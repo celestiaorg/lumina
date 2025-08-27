@@ -165,6 +165,14 @@ Run tests
 cargo test
 ```
 
+Run tests for javascript bindings. Those test are written in typescript, import wasm packages,
+and are executed in all major browsers (chrome, firefox, safari) using vitest and playwright.
+
+```bash
+npm ci
+npm test
+```
+
 ## Frontend
 
 Check out the frontend at [eigerco/lumina-front](https://github.com/eigerco/lumina-front)

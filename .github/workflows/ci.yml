@@ -196,6 +196,36 @@ jobs:
       run: cd cli/js && npm ci && npm run build
 
 
+  test-js:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        target: wasm32-unknown-unknown
+        # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
+        rustflags: ""
+
+    - name: Install wasm-pack
+      uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-pack@0.13.1
+
+    - name: Celestia devnet
+      uses: ./.github/actions/local-devnet
+
+    - name: Install javascript deps
+      run: |
+        npm ci
+        npx playwright install --with-deps
+
+    - name: Run javascript tests
+      run: npm test
+
+
   build-ios:
     runs-on: macos-latest
 
@@ -451,6 +481,7 @@ jobs:
     - clippy
     - test
     - test-wasm
+    - test-js
     - test-bindings
     - build-wasm
     - build-android

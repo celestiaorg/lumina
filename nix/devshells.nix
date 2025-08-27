@@ -1,20 +1,19 @@
 { pkgs, lib, ... }:
 let
-  extraTargets =
-    [
-      # wasm
-      "wasm32-unknown-unknown"
-      # android
-      "aarch64-linux-android"
-      "armv7-linux-androideabi"
-      "x86_64-linux-android"
-      "i686-linux-android"
-    ]
-    # ios
-    ++ lib.optionals pkgs.stdenv.isDarwin [
-      "aarch64-apple-ios"
-      "aarch64-apple-ios-sim"
-    ];
+  extraTargets = [
+    # wasm
+    "wasm32-unknown-unknown"
+    # android
+    "aarch64-linux-android"
+    "armv7-linux-androideabi"
+    "x86_64-linux-android"
+    "i686-linux-android"
+  ]
+  # ios
+  ++ lib.optionals pkgs.stdenv.isDarwin [
+    "aarch64-apple-ios"
+    "aarch64-apple-ios-sim"
+  ];
 
   rustToolchain =
     with pkgs;
@@ -65,6 +64,7 @@ in
       cargo-udeps
 
       # javascript
+      deno
       nodejs
       nodePackages.typescript-language-server
 
@@ -72,6 +72,16 @@ in
       gopls
     ];
 
+    PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+    PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = true;
     WASM_BINDGEN_TEST_TIMEOUT = 120;
+
+    shellHook = ''
+      if [ -f /etc/NIXOS ]; then
+        # work around playwright issue with finding webkit
+        # https://github.com/NixOS/nixpkgs/issues/398324
+        export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="ubuntu-24.04";
+      fi
+    '';
   };
 }
