@@ -1308,21 +1308,118 @@ mod tests {
         }
     }
 
+    struct NetworkState {
+        node_states: HashMap<NodeId, NodeState>,
+    }
+
+    enum TxModifier {
+        CorrectTx,
+    }
+
+    impl NetworkState {
+        fn submit(
+            &mut self,
+            node_id: NodeId,
+            tx: TestTxId,
+            tx_modifier: TxModifier,
+        ) -> TxSubmitResult<TestTxId> {
+            let state = self.node_states.get_mut(&node_id).unwrap();
+            if tx != state.max_sequence + 1 {
+                return Err(SubmitFailure::SequenceMismatch {
+                    expected: state.max_sequence,
+                });
+            }
+            match tx_modifier {
+                TxModifier::CorrectTx => {
+                    state.max_sequence += 1;
+                    state.mempool.insert(tx, TxStatus::Pending);
+                }
+            }
+            Ok(tx)
+        }
+
+        fn confirm_one(&mut self, node_id: NodeId, tx: TestTxId) -> TxStatus<TestConfirmInfo> {
+            let state = self.node_states.get_mut(&node_id).unwrap();
+            match state.mempool.get(&tx) {
+                Some(status) => status.clone(),
+                None => TxStatus::Unknown,
+            }
+        }
+
+        fn confirm_batch(
+            &mut self,
+            node_id: NodeId,
+            txs: Vec<TestTxId>,
+        ) -> Vec<(TestTxId, TxStatus<TestConfirmInfo>)> {
+            let state = self.node_states.get_mut(&node_id).unwrap();
+            txs.iter()
+                .map(move |tx_id| {
+                    if state.confirmed_sequence <= *tx_id {
+                        (*tx_id, TxStatus::Confirmed { info: () })
+                    } else {
+                        if let Some(status) = state.mempool.get(tx_id) {
+                            (*tx_id, status.clone())
+                        } else {
+                            (*tx_id, TxStatus::Unknown)
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+        }
+
+        fn sequence(&mut self, node_id: NodeId) -> u64 {
+            let state = self.node_states.get_mut(&node_id).unwrap();
+            state.confirmed_sequence
+        }
+
+        fn update_confirmed_sequence(&mut self, node_id: NodeId, seq_id: u64) {
+            let state = self.node_states.get_mut(&node_id).unwrap();
+            if seq_id <= state.confirmed_sequence {
+                return;
+            }
+            let mut cur_sequence = state.confirmed_sequence;
+            while let Some(tx) = state.mempool.get(&cur_sequence) {
+                if cur_sequence == seq_id + 1 {
+                    break;
+                }
+                state.mempool.remove(&cur_sequence);
+                cur_sequence += 1;
+            }
+            state.confirmed_sequence = seq_id;
+        }
+
+        fn update_confirmed_all(&mut self, seq_id: u64) {
+            let nodes = self.node_states.keys().cloned().collect::<Vec<_>>();
+            for node in nodes {
+                self.update_confirmed_sequence(node, seq_id);
+            }
+        }
+
+        fn evict(&mut self, node_id: NodeId, seq_id: u64) {
+            let state = self.node_states.get_mut(&node_id).unwrap();
+            if seq_id <= state.confirmed_sequence || seq_id > state.max_sequence {
+                return;
+            }
+            for idx in seq_id..=state.max_sequence {
+                state.mempool.insert(idx, TxStatus::Evicted);
+            }
+            state.max_sequence = seq_id - 1;
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct NodeState {
-        mempool_sequence: u64,
-        block_sequence: u64,
-        accepted_ids: Vec<TestTxId>,
-        is_evicted: bool,
+        mempool: HashMap<TestTxId, TxStatus<TestConfirmInfo>>,
+        confirmed_sequence: u64,
+        max_sequence: u64,
     }
 
     impl NodeState {
-        fn new(sequence: u64, accepted_ids: Vec<TestTxId>) -> Self {
+        fn new() -> Self {
             Self {
-                mempool_sequence: sequence,
-                block_sequence: sequence,
-                accepted_ids,
-                is_evicted: false,
+                mempool: HashMap::new(),
+                confirmed_sequence: 0,
+                max_sequence: 0,
             }
         }
     }
