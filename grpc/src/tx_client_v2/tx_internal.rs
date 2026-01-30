@@ -8,16 +8,17 @@ use crate::{
     tx_client_v2::{NodeId, Transaction, TxIdT},
 };
 
-type NodeCursor = u64;
+pub type NodeCursor = u64;
 
-struct TxInternal<TxId: TxIdT + Eq + Hash, ConfirmInfo> {
+pub struct TxInternal<TxId: TxIdT + Eq + Hash, ConfirmInfo> {
     confirmed: u64,
     transactions: VecDeque<Transaction<TxId, ConfirmInfo>>,
     nodes: HashMap<NodeId, NodeCursor>,
     id_to_seq: HashMap<TxId, u64>,
 }
 
-enum TxInternalError {
+#[derive(Debug)]
+pub enum TxInternalError {
     TransactionNotFound,
     ConfirmWithGaps,
     AdvancePastMaxSeq,
@@ -40,8 +41,20 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
         }
     }
 
-    fn max_seq(&self) -> u64 {
+    pub fn max_seq(&self) -> u64 {
         self.confirmed + self.transactions.len() as u64
+    }
+
+    pub fn confirmed_seq(&self) -> u64 {
+        self.confirmed
+    }
+
+    pub fn len(&self) -> usize {
+        self.transactions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.transactions.is_empty()
     }
 
     pub fn add_transaction(&mut self, tx: Transaction<TxId, ConfirmInfo>) -> TxInternalResult<()> {
@@ -77,6 +90,26 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
         self.transactions.get(idx)
     }
 
+    pub fn get_by_id(&self, id: &TxId) -> Option<&Transaction<TxId, ConfirmInfo>> {
+        self.id_to_seq
+            .get(id)
+            .and_then(|seq| self.tx_idx(*seq))
+            .and_then(|idx| self.transactions.get(idx))
+    }
+    
+    pub fn get_seq(&self, id: &TxId) -> Option<u64> {
+        self.id_to_seq.get(id).cloned()
+    }
+
+    pub fn get(&self, seq: u64) -> Option<&Transaction<TxId, ConfirmInfo>> {
+        self.tx_idx(seq).and_then(|idx| self.transactions.get(idx))
+    }
+
+    pub fn get_mut(&mut self, seq: u64) -> Option<&mut Transaction<TxId, ConfirmInfo>> {
+        self.tx_idx(seq)
+            .and_then(|idx| self.transactions.get_mut(idx))
+    }
+
     pub fn confirm(&mut self, seq: u64) -> TxInternalResult<Transaction<TxId, ConfirmInfo>> {
         if seq != self.confirmed + 1 {
             return Err(TxInternalError::ConfirmWithGaps);
@@ -107,25 +140,28 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
         })
     }
 
-    pub fn truncate_right_from(&mut self, seq: u64) {
+    pub fn truncate_right_from(&mut self, seq: u64) -> Option<Vec<Transaction<TxId, ConfirmInfo>>> {
         if let Some(idx) = self.tx_idx(seq) {
+            let mut tx_ret = Vec::new();
             for _ in 0..(self.transactions.len() - idx) {
-                self.transactions
+                let tx = self.transactions
                     .pop_back()
-                    .unwrap()
-                    .id
-                    .and_then(|id| self.id_to_seq.remove(&id));
+                    .unwrap();
+                if let Some(id) = tx.id.as_ref() {
+                    self.id_to_seq.remove(id);
+                }
+                tx_ret.push(tx);
             }
+            Some(tx_ret)
+        } else {
+            None
         }
     }
 
-    pub fn reset(&mut self, node: &NodeId, seq: u64) -> TxInternalResult<()> {
-        let idx = self
-            .tx_idx(seq)
-            .ok_or(TxInternalError::TransactionNotFound)?;
+    pub fn reset(&mut self, node: &NodeId, seq: u64) {
+        let max_seq = self.max_seq();
         let state = self.nodes.get_mut(node).unwrap();
-        *state = seq;
-        Ok(())
+        *state = seq.max(self.confirmed).min(max_seq);
     }
 
     fn force_update_all_nodes(&mut self, seq: u64) {

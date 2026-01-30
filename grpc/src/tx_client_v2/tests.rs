@@ -430,10 +430,10 @@
         type TxId = TestTxId;
         type ConfirmInfo = TestConfirmInfo;
 
-        async fn submit(&self, bytes: Vec<u8>, sequence: u64) -> TxSubmitResult<TestTxId> {
+        async fn submit(&self, bytes: Arc<Vec<u8>>, sequence: u64) -> TxSubmitResult<TestTxId> {
             let (reply, rx) = oneshot::channel();
             let ret = ServerCall::Submit {
-                bytes,
+                bytes: bytes.to_vec(),
                 sequence,
                 reply,
             };

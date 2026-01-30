@@ -342,7 +342,7 @@ impl SignFn<Hash, TxConfirmInfo> for BuiltSignFn {
         // id is set later after submission succeeds (with server's hash)
         Ok(Transaction {
             sequence,
-            bytes,
+            bytes: Arc::new(bytes),
             callbacks: TxCallbacks::default(),
             id: None,
         })
@@ -354,9 +354,9 @@ impl TxServer for GrpcClient {
     type TxId = Hash;
     type ConfirmInfo = TxConfirmInfo;
 
-    async fn submit(&self, tx_bytes: Vec<u8>, _sequence: u64) -> TxSubmitResult<Self::TxId> {
+    async fn submit(&self, tx_bytes: Arc<Vec<u8>>, _sequence: u64) -> TxSubmitResult<Self::TxId> {
         let resp = self
-            .broadcast_tx(tx_bytes, BroadcastMode::Sync)
+            .broadcast_tx(tx_bytes.to_vec(), BroadcastMode::Sync)
             .await
             .map_err(|err| SubmitFailure::NetworkError { err: Arc::new(err) })?;
 
