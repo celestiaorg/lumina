@@ -84,6 +84,8 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+mod tx_internal;
+
 use crate::{Error, Result, TxConfig};
 /// Identifier for a submission/confirmation node.
 pub type NodeId = Arc<str>;
