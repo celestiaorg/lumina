@@ -802,6 +802,8 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                     "[EVENT] SubmitFailed: node={}, sequence={}, failure={:?}",
                     node_id, sequence, failure
                 );
+                // todo: handle submit failure error
+                self.transactions.submit_failure(&node_id, sequence);
                 let Some(state) = self.node_state.get_mut(&node_id) else {
                     return Ok(());
                 };
@@ -848,8 +850,9 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 if let Some(submitted) = self.transactions.get_mut(sequence) {
                     submitted.notify_submitted(Ok(submit_id));
                 }
+                // todo: handle error
                 self.transactions
-                    .advance(&state_node_id, id.clone())
+                    .submit_success(&state_node_id, id.clone(), sequence)
                     .unwrap();
                 if let Some(state) = self.node_state.get_mut(&state_node_id) {
                     state.inflight = false;
@@ -1099,7 +1102,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             };
             let Some((bytes, sequence)) = self
                 .transactions
-                .next(&node_id)
+                .submit_start(&node_id)
                 .and_then(|tx| Some((tx.bytes.clone(), tx.sequence)))
             else {
                 continue;

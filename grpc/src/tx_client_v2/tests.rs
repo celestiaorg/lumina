@@ -88,7 +88,7 @@
             };
             Ok(Transaction {
                 sequence,
-                bytes,
+                bytes: Arc::new(bytes),
                 callbacks: TxCallbacks::default(),
                 id: None,
             })
