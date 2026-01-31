@@ -38,6 +38,7 @@ type TxInternalResult<T> = Result<T, TxInternalError>;
 
 impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
     pub fn new(confirmed: u64, nodes: Vec<NodeId>) -> Self {
+        println!("[TxInternal::new] confirmed={}, nodes={:?}", confirmed, nodes);
         let mut nodes_map = HashMap::new();
         for node in nodes {
             nodes_map.insert(node, SubmissionState::new());
@@ -67,24 +68,33 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
     }
 
     pub fn add_transaction(&mut self, tx: Transaction<TxId, ConfirmInfo>) -> TxInternalResult<()> {
-        if self.confirmed == 0 {
+        println!("[TxInternal::add_transaction] seq={}, confirmed={}, max_seq={}, len={}",
+            tx.sequence, self.confirmed, self.max_seq(), self.transactions.len());
+        if self.confirmed == 0 && self.transactions.is_empty() {
+            println!("[TxInternal::add_transaction] auto-adjusting confirmed: {} -> {}", self.confirmed, tx.sequence - 1);
             self.confirmed = tx.sequence - 1;
         }
         if tx.sequence != self.max_seq() + 1 {
+            println!("[TxInternal::add_transaction] ERROR: seq {} != max_seq {} + 1", tx.sequence, self.max_seq());
             return Err(TxInternalError::InvalidSequence);
         }
         self.transactions.push_back(tx);
+        println!("[TxInternal::add_transaction] SUCCESS: new max_seq={}, len={}", self.max_seq(), self.transactions.len());
         Ok(())
     }
 
     pub fn submit_success(&mut self, node: &NodeId, id: TxId, seq: u64) -> TxInternalResult<()> {
+        println!("[TxInternal::submit_success] node={}, seq={}", node, seq);
         let state = self.submissions.get_mut(node).unwrap();
+        println!("[TxInternal::submit_success] state: pending={:?}, last_submitted={:?}", state.pending, state.last_submitted);
         if let Some(pending) = state.pending {
             if seq != pending {
+                println!("[TxInternal::submit_success] ERROR: seq {} != pending {}", seq, pending);
                 return Err(TxInternalError::InvalidSequence);
             }
-            self.id_to_seq.insert(id, pending);
+            self.id_to_seq.insert(id.clone(), pending);
             state.pending = None;
+            let old_last = state.last_submitted;
             state.last_submitted = match state.last_submitted {
                 None => Some(seq),
                 Some(last) => {
@@ -95,21 +105,30 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
                     }
                 }
             };
+            println!("[TxInternal::submit_success] SUCCESS: pending=None, last_submitted: {:?} -> {:?}", old_last, state.last_submitted);
+            let tx = self.get_mut(seq).unwrap();
+            tx.id = Some(id);
             Ok(())
         } else {
+            println!("[TxInternal::submit_success] ERROR: no pending submission");
             Err(TxInternalError::InvalidSequence)
         }
     }
 
     pub fn submit_failure(&mut self, node: &NodeId, seq: u64) -> TxInternalResult<()> {
+        println!("[TxInternal::submit_failure] node={}, seq={}", node, seq);
         let state = self.submissions.get_mut(node).unwrap();
+        println!("[TxInternal::submit_failure] state: pending={:?}, last_submitted={:?}", state.pending, state.last_submitted);
         if let Some(pending) = state.pending {
             if seq != pending {
+                println!("[TxInternal::submit_failure] ERROR: seq {} != pending {}", seq, pending);
                 return Err(TxInternalError::InvalidSequence);
             }
             state.pending = None;
+            println!("[TxInternal::submit_failure] SUCCESS: pending cleared");
             Ok(())
         } else {
+            println!("[TxInternal::submit_failure] ERROR: no pending submission");
             Err(TxInternalError::TransactionNotFound)
         }
     }
@@ -120,55 +139,71 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
     }
 
     pub fn submit_start(&mut self, node: &NodeId) -> Option<&Transaction<TxId, ConfirmInfo>> {
+        println!("[TxInternal::submit_start] node={}", node);
         let to_submit = {
             let state = self.submissions.get_mut(node)?;
+            println!("[TxInternal::submit_start] state: pending={:?}, last_submitted={:?}", state.pending, state.last_submitted);
             if state.pending.is_some() {
+                println!("[TxInternal::submit_start] BLOCKED: pending already exists");
                 return None;
             }
             if state.last_submitted.is_none() {
+                println!("[TxInternal::submit_start] last_submitted=None, returning front");
                 self.transactions.front()
             } else {
                 let last_submitted = state.last_submitted.unwrap();
-                let idx = self.tx_idx(last_submitted + 1)?;
+                let next_seq = last_submitted + 1;
+                println!("[TxInternal::submit_start] looking for seq {}", next_seq);
+                let idx = self.tx_idx(next_seq)?;
                 self.transactions.get(idx)
             }
         };
         if let Some(tx) = to_submit {
+            println!("[TxInternal::submit_start] SUCCESS: returning seq={}, setting pending", tx.sequence);
             self.submissions.get_mut(node)?.pending = Some(tx.sequence);
             Some(tx)
         } else {
+            println!("[TxInternal::submit_start] None: no tx to submit");
             None
         }
     }
 
     pub fn get_by_id(&self, id: &TxId) -> Option<&Transaction<TxId, ConfirmInfo>> {
-        self.id_to_seq
-            .get(id)
-            .and_then(|seq| self.tx_idx(*seq))
+        let seq = self.id_to_seq.get(id);
+        println!("[TxInternal::get_by_id] id_to_seq lookup: {:?}", seq);
+        seq.and_then(|seq| self.tx_idx(*seq))
             .and_then(|idx| self.transactions.get(idx))
     }
 
     pub fn get_seq(&self, id: &TxId) -> Option<u64> {
-        self.id_to_seq.get(id).cloned()
+        let result = self.id_to_seq.get(id).cloned();
+        println!("[TxInternal::get_seq] result={:?}", result);
+        result
     }
 
     pub fn get(&self, seq: u64) -> Option<&Transaction<TxId, ConfirmInfo>> {
+        println!("[TxInternal::get] seq={}", seq);
         self.tx_idx(seq).and_then(|idx| self.transactions.get(idx))
     }
 
     pub fn get_mut(&mut self, seq: u64) -> Option<&mut Transaction<TxId, ConfirmInfo>> {
+        println!("[TxInternal::get_mut] seq={}", seq);
         self.tx_idx(seq)
             .and_then(|idx| self.transactions.get_mut(idx))
     }
 
     pub fn confirm(&mut self, seq: u64) -> TxInternalResult<Transaction<TxId, ConfirmInfo>> {
+        println!("[TxInternal::confirm] seq={}, confirmed={}, max_seq={}", seq, self.confirmed, self.max_seq());
         if seq != self.confirmed + 1 {
+            println!("[TxInternal::confirm] ERROR: seq {} != confirmed {} + 1", seq, self.confirmed);
             return Err(TxInternalError::ConfirmWithGaps);
         }
         let Some(first) = self.transactions.front() else {
+            println!("[TxInternal::confirm] ERROR: no transactions");
             return Err(TxInternalError::TransactionNotFound);
         };
         if first.sequence != seq {
+            println!("[TxInternal::confirm] ERROR: first.sequence {} != seq {}", first.sequence, seq);
             return Err(TxInternalError::ConfirmWithGaps);
         }
         let _ = first;
@@ -180,55 +215,74 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
             self.id_to_seq.remove(&id);
         }
         self.confirmed += 1;
+        println!("[TxInternal::confirm] SUCCESS: new confirmed={}, calling force_update_all_nodes", self.confirmed);
         self.force_update_all_nodes(seq);
         Ok(tx)
     }
 
     pub fn to_confirm(&mut self, node: &NodeId, limit: usize) -> Option<Vec<TxId>> {
+        println!("[TxInternal::to_confirm] node={}, limit={}", node, limit);
         let last = self.submissions.get(node).unwrap().last_submitted?;
-        self.tx_idx(last).map(|idx| {
+        println!("[TxInternal::to_confirm] last_submitted={}", last);
+        let result = self.tx_idx(last).map(|idx| {
+            println!("[TxInternal::to_confirm] tx_idx({})={}", last, idx);
             self.transactions
                 .iter()
                 .take(limit.min(idx + 1))
                 .filter(|tx| tx.id.is_some())
                 .map(|tx| tx.id.clone().unwrap())
                 .collect::<Vec<_>>()
-        })
+        });
+        println!("[TxInternal::to_confirm] result count={:?}", result.as_ref().map(|v| v.len()));
+        result
     }
 
     pub fn truncate_right_from(&mut self, seq: u64) -> Option<Vec<Transaction<TxId, ConfirmInfo>>> {
+        println!("[TxInternal::truncate_right_from] seq={}, confirmed={}, max_seq={}", seq, self.confirmed, self.max_seq());
         if let Some(idx) = self.tx_idx(seq) {
+            let count = self.transactions.len() - idx;
+            println!("[TxInternal::truncate_right_from] removing {} transactions from idx {}", count, idx);
             let mut tx_ret = Vec::new();
-            for _ in 0..(self.transactions.len() - idx) {
+            for _ in 0..count {
                 let tx = self.transactions.pop_back().unwrap();
+                println!("[TxInternal::truncate_right_from] removed seq={}", tx.sequence);
                 if let Some(id) = tx.id.as_ref() {
                     self.id_to_seq.remove(id);
                 }
                 tx_ret.push(tx);
             }
+            println!("[TxInternal::truncate_right_from] SUCCESS: new max_seq={}", self.max_seq());
             Some(tx_ret)
         } else {
+            println!("[TxInternal::truncate_right_from] None: seq {} not in range", seq);
             None
         }
     }
 
     pub fn reset(&mut self, node: &NodeId, seq: u64) {
-        let max_seq = seq.max(self.confirmed).min(self.max_seq());
+        println!("[TxInternal::reset] node={}, seq={}, confirmed={}, max_seq={}", node, seq, self.confirmed, self.max_seq());
+        let clamped = seq.max(self.confirmed).min(self.max_seq());
+        println!("[TxInternal::reset] clamped seq: {} -> {}", seq, clamped);
         let state = self.submissions.get_mut(node).unwrap();
+        let old_last = state.last_submitted;
         if let Some(last_submitted) = state.last_submitted.as_mut() {
-            *last_submitted = max_seq;
+            *last_submitted = clamped;
         } else {
-            state.last_submitted = Some(max_seq);
+            state.last_submitted = Some(clamped);
         }
+        println!("[TxInternal::reset] SUCCESS: last_submitted: {:?} -> {:?}", old_last, state.last_submitted);
     }
 
     fn force_update_all_nodes(&mut self, seq: u64) {
-        for state in self.submissions.values_mut() {
+        println!("[TxInternal::force_update_all_nodes] seq={}", seq);
+        for (node, state) in self.submissions.iter_mut() {
+            let old_last = state.last_submitted;
             if let Some(last) = state.last_submitted.as_mut() {
                 *last = (*last).max(seq);
             } else {
                 state.last_submitted = Some(seq);
             }
+            println!("[TxInternal::force_update_all_nodes] node={}: {:?} -> {:?}", node, old_last, state.last_submitted);
         }
     }
 }

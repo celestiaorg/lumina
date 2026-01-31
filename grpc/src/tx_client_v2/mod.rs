@@ -559,6 +559,11 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
     fn enqueue_tx(&mut self, tx: Transaction<S::TxId, S::ConfirmInfo>) -> Result<()> {
         let exp_seq = self.transactions.max_seq() + 1;
         let tx_sequence = tx.sequence;
+        let tx_id = tx.id.clone();
+        println!(
+            "[ENQUEUE] Enqueueing tx: seq={}, id={:?}, expected_seq={}",
+            tx_sequence, tx_id, exp_seq
+        );
         self.transactions.add_transaction(tx).map_err(|_| {
             crate::Error::UnexpectedResponseType(format!(
                 "tx sequence gap: expected {}, got {}",
@@ -566,9 +571,11 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             ))
         })?;
         println!(
-            "[ENQUEUE] Transaction enqueued with sequence {} (queue size: {})",
+            "[ENQUEUE] SUCCESS: sequence={}, queue_size={}, confirmed={}, max_seq={}",
             tx_sequence,
-            self.transactions.len()
+            self.transactions.len(),
+            self.transactions.confirmed_seq(),
+            self.transactions.max_seq()
         );
         self.new_submit.notify_one();
         Ok(())
@@ -648,21 +655,49 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         node_id: &NodeId,
         expected: u64,
     ) -> Result<()> {
+        println!(
+            "[RECOVERING] run_recovering called: node={}, expected={}, confirmed={}, max_seq={}",
+            node_id,
+            expected,
+            self.transactions.confirmed_seq(),
+            self.transactions.max_seq()
+        );
         select! {
             _ = self.confirm_ticker.tick() => {
                 let target = expected.saturating_sub(1);
-                if let Some(id) = self.transactions.get(target).and_then(|tx| tx.id.clone()) {
+                println!(
+                    "[RECOVERING] tick: looking for target seq={} (expected-1)",
+                    target
+                );
+                let tx_result = self.transactions.get(target);
+                let id_result = tx_result.and_then(|tx| tx.id.clone());
+                println!(
+                    "[RECOVERING] get({}): found_tx={}, found_id={:?}",
+                    target,
+                    tx_result.is_some(),
+                    id_result
+                );
+                if let Some(id) = id_result {
                     let node_id = node_id.clone();
                     let node = self.nodes.get(&node_id).unwrap().clone();
                     let state_epoch = self.state.epoch();
                     let tx = push_oneshot(&mut self.confirmations);
                     let node_state = self.node_state.get_mut(&node_id).unwrap();
+                    println!(
+                        "[RECOVERING] node_state: confirm_inflight={}",
+                        node_state.confirm_inflight
+                    );
                     if node_state.confirm_inflight {
+                        println!("[RECOVERING] skipping: confirm already inflight");
                         return Ok(());
                     }
                     node_state.confirm_inflight = true;
+                    println!(
+                        "[RECOVERING] spawning recover status for target={}, id={:?}",
+                        target, id
+                    );
                     spawn_cancellable(token, async move {
-                        println!("spawned recover status {}", target);
+                        println!("[RECOVERING] spawned recover status {}", target);
                         let response = node.status(id.clone()).await.map(|status| {
                             ConfirmationResponse::Recovering {
                                 id,
@@ -675,23 +710,39 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                             state_epoch,
                         });
                     });
+                } else {
+                    println!(
+                        "[RECOVERING] no tx found at target={}, cannot recover",
+                        target
+                    );
                 }
             }
             result = self.confirmations.next() => {
+                println!("[RECOVERING] confirmations.next() returned");
                 let Some(Some(result)) = result else {
+                    println!("[RECOVERING] confirmations returned None");
                     return Ok(());
                 };
+                println!(
+                    "[RECOVERING] confirmation result: node={}, state_epoch={}, current_epoch={}",
+                    result.node_id, result.state_epoch, self.state.epoch()
+                );
                 if result.state_epoch != self.state.epoch() {
+                    println!("[RECOVERING] stale epoch, ignoring");
                     return Ok(());
                 }
                 match result.response {
                     Ok(ConfirmationResponse::Recovering { id, status }) => {
+                        println!("[RECOVERING] got RecoverStatus: id={:?}", id);
                         self.events.push_back(TransactionEvent::RecoverStatus { node_id: result.node_id, id, status });
                     }
-                    Err(_err) => {
+                    Err(ref err) => {
+                        println!("[RECOVERING] confirmation error: {:?}", err);
                         // TODO: add error handling
                     }
-                    _ => {}
+                    _ => {
+                        println!("[RECOVERING] unexpected response type");
+                    }
                 }
             }
         }
@@ -802,6 +853,12 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                     "[EVENT] SubmitFailed: node={}, sequence={}, failure={:?}",
                     node_id, sequence, failure
                 );
+                println!(
+                    "[EVENT] SubmitFailed context: confirmed={}, max_seq={}, len={}",
+                    self.transactions.confirmed_seq(),
+                    self.transactions.max_seq(),
+                    self.transactions.len()
+                );
                 // todo: handle submit failure error
                 self.transactions.submit_failure(&node_id, sequence);
                 let Some(state) = self.node_state.get_mut(&node_id) else {
@@ -810,6 +867,12 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 state.inflight = false;
                 match failure {
                     SubmitFailure::SequenceMismatch { expected } => {
+                        println!(
+                            "[EVENT] SequenceMismatch: sequence={}, expected={}, decision: {}",
+                            sequence,
+                            expected,
+                            if sequence < expected { "RECOVERING" } else { "RESET" }
+                        );
                         if sequence < expected {
                             self.state
                                 .update(ProcessorState::Recovering { node_id, expected });
@@ -1035,15 +1098,35 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         id: S::TxId,
         status: TxStatus<S::ConfirmInfo>,
     ) -> Result<()> {
+        println!(
+            "[PROCESS_RECOVERING] node={}, id={:?}, status={:?}",
+            node_id, id,
+            match &status {
+                TxStatus::Pending => "Pending",
+                TxStatus::Confirmed { .. } => "Confirmed",
+                TxStatus::Rejected { .. } => "Rejected",
+                TxStatus::Evicted => "Evicted",
+                TxStatus::Unknown => "Unknown",
+            }
+        );
         let Some(seq) = self.transactions.get_seq(&id) else {
+            println!("[PROCESS_RECOVERING] id not found in id_to_seq mapping, returning early");
             return Ok(());
         };
+        println!("[PROCESS_RECOVERING] found seq={} for id", seq);
         match status {
             TxStatus::Confirmed { info } => {
+                println!(
+                    "[PROCESS_RECOVERING] Confirmed! Resetting node {} to seq={}, transitioning to Submitting",
+                    node_id, seq
+                );
                 self.transactions.reset(&node_id, seq);
                 self.state.force_update(ProcessorState::Submitting)
             }
             _ => {
+                println!(
+                    "[PROCESS_RECOVERING] Not confirmed, transitioning to Stopping"
+                );
                 self.state
                     .update(ProcessorState::Stopping(StopReason::ConfirmFailure(
                         ConfirmFailure {
@@ -1078,7 +1161,15 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
     }
 
     fn spawn_submissions(&mut self, token: CancellationToken) {
+        println!(
+            "[SPAWN_SUBMISSIONS] called: nodes={}, confirmed={}, max_seq={}, len={}",
+            self.nodes.len(),
+            self.transactions.confirmed_seq(),
+            self.transactions.max_seq(),
+            self.transactions.len()
+        );
         if self.nodes.is_empty() {
+            println!("[SPAWN_SUBMISSIONS] no nodes, returning");
             return;
         }
         let nodes = self
@@ -1087,9 +1178,11 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Vec<_>>();
         for (node_id, node) in nodes {
+            println!("[SPAWN_SUBMISSIONS] checking node={}", node_id);
             let delay = {
                 let state = self.node_state.entry(node_id.clone()).or_default();
                 if state.inflight {
+                    println!("[SPAWN_SUBMISSIONS] node={} is inflight, skipping", node_id);
                     continue;
                 }
                 let delay = if let Some(delay) = state.delay {
@@ -1100,13 +1193,19 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 };
                 delay
             };
+            println!("[SPAWN_SUBMISSIONS] calling submit_start for node={}", node_id);
             let Some((bytes, sequence)) = self
                 .transactions
                 .submit_start(&node_id)
                 .and_then(|tx| Some((tx.bytes.clone(), tx.sequence)))
             else {
+                println!("[SPAWN_SUBMISSIONS] submit_start returned None for node={}", node_id);
                 continue;
             };
+            println!(
+                "[SPAWN_SUBMISSIONS] spawning submission: node={}, seq={}, delay={:?}",
+                node_id, sequence, delay
+            );
             if let Some(state) = self.node_state.get_mut(&node_id) {
                 state.inflight = true;
             }
