@@ -106,7 +106,14 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
                 }
             };
             println!("[TxInternal::submit_success] SUCCESS: pending=None, last_submitted: {:?} -> {:?}", old_last, state.last_submitted);
-            let tx = self.get_mut(seq).unwrap();
+            println!(
+                "[TxInternal::submit_success] getting tx at seq={}, confirmed={}, max_seq={}, len={}",
+                seq, self.confirmed, self.max_seq(), self.transactions.len()
+            );
+            let Some(tx) = self.get_mut(seq) else {
+                println!("[TxInternal::submit_success] ERROR: tx at seq={} not found (already confirmed?)", seq);
+                return Ok(()); // tx already confirmed by another node
+            };
             tx.id = Some(id);
             Ok(())
         } else {
@@ -139,7 +146,7 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
     }
 
     pub fn submit_start(&mut self, node: &NodeId) -> Option<&Transaction<TxId, ConfirmInfo>> {
-        println!("[TxInternal::submit_start] node={}", node);
+        println!("[TxInternal::submit_start] node={}, confirmed={}", node, self.confirmed);
         let to_submit = {
             let state = self.submissions.get_mut(node)?;
             println!("[TxInternal::submit_start] state: pending={:?}, last_submitted={:?}", state.pending, state.last_submitted);
@@ -179,6 +186,10 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
         let result = self.id_to_seq.get(id).cloned();
         println!("[TxInternal::get_seq] result={:?}", result);
         result
+    }
+
+    pub fn get_pending(&self, node: &NodeId) -> Option<u64> {
+        self.submissions.get(node).and_then(|s| s.pending)
     }
 
     pub fn get(&self, seq: u64) -> Option<&Transaction<TxId, ConfirmInfo>> {
@@ -259,7 +270,7 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
         }
     }
 
-    pub fn reset(&mut self, node: &NodeId, seq: u64) {
+    pub fn reset_submitted(&mut self, node: &NodeId, seq: u64) {
         println!("[TxInternal::reset] node={}, seq={}, confirmed={}, max_seq={}", node, seq, self.confirmed, self.max_seq());
         let clamped = seq.max(self.confirmed).min(self.max_seq());
         println!("[TxInternal::reset] clamped seq: {} -> {}", seq, clamped);
@@ -554,7 +565,7 @@ mod tests {
             internal.add_transaction(make_tx(8, None)).unwrap();
 
             // Initialize last_submitted via reset
-            internal.reset(&node, 5);
+            internal.reset_submitted(&node, 5);
 
             // Submit seq 6 (last_submitted=5, so 5+1=6 is contiguous)
             internal.submit_start(&node);
@@ -639,7 +650,7 @@ mod tests {
             internal.add_transaction(make_tx(8, Some(800))).unwrap();
 
             // Set last_submitted to 7 via reset
-            internal.reset(&node, 7);
+            internal.reset_submitted(&node, 7);
 
             let ids = internal.to_confirm(&node, 10).unwrap();
             assert_eq!(ids, vec![600, 700]);
@@ -654,7 +665,7 @@ mod tests {
                     .add_transaction(make_tx(seq, Some(seq * 100)))
                     .unwrap();
             }
-            internal.reset(&node, 10);
+            internal.reset_submitted(&node, 10);
 
             let ids = internal.to_confirm(&node, 2).unwrap();
             assert_eq!(ids, vec![600, 700]);
@@ -668,7 +679,7 @@ mod tests {
             internal.add_transaction(make_tx(7, None)).unwrap();
             internal.add_transaction(make_tx(8, Some(800))).unwrap();
 
-            internal.reset(&node, 8);
+            internal.reset_submitted(&node, 8);
 
             let ids = internal.to_confirm(&node, 10).unwrap();
             assert_eq!(ids, vec![600, 800]);
@@ -689,7 +700,7 @@ mod tests {
             internal.add_transaction(make_tx(6, None)).unwrap();
             internal.add_transaction(make_tx(7, None)).unwrap();
 
-            internal.reset(&node, 6);
+            internal.reset_submitted(&node, 6);
 
             // submit_start should return seq 7 (last_submitted=6, so next is 7)
             let tx = internal.submit_start(&node).unwrap();
@@ -703,7 +714,7 @@ mod tests {
             internal.add_transaction(make_tx(6, Some(600))).unwrap();
 
             // Try to reset below confirmed
-            internal.reset(&node, 2);
+            internal.reset_submitted(&node, 2);
 
             // last_submitted should be clamped to 5
             // to_confirm returns None because tx_idx(5) is None
@@ -718,7 +729,7 @@ mod tests {
             internal.add_transaction(make_tx(7, Some(700))).unwrap();
 
             // max_seq = 7, try to reset to 100
-            internal.reset(&node, 100);
+            internal.reset_submitted(&node, 100);
 
             let ids = internal.to_confirm(&node, 10).unwrap();
             assert_eq!(ids, vec![600, 700]);
@@ -766,7 +777,7 @@ mod tests {
             let node: NodeId = Arc::from("node1");
             internal.add_transaction(make_tx(6, Some(600))).unwrap();
 
-            internal.reset(&node, 5);
+            internal.reset_submitted(&node, 5);
             internal.submit_start(&node);
             internal.submit_success(&node, 600, 6).unwrap();
 
@@ -785,7 +796,7 @@ mod tests {
             internal.add_transaction(make_tx(7, None)).unwrap();
 
             // node1 has submitted via reset, node2 hasn't
-            internal.reset(&node1, 6);
+            internal.reset_submitted(&node1, 6);
 
             internal.confirm(6).unwrap();
 
@@ -834,7 +845,7 @@ mod tests {
             }
 
             // Submit all
-            internal.reset(&node, 5);
+            internal.reset_submitted(&node, 5);
             for seq in 6..=8 {
                 internal.submit_start(&node);
                 internal.submit_success(&node, seq * 100, seq).unwrap();
@@ -940,7 +951,7 @@ mod tests {
             internal.add_transaction(make_tx(6, None)).unwrap();
             internal.add_transaction(make_tx(7, None)).unwrap();
 
-            internal.reset(&node1, 6);
+            internal.reset_submitted(&node1, 6);
             // node2 still has last_submitted=None
 
             let tx1 = internal.submit_start(&node1).unwrap();
@@ -970,7 +981,7 @@ mod tests {
             }
 
             // Initialize last_submitted for contiguous tracking
-            internal.reset(&node, 5);
+            internal.reset_submitted(&node, 5);
 
             // Submit all
             for seq in 6..=8 {

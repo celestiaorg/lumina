@@ -1,987 +1,1044 @@
-    use super::*;
-    use async_trait::async_trait;
-    use std::sync::atomic::AtomicBool;
-    use tokio::sync::mpsc;
-    use tokio::sync::mpsc::error::TryRecvError;
-    use tokio::task::JoinHandle;
+use super::*;
+use async_trait::async_trait;
+use std::sync::atomic::AtomicBool;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::task::JoinHandle;
 
-    type TestTxId = u64;
-    type TestConfirmInfo = ();
+type TestTxId = u64;
+type TestConfirmInfo = ();
 
-    #[derive(Debug)]
-    struct RoutedCall {
+#[derive(Debug)]
+struct RoutedCall {
+    node_id: NodeId,
+    call: ServerCall,
+}
+
+impl RoutedCall {
+    fn new(node_id: NodeId, call: ServerCall) -> Self {
+        Self { node_id, call }
+    }
+}
+
+#[derive(Debug)]
+enum ServerCall {
+    Submit {
+        bytes: Vec<u8>,
+        sequence: u64,
+        reply: oneshot::Sender<TxSubmitResult<TestTxId>>,
+    },
+    StatusBatch {
+        ids: Vec<TestTxId>,
+        reply: oneshot::Sender<TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>>,
+    },
+    Status {
+        id: TestTxId,
+        reply: oneshot::Sender<TxConfirmResult<TxStatus<TestConfirmInfo>>>,
+    },
+    CurrentSequence {
+        reply: oneshot::Sender<Result<u64>>,
+    },
+}
+
+#[derive(Debug)]
+struct MockTxServer {
+    node_id: NodeId,
+    calls: mpsc::Sender<RoutedCall>,
+}
+
+impl MockTxServer {
+    fn new(node_id: NodeId, calls: mpsc::Sender<RoutedCall>) -> Self {
+        Self { node_id, calls }
+    }
+    async fn send_call(&self, call: ServerCall, msg: &str) {
+        self.calls
+            .send(RoutedCall::new(self.node_id.clone(), call))
+            .await
+            .expect(msg);
+    }
+}
+
+fn make_many_servers(
+    num_servers: usize,
+) -> (mpsc::Receiver<RoutedCall>, Vec<(NodeId, Arc<MockTxServer>)>) {
+    let mut servers = Vec::with_capacity(num_servers);
+    let (calls_tx, calls_rx) = mpsc::channel(64);
+    for i in 0..num_servers {
+        let node_name: NodeId = Arc::from(format!("node-{}", i));
+        let server = Arc::new(MockTxServer::new(node_name.clone(), calls_tx.clone()));
+        servers.push((node_name, server));
+    }
+    (calls_rx, servers)
+}
+
+#[derive(Default)]
+struct TestSigner;
+
+#[async_trait]
+impl SignFn<TestTxId, TestConfirmInfo> for TestSigner {
+    async fn sign(
+        &self,
+        sequence: u64,
+        request: &TxRequest,
+        _cfg: &TxConfig,
+    ) -> Result<Transaction<TestTxId, TestConfirmInfo>> {
+        let bytes = match request {
+            TxRequest::RawPayload(bytes) => bytes.clone(),
+            TxRequest::Message(_) | TxRequest::Blobs(_) => Vec::new(),
+        };
+        Ok(Transaction {
+            sequence,
+            bytes: Arc::new(bytes),
+            callbacks: TxCallbacks::default(),
+            id: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NodeState {
+    confirmed_sequence: u64,
+    mempool: VecDeque<TxStatus<TestConfirmInfo>>,
+}
+
+impl NodeState {
+    fn new() -> Self {
+        Self {
+            confirmed_sequence: 0,
+            mempool: VecDeque::new(),
+        }
+    }
+
+    fn max_sequence(&self) -> u64 {
+        self.confirmed_sequence + self.mempool.len() as u64
+    }
+
+    fn next_submit_seq(&self) -> u64 {
+        let last_non_evicted = self
+            .mempool
+            .iter()
+            .rposition(|s| !matches!(s, TxStatus::Evicted));
+
+        let next_index = match last_non_evicted {
+            Some(i) => i + 1,
+            None => 0,
+        };
+
+        self.confirmed_sequence + 1 + next_index as u64
+    }
+
+    fn truncate_to_seq(&mut self, seq: u64) {
+        // Keep mempool entries for sequences <= seq, drop the rest.
+        if seq <= self.confirmed_sequence {
+            self.mempool.clear();
+            return;
+        }
+        let keep_len = (seq - self.confirmed_sequence) as usize;
+        if keep_len < self.mempool.len() {
+            self.mempool.truncate(keep_len);
+        }
+    }
+
+    fn status_of(&self, tx: TestTxId) -> TxStatus<TestConfirmInfo> {
+        if tx <= self.confirmed_sequence {
+            return TxStatus::Confirmed { info: () };
+        }
+        let start = self.confirmed_sequence + 1;
+        let idx = (tx - start) as usize;
+        self.mempool.get(idx).cloned().unwrap_or(TxStatus::Unknown)
+    }
+}
+
+#[derive(Debug)]
+struct NetworkState {
+    node_states: HashMap<NodeId, NodeState>,
+}
+
+enum TxModifier {
+    CorrectTx,
+}
+
+impl NetworkState {
+    fn new(node_states: HashMap<NodeId, NodeState>) -> Self {
+        Self { node_states }
+    }
+
+    fn submit(
+        &mut self,
         node_id: NodeId,
-        call: ServerCall,
-    }
+        tx: TestTxId,
+        tx_modifier: TxModifier,
+    ) -> TxSubmitResult<TestTxId> {
+        let state = self.node_states.get_mut(&node_id).unwrap();
 
-    impl RoutedCall {
-        fn new(node_id: NodeId, call: ServerCall) -> Self {
-            Self { node_id, call }
+        let expected_seq = state.next_submit_seq();
+        if tx != expected_seq {
+            return Err(SubmitFailure::SequenceMismatch {
+                expected: expected_seq,
+            });
         }
+
+        match tx_modifier {
+            TxModifier::CorrectTx => {
+                state.truncate_to_seq(tx - 1);
+                state.mempool.push_back(TxStatus::Pending);
+            }
+        }
+
+        Ok(tx)
     }
 
-    #[derive(Debug)]
-    enum ServerCall {
-        Submit {
-            bytes: Vec<u8>,
-            sequence: u64,
-            reply: oneshot::Sender<TxSubmitResult<TestTxId>>,
-        },
-        StatusBatch {
-            ids: Vec<TestTxId>,
-            reply: oneshot::Sender<TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>>,
-        },
-        Status {
-            id: TestTxId,
-            reply: oneshot::Sender<TxConfirmResult<TxStatus<TestConfirmInfo>>>,
-        },
-        CurrentSequence {
-            reply: oneshot::Sender<Result<u64>>,
-        },
+    fn confirm_one(&mut self, node_id: NodeId, tx: TestTxId) -> TxStatus<TestConfirmInfo> {
+        let state = self.node_states.get_mut(&node_id).unwrap();
+        state.status_of(tx)
     }
 
-    #[derive(Debug)]
-    struct MockTxServer {
+    fn confirm_batch(
+        &mut self,
         node_id: NodeId,
-        calls: mpsc::Sender<RoutedCall>,
+        txs: &Vec<TestTxId>,
+    ) -> Vec<(TestTxId, TxStatus<TestConfirmInfo>)> {
+        let state = self.node_states.get_mut(&node_id).unwrap();
+        txs.iter().map(|&tx| (tx, state.status_of(tx))).collect()
     }
 
-    impl MockTxServer {
-        fn new(node_id: NodeId, calls: mpsc::Sender<RoutedCall>) -> Self {
-            Self { node_id, calls }
-        }
-        async fn send_call(&self, call: ServerCall, msg: &str) {
-            self.calls
-                .send(RoutedCall::new(self.node_id.clone(), call))
-                .await
-                .expect(msg);
-        }
+    fn sequence(&mut self, node_id: NodeId) -> u64 {
+        let state = self.node_states.get_mut(&node_id).unwrap();
+        state.confirmed_sequence
     }
 
-    fn make_many_servers(
-        num_servers: usize,
-    ) -> (mpsc::Receiver<RoutedCall>, Vec<(NodeId, Arc<MockTxServer>)>) {
-        let mut servers = Vec::with_capacity(num_servers);
-        let (calls_tx, calls_rx) = mpsc::channel(64);
-        for i in 0..num_servers {
-            let node_name: NodeId = Arc::from(format!("node-{}", i));
-            let server = Arc::new(MockTxServer::new(node_name.clone(), calls_tx.clone()));
-            servers.push((node_name, server));
+    fn update_confirmed_sequence(&mut self, node_id: NodeId, seq_id: u64) {
+        let state = self.node_states.get_mut(&node_id).unwrap();
+        if seq_id <= state.confirmed_sequence {
+            return;
         }
-        (calls_rx, servers)
+
+        let drain = (seq_id - state.confirmed_sequence) as usize;
+        let drain = drain.min(state.mempool.len());
+        for _ in 0..drain {
+            state.mempool.pop_front();
+        }
+
+        state.confirmed_sequence = seq_id;
+
+        println!(
+            "state.confirmed_sequence: {}, {:?}",
+            state.confirmed_sequence, state.mempool
+        );
     }
 
-    #[derive(Default)]
-    struct TestSigner;
+    fn max_submitted_sequence(&self) -> u64 {
+        return self
+            .node_states
+            .iter()
+            .map(|(_, state)| state.next_submit_seq())
+            .max()
+            .unwrap_or(0);
+    }
 
-    #[async_trait]
-    impl SignFn<TestTxId, TestConfirmInfo> for TestSigner {
-        async fn sign(
-            &self,
-            sequence: u64,
-            request: &TxRequest,
-            _cfg: &TxConfig,
-        ) -> Result<Transaction<TestTxId, TestConfirmInfo>> {
-            let bytes = match request {
-                TxRequest::RawPayload(bytes) => bytes.clone(),
-                TxRequest::Message(_) | TxRequest::Blobs(_) => Vec::new(),
-            };
-            Ok(Transaction {
-                sequence,
-                bytes: Arc::new(bytes),
-                callbacks: TxCallbacks::default(),
-                id: None,
-            })
+    fn update_confirmed_all(&mut self, seq_id: u64) {
+        let nodes = self.node_states.keys().cloned().collect::<Vec<_>>();
+        for node in nodes {
+            self.update_confirmed_sequence(node, seq_id);
         }
     }
 
-    #[derive(Debug, Clone)]
-    struct NodeState {
-        confirmed_sequence: u64,
-        mempool: VecDeque<TxStatus<TestConfirmInfo>>,
+    fn evict(&mut self, node_id: NodeId, seq_id: u64) {
+        let state = self.node_states.get_mut(&node_id).unwrap();
+
+        let max_seq = state.max_sequence();
+        if seq_id <= state.confirmed_sequence || seq_id > max_seq {
+            return;
+        }
+
+        let start = state.confirmed_sequence + 1;
+        let from_idx = (seq_id - start) as usize;
+        for i in from_idx..state.mempool.len() {
+            state.mempool[i] = TxStatus::Evicted;
+        }
     }
+}
 
-    impl NodeState {
-        fn new() -> Self {
-            Self {
-                confirmed_sequence: 0,
-                mempool: VecDeque::new(),
-            }
-        }
+#[derive(Debug)]
+enum ServerReturn {
+    Submit(TxSubmitResult<TestTxId>),
+    StatusBatch(TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>),
+    Status(TxConfirmResult<TxStatus<TestConfirmInfo>>),
+    CurrentSequence(Result<u64>),
+}
 
-        fn max_sequence(&self) -> u64 {
-            self.confirmed_sequence + self.mempool.len() as u64
-        }
-
-        fn next_submit_seq(&self) -> u64 {
-            let last_non_evicted = self
-                .mempool
-                .iter()
-                .rposition(|s| !matches!(s, TxStatus::Evicted));
-
-            let next_index = match last_non_evicted {
-                Some(i) => i + 1,
-                None => 0,
-            };
-
-            self.confirmed_sequence + 1 + next_index as u64
-        }
-
-        fn truncate_to_seq(&mut self, seq: u64) {
-            // Keep mempool entries for sequences <= seq, drop the rest.
-            if seq <= self.confirmed_sequence {
-                self.mempool.clear();
-                return;
-            }
-            let keep_len = (seq - self.confirmed_sequence) as usize;
-            if keep_len < self.mempool.len() {
-                self.mempool.truncate(keep_len);
-            }
-        }
-
-        fn status_of(&self, tx: TestTxId) -> TxStatus<TestConfirmInfo> {
-            if tx <= self.confirmed_sequence {
-                return TxStatus::Confirmed { info: () };
-            }
-            let start = self.confirmed_sequence + 1;
-            let idx = (tx - start) as usize;
-            self.mempool.get(idx).cloned().unwrap_or(TxStatus::Unknown)
+impl ServerReturn {
+    fn assert_submit(self) -> TxSubmitResult<TestTxId> {
+        match self {
+            ServerReturn::Submit(result) => result,
+            _ => panic!("expected Submit"),
         }
     }
 
-    #[derive(Debug)]
-    struct NetworkState {
-        node_states: HashMap<NodeId, NodeState>,
-    }
-
-    enum TxModifier {
-        CorrectTx,
-    }
-
-    impl NetworkState {
-        fn new(node_states: HashMap<NodeId, NodeState>) -> Self {
-            Self { node_states }
+    fn assert_status_batch(self) -> TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>> {
+        match self {
+            ServerReturn::StatusBatch(result) => result,
+            _ => panic!("expected StatusBatch"),
         }
+    }
 
-        fn submit(
-            &mut self,
-            node_id: NodeId,
-            tx: TestTxId,
-            tx_modifier: TxModifier,
-        ) -> TxSubmitResult<TestTxId> {
-            let state = self.node_states.get_mut(&node_id).unwrap();
+    fn assert_status(self) -> TxConfirmResult<TxStatus<TestConfirmInfo>> {
+        match self {
+            ServerReturn::Status(result) => result,
+            _ => panic!("expected Status"),
+        }
+    }
 
-            let expected_seq = state.next_submit_seq();
-            if tx != expected_seq {
-                return Err(SubmitFailure::SequenceMismatch {
-                    expected: expected_seq - 1,
-                });
-            }
+    fn assert_sequence(self) -> Result<u64> {
+        match self {
+            ServerReturn::CurrentSequence(result) => result,
+            _ => panic!("expected CurrentSequence"),
+        }
+    }
+}
 
-            match tx_modifier {
-                TxModifier::CorrectTx => {
-                    state.truncate_to_seq(tx - 1);
-                    state.mempool.push_back(TxStatus::Pending);
+type ActionFunc =
+    dyn for<'a> Fn(&'a RoutedCall, &mut NetworkState) -> ActionResult + Send + Sync + 'static;
+type MatchFunc = dyn for<'a> Fn(&'a RoutedCall) -> bool + Send + Sync + 'static;
+type PeriodicFunc = dyn for<'a> Fn(usize, &mut NetworkState) -> () + Send + Sync + 'static;
+
+struct ActionResult {
+    ret: ServerReturn,
+}
+
+#[derive(Clone)]
+struct Match {
+    name: &'static str,
+    check_func: Arc<MatchFunc>,
+}
+
+impl Match {
+    fn new<F>(name: &'static str, f: F) -> Self
+    where
+        F: for<'a> Fn(&'a RoutedCall) -> bool + Send + Sync + 'static,
+    {
+        Self {
+            name,
+            check_func: Arc::new(f),
+        }
+    }
+
+    fn check(&self, call: &RoutedCall) -> bool {
+        (self.check_func)(call)
+    }
+}
+
+impl std::fmt::Debug for Match {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        f.debug_struct("Match").field("name", &self.name).finish()
+    }
+}
+
+#[derive(Clone)]
+struct Action {
+    name: &'static str,
+    action: Arc<ActionFunc>,
+}
+
+impl Action {
+    fn new<F>(name: &'static str, f: F) -> Self
+    where
+        F: for<'a> Fn(&'a RoutedCall, &mut NetworkState) -> ActionResult + Send + Sync + 'static,
+    {
+        Self {
+            name,
+            action: Arc::new(f),
+        }
+    }
+    fn call(&self, rc: &RoutedCall, state: &mut NetworkState) -> ActionResult {
+        (self.action)(rc, state)
+    }
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        f.debug_struct("Action").field("name", &self.name).finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Cardinality {
+    Once,
+    Times(u32),
+    Any,
+}
+
+impl Cardinality {
+    fn consume(&mut self) {
+        match self {
+            Cardinality::Once => *self = Cardinality::Times(0),
+            Cardinality::Times(n) => {
+                if *n > 0 {
+                    *n -= 1;
                 }
             }
-
-            Ok(tx)
+            Cardinality::Any => {}
         }
+    }
+    fn exhausted(&self) -> bool {
+        matches!(self, Cardinality::Times(0))
+    }
+    fn requires_consumption(&self) -> bool {
+        !matches!(self, Cardinality::Any)
+    }
+}
 
-        fn confirm_one(&mut self, node_id: NodeId, tx: TestTxId) -> TxStatus<TestConfirmInfo> {
-            let state = self.node_states.get_mut(&node_id).unwrap();
-            state.status_of(tx)
-        }
+struct PeriodicCall {
+    call: Arc<PeriodicFunc>,
+}
 
-        fn confirm_batch(
-            &mut self,
-            node_id: NodeId,
-            txs: &Vec<TestTxId>,
-        ) -> Vec<(TestTxId, TxStatus<TestConfirmInfo>)> {
-            let state = self.node_states.get_mut(&node_id).unwrap();
-            txs.iter().map(|&tx| (tx, state.status_of(tx))).collect()
-        }
-
-        fn sequence(&mut self, node_id: NodeId) -> u64 {
-            let state = self.node_states.get_mut(&node_id).unwrap();
-            state.confirmed_sequence
-        }
-
-        fn update_confirmed_sequence(&mut self, node_id: NodeId, seq_id: u64) {
-            let state = self.node_states.get_mut(&node_id).unwrap();
-            if seq_id <= state.confirmed_sequence {
-                return;
-            }
-
-            let drain = (seq_id - state.confirmed_sequence) as usize;
-            let drain = drain.min(state.mempool.len());
-            for _ in 0..drain {
-                state.mempool.pop_front();
-            }
-
-            state.confirmed_sequence = seq_id;
-
-            println!(
-                "state.confirmed_sequence: {}, {:?}",
-                state.confirmed_sequence, state.mempool
-            );
-        }
-
-        fn update_confirmed_all(&mut self, seq_id: u64) {
-            let nodes = self.node_states.keys().cloned().collect::<Vec<_>>();
-            for node in nodes {
-                self.update_confirmed_sequence(node, seq_id);
-            }
-        }
-
-        fn evict(&mut self, node_id: NodeId, seq_id: u64) {
-            let state = self.node_states.get_mut(&node_id).unwrap();
-
-            let max_seq = state.max_sequence();
-            if seq_id <= state.confirmed_sequence || seq_id > max_seq {
-                return;
-            }
-
-            let start = state.confirmed_sequence + 1;
-            let from_idx = (seq_id - start) as usize;
-            for i in from_idx..state.mempool.len() {
-                state.mempool[i] = TxStatus::Evicted;
-            }
+impl PeriodicCall {
+    fn new<F>(call: F) -> Self
+    where
+        F: for<'a> Fn(usize, &mut NetworkState) -> () + Send + Sync + 'static,
+    {
+        Self {
+            call: Arc::new(call),
         }
     }
 
-    #[derive(Debug)]
-    enum ServerReturn {
-        Submit(TxSubmitResult<TestTxId>),
-        StatusBatch(TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>),
-        Status(TxConfirmResult<TxStatus<TestConfirmInfo>>),
-        CurrentSequence(Result<u64>),
+    fn call(&self, iteration: usize, states: &mut NetworkState) {
+        (self.call)(iteration, states);
     }
+}
 
-    impl ServerReturn {
-        fn assert_submit(self) -> TxSubmitResult<TestTxId> {
-            match self {
-                ServerReturn::Submit(result) => result,
-                _ => panic!("expected Submit"),
-            }
-        }
+#[derive(Debug, Clone)]
+struct Rule {
+    name: &'static str,
+    matcher: Match,
+    action: Action,
+    card: Cardinality,
+    priority: usize,
+}
 
-        fn assert_status_batch(
-            self,
-        ) -> TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>> {
-            match self {
-                ServerReturn::StatusBatch(result) => result,
-                _ => panic!("expected StatusBatch"),
-            }
-        }
-
-        fn assert_status(self) -> TxConfirmResult<TxStatus<TestConfirmInfo>> {
-            match self {
-                ServerReturn::Status(result) => result,
-                _ => panic!("expected Status"),
-            }
-        }
-
-        fn assert_sequence(self) -> Result<u64> {
-            match self {
-                ServerReturn::CurrentSequence(result) => result,
-                _ => panic!("expected CurrentSequence"),
-            }
-        }
-    }
-
-    type ActionFunc =
-        dyn for<'a> Fn(&'a RoutedCall, &mut NetworkState) -> ActionResult + Send + Sync + 'static;
-    type MatchFunc = dyn for<'a> Fn(&'a RoutedCall) -> bool + Send + Sync + 'static;
-
-    struct ActionResult {
-        ret: ServerReturn,
-    }
-
-    #[derive(Clone)]
-    struct Match {
-        name: &'static str,
-        check_func: Arc<MatchFunc>,
-    }
-
-    impl Match {
-        fn new<F>(name: &'static str, f: F) -> Self
-        where
-            F: for<'a> Fn(&'a RoutedCall) -> bool + Send + Sync + 'static,
-        {
-            Self {
-                name,
-                check_func: Arc::new(f),
-            }
-        }
-
-        fn check(&self, call: &RoutedCall) -> bool {
-            (self.check_func)(call)
-        }
-    }
-
-    impl std::fmt::Debug for Match {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-            f.debug_struct("Match").field("name", &self.name).finish()
-        }
-    }
-
-    #[derive(Clone)]
-    struct Action {
-        name: &'static str,
-        action: Arc<ActionFunc>,
-    }
-
-    impl Action {
-        fn new<F>(name: &'static str, f: F) -> Self
-        where
-            F: for<'a> Fn(&'a RoutedCall, &mut NetworkState) -> ActionResult
-                + Send
-                + Sync
-                + 'static,
-        {
-            Self {
-                name,
-                action: Arc::new(f),
-            }
-        }
-        fn call(&self, rc: &RoutedCall, state: &mut NetworkState) -> ActionResult {
-            (self.action)(rc, state)
-        }
-    }
-
-    impl std::fmt::Debug for Action {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-            f.debug_struct("Action").field("name", &self.name).finish()
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    enum Cardinality {
-        Once,
-        Times(u32),
-        Any,
-    }
-
-    impl Cardinality {
-        fn consume(&mut self) {
-            match self {
-                Cardinality::Once => *self = Cardinality::Times(0),
-                Cardinality::Times(n) => {
-                    if *n > 0 {
-                        *n -= 1;
-                    }
-                }
-                Cardinality::Any => {}
-            }
-        }
-        fn exhausted(&self) -> bool {
-            matches!(self, Cardinality::Times(0))
-        }
-        fn requires_consumption(&self) -> bool {
-            !matches!(self, Cardinality::Any)
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct Rule {
+impl Rule {
+    fn new(
         name: &'static str,
         matcher: Match,
         action: Action,
         card: Cardinality,
         priority: usize,
-    }
-
-    impl Rule {
-        fn new(
-            name: &'static str,
-            matcher: Match,
-            action: Action,
-            card: Cardinality,
-            priority: usize,
-        ) -> Self {
-            Self {
-                name,
-                matcher,
-                action,
-                card,
-                priority,
-            }
-        }
-
-        fn matches(&self, call: &RoutedCall) -> bool {
-            if self.card.exhausted() {
-                return false;
-            }
-            self.matcher.check(&call)
-        }
-
-        fn consume(&mut self) {
-            self.card.consume();
-        }
-
-        fn call(&self, rc: &RoutedCall, states: &mut NetworkState) -> ActionResult {
-            self.action.call(rc, states)
+    ) -> Self {
+        Self {
+            name,
+            matcher,
+            action,
+            card,
+            priority,
         }
     }
 
-    #[async_trait]
-    impl TxServer for MockTxServer {
-        type TxId = TestTxId;
-        type ConfirmInfo = TestConfirmInfo;
-
-        async fn submit(&self, bytes: Arc<Vec<u8>>, sequence: u64) -> TxSubmitResult<TestTxId> {
-            let (reply, rx) = oneshot::channel();
-            let ret = ServerCall::Submit {
-                bytes: bytes.to_vec(),
-                sequence,
-                reply,
-            };
-            self.send_call(ret, "submit call").await;
-            rx.await.expect("submit reply")
+    fn matches(&self, call: &RoutedCall) -> bool {
+        if self.card.exhausted() {
+            return false;
         }
-
-        async fn status_batch(
-            &self,
-            ids: Vec<TestTxId>,
-        ) -> TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>> {
-            let (reply, rx) = oneshot::channel();
-            let ret = ServerCall::StatusBatch { ids, reply };
-            self.send_call(ret, "status batch call").await;
-            rx.await.expect("status batch reply")
-        }
-
-        async fn status(&self, id: Self::TxId) -> TxConfirmResult<TxStatus<Self::ConfirmInfo>> {
-            let (reply, rx) = oneshot::channel();
-            let ret = ServerCall::Status { id, reply };
-            self.send_call(ret, "status call").await;
-            rx.await.expect("status reply")
-        }
-
-        async fn current_sequence(&self) -> Result<u64> {
-            let (reply, rx) = oneshot::channel();
-            let ret = ServerCall::CurrentSequence { reply };
-            self.send_call(ret, "current sequence call").await;
-            rx.await.expect("current sequence reply")
-        }
+        self.matcher.check(&call)
     }
 
-    #[derive(Debug, Clone)]
-    struct CallLogEntry {
-        node_id: NodeId,
-        kind: &'static str,
-        seq: Option<u64>,
+    fn consume(&mut self) {
+        self.card.consume();
+    }
+
+    fn call(&self, rc: &RoutedCall, states: &mut NetworkState) -> ActionResult {
+        self.action.call(rc, states)
+    }
+}
+
+#[async_trait]
+impl TxServer for MockTxServer {
+    type TxId = TestTxId;
+    type ConfirmInfo = TestConfirmInfo;
+
+    async fn submit(&self, bytes: Arc<Vec<u8>>, sequence: u64) -> TxSubmitResult<TestTxId> {
+        let (reply, rx) = oneshot::channel();
+        let ret = ServerCall::Submit {
+            bytes: bytes.to_vec(),
+            sequence,
+            reply,
+        };
+        self.send_call(ret, "submit call").await;
+        rx.await.expect("submit reply")
+    }
+
+    async fn status_batch(
+        &self,
         ids: Vec<TestTxId>,
+    ) -> TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>> {
+        let (reply, rx) = oneshot::channel();
+        let ret = ServerCall::StatusBatch { ids, reply };
+        self.send_call(ret, "status batch call").await;
+        rx.await.expect("status batch reply")
     }
 
-    impl CallLogEntry {
-        fn new(node_id: NodeId, kind: &'static str, seq: Option<u64>, ids: Vec<TestTxId>) -> Self {
-            Self {
-                node_id,
-                kind,
-                seq,
-                ids,
+    async fn status(&self, id: Self::TxId) -> TxConfirmResult<TxStatus<Self::ConfirmInfo>> {
+        let (reply, rx) = oneshot::channel();
+        let ret = ServerCall::Status { id, reply };
+        self.send_call(ret, "status call").await;
+        rx.await.expect("status reply")
+    }
+
+    async fn current_sequence(&self) -> Result<u64> {
+        let (reply, rx) = oneshot::channel();
+        let ret = ServerCall::CurrentSequence { reply };
+        self.send_call(ret, "current sequence call").await;
+        rx.await.expect("current sequence reply")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CallLogEntry {
+    node_id: NodeId,
+    kind: &'static str,
+    seq: Option<u64>,
+    ids: Vec<TestTxId>,
+}
+
+impl CallLogEntry {
+    fn new(node_id: NodeId, kind: &'static str, seq: Option<u64>, ids: Vec<TestTxId>) -> Self {
+        Self {
+            node_id,
+            kind,
+            seq,
+            ids,
+        }
+    }
+
+    fn println(&self) {
+        println!(
+            "logging call: {}, {:?}, {:?}",
+            self.kind, self.seq, &self.ids
+        );
+    }
+}
+
+impl From<&RoutedCall> for CallLogEntry {
+    fn from(rc: &RoutedCall) -> Self {
+        let node_id = rc.node_id.clone();
+        match &rc.call {
+            ServerCall::CurrentSequence { .. } => {
+                CallLogEntry::new(node_id, "CurrentSequence", None, vec![])
+            }
+            ServerCall::Status { id, .. } => {
+                CallLogEntry::new(node_id, "Status", None, vec![id.clone()])
+            }
+            ServerCall::StatusBatch { ids, .. } => {
+                CallLogEntry::new(node_id, "StatusBatch", None, ids.clone())
+            }
+            ServerCall::Submit { sequence, .. } => {
+                CallLogEntry::new(node_id, "Submit", Some(sequence.clone()), vec![])
             }
         }
-
-        fn println(&self) {
-            println!(
-                "logging call: {}, {:?}, {:?}",
-                self.kind, self.seq, &self.ids
-            );
-        }
     }
+}
 
-    impl From<&RoutedCall> for CallLogEntry {
-        fn from(rc: &RoutedCall) -> Self {
-            let node_id = rc.node_id.clone();
-            match &rc.call {
-                ServerCall::CurrentSequence { .. } => {
-                    CallLogEntry::new(node_id, "CurrentSequence", None, vec![])
-                }
-                ServerCall::Status { id, .. } => {
-                    CallLogEntry::new(node_id, "Status", None, vec![id.clone()])
-                }
-                ServerCall::StatusBatch { ids, .. } => {
-                    CallLogEntry::new(node_id, "StatusBatch", None, ids.clone())
-                }
-                ServerCall::Submit { sequence, .. } => {
-                    CallLogEntry::new(node_id, "Submit", Some(sequence.clone()), vec![])
-                }
-            }
-        }
-    }
+#[derive(Debug)]
+struct Driver {
+    inbox: mpsc::Receiver<RoutedCall>,
+    rules: Vec<Rule>,
+    network_state: NetworkState,
+    log: Vec<CallLogEntry>,
+}
 
-    #[derive(Debug)]
-    struct Driver {
+impl Driver {
+    fn new(
         inbox: mpsc::Receiver<RoutedCall>,
         rules: Vec<Rule>,
-        network_state: NetworkState,
-        log: Vec<CallLogEntry>,
-    }
-
-    impl Driver {
-        fn new(
-            inbox: mpsc::Receiver<RoutedCall>,
-            rules: Vec<Rule>,
-            states: HashMap<NodeId, NodeState>,
-        ) -> Self {
-            Self {
-                inbox,
-                rules,
-                log: Vec::new(),
-                network_state: NetworkState::new(states),
-            }
-        }
-
-        fn log_call(&mut self, call: &RoutedCall) {
-            self.log.push(call.into());
-        }
-
-        async fn process_inbox(&mut self, shutdown: CancellationToken) -> DriverResult {
-            while let Some(rc) = tokio::select! {
-                _ = shutdown.cancelled() => None,
-                msg = self.inbox.recv() => msg,
-            } {
-                self.log_call(&rc);
-                let res = self.rules.iter_mut().find(|rule| rule.matches(&rc));
-                if let Some(rule) = res {
-                    rule.consume();
-                    let ret = rule.call(&rc, &mut self.network_state);
-                    match rc.call {
-                        ServerCall::Submit { reply, .. } => {
-                            reply.send(ret.ret.assert_submit());
-                        }
-                        ServerCall::Status { reply, .. } => {
-                            reply.send(ret.ret.assert_status());
-                        }
-                        ServerCall::StatusBatch { reply, .. } => {
-                            reply.send(ret.ret.assert_status_batch());
-                        }
-                        ServerCall::CurrentSequence { reply, .. } => {
-                            reply.send(ret.ret.assert_sequence());
-                        }
-                    }
-                }
-            }
-            let mut unmet = vec![];
-            for rule in self.rules.iter() {
-                if rule.card.requires_consumption() && !rule.card.exhausted() {
-                    unmet.push(rule.clone());
-                }
-            }
-            DriverResult {
-                unmet,
-                log: self.log.clone(),
-            }
+        states: HashMap<NodeId, NodeState>,
+    ) -> Self {
+        Self {
+            inbox,
+            rules,
+            log: Vec::new(),
+            network_state: NetworkState::new(states),
         }
     }
 
-    #[derive(Debug)]
-    struct DriverResult {
-        log: Vec<CallLogEntry>,
-        unmet: Vec<Rule>,
+    fn log_call(&mut self, call: &RoutedCall) {
+        self.log.push(call.into());
     }
 
-    struct Harness {
+    async fn process_inbox(
+        &mut self,
+        periodic: PeriodicCall,
         shutdown: CancellationToken,
-        manager_handle: Option<JoinHandle<Result<()>>>,
-        driver_handle: JoinHandle<DriverResult>,
+    ) -> DriverResult {
+        let mut iterations = 0;
+        while let Some(rc) = tokio::select! {
+            _ = shutdown.cancelled() => None,
+            msg = self.inbox.recv() => msg,
+        } {
+            self.log_call(&rc);
+            let res = self.rules.iter_mut().find(|rule| rule.matches(&rc));
+            if let Some(rule) = res {
+                rule.consume();
+                let ret = rule.call(&rc, &mut self.network_state);
+                match rc.call {
+                    ServerCall::Submit { reply, .. } => {
+                        reply.send(ret.ret.assert_submit());
+                    }
+                    ServerCall::Status { reply, .. } => {
+                        reply.send(ret.ret.assert_status());
+                    }
+                    ServerCall::StatusBatch { reply, .. } => {
+                        reply.send(ret.ret.assert_status_batch());
+                    }
+                    ServerCall::CurrentSequence { reply, .. } => {
+                        reply.send(ret.ret.assert_sequence());
+                    }
+                }
+            }
+            periodic.call(iterations, &mut self.network_state);
+            iterations += 1;
+        }
+        let mut unmet = vec![];
+        for rule in self.rules.iter() {
+            if rule.card.requires_consumption() && !rule.card.exhausted() {
+                unmet.push(rule.clone());
+            }
+        }
+        DriverResult {
+            unmet,
+            log: self.log.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DriverResult {
+    log: Vec<CallLogEntry>,
+    unmet: Vec<Rule>,
+}
+
+struct Harness {
+    shutdown: CancellationToken,
+    manager_handle: Option<JoinHandle<Result<()>>>,
+    driver_handle: JoinHandle<DriverResult>,
+    confirm_interval: Duration,
+    manager: TransactionManager<TestTxId, TestConfirmInfo>,
+}
+
+impl Harness {
+    fn new(
         confirm_interval: Duration,
-        manager: TransactionManager<TestTxId, TestConfirmInfo>,
-    }
-
-    impl Harness {
-        fn new(
-            confirm_interval: Duration,
-            max_status_batch: usize,
-            add_tx_capacity: usize,
-            num_servers: usize,
-            mut rules: Vec<Rule>,
-        ) -> (Self, TransactionWorker<MockTxServer>) {
-            let (calls_rx, servers) = make_many_servers(num_servers);
-            let mut node_map = HashMap::new();
-            let mut node_states = HashMap::new();
-            for (node_id, node_server) in servers {
-                node_map.insert(node_id.clone(), node_server);
-                node_states.insert(node_id.clone(), NodeState::new());
-            }
-            let signer = Arc::new(TestSigner::default());
-            let (manager, worker) = TransactionWorker::new(
-                node_map,
+        max_status_batch: usize,
+        add_tx_capacity: usize,
+        num_servers: usize,
+        mut rules: Vec<Rule>,
+        periodic: PeriodicCall,
+    ) -> (Self, TransactionWorker<MockTxServer>) {
+        let (calls_rx, servers) = make_many_servers(num_servers);
+        let mut node_map = HashMap::new();
+        let mut node_states = HashMap::new();
+        for (node_id, node_server) in servers {
+            node_map.insert(node_id.clone(), node_server);
+            node_states.insert(node_id.clone(), NodeState::new());
+        }
+        let signer = Arc::new(TestSigner::default());
+        let (manager, worker) = TransactionWorker::new(
+            node_map,
+            confirm_interval,
+            max_status_batch,
+            signer,
+            1,
+            add_tx_capacity,
+        );
+        rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
+        let mut driver = Driver::new(calls_rx, rules, node_states);
+        let shutdown = CancellationToken::new();
+        let process_shutdown = shutdown.clone();
+        let driver_handle =
+            tokio::spawn(async move { driver.process_inbox(periodic, process_shutdown).await });
+        (
+            Self {
+                shutdown,
+                manager_handle: None,
+                driver_handle,
                 confirm_interval,
-                max_status_batch,
-                signer,
-                1,
-                add_tx_capacity,
-            );
-            rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
-            let mut driver = Driver::new(calls_rx, rules, node_states);
-            let shutdown = CancellationToken::new();
-            let process_shutdown = shutdown.clone();
-            let driver_handle =
-                tokio::spawn(async move { driver.process_inbox(process_shutdown).await });
-            (
-                Self {
-                    shutdown,
-                    manager_handle: None,
-                    driver_handle,
-                    confirm_interval,
-                    manager,
-                },
-                worker,
-            )
-        }
-
-        fn start(&mut self, mut manager: TransactionWorker<MockTxServer>) {
-            let shutdown = self.shutdown.clone();
-            self.manager_handle =
-                Some(tokio::spawn(async move { manager.process(shutdown).await }));
-        }
-
-        async fn pump(&self) {
-            tokio::task::yield_now().await;
-        }
-
-        async fn stop(self) -> DriverResult {
-            self.shutdown.cancel();
-            let handle = self.manager_handle.unwrap();
-            _ = handle.await;
-            self.driver_handle.await.unwrap()
-        }
-
-        async fn add_tx(
-            &self,
-            bytes: Vec<u8>,
-        ) -> (
-            u64,
-            oneshot::Receiver<Result<TestTxId>>,
-            oneshot::Receiver<Result<TxStatus<TestConfirmInfo>>>,
-        ) {
-            let handle = self
-                .manager
-                .add_tx(TxRequest::RawPayload(bytes), TxConfig::default())
-                .await
-                .expect("add tx");
-            (handle.sequence, handle.submitted, handle.confirmed)
-        }
+                manager,
+            },
+            worker,
+        )
     }
 
-    #[tokio::test]
-    async fn test_eviction() {
-        let evict_sequence = 15;
-        let is_evicted = Arc::new(AtomicBool::new(false));
-        let is_evicted_submit = is_evicted.clone();
+    fn start(&mut self, mut manager: TransactionWorker<MockTxServer>) {
+        let shutdown = self.shutdown.clone();
+        self.manager_handle = Some(tokio::spawn(async move { manager.process(shutdown).await }));
+    }
 
-        let rules: Vec<Rule> = vec![
-            // Generic submit rule
-            Rule::new(
-                "submit",
-                Match::new("match submit", |rc: &RoutedCall| {
-                    matches!(&rc.call, ServerCall::Submit { .. })
-                }),
-                Action::new(
-                    "submit_action",
-                    move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
-                        ServerCall::Submit { sequence, .. } => {
-                            let result =
-                                states.submit(rc.node_id.clone(), sequence, TxModifier::CorrectTx);
-                            if is_evicted_submit.load(Ordering::Relaxed) {
-                                states.update_confirmed_all(sequence);
-                            }
-                            ActionResult {
-                                ret: ServerReturn::Submit(result),
-                            }
+    async fn pump(&self) {
+        tokio::task::yield_now().await;
+    }
+
+    async fn stop(self) -> DriverResult {
+        self.shutdown.cancel();
+        let handle = self.manager_handle.unwrap();
+        _ = handle.await;
+        self.driver_handle.await.unwrap()
+    }
+
+    async fn add_tx(
+        &self,
+        bytes: Vec<u8>,
+    ) -> (
+        u64,
+        oneshot::Receiver<Result<TestTxId>>,
+        oneshot::Receiver<Result<TxStatus<TestConfirmInfo>>>,
+    ) {
+        let handle = self
+            .manager
+            .add_tx(TxRequest::RawPayload(bytes), TxConfig::default())
+            .await
+            .expect("add tx");
+        (handle.sequence, handle.submitted, handle.confirmed)
+    }
+}
+
+#[tokio::test]
+async fn test_eviction() {
+    let evict_sequence = 15;
+    let is_evicted = Arc::new(AtomicBool::new(false));
+    let is_evicted_submit = is_evicted.clone();
+
+    let rules: Vec<Rule> = vec![
+        // Generic submit rule
+        Rule::new(
+            "submit",
+            Match::new("match submit", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::Submit { .. })
+            }),
+            Action::new(
+                "submit_action",
+                move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
+                    ServerCall::Submit { sequence, .. } => {
+                        let result =
+                            states.submit(rc.node_id.clone(), sequence, TxModifier::CorrectTx);
+                        ActionResult {
+                            ret: ServerReturn::Submit(result),
                         }
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Any,
-                0,
+                    }
+                    _ => panic!("unexpected call"),
+                },
             ),
-            // Submit evict rule (higher priority)
-            Rule::new(
-                "submit evict",
-                Match::new(
-                    "match submit evict",
-                    move |rc: &RoutedCall| matches!(&rc.call, ServerCall::Submit { sequence, .. } if *sequence == evict_sequence),
-                ),
-                Action::new(
-                    "submit_evict_action",
-                    move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
-                        ServerCall::Submit { .. } => {
-                            states.evict(rc.node_id.clone(), 2);
-                            is_evicted.store(true, Ordering::Relaxed);
-                            ActionResult {
-                                ret: ServerReturn::Submit(TxSubmitResult::Err(
-                                    SubmitFailure::SequenceMismatch { expected: 2 },
-                                )),
-                            }
-                        }
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Times(2),
-                1,
+            Cardinality::Any,
+            0,
+        ),
+        // Submit evict rule (higher priority)
+        Rule::new(
+            "submit evict",
+            Match::new(
+                "match submit evict",
+                move |rc: &RoutedCall| matches!(&rc.call, ServerCall::Submit { sequence, .. } if *sequence == evict_sequence),
             ),
-            // Status rule
-            Rule::new(
-                "status",
-                Match::new("match status", |rc: &RoutedCall| {
-                    matches!(&rc.call, ServerCall::Status { .. })
-                }),
-                Action::new(
-                    "status_action",
-                    |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
-                        ServerCall::Status { id, .. } => {
-                            let status = states.confirm_one(rc.node_id.clone(), id);
-                            ActionResult {
-                                ret: ServerReturn::Status(TxConfirmResult::Ok(status)),
-                            }
-                        }
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Any,
-                0,
-            ),
-            // Status batch rule
-            Rule::new(
-                "status batch",
-                Match::new("match status batch", |rc: &RoutedCall| {
-                    matches!(&rc.call, ServerCall::StatusBatch { .. })
-                }),
-                Action::new(
-                    "status_batch_action",
-                    |rc: &RoutedCall, states: &mut NetworkState| match &rc.call {
-                        ServerCall::StatusBatch { ids, .. } => {
-                            let results = states.confirm_batch(rc.node_id.clone(), ids);
-                            ActionResult {
-                                ret: ServerReturn::StatusBatch(TxConfirmResult::Ok(results)),
-                            }
-                        }
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Any,
-                0,
-            ),
-            // Sequence rule
-            Rule::new(
-                "sequence",
-                Match::new("match sequence", |rc: &RoutedCall| {
-                    matches!(&rc.call, ServerCall::CurrentSequence { .. })
-                }),
-                Action::new(
-                    "sequence_action",
-                    |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
-                        ServerCall::CurrentSequence { .. } => ActionResult {
-                            ret: ServerReturn::CurrentSequence(Ok(
-                                states.sequence(rc.node_id.clone())
+            Action::new(
+                "submit_evict_action",
+                move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
+                    ServerCall::Submit { .. } => {
+                        states.evict(rc.node_id.clone(), 2);
+                        is_evicted.store(true, Ordering::Relaxed);
+                        ActionResult {
+                            ret: ServerReturn::Submit(TxSubmitResult::Err(
+                                SubmitFailure::SequenceMismatch { expected: 2 },
                             )),
-                        },
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Any,
-                0,
-            ),
-        ];
-        let (mut harness, manager_worker) =
-            Harness::new(Duration::from_millis(1), 10, 1000, 2, rules);
-        harness.start(manager_worker);
-        let mut add_handles = VecDeque::new();
-        for i in 0..100 {
-            let handle = harness.add_tx(vec![0, 0]).await;
-            add_handles.push_back(handle);
-        }
-        while let Some(handle) = add_handles.pop_front() {
-            let (seq, submit, confirm) = handle;
-            submit.await;
-            match confirm.await {
-                Err(e) => {
-                    panic!("confirm await error: {:?} with seq {}", e, seq);
-                }
-                Ok(res) => match res {
-                    Ok(conf) => {
-                        println!("confirm successful for {}", seq);
+                        }
                     }
-                    Err(e) => {
-                        println!("confirm failed for {}: {}", seq, e);
-                    }
+                    _ => panic!("unexpected call"),
                 },
-            }
+            ),
+            Cardinality::Times(2),
+            1,
+        ),
+        // Status rule
+        Rule::new(
+            "status",
+            Match::new("match status", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::Status { .. })
+            }),
+            Action::new(
+                "status_action",
+                |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
+                    ServerCall::Status { id, .. } => {
+                        let status = states.confirm_one(rc.node_id.clone(), id);
+                        ActionResult {
+                            ret: ServerReturn::Status(TxConfirmResult::Ok(status)),
+                        }
+                    }
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Any,
+            0,
+        ),
+        // Status batch rule
+        Rule::new(
+            "status batch",
+            Match::new("match status batch", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::StatusBatch { .. })
+            }),
+            Action::new(
+                "status_batch_action",
+                |rc: &RoutedCall, states: &mut NetworkState| match &rc.call {
+                    ServerCall::StatusBatch { ids, .. } => {
+                        let results = states.confirm_batch(rc.node_id.clone(), ids);
+                        ActionResult {
+                            ret: ServerReturn::StatusBatch(TxConfirmResult::Ok(results)),
+                        }
+                    }
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Any,
+            0,
+        ),
+        // Sequence rule
+        Rule::new(
+            "sequence",
+            Match::new("match sequence", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::CurrentSequence { .. })
+            }),
+            Action::new(
+                "sequence_action",
+                |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
+                    ServerCall::CurrentSequence { .. } => ActionResult {
+                        ret: ServerReturn::CurrentSequence(Ok(states.sequence(rc.node_id.clone()))),
+                    },
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Any,
+            0,
+        ),
+    ];
+    let update = PeriodicCall::new(|iterations: usize, states: &mut NetworkState| {
+        if iterations % 10 == 0 {
+            let max_seq = states.max_submitted_sequence() - 1;
+            states.update_confirmed_all(max_seq);
         }
-        let results = harness.stop().await;
-        for log in results.log {
-            log.println();
+    });
+    let (mut harness, manager_worker) =
+        Harness::new(Duration::from_millis(1), 10, 1000, 2, rules, update);
+    harness.start(manager_worker);
+    let mut add_handles = VecDeque::new();
+    for i in 0..100 {
+        let handle = harness.add_tx(vec![0, 0]).await;
+        add_handles.push_back(handle);
+    }
+    while let Some(handle) = add_handles.pop_front() {
+        let (seq, submit, confirm) = handle;
+        submit.await;
+        match confirm.await {
+            Err(e) => {
+                panic!("confirm await error: {:?} with seq {}", e, seq);
+            }
+            Ok(res) => match res {
+                Ok(conf) => {
+                    println!("confirm successful for {}", seq);
+                }
+                Err(e) => {
+                    println!("confirm failed for {}: {}", seq, e);
+                }
+            },
         }
     }
+    let results = harness.stop().await;
+    for log in results.log {
+        log.println();
+    }
+}
 
-    #[tokio::test]
-    async fn test_recovering() {
-        let evict_sequence = 15;
-        let recovery_sequence = 3;
-        let is_evicted = Arc::new(AtomicBool::new(false));
-        let is_evicted_submit = is_evicted.clone();
-        let is_evicted_recovery = is_evicted.clone();
-        let recovery_triggered = Arc::new(AtomicBool::new(false));
-        let recovery_triggered_check = recovery_triggered.clone();
+#[tokio::test]
+async fn test_recovering() {
+    let evict_sequence = 15;
+    let is_evicted = Arc::new(AtomicBool::new(false));
+    let is_evicted_submit = is_evicted.clone();
+    let recovery_triggered = Arc::new(AtomicBool::new(false));
+    let recovery_triggered_check = recovery_triggered.clone();
 
-        let rules: Vec<Rule> = vec![
-            // Generic submit rule
-            Rule::new(
-                "submit",
-                Match::new("match submit", |rc: &RoutedCall| {
-                    matches!(&rc.call, ServerCall::Submit { .. })
-                }),
-                Action::new(
-                    "submit_action",
-                    move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
-                        ServerCall::Submit { sequence, .. } => {
-                            let result =
-                                states.submit(rc.node_id.clone(), sequence, TxModifier::CorrectTx);
-                            if is_evicted_submit.load(Ordering::Relaxed) {
-                                if !recovery_triggered.load(Ordering::Relaxed) {
-                                    println!("recovery not triggered {}", sequence);
-                                    states.update_confirmed_all(evict_sequence);
-                                    recovery_triggered.store(true, Ordering::Relaxed);
-                                } else {
-                                    println!("recovery triggered {}", sequence);
-                                    states.update_confirmed_all(sequence);
-                                }
-                            }
-                            ActionResult {
-                                ret: ServerReturn::Submit(result),
-                            }
-                        }
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Any,
-                0,
-            ),
-            // Submit evict rule (higher priority)
-            Rule::new(
-                "submit evict",
-                Match::new(
-                    "match submit evict",
-                    move |rc: &RoutedCall| matches!(&rc.call, ServerCall::Submit { sequence, .. } if *sequence == evict_sequence),
-                ),
-                Action::new(
-                    "submit_evict_action",
-                    move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
-                        ServerCall::Submit { .. } => {
-                            println!("[EVICT] Evicting at sequence {}", evict_sequence);
-                            states.evict(rc.node_id.clone(), 2);
-                            is_evicted.store(true, Ordering::Relaxed);
-                            ActionResult {
-                                ret: ServerReturn::Submit(TxSubmitResult::Err(
-                                    SubmitFailure::SequenceMismatch { expected: 2 },
-                                )),
-                            }
-                        }
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Once,
-                1,
-            ),
-            // Status rule
-            Rule::new(
-                "status",
-                Match::new("match status", |rc: &RoutedCall| {
-                    matches!(&rc.call, ServerCall::Status { .. })
-                }),
-                Action::new(
-                    "status_action",
-                    |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
-                        ServerCall::Status { id, .. } => {
-                            let status = states.confirm_one(rc.node_id.clone(), id);
-                            ActionResult {
-                                ret: ServerReturn::Status(TxConfirmResult::Ok(status)),
-                            }
-                        }
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Any,
-                0,
-            ),
-            // Status batch rule
-            Rule::new(
-                "status batch",
-                Match::new("match status batch", |rc: &RoutedCall| {
-                    matches!(&rc.call, ServerCall::StatusBatch { .. })
-                }),
-                Action::new(
-                    "status_batch_action",
-                    |rc: &RoutedCall, states: &mut NetworkState| match &rc.call {
-                        ServerCall::StatusBatch { ids, .. } => {
-                            let results = states.confirm_batch(rc.node_id.clone(), ids);
+    let rules: Vec<Rule> = vec![
+        // Generic submit rule
+        Rule::new(
+            "submit",
+            Match::new("match submit", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::Submit { .. })
+            }),
+            Action::new(
+                "submit_action",
+                move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
+                    ServerCall::Submit { sequence, .. } => {
+                        let node_state = states.node_states.get(&rc.node_id).unwrap();
+                        let expected_seq = node_state.next_submit_seq();
+                        println!(
+                            "[SUBMIT] node={}, seq={}, expected={}, confirmed={}, mempool_len={}",
+                            rc.node_id,
+                            sequence,
+                            expected_seq,
+                            node_state.confirmed_sequence,
+                            node_state.mempool.len()
+                        );
+                        let result =
+                            states.submit(rc.node_id.clone(), sequence, TxModifier::CorrectTx);
+                        if let Err(ref e) = result {
                             println!(
-                                "[DEBUG STATUS_BATCH] node={}, ids={:?}, results={:?}",
-                                rc.node_id, ids, results
+                                "[SUBMIT] FAILED: node={}, seq={}, error={:?}",
+                                rc.node_id, sequence, e
                             );
-                            ActionResult {
-                                ret: ServerReturn::StatusBatch(TxConfirmResult::Ok(results)),
+                        }
+                        if is_evicted_submit.load(Ordering::Relaxed) {
+                            if !recovery_triggered.load(Ordering::Relaxed) {
+                                println!(
+                                    "[SUBMIT] recovery not triggered, updating confirmed to {}",
+                                    evict_sequence
+                                );
+                                states.update_confirmed_all(evict_sequence);
+                                recovery_triggered.store(true, Ordering::Relaxed);
                             }
                         }
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Any,
-                0,
-            ),
-            // Sequence rule
-            Rule::new(
-                "sequence",
-                Match::new("match sequence", |rc: &RoutedCall| {
-                    matches!(&rc.call, ServerCall::CurrentSequence { .. })
-                }),
-                Action::new(
-                    "sequence_action",
-                    |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
-                        ServerCall::CurrentSequence { .. } => ActionResult {
-                            ret: ServerReturn::CurrentSequence(Ok(
-                                states.sequence(rc.node_id.clone())
-                            )),
-                        },
-                        _ => panic!("unexpected call"),
-                    },
-                ),
-                Cardinality::Any,
-                0,
-            ),
-        ];
-
-        let (mut harness, manager_worker) =
-            Harness::new(Duration::from_millis(2), 10, 1000, 2, rules);
-        harness.start(manager_worker);
-        let mut add_handles = VecDeque::new();
-        for _i in 0..100 {
-            let handle = harness.add_tx(vec![0, 0]).await;
-            add_handles.push_back(handle);
-        }
-        while let Some(handle) = add_handles.pop_front() {
-            let (seq, submit, confirm) = handle;
-            let _ = submit.await;
-            match confirm.await {
-                Err(e) => {
-                    println!("confirm await error: {:?} with seq {}", e, seq);
-                }
-                Ok(res) => match res {
-                    Ok(_conf) => {
-                        println!("confirm successful for {}", seq);
+                        ActionResult {
+                            ret: ServerReturn::Submit(result),
+                        }
                     }
-                    Err(e) => {
-                        println!("confirm failed for {}: {}", seq, e);
-                    }
+                    _ => panic!("unexpected call"),
                 },
-            }
+            ),
+            Cardinality::Any,
+            0,
+        ),
+        // Submit evict rule (higher priority)
+        Rule::new(
+            "submit evict",
+            Match::new(
+                "match submit evict",
+                move |rc: &RoutedCall| matches!(&rc.call, ServerCall::Submit { sequence, .. } if *sequence == evict_sequence),
+            ),
+            Action::new(
+                "submit_evict_action",
+                move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
+                    ServerCall::Submit { .. } => {
+                        println!("[EVICT] Evicting at sequence {}", evict_sequence);
+                        states.evict(rc.node_id.clone(), 2);
+                        is_evicted.store(true, Ordering::Relaxed);
+                        ActionResult {
+                            ret: ServerReturn::Submit(TxSubmitResult::Err(
+                                SubmitFailure::SequenceMismatch { expected: 2 },
+                            )),
+                        }
+                    }
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Once,
+            1,
+        ),
+        // Status rule
+        Rule::new(
+            "status",
+            Match::new("match status", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::Status { .. })
+            }),
+            Action::new(
+                "status_action",
+                |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
+                    ServerCall::Status { id, .. } => {
+                        let status = states.confirm_one(rc.node_id.clone(), id);
+                        ActionResult {
+                            ret: ServerReturn::Status(TxConfirmResult::Ok(status)),
+                        }
+                    }
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Any,
+            0,
+        ),
+        // Status batch rule
+        Rule::new(
+            "status batch",
+            Match::new("match status batch", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::StatusBatch { .. })
+            }),
+            Action::new(
+                "status_batch_action",
+                |rc: &RoutedCall, states: &mut NetworkState| match &rc.call {
+                    ServerCall::StatusBatch { ids, .. } => {
+                        let results = states.confirm_batch(rc.node_id.clone(), ids);
+                        println!(
+                            "[DEBUG STATUS_BATCH] node={}, ids={:?}, results={:?}",
+                            rc.node_id, ids, results
+                        );
+                        ActionResult {
+                            ret: ServerReturn::StatusBatch(TxConfirmResult::Ok(results)),
+                        }
+                    }
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Any,
+            0,
+        ),
+        // Sequence rule
+        Rule::new(
+            "sequence",
+            Match::new("match sequence", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::CurrentSequence { .. })
+            }),
+            Action::new(
+                "sequence_action",
+                |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
+                    ServerCall::CurrentSequence { .. } => ActionResult {
+                        ret: ServerReturn::CurrentSequence(Ok(states.sequence(rc.node_id.clone()))),
+                    },
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Any,
+            0,
+        ),
+    ];
+
+    let update = PeriodicCall::new(move |iterations: usize, states: &mut NetworkState| {
+        if !recovery_triggered_check.load(Ordering::Relaxed) {
+            return;
         }
-        let results = harness.stop().await;
-        for log in results.log {
-            log.println();
+        if iterations % 100 == 0 {
+            let max_seq = states.max_submitted_sequence() - 1;
+            println!(
+                "[SUBMIT] recovery triggered, updating confirmed to {}",
+                max_seq
+            );
+            states.update_confirmed_all(max_seq);
+        }
+    });
+    let (mut harness, manager_worker) =
+        Harness::new(Duration::from_millis(1), 10, 1000, 2, rules, update);
+    harness.start(manager_worker);
+    let mut add_handles = VecDeque::new();
+    for _i in 0..100 {
+        let handle = harness.add_tx(vec![0, 0]).await;
+        add_handles.push_back(handle);
+    }
+    while let Some(handle) = add_handles.pop_front() {
+        let (seq, submit, confirm) = handle;
+        let _ = submit.await;
+        match confirm.await {
+            Err(e) => {
+                println!("confirm await error: {:?} with seq {}", e, seq);
+            }
+            Ok(res) => match res {
+                Ok(_conf) => {
+                    println!("confirm successful for {}", seq);
+                }
+                Err(e) => {
+                    println!("confirm failed for {}: {}", seq, e);
+                }
+            },
         }
     }
+    let results = harness.stop().await;
+    for log in results.log {
+        log.println();
+    }
+}
