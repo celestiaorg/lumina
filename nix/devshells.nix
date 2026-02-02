@@ -56,7 +56,7 @@ in
       binaryen # wasm-opt
       chromedriver
       geckodriver
-      wasm-bindgen-cli_0_2_100
+      wasm-bindgen-cli_0_2_108
       wasm-pack
       # rust - other
       cargo-edit

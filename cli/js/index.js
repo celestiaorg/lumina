@@ -1,55 +1,11 @@
 Error.stackTraceLimit = 99; // rust stack traces can get pretty big, increase the default
 
-import { AppVersion, Blob, Namespace, NodeConfig, BroadcastMode, GrpcClient, GrpcClientBuilder, Endpoint, TxPriority, protoEncodeSignDoc, spawnNode } from "lumina-node";
-import { secp256k1 } from "@noble/curves/secp256k1";
-import { Registry } from "@cosmjs/proto-signing";
+import { AppVersion, Blob, Namespace, NodeConfig, spawnNode } from "lumina-node";
 
 // Expose classes on window so they can be used from the console
 window.AppVersion = AppVersion;
 window.Blob = Blob;
 window.Namespace = Namespace;
-window.TxPriority = TxPriority;
-window.BroadcastMode = BroadcastMode;
-window.GrpcClient = GrpcClient;
-window.GrpcClientBuilder = GrpcClientBuilder;
-window.Endpoint = Endpoint;
-
-// cat ci/credentials/node-0.address
-window.node0Addr = "celestia1t52q7uqgnjfzdh3wx5m5phvma3umrq8k6tq2p9";
-
-async function createTxClient() {
-  // cat ci/credentials/node-0.plaintext-key
-  const privKey = "393fdb5def075819de55756b45c9e2c8531a8c78dd6eede483d3440e9457d839";
-  const pubKey = secp256k1.getPublicKey(privKey);
-
-  const signer = (signDoc) => {
-    const bytes = protoEncodeSignDoc(signDoc);
-    const sig = secp256k1.sign(bytes, privKey, { prehash: true });
-    return sig.toCompactRawBytes();
-  };
-
-  const endpoint = new Endpoint("http://127.0.0.1:18080");
-  const txClient = await GrpcClient.withUrl(endpoint)
-    .withPubkeyAndSigner(pubKey, signer)
-    .build();
-  return txClient;
-}
-
-async function submitBankMsgSend(address, amount) {
-  const registry = new Registry();
-  const sendMsg = {
-    typeUrl: "/cosmos.bank.v1beta1.MsgSend",
-    value: {
-      fromAddress: window.node0Addr,
-      toAddress: address,
-      amount: [{ denom: "utia", amount: amount.toString() }],
-    },
-  };
-  const sendMsgAny = registry.encodeAsAny(sendMsg);
-  const txInfo = await window.txClient.submitMessage(sendMsgAny, { memo: "foo", priority: TxPriority.High });
-
-  return txInfo;
-}
 
 async function showStats(node) {
   if (!node || !await node.isRunning()) {
@@ -130,7 +86,6 @@ function stopped(document) {
 
 async function main(document, window) {
   window.node = await spawnNode();
-  window.txClient = await createTxClient();
 
   window.events = await window.node.eventsChannel();
   window.events.onmessage = (event) => {
@@ -164,10 +119,6 @@ async function main(document, window) {
       await started(document, window);
     }
   });
-
-  // test submitting transfer
-  const txInfo = await submitBankMsgSend(window.node0Addr, 10000);
-  console.log("Submitting bank MsgSend successful", txInfo);
 }
 
 await main(document, window);
