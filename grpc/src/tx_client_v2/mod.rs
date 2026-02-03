@@ -65,7 +65,7 @@
 //! # Ok(())
 //! # }
 //! ```
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::hash::Hash as StdHash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,14 +79,14 @@ use lumina_utils::executor::spawn_cancellable;
 use lumina_utils::time::{self, Interval};
 use tendermint_proto::google::protobuf::Any;
 use tokio::select;
-use tokio::sync::{Mutex, Notify, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-mod node_ctx;
-mod tx_internal;
+mod node_manager;
+mod tx_buffer;
 
 use crate::{Error, Result, TxConfig};
-use node_ctx::{NodeCtx, NodeEffect, NodeMode, NodePlan};
+use node_manager::{NodeManager, WorkerEvent};
 /// Identifier for a submission/confirmation node.
 pub type NodeId = Arc<str>;
 /// Result for submission calls: either a server TxId or a submission failure.
@@ -328,133 +328,43 @@ pub trait TxServer: Send + Sync {
     async fn current_sequence(&self) -> Result<u64>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WakeUpKind {
+    Submission,
+    Confirmation,
+}
+
 #[derive(Debug)]
-enum TransactionEvent<TxId, ConfirmInfo> {
-    Submitted {
+enum NodeEvent<TxId, ConfirmInfo> {
+    WakeUp(WakeUpKind),
+    NodeResponse {
         node_id: NodeId,
-        sequence: u64,
-        id: TxId,
+        response: NodeResponse<TxId, ConfirmInfo>,
     },
-    SubmitFailed {
-        node_id: NodeId,
+    NodeStop,
+}
+
+#[derive(Debug)]
+enum NodeResponse<TxId, ConfirmInfo> {
+    Submission {
         sequence: u64,
-        failure: SubmitFailure,
+        result: TxSubmitResult<TxId>,
     },
-    SubmitStatusBatch {
-        node_id: NodeId,
+    Confirmation {
+        state_epoch: u64,
+        response: TxConfirmResult<ConfirmationResponse<TxId, ConfirmInfo>>,
+    },
+}
+
+#[derive(Debug)]
+enum ConfirmationResponse<TxId, ConfirmInfo> {
+    Batch {
         statuses: Vec<(TxId, TxStatus<ConfirmInfo>)>,
     },
-    StopStatusBatch {
-        node_id: NodeId,
-        statuses: Vec<(TxId, TxStatus<ConfirmInfo>)>,
-    },
-    RecoverStatus {
-        node_id: NodeId,
+    Single {
         id: TxId,
         status: TxStatus<ConfirmInfo>,
     },
-}
-
-impl<TxId, ConfirmInfo> TransactionEvent<TxId, ConfirmInfo> {
-    fn node_id(&self) -> &NodeId {
-        match self {
-            TransactionEvent::Submitted { node_id, .. } => node_id,
-            TransactionEvent::SubmitFailed { node_id, .. } => node_id,
-            TransactionEvent::SubmitStatusBatch { node_id, .. } => node_id,
-            TransactionEvent::StopStatusBatch { node_id, .. } => node_id,
-            TransactionEvent::RecoverStatus { node_id, .. } => node_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum ProcessorState {
-    Submitting,
-    Stopping(StopReason),
-    #[allow(dead_code)]
-    Stopped(StopReason),
-}
-
-impl ProcessorState {
-    fn transition(self, other: ProcessorState) -> ProcessorState {
-        match (self, other) {
-            (stopped @ ProcessorState::Stopped(_), _) => stopped,
-            (ProcessorState::Stopping(_), stopped @ ProcessorState::Stopped(_)) => stopped,
-            (stopping @ ProcessorState::Stopping(_), ProcessorState::Submitting) => stopping,
-            (_, other) => other,
-        }
-    }
-
-    fn is_stopped(&self) -> bool {
-        matches!(self, ProcessorState::Stopped(_))
-    }
-
-    fn equivalent(&self, other: &ProcessorState) -> bool {
-        matches!(
-            (self, other),
-            (ProcessorState::Submitting, ProcessorState::Submitting)
-                | (ProcessorState::Stopping(_), ProcessorState::Stopping(_))
-                | (ProcessorState::Stopped(_), ProcessorState::Stopped(_))
-        )
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ProcessorStateWithEpoch {
-    state: ProcessorState,
-    epoch: u64,
-}
-
-impl ProcessorStateWithEpoch {
-    fn new(state: ProcessorState) -> Self {
-        Self { state, epoch: 0 }
-    }
-
-    fn snapshot(&self) -> ProcessorState {
-        self.state.clone()
-    }
-
-    fn update(&mut self, other: ProcessorState) {
-        let current = std::mem::replace(&mut self.state, ProcessorState::Submitting);
-        let next = current.transition(other);
-        self.set_if_changed(next);
-    }
-
-    fn force_update(&mut self, other: ProcessorState) {
-        self.set_if_changed(other);
-    }
-
-    fn set_if_changed(&mut self, next: ProcessorState) {
-        if !self.state.equivalent(&next) {
-            self.state = next;
-            self.epoch = self.epoch.saturating_add(1);
-        }
-    }
-
-    fn is_stopped(&self) -> bool {
-        self.state.is_stopped()
-    }
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-enum StopReason {
-    SubmitFailure(SubmitFailure),
-    ConfirmFailure(ConfirmFailure),
-    AllNodesStopped,
-    Shutdown,
-}
-
-impl From<SubmitFailure> for StopReason {
-    fn from(value: SubmitFailure) -> Self {
-        StopReason::SubmitFailure(value)
-    }
-}
-
-impl From<ConfirmFailure> for StopReason {
-    fn from(value: ConfirmFailure) -> Self {
-        StopReason::ConfirmFailure(value)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -496,14 +406,6 @@ struct SubmissionResult<TxId> {
     result: TxSubmitResult<TxId>,
 }
 
-enum ConfirmationResponse<TxId, ConfirmInfo> {
-    Recovering {
-        id: TxId,
-        status: TxStatus<ConfirmInfo>,
-    },
-    Submitting(Vec<(TxId, TxStatus<ConfirmInfo>)>),
-}
-
 struct ConfirmationResult<TxId, ConfirmInfo> {
     node_id: NodeId,
     state_epoch: u64,
@@ -511,19 +413,17 @@ struct ConfirmationResult<TxId, ConfirmInfo> {
 }
 
 pub struct TransactionWorker<S: TxServer> {
-    nodes: HashMap<NodeId, NodeCtx<S>>,
-    transactions: tx_internal::TxInternal<S::TxId, S::ConfirmInfo>,
-    events: VecDeque<TransactionEvent<S::TxId, S::ConfirmInfo>>,
+    nodes: NodeManager<S>,
+    servers: HashMap<NodeId, Arc<S>>,
+    transactions: tx_buffer::TxBuffer<S::TxId, S::ConfirmInfo>,
     error_by_seq: HashMap<u64, Vec<NodeError<S::ConfirmInfo>>>,
     add_tx_rx: mpsc::Receiver<Transaction<S::TxId, S::ConfirmInfo>>,
-    new_submit: Arc<Notify>,
     submissions: FuturesUnordered<BoxFuture<'static, Option<SubmissionResult<S::TxId>>>>,
     confirmations:
         FuturesUnordered<BoxFuture<'static, Option<ConfirmationResult<S::TxId, S::ConfirmInfo>>>>,
     confirm_ticker: Interval,
     confirm_interval: Duration,
     max_status_batch: usize,
-    state: ProcessorStateWithEpoch,
 }
 
 impl<S: TxServer + 'static> TransactionWorker<S> {
@@ -550,30 +450,20 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             signer,
         };
         let start_confirmed = start_sequence.saturating_sub(1);
-        let nodes = nodes
-            .into_iter()
-            .map(|(node_id, server)| {
-                (
-                    node_id.clone(),
-                    NodeCtx::new(node_id, server, start_confirmed),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let other_nodes = nodes.keys().cloned().collect();
-        let transactions = tx_internal::TxInternal::new(0, other_nodes);
+        let node_ids = nodes.keys().cloned().collect::<Vec<_>>();
+        let node_manager = NodeManager::new(node_ids, start_confirmed);
+        let transactions = tx_buffer::TxBuffer::new(0);
         (
             manager,
             TransactionWorker {
                 add_tx_rx,
-                nodes,
+                nodes: node_manager,
+                servers: nodes,
                 transactions,
-                events: VecDeque::new(),
                 error_by_seq: HashMap::new(),
-                new_submit: Arc::new(Notify::new()),
                 submissions: FuturesUnordered::new(),
                 confirmations: FuturesUnordered::new(),
                 confirm_ticker: Interval::new(confirm_interval),
-                state: ProcessorStateWithEpoch::new(ProcessorState::Submitting),
                 confirm_interval,
                 max_status_batch,
             },
@@ -589,7 +479,6 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 exp_seq, tx_sequence
             ))
         })?;
-        self.new_submit.notify_one();
         Ok(())
     }
 
@@ -617,182 +506,149 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             .boxed(),
         );
 
+        let mut current_event: Option<NodeEvent<S::TxId, S::ConfirmInfo>> = None;
+
         loop {
-            while let Some(event) = self.events.pop_front() {
-                self.process_event(event).await?;
+            if let Some(event) = current_event.take() {
+                let outcome = self.nodes.handle_event(
+                    event,
+                    &self.transactions,
+                    self.confirm_interval,
+                    self.max_status_batch,
+                );
+                let stop = self.apply_worker_events(outcome.worker_events, shutdown.clone())?;
+                if stop {
+                    break;
+                }
+                if let Some(kind) = outcome.wake_up {
+                    current_event = Some(NodeEvent::WakeUp(kind));
+                }
+                continue;
             }
+
             select! {
-                _ = shutdown.cancelled() => self.update(ProcessorState::Stopped(StopReason::Shutdown)),
-                res = async {
-                    match self.state.snapshot() {
-                        ProcessorState::Submitting => {
-                            self.run_submitting(shutdown.clone()).await?;
+                _ = shutdown.cancelled() => {
+                    current_event = Some(NodeEvent::NodeStop);
+                }
+                tx = self.add_tx_rx.recv() => {
+                    if let Some(tx) = tx {
+                        let stop = self.apply_worker_events(
+                            vec![WorkerEvent::EnqueueTx { tx }],
+                            shutdown.clone(),
+                        )?;
+                        if stop {
+                            break;
                         }
-                        ProcessorState::Stopping(_) => {
-                            self.run_stopping(shutdown.clone()).await?;
-                        }
-                        ProcessorState::Stopped(_) => (),
+                        current_event = Some(NodeEvent::WakeUp(WakeUpKind::Submission));
                     }
-                    Ok::<_, Error>(())
-                } => res?,
-            }
-            if self.state.is_stopped() {
-                break;
+                }
+                _ = self.confirm_ticker.tick() => {
+                    current_event = Some(NodeEvent::WakeUp(WakeUpKind::Confirmation));
+                }
+                result = self.submissions.next() => {
+                    if let Some(Some(result)) = result {
+                        current_event = Some(NodeEvent::NodeResponse {
+                            node_id: result.node_id,
+                            response: NodeResponse::Submission {
+                                sequence: result.sequence,
+                                result: result.result,
+                            },
+                        });
+                    }
+                }
+                result = self.confirmations.next() => {
+                    if let Some(Some(result)) = result {
+                        current_event = Some(NodeEvent::NodeResponse {
+                            node_id: result.node_id,
+                            response: NodeResponse::Confirmation {
+                                state_epoch: result.state_epoch,
+                                response: result.response,
+                            },
+                        });
+                    }
+                }
             }
         }
 
         shutdown.cancel();
-        // Wait for all in-flight tasks to complete before returning
-        self.drain_pending().await;
-
         Ok(())
     }
 
-    /// Wait for all in-flight submissions and confirmations to complete.
-    ///
-    /// Call this before dropping the worker if you need to ensure all spawned
-    /// tasks have finished. Note: this will block until all pending network
-    /// requests complete, so ensure your servers are responsive.
-    pub async fn drain_pending(&mut self) {
-        while self.submissions.next().await.is_some() {}
-        while self.confirmations.next().await.is_some() {}
-    }
-
-    async fn run_submitting(&mut self, token: CancellationToken) -> Result<()> {
-        select! {
-            tx = self.add_tx_rx.recv() => {
-                if let Some(tx) = tx {
+    fn apply_worker_events(
+        &mut self,
+        events: Vec<WorkerEvent<S::TxId, S::ConfirmInfo>>,
+        token: CancellationToken,
+    ) -> Result<bool> {
+        for event in events {
+            match event {
+                WorkerEvent::EnqueueTx { tx } => {
                     self.enqueue_tx(tx)?;
                 }
-            }
-            _ = self.new_submit.notified() => {
-                self.spawn_submissions(token.clone());
-            }
-            _ = self.confirm_ticker.tick() => {
-                self.spawn_confirmations(token.clone());
-            }
-            result = self.submissions.next() => {
-                if let Some(Some(result)) = result {
-                    self.events.push_back(match result.result {
-                        Ok(id) => TransactionEvent::Submitted {
-                            node_id: result.node_id,
-                            sequence: result.sequence,
-                            id,
-                        },
-                        Err(failure) => TransactionEvent::SubmitFailed {
-                            node_id: result.node_id,
-                            sequence: result.sequence,
-                            failure,
-                        },
+                WorkerEvent::SpawnSubmit {
+                    node_id,
+                    bytes,
+                    sequence,
+                    delay,
+                } => {
+                    let Some(node) = self.servers.get(&node_id).cloned() else {
+                        continue;
+                    };
+                    let tx = push_oneshot(&mut self.submissions);
+                    spawn_cancellable(token.clone(), async move {
+                        time::sleep(delay).await;
+                        let result = node.submit(bytes, sequence).await;
+                        let _ = tx.send(SubmissionResult {
+                            node_id,
+                            sequence,
+                            result,
+                        });
                     });
                 }
-            }
-            result = self.confirmations.next() => {
-                let Some(Some(result)) = result else {
-                    return Ok(());
-                };
-                let Some(node) = self.nodes.get(&result.node_id) else {
-                    return Ok(());
-                };
-                let node_epoch = node.state.epoch;
-                if result.state_epoch != node_epoch {
-                    return Ok(());
-                }
-                match result.response {
-                    Ok(ConfirmationResponse::Submitting(statuses)) => {
-                        self.events.push_back(TransactionEvent::SubmitStatusBatch {
-                            node_id: result.node_id,
-                            statuses,
+                WorkerEvent::SpawnConfirmBatch {
+                    node_id,
+                    ids,
+                    epoch,
+                } => {
+                    let Some(node) = self.servers.get(&node_id).cloned() else {
+                        continue;
+                    };
+                    let tx = push_oneshot(&mut self.confirmations);
+                    spawn_cancellable(token.clone(), async move {
+                        let response = node
+                            .status_batch(ids)
+                            .await
+                            .map(|statuses| ConfirmationResponse::Batch { statuses });
+                        let _ = tx.send(ConfirmationResult {
+                            state_epoch: epoch,
+                            node_id,
+                            response,
                         });
-                    }
-                    Ok(ConfirmationResponse::Recovering { id, status }) => {
-                        self.events.push_back(TransactionEvent::RecoverStatus { node_id: result.node_id, id, status });
-                    }
-                    Err(_err) => {
-                        // TODO: add error handling
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn run_stopping(&mut self, token: CancellationToken) -> Result<()> {
-        select! {
-            _ = self.confirm_ticker.tick() => {
-                self.spawn_confirmations(token.clone());
-            }
-            result = self.submissions.next() => {
-                if let Some(Some(result)) = result {
-                    self.events.push_back(match result.result {
-                        Ok(id) => TransactionEvent::Submitted {
-                            node_id: result.node_id,
-                            sequence: result.sequence,
-                            id,
-                        },
-                        Err(failure) => TransactionEvent::SubmitFailed {
-                            node_id: result.node_id,
-                            sequence: result.sequence,
-                            failure,
-                        },
                     });
                 }
-            }
-            result = self.confirmations.next() => {
-                let Some(Some(result)) = result else {
-                    return Ok(());
-                };
-                let Some(node) = self.nodes.get(&result.node_id) else {
-                    return Ok(());
-                };
-                if result.state_epoch != node.state.epoch {
-                    return Ok(());
-                }
-                match result.response {
-                    Ok(ConfirmationResponse::Submitting(statuses)) => {
-                        self.events.push_back(TransactionEvent::StopStatusBatch {
-                            node_id: result.node_id,
-                            statuses,
+                WorkerEvent::SpawnRecover { node_id, id, epoch } => {
+                    let Some(node) = self.servers.get(&node_id).cloned() else {
+                        continue;
+                    };
+                    let tx = push_oneshot(&mut self.confirmations);
+                    spawn_cancellable(token.clone(), async move {
+                        let response = node
+                            .status(id.clone())
+                            .await
+                            .map(|status| ConfirmationResponse::Single { id, status });
+                        let _ = tx.send(ConfirmationResult {
+                            node_id,
+                            response,
+                            state_epoch: epoch,
                         });
-                    }
-                    Ok(ConfirmationResponse::Recovering { id, status }) => {
-                        self.events.push_back(TransactionEvent::RecoverStatus { node_id: result.node_id, id, status });
-                    }
-                    Err(_err) => {
-                        // TODO: add error handling
-                    }
+                    });
                 }
-            }
-        }
-        self.maybe_finalize_stopping();
-        Ok(())
-    }
-
-    async fn process_event(
-        &mut self,
-        event: TransactionEvent<S::TxId, S::ConfirmInfo>,
-    ) -> Result<()> {
-        let node_id = event.node_id().clone();
-        let effects = {
-            let Some(node) = self.nodes.get_mut(&node_id) else {
-                return Ok(());
-            };
-            node.handle_event(event, &mut self.transactions, self.confirm_interval)
-        };
-        self.apply_effects(effects);
-        Ok(())
-    }
-
-    fn apply_effects(&mut self, effects: Vec<NodeEffect<S::ConfirmInfo>>) {
-        for effect in effects {
-            match effect {
-                NodeEffect::NotifySubmit => self.new_submit.notify_one(),
-                NodeEffect::FillConfirmSlot { seq, info } => {
-                    if self.transactions.try_fill_confirm_slot(seq, info) {
-                        self.advance_global_confirmed();
-                    }
+                WorkerEvent::MarkSubmitted { sequence, id } => {
+                    self.mark_submitted(sequence, id);
                 }
-                NodeEffect::RecordError {
+                WorkerEvent::Confirm { seq, info } => {
+                    self.confirm_tx(seq, info);
+                }
+                WorkerEvent::RecordError {
                     seq,
                     status,
                     node_id,
@@ -802,17 +658,24 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                         .or_default()
                         .push(NodeError { node_id, status });
                 }
-                NodeEffect::Stop(reason) => self.update(ProcessorState::Stopping(reason)),
+                WorkerEvent::WorkerStop => {
+                    self.finalize_remaining();
+                    return Ok(true);
+                }
             }
         }
-        self.maybe_enter_stopping();
+        Ok(false)
     }
 
-    fn advance_global_confirmed(&mut self) {
+    fn mark_submitted(&mut self, sequence: u64, id: S::TxId) {
+        if let Some(tx) = self.transactions.get_mut(sequence) {
+            tx.notify_submitted(Ok(id.clone()));
+        }
+        let _ = self.transactions.set_submitted_id(sequence, id);
+    }
+
+    fn confirm_tx(&mut self, seq: u64, info: S::ConfirmInfo) {
         let expected = self.transactions.confirmed_seq() + 1;
-        let Some((seq, info)) = self.transactions.take_confirm_slot() else {
-            return;
-        };
         if seq != expected {
             return;
         }
@@ -820,78 +683,6 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             tx.notify_confirmed(Ok(TxStatus::Confirmed { info }));
         }
         self.error_by_seq.remove(&seq);
-    }
-
-    fn maybe_enter_stopping(&mut self) {
-        if !matches!(self.state.snapshot(), ProcessorState::Submitting) {
-            return;
-        }
-        if self.all_nodes_stopped() {
-            self.update(ProcessorState::Stopping(StopReason::AllNodesStopped));
-        }
-    }
-
-    fn all_nodes_stopped(&self) -> bool {
-        self.nodes
-            .values()
-            .all(|node| node.mode == NodeMode::Stopped)
-    }
-
-    fn any_submit_inflight(&self) -> bool {
-        self.nodes.values().any(|node| node.state.submit_inflight)
-    }
-
-    fn any_confirm_inflight(&self) -> bool {
-        self.nodes.values().any(|node| node.state.confirm_inflight)
-    }
-
-    fn has_confirm_work(&mut self) -> bool {
-        for (node_id, node) in self.nodes.iter() {
-            if node.state.recovering() {
-                if let Some(target) = node.state.recover_sequence {
-                    if self.transactions.confirmed_seq() < target {
-                        if let Some(tx) = self.transactions.get(target) {
-                            if tx.id.is_some() {
-                                return true;
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-            if let Some(ids) = self.transactions.to_confirm(node_id, self.max_status_batch) {
-                if !ids.is_empty() {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn maybe_finalize_stopping(&mut self) {
-        if self.transactions.is_empty() {
-            if let ProcessorState::Stopping(reason) = self.state.snapshot() {
-                self.state.force_update(ProcessorState::Stopped(reason));
-            }
-            return;
-        }
-        let require_all_nodes = matches!(
-            self.state.snapshot(),
-            ProcessorState::Stopping(StopReason::AllNodesStopped)
-        );
-        if require_all_nodes && !self.all_nodes_stopped() {
-            return;
-        }
-        if self.any_submit_inflight() || self.any_confirm_inflight() {
-            return;
-        }
-        if self.has_confirm_work() {
-            return;
-        }
-        self.finalize_remaining();
-        if let ProcessorState::Stopping(reason) = self.state.snapshot() {
-            self.state.force_update(ProcessorState::Stopped(reason));
-        }
     }
 
     fn finalize_remaining(&mut self) {
@@ -907,104 +698,6 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 .unwrap_or(TxStatus::Unknown);
             tx.notify_confirmed(Ok(status));
         }
-    }
-
-    fn spawn_submissions(&mut self, token: CancellationToken) {
-        if self.nodes.is_empty() {
-            return;
-        }
-        let mut plans = Vec::new();
-        for node in self.nodes.values_mut() {
-            if let Some(plan) = node.plan_submission(&mut self.transactions) {
-                plans.push(plan);
-            }
-        }
-        for plan in plans {
-            if let NodePlan::Submit {
-                node_id,
-                bytes,
-                sequence,
-                delay,
-            } = plan
-            {
-                let node = self.nodes.get(&node_id).unwrap().server.clone();
-                let tx = push_oneshot(&mut self.submissions);
-                spawn_cancellable(token.clone(), async move {
-                    time::sleep(delay).await;
-                    let result = node.submit(bytes, sequence).await;
-                    let _ = tx.send(SubmissionResult {
-                        node_id,
-                        sequence,
-                        result,
-                    });
-                });
-            }
-        }
-    }
-
-    fn spawn_confirmations(&mut self, token: CancellationToken) {
-        if self.transactions.is_empty() {
-            return;
-        }
-        let mut plans = Vec::new();
-        for node in self.nodes.values_mut() {
-            if node.maybe_clear_recovering(&self.transactions) {
-                self.new_submit.notify_one();
-            }
-            if let Some(plan) =
-                node.plan_confirmation(&mut self.transactions, self.max_status_batch)
-            {
-                plans.push(plan);
-            }
-        }
-        for plan in plans {
-            match plan {
-                NodePlan::ConfirmBatch {
-                    node_id,
-                    ids,
-                    epoch,
-                } => {
-                    let node = self.nodes.get(&node_id).unwrap().server.clone();
-                    let tx = push_oneshot(&mut self.confirmations);
-                    spawn_cancellable(token.clone(), async move {
-                        let response = node
-                            .status_batch(ids)
-                            .await
-                            .map(|status| ConfirmationResponse::Submitting(status));
-                        let _ = tx.send(ConfirmationResult {
-                            state_epoch: epoch,
-                            node_id,
-                            response,
-                        });
-                    });
-                }
-                NodePlan::Recover { node_id, id, epoch } => {
-                    let node = self.nodes.get(&node_id).unwrap().server.clone();
-                    let tx = push_oneshot(&mut self.confirmations);
-                    spawn_cancellable(token.clone(), async move {
-                        let response = node
-                            .status(id.clone())
-                            .await
-                            .map(|status| ConfirmationResponse::Recovering { id, status });
-                        let _ = tx.send(ConfirmationResult {
-                            node_id,
-                            response,
-                            state_epoch: epoch,
-                        });
-                    });
-                }
-                NodePlan::Submit { .. } => {}
-            }
-        }
-    }
-
-    fn update(&mut self, new: ProcessorState) {
-        if let ProcessorState::Stopping(_) = new {
-            for node in self.nodes.values_mut() {
-                node.state.set_submitting();
-            }
-        }
-        self.state.update(new);
     }
 }
 
