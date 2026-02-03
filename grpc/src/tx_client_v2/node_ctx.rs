@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::tx_client_v2::tx_internal::TxInternal;
 use crate::tx_client_v2::{
     NodeId, RejectionReason, StopReason, SubmitFailure, TransactionEvent, TxServer, TxStatus,
 };
-use crate::tx_client_v2::tx_internal::TxInternal;
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct NodeSubmissionState {
@@ -58,8 +58,10 @@ pub(crate) enum NodePlan<TxId> {
 #[derive(Debug)]
 pub(crate) enum NodeEffect<ConfirmInfo> {
     NotifySubmit,
-    FillConfirmSlot { seq: u64, info: ConfirmInfo },
-    AdvanceGlobalConfirm,
+    FillConfirmSlot {
+        seq: u64,
+        info: ConfirmInfo,
+    },
     RecordError {
         seq: u64,
         status: TxStatus<ConfirmInfo>,
@@ -248,10 +250,7 @@ impl<S: TxServer> NodeCtx<S> {
         let mut effects = Vec::new();
         let mut collected = statuses
             .into_iter()
-            .filter_map(|(tx_id, status)| {
-                txs.get_by_id(&tx_id)
-                    .map(|tx| (tx.sequence, status))
-            })
+            .filter_map(|(tx_id, status)| txs.get_by_id(&tx_id).map(|tx| (tx.sequence, status)))
             .collect::<Vec<_>>();
         collected.sort_by(|first, second| first.0.cmp(&second.0));
         if collected.is_empty() {
@@ -291,10 +290,10 @@ impl<S: TxServer> NodeCtx<S> {
                 },
                 TxStatus::Confirmed { info } => {
                     self.last_confirmed = sequence;
-                    if sequence == txs.confirmed_seq() + 1 {
-                        effects.push(NodeEffect::FillConfirmSlot { seq: sequence, info });
-                        effects.push(NodeEffect::AdvanceGlobalConfirm);
-                    }
+                    effects.push(NodeEffect::FillConfirmSlot {
+                        seq: sequence,
+                        info,
+                    });
                 }
                 TxStatus::Unknown => {
                     effects.extend(self.record_fatal(sequence, TxStatus::Unknown));
@@ -321,7 +320,6 @@ impl<S: TxServer> NodeCtx<S> {
                 txs.reset_submitted(&self.id, seq);
                 self.state.set_submitting();
                 effects.push(NodeEffect::FillConfirmSlot { seq, info });
-                effects.push(NodeEffect::AdvanceGlobalConfirm);
                 effects.push(NodeEffect::NotifySubmit);
             }
             other => {
@@ -361,18 +359,26 @@ mod tests {
         type TxId = u64;
         type ConfirmInfo = u64;
 
-        async fn submit(&self, _tx_bytes: Arc<Vec<u8>>, _sequence: u64) -> crate::tx_client_v2::TxSubmitResult<Self::TxId> {
+        async fn submit(
+            &self,
+            _tx_bytes: Arc<Vec<u8>>,
+            _sequence: u64,
+        ) -> crate::tx_client_v2::TxSubmitResult<Self::TxId> {
             unimplemented!()
         }
 
         async fn status_batch(
             &self,
             _ids: Vec<Self::TxId>,
-        ) -> crate::tx_client_v2::TxConfirmResult<Vec<(Self::TxId, TxStatus<Self::ConfirmInfo>)>> {
+        ) -> crate::tx_client_v2::TxConfirmResult<Vec<(Self::TxId, TxStatus<Self::ConfirmInfo>)>>
+        {
             unimplemented!()
         }
 
-        async fn status(&self, _id: Self::TxId) -> crate::tx_client_v2::TxConfirmResult<TxStatus<Self::ConfirmInfo>> {
+        async fn status(
+            &self,
+            _id: Self::TxId,
+        ) -> crate::tx_client_v2::TxConfirmResult<TxStatus<Self::ConfirmInfo>> {
             unimplemented!()
         }
 
@@ -468,9 +474,11 @@ mod tests {
         let effects = node.handle_event(event, &mut txs, Duration::from_secs(1));
         assert_eq!(node.mode, NodeMode::Stopped);
         assert_eq!(node.submit_up_to, 1);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, NodeEffect::RecordError { seq: 1, .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, NodeEffect::RecordError { seq: 1, .. }))
+        );
     }
 
     #[test]
@@ -492,9 +500,11 @@ mod tests {
         let effects = node.handle_event(event, &mut txs, Duration::from_secs(1));
         assert_eq!(node.mode, NodeMode::Stopped);
         assert_eq!(node.submit_up_to, 1);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, NodeEffect::RecordError { seq: 1, .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, NodeEffect::RecordError { seq: 1, .. }))
+        );
     }
 
     #[test]
@@ -516,8 +526,10 @@ mod tests {
 
         let effects = node.handle_event(event, &mut txs, Duration::from_secs(1));
         assert!(!node.state.recovering());
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, NodeEffect::NotifySubmit)));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, NodeEffect::NotifySubmit))
+        );
     }
 }

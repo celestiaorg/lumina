@@ -82,8 +82,8 @@ use tokio::select;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-mod tx_internal;
 mod node_ctx;
+mod tx_internal;
 
 use crate::{Error, Result, TxConfig};
 use node_ctx::{NodeCtx, NodeEffect, NodeMode, NodePlan};
@@ -371,6 +371,7 @@ impl<TxId, ConfirmInfo> TransactionEvent<TxId, ConfirmInfo> {
 enum ProcessorState {
     Submitting,
     Stopping(StopReason),
+    #[allow(dead_code)]
     Stopped(StopReason),
 }
 
@@ -456,20 +457,16 @@ impl From<ConfirmFailure> for StopReason {
     }
 }
 
-fn recovery_expected(reason: &RejectionReason) -> Option<u64> {
-    match reason {
-        RejectionReason::SequenceMismatch { expected, .. } => Some(*expected),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone)]
 struct NodeError<ConfirmInfo> {
+    #[allow(dead_code)]
     node_id: NodeId,
     status: TxStatus<ConfirmInfo>,
 }
 
-fn pick_error_status<ConfirmInfo: Clone>(errors: &[NodeError<ConfirmInfo>]) -> TxStatus<ConfirmInfo> {
+fn pick_error_status<ConfirmInfo: Clone>(
+    errors: &[NodeError<ConfirmInfo>],
+) -> TxStatus<ConfirmInfo> {
     let mut evicted: Option<TxStatus<ConfirmInfo>> = None;
     let mut unknown: Option<TxStatus<ConfirmInfo>> = None;
     for error in errors {
@@ -764,24 +761,24 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                     Err(_err) => {
                         // TODO: add error handling
                     }
-                    _ => {}
                 }
             }
         }
         self.maybe_finalize_stopping();
         Ok(())
     }
-    
+
     async fn process_event(
         &mut self,
         event: TransactionEvent<S::TxId, S::ConfirmInfo>,
     ) -> Result<()> {
         let node_id = event.node_id().clone();
-        let Some(node) = self.nodes.get_mut(&node_id) else {
-            return Ok(());
+        let effects = {
+            let Some(node) = self.nodes.get_mut(&node_id) else {
+                return Ok(());
+            };
+            node.handle_event(event, &mut self.transactions, self.confirm_interval)
         };
-        let effects = node.handle_event(event, &mut self.transactions, self.confirm_interval);
-        drop(node);
         self.apply_effects(effects);
         Ok(())
     }
@@ -791,10 +788,15 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             match effect {
                 NodeEffect::NotifySubmit => self.new_submit.notify_one(),
                 NodeEffect::FillConfirmSlot { seq, info } => {
-                    let _ = self.transactions.try_fill_confirm_slot(seq, info);
+                    if self.transactions.try_fill_confirm_slot(seq, info) {
+                        self.advance_global_confirmed();
+                    }
                 }
-                NodeEffect::AdvanceGlobalConfirm => self.advance_global_confirmed(),
-                NodeEffect::RecordError { seq, status, node_id } => {
+                NodeEffect::RecordError {
+                    seq,
+                    status,
+                    node_id,
+                } => {
                     self.error_by_seq
                         .entry(seq)
                         .or_default()
@@ -949,13 +951,19 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             if node.maybe_clear_recovering(&self.transactions) {
                 self.new_submit.notify_one();
             }
-            if let Some(plan) = node.plan_confirmation(&mut self.transactions, self.max_status_batch) {
+            if let Some(plan) =
+                node.plan_confirmation(&mut self.transactions, self.max_status_batch)
+            {
                 plans.push(plan);
             }
         }
         for plan in plans {
             match plan {
-                NodePlan::ConfirmBatch { node_id, ids, epoch } => {
+                NodePlan::ConfirmBatch {
+                    node_id,
+                    ids,
+                    epoch,
+                } => {
                     let node = self.nodes.get(&node_id).unwrap().server.clone();
                     let tx = push_oneshot(&mut self.confirmations);
                     spawn_cancellable(token.clone(), async move {
@@ -989,7 +997,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             }
         }
     }
-    
+
     fn update(&mut self, new: ProcessorState) {
         if let ProcessorState::Stopping(_) = new {
             for node in self.nodes.values_mut() {

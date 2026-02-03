@@ -7,7 +7,6 @@ use k256::ecdsa::VerifyingKey;
 use lumina_utils::executor::spawn;
 use prost::Message;
 use tendermint::chain::Id;
-use tendermint::crypto::Sha256 as _;
 use tokio::sync::{Mutex, OnceCell, RwLock, oneshot};
 use tokio_util::sync::CancellationToken;
 

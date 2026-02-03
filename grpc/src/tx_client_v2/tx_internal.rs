@@ -36,6 +36,7 @@ struct ConfirmSlot<ConfirmInfo> {
 pub enum TxInternalError {
     TransactionNotFound,
     ConfirmWithGaps,
+    #[allow(dead_code)]
     AdvancePastMaxSeq,
     InvalidSequence,
 }
@@ -178,6 +179,7 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxInternal<TxId, ConfirmInfo> {
         self.id_to_seq.get(id).cloned()
     }
 
+    #[allow(dead_code)]
     pub fn get_pending(&self, node: &NodeId) -> Option<u64> {
         self.submissions.get(node).and_then(|s| s.pending)
     }
