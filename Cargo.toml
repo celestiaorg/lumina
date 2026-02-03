@@ -43,10 +43,8 @@ futures-util = "0.3"
 # we don't depend on `getrandom` directly, but it requires additional actions
 # to build for wasm32, thus we need to specify it and enable certain features
 # and set `rustflags` in `.cargo/config.toml`.
-# See <https://docs.rs/getrandom/0.3.3/getrandom/#webassembly-support>
-# libp2p 0.56 has dependency on both rand 0.8.5 and 0.9.2, which means we need both
-getrandom_02 = { package = "getrandom", version = "0.2.10", features = ["js"] }
-getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# See <https://docs.rs/getrandom/0.3.4/getrandom/#webassembly-support>
+getrandom_03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 hex = "0.4.3"
 http = "1"

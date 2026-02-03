@@ -43,7 +43,7 @@ uniffi = { workspace = true, optional = true }
 k256.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom_02.workspace = true
+getrandom_03.workspace = true
 lumina-utils = { workspace = true, features = ["make-object"] }
 
 js-sys = { workspace = true, optional = true }

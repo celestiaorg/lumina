@@ -47,7 +47,7 @@ tonic = { workspace = true, features = ["transport"] }
 celestia-grpc = { workspace = true, features = ["wasm-bindgen"] }
 celestia-rpc = { workspace = true, features = ["wasm-bindgen"] }
 celestia-types = { workspace = true, features = ["wasm-bindgen"] }
-getrandom_02.workspace = true
+getrandom_03.workspace = true
 tonic-web-wasm-client.workspace = true
 
 [dev-dependencies]
