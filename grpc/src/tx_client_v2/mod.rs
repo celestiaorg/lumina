@@ -649,6 +649,9 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 }
             }
         }
+        if let Some(limit) = self.nodes.min_confirmed_non_stopped() {
+            self.clear_confirmed_up_to(limit);
+        }
         Ok(false)
     }
 
@@ -660,13 +663,10 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
     }
 
     fn confirm_tx(&mut self, seq: u64, info: S::ConfirmInfo) {
-        let expected = self.transactions.confirmed_seq() + 1;
-        if seq != expected {
+        let Some(tx) = self.transactions.get_mut(seq) else {
             return;
-        }
-        if let Ok(mut tx) = self.transactions.confirm(seq) {
-            tx.notify_confirmed(Ok(TxStatus::Confirmed { info }));
-        }
+        };
+        tx.notify_confirmed(Ok(TxStatus::Confirmed { info }));
     }
 
     fn finalize_remaining(&mut self, fatal: Option<TxStatus<S::ConfirmInfo>>) {
@@ -685,6 +685,18 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 tx.notify_submitted(Err(Error::UnexpectedResponseType(submit_error_msg.clone())));
             }
             tx.notify_confirmed(Ok(status));
+        }
+    }
+
+    fn clear_confirmed_up_to(&mut self, limit: u64) {
+        loop {
+            let next = self.transactions.confirmed_seq() + 1;
+            if next > limit {
+                break;
+            }
+            if self.transactions.confirm(next).is_err() {
+                break;
+            }
         }
     }
 }

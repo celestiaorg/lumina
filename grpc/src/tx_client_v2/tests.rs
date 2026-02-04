@@ -1,12 +1,35 @@
 use super::*;
 use async_trait::async_trait;
 use std::collections::VecDeque;
+use std::sync::Once;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 type TestTxId = u64;
 type TestConfirmInfo = ();
+
+fn init_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let level = std::env::var("RUST_LOG")
+            .ok()
+            .map(|value| value.to_lowercase())
+            .and_then(|value| match value.as_str() {
+                "trace" => Some(tracing::Level::TRACE),
+                "debug" => Some(tracing::Level::DEBUG),
+                "info" => Some(tracing::Level::INFO),
+                "warn" => Some(tracing::Level::WARN),
+                "error" => Some(tracing::Level::ERROR),
+                _ => None,
+            })
+            .unwrap_or(tracing::Level::WARN);
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(level)
+            .try_init();
+    });
+}
 
 #[derive(Debug)]
 struct RoutedCall {
@@ -706,6 +729,7 @@ impl Harness {
 
 #[tokio::test]
 async fn test_eviction() {
+    init_tracing();
     let evict_sequence = 15;
     let is_evicted = Arc::new(AtomicBool::new(false));
     let _is_evicted_submit = is_evicted.clone();
@@ -858,6 +882,7 @@ async fn test_eviction() {
 
 #[tokio::test]
 async fn test_recovering() {
+    init_tracing();
     let evict_sequence = 15;
     let is_evicted = Arc::new(AtomicBool::new(false));
     let is_evicted_submit = is_evicted.clone();

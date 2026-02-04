@@ -128,7 +128,7 @@ struct RecoveringState {
 struct StoppedState<ConfirmInfo> {
     shared: NodeShared,
     confirm_inflight: bool,
-    submit_up_to: u64,
+    stop_seq: u64,
     error: StopError<ConfirmInfo>,
 }
 
@@ -216,8 +216,8 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
                 state.shared.submit_delay,
             ),
             NodeState::Stopped(state) => format!(
-                "Stopped submit_up_to={} error={} last_confirmed={} last_submitted={:?} confirm_inflight={} epoch={} delay={:?}",
-                state.submit_up_to,
+                "Stopped stop_seq={} error={} last_confirmed={} last_submitted={:?} confirm_inflight={} epoch={} delay={:?}",
+                state.stop_seq,
                 state.error.label(),
                 state.shared.last_confirmed,
                 state.shared.last_submitted,
@@ -228,42 +228,17 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
         }
     }
 
-    fn current_submitted(&self) -> Option<u64> {
-        match self {
-            NodeState::Active(state) => match (state.shared.last_submitted, state.pending) {
-                (Some(last), Some(pending)) => Some(last.max(pending)),
-                (Some(last), None) => Some(last),
-                (None, Some(pending)) => Some(pending),
-                (None, None) => None,
-            },
-            NodeState::Recovering(state) => state.shared.last_submitted,
-            NodeState::Stopped(state) => state.shared.last_submitted,
-        }
-    }
-
-    fn bump_submitted_to_confirmed(&mut self, confirmed: u64) {
-        let shared = self.shared_mut();
-        match shared.last_submitted {
-            Some(last) if last < confirmed => shared.last_submitted = Some(confirmed),
-            None if confirmed > 0 => shared.last_submitted = Some(confirmed),
-            _ => {}
-        }
-    }
-
-    fn stop_submissions(&mut self, confirmed: u64) {
-        let mut shared = self.shared().clone();
-        let current = self.current_submitted();
+    fn stop_submissions(&mut self) {
+        let shared = self.shared().clone();
+        let last_submitted = shared.last_submitted;
         let confirm_inflight = self.confirm_inflight();
-        match shared.last_submitted {
-            Some(last) if last < confirmed => shared.last_submitted = Some(confirmed),
-            None if confirmed > 0 => shared.last_submitted = Some(confirmed),
-            _ => {}
-        }
-        let submit_up_to = current.unwrap_or(shared.last_confirmed);
+        let stop_seq = last_submitted
+            .unwrap_or(shared.last_confirmed)
+            .max(shared.last_confirmed);
         *self = NodeState::Stopped(StoppedState {
             shared,
             confirm_inflight,
-            submit_up_to,
+            stop_seq,
             error: StopError::Other,
         });
     }
@@ -271,11 +246,11 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
     fn stop_with_error(&mut self, seq: u64, error: StopError<ConfirmInfo>) {
         let shared = self.shared().clone();
         let confirm_inflight = self.confirm_inflight();
-        let submit_up_to = seq;
+        let stop_seq = seq;
         *self = NodeState::Stopped(StoppedState {
             shared,
             confirm_inflight,
-            submit_up_to,
+            stop_seq,
             error,
         });
     }
@@ -283,11 +258,11 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
     fn apply_stop_error(&mut self, seq: u64, error: StopError<ConfirmInfo>) {
         match self {
             NodeState::Stopped(state) => {
-                let prev_submit_up_to = state.submit_up_to;
-                if seq < state.submit_up_to {
-                    state.submit_up_to = seq;
+                let prev_stop_seq = state.stop_seq;
+                if seq < state.stop_seq {
+                    state.stop_seq = seq;
                 }
-                if matches!(state.error, StopError::Other) || seq < prev_submit_up_to {
+                if matches!(state.error, StopError::Other) || seq < prev_stop_seq {
                     state.error = error;
                 }
             }
@@ -328,11 +303,44 @@ impl<S: TxServer> NodeManager<S> {
         Self { nodes }
     }
 
-    pub(crate) fn should_stop(&self) -> bool {
-        self.nodes.values().all(|node| match node {
-            NodeState::Stopped(state) => state.shared.last_confirmed >= state.submit_up_to,
-            _ => false,
-        })
+    pub(crate) fn should_stop(&self, confirmed_seq: u64) -> bool {
+        let mut any_active = false;
+        for (node_id, node) in self.nodes.iter() {
+            let node_should_stop = match node {
+                NodeState::Stopped(state) => confirmed_seq >= state.stop_seq,
+                _ => {
+                    any_active = true;
+                    false
+                }
+            };
+            debug!(
+                node_id = %node_id.as_ref(),
+                state = %node.log_state(),
+                confirmed_seq,
+                node_should_stop,
+                "should_stop check"
+            );
+        }
+        if any_active {
+            return false;
+        }
+        debug!("all nodes stopped; stopping worker");
+        true
+    }
+
+    pub(crate) fn min_confirmed_non_stopped(&self) -> Option<u64> {
+        let mut min_confirmed: Option<u64> = None;
+        for node in self.nodes.values() {
+            if node.is_stopped() {
+                continue;
+            }
+            let confirmed = node.shared().last_confirmed;
+            min_confirmed = Some(match min_confirmed {
+                Some(current) => current.min(confirmed),
+                None => confirmed,
+            });
+        }
+        min_confirmed
     }
 
     pub(crate) fn tail_error_status(&self) -> Option<TxStatus<S::ConfirmInfo>> {
@@ -343,9 +351,9 @@ impl<S: TxServer> NodeManager<S> {
                     continue;
                 };
                 match &best {
-                    None => best = Some((state.submit_up_to, status)),
-                    Some((seq, _)) if state.submit_up_to > *seq => {
-                        best = Some((state.submit_up_to, status))
+                    None => best = Some((state.stop_seq, status)),
+                    Some((seq, _)) if state.stop_seq > *seq => {
+                        best = Some((state.stop_seq, status))
                     }
                     _ => {}
                 }
@@ -417,8 +425,9 @@ impl<S: TxServer> NodeManager<S> {
                                 }
                                 match failure {
                                     SubmitFailure::SequenceMismatch { expected } => {
-                                        let recovering =
-                                            on_sequence_mismatch(node, sequence, expected, txs);
+                                        let recovering = on_sequence_mismatch(
+                                            node, &node_id, sequence, expected, txs,
+                                        );
                                         if recovering {
                                             wake_up = Some(WakeUpKind::Confirmation);
                                         }
@@ -429,8 +438,12 @@ impl<S: TxServer> NodeManager<S> {
                                     }
                                     other => {
                                         let status = submit_failure_status(&node_id, &other);
+                                        let stop_at = node
+                                            .shared()
+                                            .last_submitted
+                                            .unwrap_or(node.shared().last_confirmed);
                                         node.stop_with_error(
-                                            sequence,
+                                            stop_at,
                                             StopError::SubmitError(status),
                                         );
                                     }
@@ -446,12 +459,29 @@ impl<S: TxServer> NodeManager<S> {
                         response,
                     } => {
                         if state_epoch != node.epoch() {
+                            debug!(
+                                node_id = %node_id.as_ref(),
+                                expected_epoch = node.epoch(),
+                                response_epoch = state_epoch,
+                                "confirmation epoch mismatch"
+                            );
+                            match node {
+                                NodeState::Active(active) => active.confirm_inflight = false,
+                                NodeState::Recovering(recovering) => {
+                                    recovering.confirm_inflight = false;
+                                }
+                                NodeState::Stopped(stopped) => {
+                                    stopped.confirm_inflight = false;
+                                }
+                            }
+                            if wake_up.is_none() {
+                                wake_up = Some(WakeUpKind::Confirmation);
+                            }
                             return NodeOutcome {
                                 worker_events,
                                 wake_up,
                             };
                         }
-                        node.bump_submitted_to_confirmed(txs.confirmed_seq());
                         match node {
                             NodeState::Active(active) => active.confirm_inflight = false,
                             NodeState::Recovering(recovering) => {
@@ -464,8 +494,13 @@ impl<S: TxServer> NodeManager<S> {
                         match response {
                             Ok(confirmation) => match confirmation {
                                 crate::tx_client_v2::ConfirmationResponse::Batch { statuses } => {
-                                    let mut effects =
-                                        process_status_batch(node, statuses, txs, &mut wake_up);
+                                    let mut effects = process_status_batch(
+                                        &node_id,
+                                        node,
+                                        statuses,
+                                        txs,
+                                        &mut wake_up,
+                                    );
                                     worker_events.append(&mut effects);
                                 }
                                 crate::tx_client_v2::ConfirmationResponse::Single {
@@ -476,7 +511,9 @@ impl<S: TxServer> NodeManager<S> {
                                     let mut effects = process_recover_status(node, id, status, txs);
                                     worker_events.append(&mut effects);
                                     if was_recovering && matches!(node, NodeState::Active(_)) {
-                                        wake_up = Some(WakeUpKind::Submission);
+                                        if wake_up.is_none() {
+                                            wake_up = Some(WakeUpKind::Confirmation);
+                                        }
                                     }
                                 }
                             },
@@ -493,7 +530,6 @@ impl<S: TxServer> NodeManager<S> {
                 );
             }
             NodeEvent::NodeStop => {
-                let confirmed = txs.confirmed_seq();
                 for (node_id, node) in self.nodes.iter_mut() {
                     debug!(
                         node_id = %node_id.as_ref(),
@@ -501,7 +537,7 @@ impl<S: TxServer> NodeManager<S> {
                         "node state (before stop)"
                     );
                     if !node.is_stopped() {
-                        node.stop_submissions(confirmed);
+                        node.stop_submissions();
                     }
                     debug!(
                         node_id = %node_id.as_ref(),
@@ -512,7 +548,7 @@ impl<S: TxServer> NodeManager<S> {
             }
         }
 
-        if self.should_stop() {
+        if self.should_stop(txs.confirmed_seq()) {
             worker_events.push(WorkerEvent::WorkerStop);
         }
 
@@ -574,6 +610,15 @@ fn submit_failure_status<ConfirmInfo>(
     }
 }
 
+fn sequence_mismatch_status<ConfirmInfo>(node_id: &NodeId, expected: u64) -> TxStatus<ConfirmInfo> {
+    TxStatus::Rejected {
+        reason: RejectionReason::SequenceMismatch {
+            expected,
+            node_id: node_id.clone(),
+        },
+    }
+}
+
 fn on_submit_success(state: &mut ActiveState, sequence: u64) {
     state.pending = None;
     match state.shared.last_submitted {
@@ -600,9 +645,10 @@ fn plan_submission<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
             if state.pending.is_some() {
                 return None;
             }
+            let confirmed = txs.confirmed_seq();
             let next_seq = match state.shared.last_submitted {
-                Some(last) => last + 1,
-                None => txs.confirmed_seq() + 1,
+                Some(last) => last.max(confirmed) + 1,
+                None => confirmed + 1,
             };
             let tx = txs.get(next_seq)?;
             let delay = state
@@ -665,7 +711,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
                 return None;
             }
             let last = state.shared.last_submitted?;
-            let confirm_upto = last.min(state.submit_up_to);
+            let confirm_upto = last.min(state.stop_seq);
             let ids = txs.ids_up_to(confirm_upto, max_batch)?;
             if ids.is_empty() {
                 return None;
@@ -683,58 +729,58 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
 
 fn on_sequence_mismatch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
     node: &mut NodeState<ConfirmInfo>,
+    node_id: &NodeId,
     sequence: u64,
     expected: u64,
     txs: &TxBuffer<TxId, ConfirmInfo>,
 ) -> bool {
     let mut recover_target = None;
-    let mut stop_submit_up_to = None;
-    match node {
-        NodeState::Active(state) => {
-            if txs.confirmed_seq() >= expected {
-                return false;
-            }
-            if txs.max_seq() < expected.saturating_sub(1) {
-                stop_submit_up_to = Some(sequence);
-            } else if sequence < expected {
-                state.shared.epoch = state.shared.epoch.saturating_add(1);
-                recover_target = Some(expected - 1);
-            } else {
-                let clamped = expected.saturating_sub(1).max(txs.confirmed_seq());
-                state.shared.last_submitted = Some(clamped);
-                return false;
-            }
-        }
-        NodeState::Stopped(state) => {
-            if txs.confirmed_seq() >= expected {
-                return false;
-            }
-            if txs.max_seq() < expected.saturating_sub(1) {
-                stop_submit_up_to = Some(sequence);
-            } else if sequence < expected {
-                state.shared.epoch = state.shared.epoch.saturating_add(1);
-                recover_target = Some(expected - 1);
-            } else {
-                let clamped = expected.saturating_sub(1).max(txs.confirmed_seq());
-                state.shared.last_submitted = Some(clamped);
-                return false;
-            }
-        }
+    let mut stop_seq = None;
+    let shared = match node {
+        NodeState::Active(state) => &mut state.shared,
+        NodeState::Stopped(state) => &mut state.shared,
         NodeState::Recovering(_) => {
             return false;
         }
+    };
+    if txs.confirmed_seq() >= expected {
+        return false;
+    }
+    if sequence < expected {
+        let target = expected - 1;
+        if txs.get(target).and_then(|tx| tx.id.clone()).is_none() {
+            let status = sequence_mismatch_status(node_id, expected);
+            let stop_at = shared.last_submitted.unwrap_or(shared.last_confirmed);
+            node.apply_stop_error(stop_at, StopError::ConfirmError(status));
+            return false;
+        }
+        shared.epoch = shared.epoch.saturating_add(1);
+        recover_target = Some(target);
+    } else if txs.max_seq() < expected.saturating_sub(1) {
+        let has_id = txs.get(sequence).and_then(|tx| tx.id.clone()).is_some();
+        let stop_at = if has_id {
+            sequence
+        } else {
+            shared.last_submitted.unwrap_or(shared.last_confirmed)
+        };
+        stop_seq = Some(stop_at);
+    } else {
+        let clamped = expected.saturating_sub(1).max(txs.confirmed_seq());
+        shared.last_submitted = Some(clamped);
+        return false;
     }
     if let Some(target) = recover_target {
         node.transition_to_recovering(target);
         return true;
     }
-    if let Some(submit_up_to) = stop_submit_up_to {
-        node.apply_stop_error(submit_up_to, StopError::Other);
+    if let Some(stop_seq) = stop_seq {
+        node.apply_stop_error(stop_seq, StopError::Other);
     }
     false
 }
 
 fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
+    node_id: &NodeId,
     node: &mut NodeState<ConfirmInfo>,
     statuses: Vec<(TxId, TxStatus<ConfirmInfo>)>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
@@ -800,7 +846,7 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
         }
     }
     if let Some((sequence, expected)) = seq_mismatch {
-        let recovering = on_sequence_mismatch(node, sequence, expected, txs);
+        let recovering = on_sequence_mismatch(node, node_id, sequence, expected, txs);
         if recovering && wake_up.is_none() {
             *wake_up = Some(WakeUpKind::Confirmation);
         }
@@ -823,26 +869,33 @@ fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
     };
     let mut confirmed_info: Option<ConfirmInfo> = None;
     let mut fatal: Option<TxStatus<ConfirmInfo>> = None;
+    let mut confirmed = false;
     {
         let NodeState::Recovering(state) = node else {
             return effects;
         };
         match status {
             TxStatus::Confirmed { info } => {
-                state.shared.last_confirmed = state.shared.last_confirmed.max(seq);
                 state.shared.last_submitted =
                     Some(state.shared.last_submitted.unwrap_or(seq).max(seq));
                 state.shared.epoch = state.shared.epoch.saturating_add(1);
-                confirmed_info = Some(info);
+                let expected = txs.confirmed_seq() + 1;
+                if seq == expected {
+                    state.shared.last_confirmed = seq;
+                    confirmed_info = Some(info);
+                }
+                confirmed = true;
             }
             other => {
                 fatal = Some(other);
             }
         }
     }
-    if let Some(info) = confirmed_info {
+    if confirmed {
         node.transition_to_active();
-        effects.push(WorkerEvent::Confirm { seq, info });
+        if let Some(info) = confirmed_info {
+            effects.push(WorkerEvent::Confirm { seq, info });
+        }
     }
     if let Some(status) = fatal {
         node.apply_stop_error(seq, StopError::ConfirmError(status));
@@ -1062,6 +1115,97 @@ mod tests {
                     if id == &node_id && *tx_id == 10
             )
         }));
+    }
+
+    #[test]
+    fn sequence_mismatch_missing_id_stops_on_submit() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
+        let mut txs = TxBuffer::new(0);
+        txs.add_transaction(make_tx(1, None)).unwrap();
+
+        let _ = manager.handle_event(
+            NodeEvent::NodeResponse {
+                node_id: node_id.clone(),
+                response: NodeResponse::Submission {
+                    sequence: 1,
+                    result: Err(SubmitFailure::SequenceMismatch { expected: 2 }),
+                },
+            },
+            &txs,
+            Duration::from_secs(1),
+            16,
+        );
+
+        assert!(matches!(
+            manager.nodes.get(&node_id).unwrap(),
+            NodeState::Stopped(_)
+        ));
+        let status = manager.tail_error_status().expect("missing error status");
+        match status {
+            TxStatus::Rejected {
+                reason:
+                    RejectionReason::SequenceMismatch {
+                        expected,
+                        node_id: id,
+                    },
+            } => {
+                assert_eq!(expected, 2);
+                assert_eq!(id, node_id);
+            }
+            other => panic!("unexpected status: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sequence_mismatch_missing_id_stops_on_confirm() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
+        let mut txs = TxBuffer::new(0);
+        txs.add_transaction(make_tx(1, None)).unwrap();
+        txs.add_transaction(make_tx(2, None)).unwrap();
+        txs.set_submitted_id(1, 10);
+
+        let statuses = vec![(
+            10,
+            TxStatus::Rejected {
+                reason: RejectionReason::SequenceMismatch {
+                    expected: 3,
+                    node_id: node_id.clone(),
+                },
+            },
+        )];
+        let _ = manager.handle_event(
+            NodeEvent::NodeResponse {
+                node_id: node_id.clone(),
+                response: NodeResponse::Confirmation {
+                    state_epoch: 0,
+                    response: Ok(ConfirmationResponse::Batch { statuses }),
+                },
+            },
+            &txs,
+            Duration::from_secs(1),
+            16,
+        );
+
+        assert!(matches!(
+            manager.nodes.get(&node_id).unwrap(),
+            NodeState::Stopped(_)
+        ));
+        let status = manager.tail_error_status().expect("missing error status");
+        match status {
+            TxStatus::Rejected {
+                reason:
+                    RejectionReason::SequenceMismatch {
+                        expected,
+                        node_id: id,
+                    },
+            } => {
+                assert_eq!(expected, 3);
+                assert_eq!(id, node_id);
+            }
+            other => panic!("unexpected status: {:?}", other),
+        }
     }
 
     #[test]
