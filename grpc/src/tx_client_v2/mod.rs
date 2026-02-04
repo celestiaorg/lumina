@@ -367,39 +367,6 @@ enum ConfirmationResponse<TxId, ConfirmInfo> {
     },
 }
 
-#[derive(Debug, Clone)]
-struct NodeError<ConfirmInfo> {
-    #[allow(dead_code)]
-    node_id: NodeId,
-    status: TxStatus<ConfirmInfo>,
-}
-
-fn pick_error_status<ConfirmInfo: Clone>(
-    errors: &[NodeError<ConfirmInfo>],
-) -> TxStatus<ConfirmInfo> {
-    let mut evicted: Option<TxStatus<ConfirmInfo>> = None;
-    let mut unknown: Option<TxStatus<ConfirmInfo>> = None;
-    for error in errors {
-        match &error.status {
-            TxStatus::Rejected { .. } => {
-                return error.status.clone();
-            }
-            TxStatus::Evicted => {
-                if evicted.is_none() {
-                    evicted = Some(error.status.clone());
-                }
-            }
-            TxStatus::Unknown => {
-                if unknown.is_none() {
-                    unknown = Some(error.status.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    evicted.or(unknown).unwrap_or(TxStatus::Unknown)
-}
-
 struct SubmissionResult<TxId> {
     node_id: NodeId,
     sequence: u64,
@@ -416,7 +383,6 @@ pub struct TransactionWorker<S: TxServer> {
     nodes: NodeManager<S>,
     servers: HashMap<NodeId, Arc<S>>,
     transactions: tx_buffer::TxBuffer<S::TxId, S::ConfirmInfo>,
-    error_by_seq: HashMap<u64, Vec<NodeError<S::ConfirmInfo>>>,
     add_tx_rx: mpsc::Receiver<Transaction<S::TxId, S::ConfirmInfo>>,
     submissions: FuturesUnordered<BoxFuture<'static, Option<SubmissionResult<S::TxId>>>>,
     confirmations:
@@ -460,7 +426,6 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 nodes: node_manager,
                 servers: nodes,
                 transactions,
-                error_by_seq: HashMap::new(),
                 submissions: FuturesUnordered::new(),
                 confirmations: FuturesUnordered::new(),
                 confirm_ticker: Interval::new(confirm_interval),
@@ -648,18 +613,8 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 WorkerEvent::Confirm { seq, info } => {
                     self.confirm_tx(seq, info);
                 }
-                WorkerEvent::RecordError {
-                    seq,
-                    status,
-                    node_id,
-                } => {
-                    self.error_by_seq
-                        .entry(seq)
-                        .or_default()
-                        .push(NodeError { node_id, status });
-                }
                 WorkerEvent::WorkerStop => {
-                    let fatal = self.tail_error_status();
+                    let fatal = self.nodes.tail_error_status();
                     self.finalize_remaining(fatal);
                     return Ok(true);
                 }
@@ -683,7 +638,6 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         if let Ok(mut tx) = self.transactions.confirm(seq) {
             tx.notify_confirmed(Ok(TxStatus::Confirmed { info }));
         }
-        self.error_by_seq.remove(&seq);
     }
 
     fn finalize_remaining(&mut self, fatal: Option<TxStatus<S::ConfirmInfo>>) {
@@ -696,23 +650,13 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             let status = if let Some(fatal_status) = fatal.clone() {
                 fatal_status
             } else {
-                self.error_by_seq
-                    .remove(&next)
-                    .map(|errors| pick_error_status(&errors))
-                    .unwrap_or(TxStatus::Unknown)
+                TxStatus::Unknown
             };
             if tx.id.is_none() {
                 tx.notify_submitted(Err(Error::UnexpectedResponseType(submit_error_msg.clone())));
             }
             tx.notify_confirmed(Ok(status));
         }
-    }
-
-    fn tail_error_status(&self) -> Option<TxStatus<S::ConfirmInfo>> {
-        let next = self.transactions.confirmed_seq() + 1;
-        self.error_by_seq
-            .get(&next)
-            .map(|errors| pick_error_status(errors))
     }
 }
 

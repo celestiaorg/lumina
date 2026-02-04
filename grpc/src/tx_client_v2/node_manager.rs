@@ -38,11 +38,6 @@ pub(crate) enum WorkerEvent<TxId: TxIdT, ConfirmInfo> {
         seq: u64,
         info: ConfirmInfo,
     },
-    RecordError {
-        seq: u64,
-        status: TxStatus<ConfirmInfo>,
-        node_id: NodeId,
-    },
     WorkerStop,
 }
 
@@ -52,10 +47,27 @@ pub(crate) struct NodeOutcome<TxId: TxIdT, ConfirmInfo> {
 }
 
 #[derive(Debug, Clone)]
+enum StopError<ConfirmInfo> {
+    ConfirmError(TxStatus<ConfirmInfo>),
+    SubmitError(TxStatus<ConfirmInfo>),
+    Other,
+}
+
+impl<ConfirmInfo: Clone> StopError<ConfirmInfo> {
+    fn status(&self) -> Option<TxStatus<ConfirmInfo>> {
+        match self {
+            StopError::ConfirmError(status) | StopError::SubmitError(status) => {
+                Some(status.clone())
+            }
+            StopError::Other => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct NodeShared {
     submit_delay: Option<Duration>,
     epoch: u64,
-    submit_up_to: u64,
     last_submitted: Option<u64>,
     last_confirmed: u64,
 }
@@ -74,23 +86,19 @@ struct RecoveringState {
     target: u64,
 }
 
-impl RecoveringState {
-    fn reset_limits_for_recover(&mut self) {
-        self.shared.submit_up_to = u64::MAX;
-    }
-}
-
 #[derive(Debug, Clone)]
-struct StoppedState {
+struct StoppedState<ConfirmInfo> {
     shared: NodeShared,
     confirm_inflight: bool,
+    submit_up_to: u64,
+    error: StopError<ConfirmInfo>,
 }
 
 #[derive(Debug, Clone)]
-enum NodeState {
+enum NodeState<ConfirmInfo> {
     Active(ActiveState),
     Recovering(RecoveringState),
-    Stopped(StoppedState),
+    Stopped(StoppedState<ConfirmInfo>),
 }
 
 impl Default for NodeShared {
@@ -98,18 +106,16 @@ impl Default for NodeShared {
         Self {
             submit_delay: None,
             epoch: 0,
-            submit_up_to: u64::MAX,
             last_submitted: None,
             last_confirmed: 0,
         }
     }
 }
 
-impl NodeState {
+impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
     fn new(start_confirmed: u64) -> Self {
         let shared = NodeShared {
             last_confirmed: start_confirmed,
-            submit_up_to: u64::MAX,
             ..NodeShared::default()
         };
         NodeState::Active(ActiveState {
@@ -132,14 +138,6 @@ impl NodeState {
             NodeState::Active(state) => state.confirm_inflight,
             NodeState::Recovering(state) => state.confirm_inflight,
             NodeState::Stopped(state) => state.confirm_inflight,
-        }
-    }
-
-    fn set_confirm_inflight(&mut self, inflight: bool) {
-        match self {
-            NodeState::Active(state) => state.confirm_inflight = inflight,
-            NodeState::Recovering(state) => state.confirm_inflight = inflight,
-            NodeState::Stopped(state) => state.confirm_inflight = inflight,
         }
     }
 
@@ -190,32 +188,40 @@ impl NodeState {
             None if confirmed > 0 => shared.last_submitted = Some(confirmed),
             _ => {}
         }
-        shared.submit_up_to = current.unwrap_or(shared.last_confirmed);
+        let submit_up_to = current.unwrap_or(shared.last_confirmed);
         *self = NodeState::Stopped(StoppedState {
             shared,
             confirm_inflight,
+            submit_up_to,
+            error: StopError::Other,
         });
     }
 
-    fn record_fatal<TxId: TxIdT, ConfirmInfo: Clone>(
-        &mut self,
-        node_id: &NodeId,
-        seq: u64,
-        status: TxStatus<ConfirmInfo>,
-        effects: &mut Vec<WorkerEvent<TxId, ConfirmInfo>>,
-    ) {
-        let mut shared = self.shared().clone();
+    fn stop_with_error(&mut self, seq: u64, error: StopError<ConfirmInfo>) {
+        let shared = self.shared().clone();
         let confirm_inflight = self.confirm_inflight();
-        shared.submit_up_to = shared.submit_up_to.min(seq);
-        effects.push(WorkerEvent::RecordError {
-            seq,
-            status,
-            node_id: node_id.clone(),
-        });
+        let submit_up_to = seq;
         *self = NodeState::Stopped(StoppedState {
             shared,
             confirm_inflight,
+            submit_up_to,
+            error,
         });
+    }
+
+    fn apply_stop_error(&mut self, seq: u64, error: StopError<ConfirmInfo>) {
+        match self {
+            NodeState::Stopped(state) => {
+                let prev_submit_up_to = state.submit_up_to;
+                if seq < state.submit_up_to {
+                    state.submit_up_to = seq;
+                }
+                if matches!(state.error, StopError::Other) || seq < prev_submit_up_to {
+                    state.error = error;
+                }
+            }
+            _ => self.stop_with_error(seq, error),
+        }
     }
 
     fn transition_to_recovering(&mut self, target: u64) {
@@ -236,20 +242,10 @@ impl NodeState {
             confirm_inflight: false,
         });
     }
-
-    fn transition_to_stopped(&mut self) {
-        let shared = self.shared().clone();
-        let confirm_inflight = self.confirm_inflight();
-        *self = NodeState::Stopped(StoppedState {
-            shared,
-            confirm_inflight,
-        });
-    }
 }
 
 pub(crate) struct NodeManager<S: TxServer> {
-    nodes: HashMap<NodeId, NodeState>,
-    _marker: std::marker::PhantomData<S>,
+    nodes: HashMap<NodeId, NodeState<S::ConfirmInfo>>,
 }
 
 impl<S: TxServer> NodeManager<S> {
@@ -258,16 +254,33 @@ impl<S: TxServer> NodeManager<S> {
             .into_iter()
             .map(|id| (id, NodeState::new(start_confirmed)))
             .collect();
-        Self {
-            nodes,
-            _marker: std::marker::PhantomData,
-        }
+        Self { nodes }
     }
 
     pub(crate) fn should_stop(&self) -> bool {
-        self.nodes
-            .values()
-            .all(|node| matches!(node, NodeState::Stopped(_)))
+        self.nodes.values().all(|node| match node {
+            NodeState::Stopped(state) => state.shared.last_confirmed >= state.submit_up_to,
+            _ => false,
+        })
+    }
+
+    pub(crate) fn tail_error_status(&self) -> Option<TxStatus<S::ConfirmInfo>> {
+        let mut best: Option<(u64, TxStatus<S::ConfirmInfo>)> = None;
+        for node in self.nodes.values() {
+            if let NodeState::Stopped(state) = node {
+                let Some(status) = state.error.status() else {
+                    continue;
+                };
+                match &best {
+                    None => best = Some((state.submit_up_to, status)),
+                    Some((seq, _)) if state.submit_up_to > *seq => {
+                        best = Some((state.submit_up_to, status))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        best.map(|(_, status)| status)
     }
 
     pub(crate) fn handle_event(
@@ -334,11 +347,9 @@ impl<S: TxServer> NodeManager<S> {
                                     }
                                     other => {
                                         let status = submit_failure_status(&node_id, &other);
-                                        node.record_fatal(
-                                            &node_id,
+                                        node.stop_with_error(
                                             sequence,
-                                            status,
-                                            &mut worker_events,
+                                            StopError::SubmitError(status),
                                         );
                                     }
                                 }
@@ -352,13 +363,6 @@ impl<S: TxServer> NodeManager<S> {
                         state_epoch,
                         response,
                     } => {
-                        if node.is_stopped() {
-                            node.set_confirm_inflight(false);
-                            return NodeOutcome {
-                                worker_events,
-                                wake_up,
-                            };
-                        }
                         if state_epoch != node.epoch() {
                             return NodeOutcome {
                                 worker_events,
@@ -371,34 +375,23 @@ impl<S: TxServer> NodeManager<S> {
                             NodeState::Recovering(recovering) => {
                                 recovering.confirm_inflight = false;
                             }
-                            NodeState::Stopped(_) => {
-                                return NodeOutcome {
-                                    worker_events,
-                                    wake_up,
-                                };
+                            NodeState::Stopped(stopped) => {
+                                stopped.confirm_inflight = false;
                             }
                         }
                         match response {
                             Ok(confirmation) => match confirmation {
                                 crate::tx_client_v2::ConfirmationResponse::Batch { statuses } => {
-                                    if matches!(node, NodeState::Active(_)) {
-                                        let mut effects = process_status_batch(
-                                            &node_id,
-                                            node,
-                                            statuses,
-                                            txs,
-                                            &mut wake_up,
-                                        );
-                                        worker_events.append(&mut effects);
-                                    }
+                                    let mut effects =
+                                        process_status_batch(node, statuses, txs, &mut wake_up);
+                                    worker_events.append(&mut effects);
                                 }
                                 crate::tx_client_v2::ConfirmationResponse::Single {
                                     id,
                                     status,
                                 } => {
                                     let was_recovering = matches!(node, NodeState::Recovering(_));
-                                    let mut effects =
-                                        process_recover_status(&node_id, node, id, status, txs);
+                                    let mut effects = process_recover_status(node, id, status, txs);
                                     worker_events.append(&mut effects);
                                     if was_recovering && matches!(node, NodeState::Active(_)) {
                                         wake_up = Some(WakeUpKind::Submission);
@@ -415,7 +408,9 @@ impl<S: TxServer> NodeManager<S> {
             NodeEvent::NodeStop => {
                 let confirmed = txs.confirmed_seq();
                 for node in self.nodes.values_mut() {
-                    node.stop_submissions(confirmed);
+                    if !node.is_stopped() {
+                        node.stop_submissions(confirmed);
+                    }
                 }
             }
         }
@@ -490,7 +485,7 @@ fn on_submit_failure(state: &mut ActiveState) {
 
 fn plan_submission<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
     node_id: &NodeId,
-    node: &mut NodeState,
+    node: &mut NodeState<ConfirmInfo>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
 ) -> Option<WorkerEvent<TxId, ConfirmInfo>> {
     match node {
@@ -502,9 +497,6 @@ fn plan_submission<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
                 Some(last) => last + 1,
                 None => txs.confirmed_seq() + 1,
             };
-            if next_seq > state.shared.submit_up_to {
-                return None;
-            }
             let tx = txs.get(next_seq)?;
             let delay = state
                 .shared
@@ -525,7 +517,7 @@ fn plan_submission<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
 
 fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
     node_id: &NodeId,
-    node: &mut NodeState,
+    node: &mut NodeState<ConfirmInfo>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
     max_batch: usize,
 ) -> Option<WorkerEvent<TxId, ConfirmInfo>> {
@@ -535,8 +527,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
                 return None;
             }
             let last = state.shared.last_submitted?;
-            let confirm_upto = last.min(state.shared.submit_up_to);
-            let ids = txs.ids_up_to(confirm_upto, max_batch)?;
+            let ids = txs.ids_up_to(last, max_batch)?;
             if ids.is_empty() {
                 return None;
             }
@@ -552,9 +543,6 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
             if state.confirm_inflight {
                 return None;
             }
-            if state.target > state.shared.submit_up_to {
-                state.reset_limits_for_recover();
-            }
             let tx = txs.get(state.target)?;
             let id = tx.id.clone()?;
             let epoch = state.shared.epoch;
@@ -565,34 +553,67 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
                 epoch,
             })
         }
-        NodeState::Stopped(_) => None,
+        NodeState::Stopped(state) => {
+            if state.confirm_inflight {
+                return None;
+            }
+            let last = state.shared.last_submitted?;
+            let confirm_upto = last.min(state.submit_up_to);
+            let ids = txs.ids_up_to(confirm_upto, max_batch)?;
+            if ids.is_empty() {
+                return None;
+            }
+            let epoch = state.shared.epoch;
+            state.confirm_inflight = true;
+            Some(WorkerEvent::SpawnConfirmBatch {
+                node_id: node_id.clone(),
+                ids,
+                epoch,
+            })
+        }
     }
 }
 
-fn on_sequence_mismatch<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
-    node: &mut NodeState,
+fn on_sequence_mismatch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
+    node: &mut NodeState<ConfirmInfo>,
     sequence: u64,
     expected: u64,
     txs: &TxBuffer<TxId, ConfirmInfo>,
 ) -> bool {
     let mut recover_target = None;
-    let mut stop = false;
-    {
-        let NodeState::Active(state) = node else {
-            return false;
-        };
-        if txs.confirmed_seq() >= expected {
-            return false;
+    let mut stop_submit_up_to = None;
+    match node {
+        NodeState::Active(state) => {
+            if txs.confirmed_seq() >= expected {
+                return false;
+            }
+            if txs.max_seq() < expected.saturating_sub(1) {
+                stop_submit_up_to = Some(sequence);
+            } else if sequence < expected {
+                state.shared.epoch = state.shared.epoch.saturating_add(1);
+                recover_target = Some(expected - 1);
+            } else {
+                let clamped = expected.saturating_sub(1).max(txs.confirmed_seq());
+                state.shared.last_submitted = Some(clamped);
+                return false;
+            }
         }
-        if txs.max_seq() < expected.saturating_sub(1) {
-            state.shared.submit_up_to = state.shared.submit_up_to.min(sequence);
-            stop = true;
-        } else if sequence < expected {
-            state.shared.epoch = state.shared.epoch.saturating_add(1);
-            recover_target = Some(expected - 1);
-        } else {
-            let clamped = expected.saturating_sub(1).max(txs.confirmed_seq());
-            state.shared.last_submitted = Some(clamped);
+        NodeState::Stopped(state) => {
+            if txs.confirmed_seq() >= expected {
+                return false;
+            }
+            if txs.max_seq() < expected.saturating_sub(1) {
+                stop_submit_up_to = Some(sequence);
+            } else if sequence < expected {
+                state.shared.epoch = state.shared.epoch.saturating_add(1);
+                recover_target = Some(expected - 1);
+            } else {
+                let clamped = expected.saturating_sub(1).max(txs.confirmed_seq());
+                state.shared.last_submitted = Some(clamped);
+                return false;
+            }
+        }
+        NodeState::Recovering(_) => {
             return false;
         }
     }
@@ -600,15 +621,14 @@ fn on_sequence_mismatch<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
         node.transition_to_recovering(target);
         return true;
     }
-    if stop {
-        node.transition_to_stopped();
+    if let Some(submit_up_to) = stop_submit_up_to {
+        node.apply_stop_error(submit_up_to, StopError::Other);
     }
     false
 }
 
 fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
-    node_id: &NodeId,
-    node: &mut NodeState,
+    node: &mut NodeState<ConfirmInfo>,
     statuses: Vec<(TxId, TxStatus<ConfirmInfo>)>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
     wake_up: &mut Option<WakeUpKind>,
@@ -625,10 +645,13 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
     let mut fatal: Option<(u64, TxStatus<ConfirmInfo>)> = None;
     let mut seq_mismatch: Option<(u64, u64)> = None;
     {
-        let NodeState::Active(state) = node else {
-            return effects;
+        let shared = match node {
+            NodeState::Recovering(_) => {
+                return effects;
+            }
+            _ => node.shared_mut(),
         };
-        let offset = state.shared.last_confirmed + 1;
+        let offset = shared.last_confirmed + 1;
         for (idx, (sequence, status)) in collected.into_iter().enumerate() {
             if idx as u64 + offset != sequence {
                 break;
@@ -638,13 +661,8 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
                     break;
                 }
                 TxStatus::Evicted => {
-                    effects.push(WorkerEvent::RecordError {
-                        seq: sequence,
-                        status: TxStatus::Evicted,
-                        node_id: node_id.clone(),
-                    });
                     let clamped = sequence.saturating_sub(1).max(txs.confirmed_seq());
-                    state.shared.last_submitted = Some(clamped);
+                    shared.last_submitted = Some(clamped);
                     if wake_up.is_none() {
                         *wake_up = Some(WakeUpKind::Submission);
                     }
@@ -661,7 +679,7 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
                     }
                 },
                 TxStatus::Confirmed { info } => {
-                    state.shared.last_confirmed = sequence;
+                    shared.last_confirmed = sequence;
                     effects.push(WorkerEvent::Confirm {
                         seq: sequence,
                         info,
@@ -681,14 +699,13 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
         }
     }
     if let Some((sequence, status)) = fatal {
-        node.record_fatal(node_id, sequence, status, &mut effects);
+        node.apply_stop_error(sequence, StopError::ConfirmError(status));
     }
     effects
 }
 
 fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
-    node_id: &NodeId,
-    node: &mut NodeState,
+    node: &mut NodeState<ConfirmInfo>,
     id: TxId,
     status: TxStatus<ConfirmInfo>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
@@ -721,7 +738,7 @@ fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
         effects.push(WorkerEvent::Confirm { seq, info });
     }
     if let Some(status) = fatal {
-        node.record_fatal(node_id, seq, status, &mut effects);
+        node.apply_stop_error(seq, StopError::ConfirmError(status));
     }
     effects
 }
