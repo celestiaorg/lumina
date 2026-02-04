@@ -3,6 +3,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tracing::debug;
+
 use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
     NodeEvent, NodeId, NodeResponse, RejectionReason, SubmitFailure, TxIdT, TxServer, TxStatus,
@@ -41,6 +43,32 @@ pub(crate) enum WorkerEvent<TxId: TxIdT, ConfirmInfo> {
     WorkerStop,
 }
 
+impl<TxId: TxIdT, ConfirmInfo> WorkerEvent<TxId, ConfirmInfo> {
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            WorkerEvent::EnqueueTx { tx } => format!("EnqueueTx seq={}", tx.sequence),
+            WorkerEvent::SpawnSubmit {
+                node_id, sequence, ..
+            } => format!("SpawnSubmit node={} seq={}", node_id.as_ref(), sequence),
+            WorkerEvent::SpawnConfirmBatch { node_id, ids, .. } => {
+                format!(
+                    "SpawnConfirmBatch node={} count={}",
+                    node_id.as_ref(),
+                    ids.len()
+                )
+            }
+            WorkerEvent::SpawnRecover { node_id, .. } => {
+                format!("SpawnRecover node={}", node_id.as_ref())
+            }
+            WorkerEvent::MarkSubmitted { sequence, .. } => {
+                format!("MarkSubmitted seq={}", sequence)
+            }
+            WorkerEvent::Confirm { seq, .. } => format!("Confirm seq={}", seq),
+            WorkerEvent::WorkerStop => "WorkerStop".to_string(),
+        }
+    }
+}
+
 pub(crate) struct NodeOutcome<TxId: TxIdT, ConfirmInfo> {
     pub(crate) worker_events: Vec<WorkerEvent<TxId, ConfirmInfo>>,
     pub(crate) wake_up: Option<WakeUpKind>,
@@ -60,6 +88,16 @@ impl<ConfirmInfo: Clone> StopError<ConfirmInfo> {
                 Some(status.clone())
             }
             StopError::Other => None,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            StopError::ConfirmError(status) => {
+                format!("ConfirmError({})", tx_status_label(status))
+            }
+            StopError::SubmitError(status) => format!("SubmitError({})", tx_status_label(status)),
+            StopError::Other => "Other".to_string(),
         }
     }
 }
@@ -154,6 +192,39 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
             NodeState::Active(state) => &mut state.shared,
             NodeState::Recovering(state) => &mut state.shared,
             NodeState::Stopped(state) => &mut state.shared,
+        }
+    }
+
+    fn log_state(&self) -> String {
+        match self {
+            NodeState::Active(state) => format!(
+                "Active last_confirmed={} last_submitted={:?} pending={:?} confirm_inflight={} epoch={} delay={:?}",
+                state.shared.last_confirmed,
+                state.shared.last_submitted,
+                state.pending,
+                state.confirm_inflight,
+                state.shared.epoch,
+                state.shared.submit_delay,
+            ),
+            NodeState::Recovering(state) => format!(
+                "Recovering target={} last_confirmed={} last_submitted={:?} confirm_inflight={} epoch={} delay={:?}",
+                state.target,
+                state.shared.last_confirmed,
+                state.shared.last_submitted,
+                state.confirm_inflight,
+                state.shared.epoch,
+                state.shared.submit_delay,
+            ),
+            NodeState::Stopped(state) => format!(
+                "Stopped submit_up_to={} error={} last_confirmed={} last_submitted={:?} confirm_inflight={} epoch={} delay={:?}",
+                state.submit_up_to,
+                state.error.label(),
+                state.shared.last_confirmed,
+                state.shared.last_submitted,
+                state.confirm_inflight,
+                state.shared.epoch,
+                state.shared.submit_delay,
+            ),
         }
     }
 
@@ -293,9 +364,15 @@ impl<S: TxServer> NodeManager<S> {
         let mut worker_events = Vec::new();
         let mut wake_up = None;
 
+        debug!(event = %event.summary(), "node event");
         match event {
             NodeEvent::WakeUp(kind) => {
                 for (node_id, node) in self.nodes.iter_mut() {
+                    debug!(
+                        node_id = %node_id.as_ref(),
+                        state = %node.log_state(),
+                        "node state (wakeup)"
+                    );
                     match kind {
                         WakeUpKind::Submission => {
                             if let Some(event) = plan_submission(node_id, node, txs) {
@@ -314,6 +391,11 @@ impl<S: TxServer> NodeManager<S> {
             }
             NodeEvent::NodeResponse { node_id, response } => {
                 let node = self.nodes.get_mut(&node_id).unwrap();
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    state = %node.log_state(),
+                    "node state (before response)"
+                );
                 match response {
                     NodeResponse::Submission { sequence, result } => {
                         if node.is_stopped() {
@@ -404,13 +486,28 @@ impl<S: TxServer> NodeManager<S> {
                         }
                     }
                 }
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    state = %node.log_state(),
+                    "node state (after response)"
+                );
             }
             NodeEvent::NodeStop => {
                 let confirmed = txs.confirmed_seq();
-                for node in self.nodes.values_mut() {
+                for (node_id, node) in self.nodes.iter_mut() {
+                    debug!(
+                        node_id = %node_id.as_ref(),
+                        state = %node.log_state(),
+                        "node state (before stop)"
+                    );
                     if !node.is_stopped() {
                         node.stop_submissions(confirmed);
                     }
+                    debug!(
+                        node_id = %node_id.as_ref(),
+                        state = %node.log_state(),
+                        "node state (after stop)"
+                    );
                 }
             }
         }
@@ -423,6 +520,16 @@ impl<S: TxServer> NodeManager<S> {
             worker_events,
             wake_up,
         }
+    }
+}
+
+fn tx_status_label<ConfirmInfo>(status: &TxStatus<ConfirmInfo>) -> &'static str {
+    match status {
+        TxStatus::Pending => "Pending",
+        TxStatus::Confirmed { .. } => "Confirmed",
+        TxStatus::Rejected { .. } => "Rejected",
+        TxStatus::Evicted => "Evicted",
+        TxStatus::Unknown => "Unknown",
     }
 }
 

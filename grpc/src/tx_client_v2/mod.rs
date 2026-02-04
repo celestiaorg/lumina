@@ -81,6 +81,7 @@ use tendermint_proto::google::protobuf::Any;
 use tokio::select;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 mod node_manager;
 mod tx_buffer;
@@ -344,6 +345,33 @@ enum NodeEvent<TxId, ConfirmInfo> {
     NodeStop,
 }
 
+impl<TxId, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
+    fn summary(&self) -> String {
+        match self {
+            NodeEvent::WakeUp(kind) => match kind {
+                WakeUpKind::Submission => "WakeUp(Submission)".to_string(),
+                WakeUpKind::Confirmation => "WakeUp(Confirmation)".to_string(),
+            },
+            NodeEvent::NodeResponse { response, .. } => match response {
+                NodeResponse::Submission { sequence, result } => {
+                    let status = if result.is_ok() { "Ok" } else { "Err" };
+                    format!("NodeResponse::Submission seq={} {}", sequence, status)
+                }
+                NodeResponse::Confirmation { response, .. } => match response {
+                    Ok(ConfirmationResponse::Batch { statuses }) => {
+                        format!("NodeResponse::Confirmation Batch {}", statuses.len())
+                    }
+                    Ok(ConfirmationResponse::Single { .. }) => {
+                        "NodeResponse::Confirmation Single".to_string()
+                    }
+                    Err(_) => "NodeResponse::Confirmation Err".to_string(),
+                },
+            },
+            NodeEvent::NodeStop => "NodeStop".to_string(),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum NodeResponse<TxId, ConfirmInfo> {
     Submission {
@@ -545,6 +573,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         token: CancellationToken,
     ) -> Result<bool> {
         for event in events {
+            debug!(event = %event.summary(), "worker event");
             match event {
                 WorkerEvent::EnqueueTx { tx } => {
                     self.enqueue_tx(tx)?;
