@@ -71,6 +71,7 @@ celestia-rpc.workspace = true
 futures.workspace = true
 lumina-utils = { workspace = true, features = ["test-utils"] }
 rand.workspace = true
+tracing-subscriber.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

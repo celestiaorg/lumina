@@ -838,6 +838,7 @@ dependencies = [
  "tonic",
  "tonic-web-wasm-client",
  "tracing",
+ "tracing-subscriber",
  "uniffi",
  "wasm-bindgen",
  "wasm-bindgen-futures",
