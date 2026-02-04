@@ -7,7 +7,6 @@ use k256::ecdsa::VerifyingKey;
 use lumina_utils::executor::spawn;
 use prost::Message;
 use tendermint::chain::Id;
-use tendermint::crypto::Sha256 as _;
 use tokio::sync::{Mutex, OnceCell, RwLock, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -482,10 +481,11 @@ fn map_submit_failure(code: ErrorCode, message: &str) -> SubmitFailure {
     }
 
     match code {
-        ErrorCode::InsufficientFunds => SubmitFailure::InsufficientFunds,
-        ErrorCode::InsufficientFee => SubmitFailure::InsufficientFee { expected_fee: 0 },
         ErrorCode::MempoolIsFull => SubmitFailure::MempoolIsFull,
-        _ => SubmitFailure::InvalidTx { error_code: code },
+        _ => SubmitFailure::Other {
+            error_code: code,
+            message: message.to_string(),
+        },
     }
 }
 

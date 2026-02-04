@@ -1,12 +1,35 @@
 use super::*;
 use async_trait::async_trait;
+use std::collections::VecDeque;
+use std::sync::Once;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task::JoinHandle;
 
 type TestTxId = u64;
 type TestConfirmInfo = ();
+
+fn init_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let level = std::env::var("RUST_LOG")
+            .ok()
+            .map(|value| value.to_lowercase())
+            .and_then(|value| match value.as_str() {
+                "trace" => Some(tracing::Level::TRACE),
+                "debug" => Some(tracing::Level::DEBUG),
+                "info" => Some(tracing::Level::INFO),
+                "warn" => Some(tracing::Level::WARN),
+                "error" => Some(tracing::Level::ERROR),
+                _ => None,
+            })
+            .unwrap_or(tracing::Level::WARN);
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(level)
+            .try_init();
+    });
+}
 
 #[derive(Debug)]
 struct RoutedCall {
@@ -23,6 +46,7 @@ impl RoutedCall {
 #[derive(Debug)]
 enum ServerCall {
     Submit {
+        #[allow(dead_code)]
         bytes: Vec<u8>,
         sequence: u64,
         reply: oneshot::Sender<TxSubmitResult<TestTxId>>,
@@ -409,6 +433,7 @@ impl PeriodicCall {
 
 #[derive(Debug, Clone)]
 struct Rule {
+    #[allow(dead_code)]
     name: &'static str,
     matcher: Match,
     action: Action,
@@ -492,6 +517,7 @@ impl TxServer for MockTxServer {
 
 #[derive(Debug, Clone)]
 struct CallLogEntry {
+    #[allow(dead_code)]
     node_id: NodeId,
     kind: &'static str,
     seq: Option<u64>,
@@ -579,16 +605,16 @@ impl Driver {
                 let ret = rule.call(&rc, &mut self.network_state);
                 match rc.call {
                     ServerCall::Submit { reply, .. } => {
-                        reply.send(ret.ret.assert_submit());
+                        let _ = reply.send(ret.ret.assert_submit());
                     }
                     ServerCall::Status { reply, .. } => {
-                        reply.send(ret.ret.assert_status());
+                        let _ = reply.send(ret.ret.assert_status());
                     }
                     ServerCall::StatusBatch { reply, .. } => {
-                        reply.send(ret.ret.assert_status_batch());
+                        let _ = reply.send(ret.ret.assert_status_batch());
                     }
                     ServerCall::CurrentSequence { reply, .. } => {
-                        reply.send(ret.ret.assert_sequence());
+                        let _ = reply.send(ret.ret.assert_sequence());
                     }
                 }
             }
@@ -611,6 +637,7 @@ impl Driver {
 #[derive(Debug)]
 struct DriverResult {
     log: Vec<CallLogEntry>,
+    #[allow(dead_code)]
     unmet: Vec<Rule>,
 }
 
@@ -618,6 +645,7 @@ struct Harness {
     shutdown: CancellationToken,
     manager_handle: Option<JoinHandle<Result<()>>>,
     driver_handle: JoinHandle<DriverResult>,
+    #[allow(dead_code)]
     confirm_interval: Duration,
     manager: TransactionManager<TestTxId, TestConfirmInfo>,
 }
@@ -670,6 +698,7 @@ impl Harness {
         self.manager_handle = Some(tokio::spawn(async move { manager.process(shutdown).await }));
     }
 
+    #[allow(dead_code)]
     async fn pump(&self) {
         tokio::task::yield_now().await;
     }
@@ -700,9 +729,10 @@ impl Harness {
 
 #[tokio::test]
 async fn test_eviction() {
+    init_tracing();
     let evict_sequence = 15;
     let is_evicted = Arc::new(AtomicBool::new(false));
-    let is_evicted_submit = is_evicted.clone();
+    let _is_evicted_submit = is_evicted.clone();
 
     let rules: Vec<Rule> = vec![
         // Generic submit rule
@@ -823,19 +853,19 @@ async fn test_eviction() {
         Harness::new(Duration::from_millis(1), 10, 1000, 2, rules, update);
     harness.start(manager_worker);
     let mut add_handles = VecDeque::new();
-    for i in 0..100 {
+    for _ in 0..100 {
         let handle = harness.add_tx(vec![0, 0]).await;
         add_handles.push_back(handle);
     }
     while let Some(handle) = add_handles.pop_front() {
         let (seq, submit, confirm) = handle;
-        submit.await;
+        let _ = submit.await;
         match confirm.await {
             Err(e) => {
                 panic!("confirm await error: {:?} with seq {}", e, seq);
             }
             Ok(res) => match res {
-                Ok(conf) => {
+                Ok(_conf) => {
                     println!("confirm successful for {}", seq);
                 }
                 Err(e) => {
@@ -852,6 +882,7 @@ async fn test_eviction() {
 
 #[tokio::test]
 async fn test_recovering() {
+    init_tracing();
     let evict_sequence = 15;
     let is_evicted = Arc::new(AtomicBool::new(false));
     let is_evicted_submit = is_evicted.clone();
