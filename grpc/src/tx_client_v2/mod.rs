@@ -659,7 +659,8 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                         .push(NodeError { node_id, status });
                 }
                 WorkerEvent::WorkerStop => {
-                    self.finalize_remaining();
+                    let fatal = self.tail_error_status();
+                    self.finalize_remaining(fatal);
                     return Ok(true);
                 }
             }
@@ -685,19 +686,33 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         self.error_by_seq.remove(&seq);
     }
 
-    fn finalize_remaining(&mut self) {
+    fn finalize_remaining(&mut self, fatal: Option<TxStatus<S::ConfirmInfo>>) {
+        let submit_error_msg = "not submitted: limit_seq".to_string();
         loop {
             let next = self.transactions.confirmed_seq() + 1;
             let Ok(mut tx) = self.transactions.confirm(next) else {
                 break;
             };
-            let status = self
-                .error_by_seq
-                .remove(&next)
-                .map(|errors| pick_error_status(&errors))
-                .unwrap_or(TxStatus::Unknown);
+            let status = if let Some(fatal_status) = fatal.clone() {
+                fatal_status
+            } else {
+                self.error_by_seq
+                    .remove(&next)
+                    .map(|errors| pick_error_status(&errors))
+                    .unwrap_or(TxStatus::Unknown)
+            };
+            if tx.id.is_none() {
+                tx.notify_submitted(Err(Error::UnexpectedResponseType(submit_error_msg.clone())));
+            }
             tx.notify_confirmed(Ok(status));
         }
+    }
+
+    fn tail_error_status(&self) -> Option<TxStatus<S::ConfirmInfo>> {
+        let next = self.transactions.confirmed_seq() + 1;
+        self.error_by_seq
+            .get(&next)
+            .map(|errors| pick_error_status(errors))
     }
 }
 
