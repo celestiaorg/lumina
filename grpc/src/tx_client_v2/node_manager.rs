@@ -432,20 +432,30 @@ impl<S: TxServer> NodeManager<S> {
                                             wake_up = Some(WakeUpKind::Confirmation);
                                         }
                                     }
-                                    SubmitFailure::MempoolIsFull
-                                    | SubmitFailure::NetworkError { .. } => {
+                                    SubmitFailure::MempoolIsFull => {
                                         node.shared_mut().submit_delay = Some(confirm_interval);
                                     }
-                                    other => {
-                                        let status = submit_failure_status(&node_id, &other);
+                                    SubmitFailure::Other {
+                                        error_code,
+                                        message,
+                                    } => {
                                         let stop_at = node
                                             .shared()
                                             .last_submitted
                                             .unwrap_or(node.shared().last_confirmed);
+                                        let status =
+                                            submit_other_status(&node_id, error_code, message);
                                         node.stop_with_error(
                                             stop_at,
                                             StopError::SubmitError(status),
                                         );
+                                    }
+                                    SubmitFailure::NetworkError { .. } => {
+                                        let stop_at = node
+                                            .shared()
+                                            .last_submitted
+                                            .unwrap_or(node.shared().last_confirmed);
+                                        node.stop_with_error(stop_at, StopError::Other);
                                     }
                                 }
                             }
@@ -569,38 +579,11 @@ fn tx_status_label<ConfirmInfo>(status: &TxStatus<ConfirmInfo>) -> &'static str 
     }
 }
 
-fn submit_failure_status<ConfirmInfo>(
+fn submit_other_status<ConfirmInfo>(
     node_id: &NodeId,
-    failure: &SubmitFailure,
+    error_code: celestia_types::state::ErrorCode,
+    message: String,
 ) -> TxStatus<ConfirmInfo> {
-    let (error_code, message) = match failure {
-        SubmitFailure::InvalidTx { error_code } => {
-            (*error_code, "submit failed: invalid tx".to_string())
-        }
-        SubmitFailure::InsufficientFunds => (
-            celestia_types::state::ErrorCode::UnknownRequest,
-            "submit failed: insufficient funds".to_string(),
-        ),
-        SubmitFailure::InsufficientFee { expected_fee } => (
-            celestia_types::state::ErrorCode::UnknownRequest,
-            format!(
-                "submit failed: insufficient fee (expected {})",
-                expected_fee
-            ),
-        ),
-        SubmitFailure::SequenceMismatch { expected } => (
-            celestia_types::state::ErrorCode::UnknownRequest,
-            format!("submit failed: sequence mismatch (expected {})", expected),
-        ),
-        SubmitFailure::NetworkError { .. } => (
-            celestia_types::state::ErrorCode::UnknownRequest,
-            "submit failed: network error".to_string(),
-        ),
-        SubmitFailure::MempoolIsFull => (
-            celestia_types::state::ErrorCode::UnknownRequest,
-            "submit failed: mempool is full".to_string(),
-        ),
-    };
     TxStatus::Rejected {
         reason: RejectionReason::OtherReason {
             error_code,

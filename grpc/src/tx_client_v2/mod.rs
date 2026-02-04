@@ -275,12 +275,11 @@ pub enum TxStatus<ConfirmInfo> {
 pub enum SubmitFailure {
     /// Server expects a different sequence.
     SequenceMismatch { expected: u64 },
-    /// Transaction failed validation.
-    InvalidTx { error_code: ErrorCode },
-    /// Account has insufficient funds.
-    InsufficientFunds,
-    /// Fee too low for the computed gas price.
-    InsufficientFee { expected_fee: u64 },
+    /// Submission failed with a specific error code and message.
+    Other {
+        error_code: ErrorCode,
+        message: String,
+    },
     /// Transport or RPC error while submitting.
     NetworkError { err: Arc<Error> },
     /// Node mempool is full.

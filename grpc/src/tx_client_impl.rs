@@ -481,10 +481,11 @@ fn map_submit_failure(code: ErrorCode, message: &str) -> SubmitFailure {
     }
 
     match code {
-        ErrorCode::InsufficientFunds => SubmitFailure::InsufficientFunds,
-        ErrorCode::InsufficientFee => SubmitFailure::InsufficientFee { expected_fee: 0 },
         ErrorCode::MempoolIsFull => SubmitFailure::MempoolIsFull,
-        _ => SubmitFailure::InvalidTx { error_code: code },
+        _ => SubmitFailure::Other {
+            error_code: code,
+            message: message.to_string(),
+        },
     }
 }
 
