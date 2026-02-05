@@ -23,8 +23,8 @@ use crate::grpc::{
 use crate::signer::{BoxedDocSigner, sign_tx};
 
 use crate::tx_client_v2::{
-    RejectionReason, SignFn, SubmitFailure, Transaction, TransactionManager, TransactionWorker,
-    TxCallbacks, TxConfirmResult, TxHandle, TxRequest, TxServer, TxStatus, TxSubmitResult,
+    NodeId, RejectionReason, SignFn, SubmitFailure, Transaction, TransactionManager,
+    TransactionWorker, TxCallbacks, TxConfirmResult, TxRequest, TxServer, TxStatus, TxSubmitResult,
 };
 use crate::{Error, GrpcClient, Result, TxConfig, TxInfo};
 
@@ -115,6 +115,36 @@ impl SignFnBuilder {
     }
 }
 
+pub struct ConfirmHandle<ConfirmInfo> {
+    pub sequence: u64,
+    pub confirmed: oneshot::Receiver<Result<TxStatus<ConfirmInfo>>>,
+}
+
+impl<ConfirmInfo> ConfirmHandle<ConfirmInfo> {
+    async fn confirm(self) -> Result<TxStatus<ConfirmInfo>> {
+        // we should never have recv errors
+        self.confirmed.await.unwrap()
+    }
+}
+
+pub struct TxServiceConfig {
+    pub nodes: Vec<(NodeId, GrpcClient)>,
+    pub confirm_interval: Duration,
+    pub max_status_batch: usize,
+    pub queue_capacity: usize,
+}
+
+impl TxServiceConfig {
+    pub fn new(nodes: Vec<(NodeId, GrpcClient)>) -> Self {
+        Self {
+            nodes,
+            confirm_interval: Duration::from_millis(TxConfig::default().confirmation_interval_ms),
+            max_status_batch: DEFAULT_MAX_STATUS_BATCH,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
+        }
+    }
+}
+
 pub struct TransactionService {
     inner: Arc<TransactionServiceInner>,
 }
@@ -122,7 +152,8 @@ pub struct TransactionService {
 struct TransactionServiceInner {
     manager: RwLock<TransactionManager<Hash, TxConfirmInfo>>,
     worker: Mutex<Option<WorkerHandle>>,
-    client: GrpcClient,
+    clients: HashMap<NodeId, GrpcClient>,
+    primary_client: GrpcClient,
     sign_fn: Arc<dyn SignFn<Hash, TxConfirmInfo>>,
     confirm_interval: Duration,
     max_status_batch: usize,
@@ -130,25 +161,39 @@ struct TransactionServiceInner {
 }
 
 struct WorkerHandle {
-    shutdown: CancellationToken,
     done_rx: oneshot::Receiver<Result<()>>,
 }
 
+impl WorkerHandle {
+    fn is_finished(&mut self) -> bool {
+        match self.done_rx.try_recv() {
+            Ok(_) => true,
+            Err(oneshot::error::TryRecvError::Closed) => true,
+            Err(oneshot::error::TryRecvError::Empty) => false,
+        }
+    }
+}
+
 impl TransactionService {
-    pub(crate) async fn new(client: GrpcClient) -> Result<Self> {
-        let (pubkey, signer) = client.signer()?;
+    pub async fn new(config: TxServiceConfig) -> Result<Self> {
+        let Some((_primary_id, primary_client)) = config.nodes.first() else {
+            return Err(Error::UnexpectedResponseType(
+                "no grpc clients provided".to_string(),
+            ));
+        };
+        let primary_client = primary_client.clone();
+        let clients: HashMap<NodeId, GrpcClient> = config.nodes.into_iter().collect();
+        let context = Arc::new(GrpcSignContext::new(primary_client.clone()));
+        let (pubkey, signer) = primary_client.signer()?;
         let signer = Arc::new(signer);
-        let context = Arc::new(GrpcSignContext::new(client.clone()));
         let sign_fn = SignFnBuilder::new(context, pubkey, signer).build();
-        let confirm_interval = Duration::from_millis(TxConfig::default().confirmation_interval_ms);
-        let max_status_batch = DEFAULT_MAX_STATUS_BATCH;
-        let queue_capacity = DEFAULT_QUEUE_CAPACITY;
         let (manager, worker_handle) = Self::spawn_worker(
-            &client,
+            &clients,
+            primary_client.clone(),
             sign_fn.clone(),
-            confirm_interval,
-            max_status_batch,
-            queue_capacity,
+            config.confirm_interval,
+            config.max_status_batch,
+            config.queue_capacity,
         )
         .await?;
 
@@ -156,11 +201,12 @@ impl TransactionService {
             inner: Arc::new(TransactionServiceInner {
                 manager: RwLock::new(manager),
                 worker: Mutex::new(Some(worker_handle)),
-                client,
+                clients,
+                primary_client,
                 sign_fn,
-                confirm_interval,
-                max_status_batch,
-                queue_capacity,
+                confirm_interval: config.confirm_interval,
+                max_status_batch: config.max_status_batch,
+                queue_capacity: config.queue_capacity,
             }),
         })
     }
@@ -169,27 +215,53 @@ impl TransactionService {
         &self,
         request: TxRequest,
         cfg: TxConfig,
-    ) -> Result<TxHandle<Hash, TxConfirmInfo>> {
+    ) -> Result<ConfirmHandle<TxConfirmInfo>> {
         let manager = self.inner.manager.read().await.clone();
-        manager.add_tx(request, cfg).await
+        let handle = manager.add_tx(request, cfg).await?;
+        match handle.submitted.await {
+            Ok(Ok(_)) => Ok(ConfirmHandle {
+                sequence: handle.sequence,
+                confirmed: handle.confirmed,
+            }),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(Error::TxWorkerStopped),
+        }
+    }
+
+    pub async fn submit_restart(
+        &self,
+        request: TxRequest,
+        cfg: TxConfig,
+    ) -> Result<ConfirmHandle<TxConfirmInfo>> {
+        let retry_request = request.clone();
+        let retry_cfg = cfg.clone();
+        match self.submit(request, cfg).await {
+            Ok(handle) => Ok(handle),
+            Err(Error::TxWorkerStopped) => {
+                self.recreate_worker().await?;
+                self.submit(retry_request, retry_cfg).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn recreate_worker(&self) -> Result<()> {
+        let mut worker_guard = self.inner.worker.lock().await;
+        if let Some(worker) = worker_guard.as_mut() {
+            if !worker.is_finished() {
+                return Err(Error::TxWorkerRunning);
+            }
+        }
         let (manager, worker_handle) = Self::spawn_worker(
-            &self.inner.client,
+            &self.inner.clients,
+            self.inner.primary_client.clone(),
             self.inner.sign_fn.clone(),
             self.inner.confirm_interval,
             self.inner.max_status_batch,
             self.inner.queue_capacity,
         )
         .await?;
-
-        let mut worker_guard = self.inner.worker.lock().await;
-        if let Some(old_worker) = worker_guard.replace(worker_handle) {
-            old_worker.shutdown.cancel();
-            // Wait for worker to finish
-            let _ = old_worker.done_rx.await;
-        }
+        *worker_guard = Some(worker_handle);
 
         let mut manager_guard = self.inner.manager.write().await;
         *manager_guard = manager;
@@ -198,14 +270,26 @@ impl TransactionService {
     }
 
     async fn spawn_worker(
-        client: &GrpcClient,
+        clients: &HashMap<NodeId, GrpcClient>,
+        primary_client: GrpcClient,
         sign_fn: Arc<dyn SignFn<Hash, TxConfirmInfo>>,
         confirm_interval: Duration,
         max_status_batch: usize,
         queue_capacity: usize,
     ) -> Result<(TransactionManager<Hash, TxConfirmInfo>, WorkerHandle)> {
-        let start_sequence = client.current_sequence().await?;
-        let nodes = HashMap::from([(Arc::from("default"), Arc::new(client.clone()))]);
+        let start_sequence = current_sequence(&primary_client).await?;
+        let nodes = clients
+            .iter()
+            .map(|(node_id, client)| {
+                (
+                    node_id.clone(),
+                    Arc::new(NodeClient {
+                        node_id: node_id.clone(),
+                        client: client.clone(),
+                    }),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let (manager, mut worker) = TransactionWorker::new(
             nodes,
             confirm_interval,
@@ -215,21 +299,14 @@ impl TransactionService {
             queue_capacity,
         );
 
-        let shutdown = CancellationToken::new();
-        let worker_shutdown = shutdown.clone();
+        let worker_shutdown = CancellationToken::new();
         let (done_tx, done_rx) = oneshot::channel();
         spawn(async move {
             let result = worker.process(worker_shutdown).await;
             let _ = done_tx.send(result);
         });
 
-        Ok((manager, WorkerHandle { shutdown, done_rx }))
-    }
-}
-
-impl GrpcClient {
-    pub async fn transaction_service(&self) -> Result<TransactionService> {
-        TransactionService::new(self.clone()).await
+        Ok((manager, WorkerHandle { done_rx }))
     }
 }
 
@@ -239,6 +316,12 @@ struct BuiltSignFn {
     signer: Arc<BoxedDocSigner>,
     cached_account: OnceCell<BaseAccount>,
     cached_chain_id: OnceCell<Id>,
+}
+
+#[derive(Clone)]
+struct NodeClient {
+    node_id: NodeId,
+    client: GrpcClient,
 }
 
 #[async_trait]
@@ -273,19 +356,7 @@ impl SignFn<Hash, TxConfirmInfo> for BuiltSignFn {
                 };
                 (tx_body, Some(blobs))
             }
-            TxRequest::Message(msg) => {
-                let tx_body = RawTxBody {
-                    messages: vec![msg.clone()],
-                    memo: cfg.memo.clone().unwrap_or_default(),
-                    ..RawTxBody::default()
-                };
-                (tx_body, None)
-            }
-            TxRequest::RawPayload(_) => {
-                return Err(Error::UnexpectedResponseType(
-                    "raw payload not supported".into(),
-                ));
-            }
+            TxRequest::Tx(body) => (body.clone(), None),
         };
 
         let (gas_limit, gas_price) = match cfg.gas_limit {
@@ -349,12 +420,13 @@ impl SignFn<Hash, TxConfirmInfo> for BuiltSignFn {
 }
 
 #[async_trait]
-impl TxServer for GrpcClient {
+impl TxServer for NodeClient {
     type TxId = Hash;
     type ConfirmInfo = TxConfirmInfo;
 
     async fn submit(&self, tx_bytes: Arc<Vec<u8>>, _sequence: u64) -> TxSubmitResult<Self::TxId> {
         let resp = self
+            .client
             .broadcast_tx(tx_bytes.to_vec(), BroadcastMode::Sync)
             .await
             .map_err(|err| SubmitFailure::NetworkError { err: Arc::new(err) })?;
@@ -370,20 +442,17 @@ impl TxServer for GrpcClient {
         &self,
         ids: Vec<Self::TxId>,
     ) -> TxConfirmResult<Vec<(Self::TxId, TxStatus<Self::ConfirmInfo>)>> {
-        let response = self.tx_status_batch(ids.clone()).await?;
+        let response = self.client.tx_status_batch(ids.clone()).await?;
         let mut response_map = HashMap::new();
         for result in response.statuses {
             response_map.insert(result.hash, result.status);
         }
 
         let mut statuses = Vec::with_capacity(ids.len());
-        let mut expected_sequence: Option<u64> = None;
-
         for hash in ids {
             match response_map.remove(&hash) {
                 Some(status) => {
-                    let mapped =
-                        map_status_response(hash, status, &mut expected_sequence, self, "").await?;
+                    let mapped = map_status_response(hash, status, self.node_id.as_ref())?;
                     statuses.push((hash, mapped));
                 }
                 None => {
@@ -396,17 +465,12 @@ impl TxServer for GrpcClient {
     }
 
     async fn status(&self, id: Self::TxId) -> TxConfirmResult<TxStatus<Self::ConfirmInfo>> {
-        let mut result = self.status_batch(vec![id]).await?;
-        result
-            .pop()
-            .map(|(_, status)| status)
-            .ok_or_else(|| Error::UnexpectedResponseType("empty status response".to_string()))
+        let response = self.client.tx_status(id).await?;
+        map_status_response(id, response, self.node_id.as_ref())
     }
 
     async fn current_sequence(&self) -> Result<u64> {
-        let address = self.get_account_address().ok_or(Error::MissingSigner)?;
-        let account = self.get_account(&address).await?;
-        Ok(account.sequence)
+        current_sequence(&self.client).await
     }
 }
 
@@ -416,11 +480,9 @@ pub struct TxConfirmInfo {
     pub execution_code: ErrorCode,
 }
 
-async fn map_status_response(
+fn map_status_response(
     hash: Hash,
     response: TxStatusResponse,
-    expected_sequence: &mut Option<u64>,
-    client: &GrpcClient,
     node_id: &str,
 ) -> Result<TxStatus<TxConfirmInfo>> {
     match response.status {
@@ -435,7 +497,15 @@ async fn map_status_response(
         }),
         GrpcTxStatus::Rejected => {
             if is_wrong_sequence(response.execution_code) {
-                let expected = ensure_expected_sequence(expected_sequence, client).await?;
+                let Some(expected) = extract_sequence_on_mismatch(&response.error) else {
+                    return Ok(TxStatus::Rejected {
+                        reason: RejectionReason::OtherReason {
+                            error_code: response.execution_code,
+                            message: response.error.clone(),
+                            node_id: Arc::from(node_id),
+                        },
+                    });
+                };
                 Ok(TxStatus::Rejected {
                     reason: RejectionReason::SequenceMismatch {
                         expected,
@@ -465,18 +535,21 @@ async fn ensure_expected_sequence(
     if let Some(expected) = expected_sequence {
         return Ok(*expected);
     }
-    let expected = client.current_sequence().await?;
+    let expected = current_sequence(client).await?;
     *expected_sequence = Some(expected);
     Ok(expected)
 }
 
+async fn current_sequence(client: &GrpcClient) -> Result<u64> {
+    let address = client.get_account_address().ok_or(Error::MissingSigner)?;
+    let account = client.get_account(&address).await?;
+    Ok(account.sequence)
+}
+
 fn map_submit_failure(code: ErrorCode, message: &str) -> SubmitFailure {
     if is_wrong_sequence(code) {
-        if let Some(parsed) = extract_sequence_on_mismatch(message) {
-            return match parsed {
-                Ok(expected) => SubmitFailure::SequenceMismatch { expected },
-                Err(err) => SubmitFailure::NetworkError { err: Arc::new(err) },
-            };
+        if let Some(expected) = extract_sequence_on_mismatch(message) {
+            return SubmitFailure::SequenceMismatch { expected };
         }
     }
 
@@ -493,9 +566,10 @@ fn is_wrong_sequence(code: ErrorCode) -> bool {
     code == ErrorCode::InvalidSequence || code == ErrorCode::WrongSequence
 }
 
-fn extract_sequence_on_mismatch(msg: &str) -> Option<Result<u64>> {
+fn extract_sequence_on_mismatch(msg: &str) -> Option<u64> {
     msg.contains(SEQUENCE_ERROR_PAT)
         .then(|| extract_sequence(msg))
+        .and_then(|res| res.ok())
 }
 
 fn extract_sequence(msg: &str) -> Result<u64> {
@@ -527,7 +601,6 @@ mod tests {
     use rand::rngs::OsRng;
     use rand::{Rng, RngCore};
     use tendermint::chain::Id;
-    use tendermint_proto::google::protobuf::Any;
 
     struct MockContext {
         account: BaseAccount,
@@ -562,7 +635,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signfn_builder_signs_message() {
+    async fn signfn_builder_signs_tx_body() {
         let signing_key = SigningKey::random(&mut OsRng);
         let pubkey = signing_key.verifying_key().clone();
         let signer = Arc::new(BoxedDocSigner::new(signing_key.clone()));
@@ -583,10 +656,7 @@ mod tests {
         let tx = sign_fn
             .sign(
                 1,
-                &TxRequest::Message(Any {
-                    type_url: "/test.Msg".into(),
-                    value: RawTxBody::default().encode_to_vec(),
-                }),
+                &TxRequest::Tx(RawTxBody::default()),
                 &TxConfig::default().with_gas_limit(100),
             )
             .await
@@ -594,43 +664,6 @@ mod tests {
 
         assert_eq!(tx.sequence, 1);
         assert!(!tx.bytes.is_empty());
-    }
-
-    #[tokio::test]
-    async fn signfn_builder_rejects_raw_payload() {
-        let signing_key = SigningKey::random(&mut OsRng);
-        let pubkey = signing_key.verifying_key().clone();
-        let signer = Arc::new(BoxedDocSigner::new(signing_key.clone()));
-        let address = AccAddress::from(pubkey);
-        let account = BaseAccount {
-            address,
-            pub_key: None,
-            account_number: 1,
-            sequence: 0,
-        };
-        let context = Arc::new(MockContext {
-            account,
-            chain_id: Id::try_from("test-chain").expect("chain id"),
-            gas_price: 0.1,
-        });
-
-        let sign_fn = SignFnBuilder::new(context, pubkey, signer).build();
-        let err = sign_fn
-            .sign(
-                1,
-                &TxRequest::RawPayload(vec![1, 2, 3]),
-                &TxConfig::default().with_gas_limit(100),
-            )
-            .await
-            .expect_err("raw payload");
-
-        assert!(matches!(err, Error::UnexpectedResponseType(_)));
-    }
-
-    #[test]
-    fn txserver_impl_compiles_with_grpc_client() {
-        fn assert_txserver<T: TxServer<TxId = Hash, ConfirmInfo = TxConfirmInfo>>() {}
-        assert_txserver::<GrpcClient>();
     }
 
     #[async_test]
@@ -643,7 +676,10 @@ mod tests {
             .build()
             .unwrap();
 
-        let service = client.transaction_service().await.unwrap();
+        let service =
+            TransactionService::new(TxServiceConfig::new(vec![(Arc::from("default"), client)]))
+                .await
+                .unwrap();
         let handle = service
             .submit(
                 TxRequest::Blobs(vec![random_blob(10..=1000)]),
@@ -651,13 +687,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let submit_hash = handle.submitted.await.unwrap().unwrap();
-        let confirm_status = handle.confirmed.await.unwrap().unwrap();
+        let confirm_status = handle.confirm().await.unwrap();
 
         let TxStatus::Confirmed { info } = confirm_status else {
             panic!("expected confirmed status");
         };
-        assert_eq!(submit_hash, info.info.hash);
         assert!(info.info.height > 0);
     }
 

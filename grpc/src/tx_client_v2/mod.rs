@@ -77,7 +77,6 @@ use futures::future::{BoxFuture, FutureExt};
 use futures::stream::{FuturesUnordered, StreamExt};
 use lumina_utils::executor::spawn_cancellable;
 use lumina_utils::time::{self, Interval};
-use tendermint_proto::google::protobuf::Any;
 use tokio::select;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -102,10 +101,8 @@ impl<T> TxIdT for T where T: Clone + std::fmt::Debug {}
 pub enum TxRequest {
     /// Pay-for-blobs transaction.
     Blobs(Vec<celestia_types::Blob>),
-    /// Arbitrary protobuf message (already encoded as `Any`).
-    Message(Any),
-    /// Raw bytes payload (used by tests or external signers).
-    RawPayload(Vec<u8>),
+    /// Raw Cosmos transaction body with arbitrary messages.
+    Tx(celestia_types::state::RawTxBody),
 }
 
 #[derive(Debug)]
@@ -197,7 +194,7 @@ impl<TxId: TxIdT, ConfirmInfo> TransactionManager<TxId, ConfirmInfo> {
     /// # use celestia_grpc::tx_client_v2::{TransactionManager, TxRequest};
     /// # async fn docs(manager: TransactionManager<u64, u64>) -> Result<()> {
     /// let handle = manager
-    ///     .add_tx(TxRequest::RawPayload(vec![1, 2, 3]), TxConfig::default())
+    ///     .add_tx(TxRequest::Tx(celestia_types::state::RawTxBody::default()), TxConfig::default())
     ///     .await?;
     /// handle.submitted.await?;
     /// handle.confirmed.await?;
@@ -235,9 +232,7 @@ impl<TxId: TxIdT, ConfirmInfo> TransactionManager<TxId, ConfirmInfo> {
             Err(mpsc::error::TrySendError::Full(_)) => Err(Error::UnexpectedResponseType(
                 "transaction queue full".to_string(),
             )),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(Error::UnexpectedResponseType(
-                "transaction manager closed".to_string(),
-            )),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(Error::TxWorkerStopped),
         }
     }
 
@@ -669,7 +664,6 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
     }
 
     fn finalize_remaining(&mut self, fatal: Option<TxStatus<S::ConfirmInfo>>) {
-        let submit_error_msg = "not submitted: limit_seq".to_string();
         loop {
             let next = self.transactions.confirmed_seq() + 1;
             let Ok(mut tx) = self.transactions.confirm(next) else {
@@ -681,7 +675,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 TxStatus::Unknown
             };
             if tx.id.is_none() {
-                tx.notify_submitted(Err(Error::UnexpectedResponseType(submit_error_msg.clone())));
+                tx.notify_submitted(Err(Error::TxWorkerStopped));
             }
             tx.notify_confirmed(Ok(status));
         }

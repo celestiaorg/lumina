@@ -1,5 +1,7 @@
 use super::*;
 use async_trait::async_trait;
+use celestia_types::state::RawTxBody;
+use prost::Message;
 use std::collections::VecDeque;
 use std::sync::Once;
 use std::sync::atomic::AtomicBool;
@@ -107,8 +109,8 @@ impl SignFn<TestTxId, TestConfirmInfo> for TestSigner {
         _cfg: &TxConfig,
     ) -> Result<Transaction<TestTxId, TestConfirmInfo>> {
         let bytes = match request {
-            TxRequest::RawPayload(bytes) => bytes.clone(),
-            TxRequest::Message(_) | TxRequest::Blobs(_) => Vec::new(),
+            TxRequest::Tx(body) => body.encode_to_vec(),
+            TxRequest::Blobs(_) => Vec::new(),
         };
         Ok(Transaction {
             sequence,
@@ -718,9 +720,13 @@ impl Harness {
         oneshot::Receiver<Result<TestTxId>>,
         oneshot::Receiver<Result<TxStatus<TestConfirmInfo>>>,
     ) {
+        let body = RawTxBody {
+            memo: format!("test-bytes:{:?}", bytes),
+            ..RawTxBody::default()
+        };
         let handle = self
             .manager
-            .add_tx(TxRequest::RawPayload(bytes), TxConfig::default())
+            .add_tx(TxRequest::Tx(body), TxConfig::default())
             .await
             .expect("add tx");
         (handle.sequence, handle.submitted, handle.confirmed)

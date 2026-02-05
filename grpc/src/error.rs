@@ -43,6 +43,12 @@ pub enum Error {
     /// Unexpected reponse type
     #[error("Unexpected response type")]
     UnexpectedResponseType(String),
+    /// Transaction worker stopped after completing queued work.
+    #[error("Transaction worker stopped")]
+    TxWorkerStopped,
+    /// Transaction worker is still running.
+    #[error("Transaction worker is running")]
+    TxWorkerRunning,
 
     /// Empty blob submission list
     #[error("Attempted to submit blob transaction with empty blob list")]
