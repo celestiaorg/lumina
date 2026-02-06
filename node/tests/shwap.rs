@@ -1,5 +1,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -299,19 +300,15 @@ async fn wait_for_height(
     }
 
     // we didn't find header, so let's wait for it on subscription
-    let mut max_tries = 5;
     let mut sub = node.header_subscribe().await.unwrap();
     loop {
-        if max_tries == 0 {
-            break;
-        }
-
         let hdr = sub.recv().await.unwrap();
-        if hdr.height() == height {
-            return hdr;
-        }
 
-        max_tries -= 1;
+        match hdr.height().cmp(&height) {
+            Ordering::Less => continue,
+            Ordering::Equal => return hdr,
+            Ordering::Greater => break,
+        }
     }
 
     // check last time with get by height, maybe it was inserted in a moment that
