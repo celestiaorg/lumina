@@ -116,6 +116,7 @@ impl SignFnBuilder {
 }
 
 pub struct ConfirmHandle<ConfirmInfo> {
+    pub hash: Hash,
     pub sequence: u64,
     pub confirmed: oneshot::Receiver<Result<TxStatus<ConfirmInfo>>>,
 }
@@ -219,7 +220,8 @@ impl TransactionService {
         let manager = self.inner.manager.read().await.clone();
         let handle = manager.add_tx(request, cfg).await?;
         match handle.submitted.await {
-            Ok(Ok(_)) => Ok(ConfirmHandle {
+            Ok(Ok(hash)) => Ok(ConfirmHandle {
+                hash,
                 sequence: handle.sequence,
                 confirmed: handle.confirmed,
             }),
