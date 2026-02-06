@@ -13,13 +13,9 @@
 //! - bitswap 1.2.0
 //! - shwap - celestia's data availability protocol on top of bitswap
 
-use std::collections::HashMap;
-use std::future::poll_fn;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 
-use blockstore::Blockstore;
 use blockstore::block::CidError;
 use celestia_proto::p2p::pb::{HeaderRequest, header_request};
 use celestia_types::fraud_proof::BadEncodingFraudProof;
@@ -27,10 +23,8 @@ use celestia_types::hash::Hash;
 use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::Namespace;
 use celestia_types::row::Row;
-use celestia_types::row_namespace_data::{RowNamespaceData, RowNamespaceDataId};
 use celestia_types::sample::Sample;
 use celestia_types::{Blob, ExtendedDataSquare, ExtendedHeader, FraudProof};
-use cid::Cid;
 use libp2p::gossipsub::TopicHash;
 use libp2p::identity::Keypair;
 use libp2p::swarm::{NetworkBehaviour, NetworkInfo};
@@ -38,7 +32,6 @@ use libp2p::{Multiaddr, PeerId, gossipsub};
 use lumina_utils::executor::{JoinHandle, spawn};
 use lumina_utils::time::{self, Interval};
 use lumina_utils::token::Token;
-use smallvec::SmallVec;
 use tendermint_proto::Protobuf;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -49,7 +42,6 @@ mod connection_control;
 mod header_ex;
 pub(crate) mod header_session;
 mod shrex;
-pub(crate) mod shwap;
 mod swarm;
 mod swarm_manager;
 mod utils;
@@ -57,14 +49,13 @@ mod utils;
 use crate::block_ranges::BlockRange;
 use crate::events::EventPublisher;
 use crate::p2p::header_session::HeaderSession;
-use crate::p2p::shwap::{ShwapMultihasher, convert_cid, get_block_container};
 use crate::p2p::swarm_manager::SwarmManager;
 use crate::peer_tracker::PeerTracker;
 use crate::peer_tracker::PeerTrackerInfo;
 use crate::store::{Store, StoreError};
 use crate::utils::{
-    MultiaddrExt, OneshotResultSender, OneshotResultSenderExt, OneshotSenderExt,
-    celestia_protocol_id, fraudsub_ident_topic, gossipsub_ident_topic,
+    MultiaddrExt, OneshotResultSender, OneshotSenderExt, fraudsub_ident_topic,
+    gossipsub_ident_topic,
 };
 
 pub use crate::p2p::header_ex::HeaderExError;
@@ -114,10 +105,6 @@ pub enum P2pError {
     #[error("Bootnode multiaddrs without peer ID: {0:?}")]
     BootnodeAddrsWithoutPeerId(Vec<Multiaddr>),
 
-    /// An error propagated from [`beetswap::Behaviour`].
-    #[error("Bitswap: {0}")]
-    Bitswap(#[from] beetswap::Error),
-
     /// Protobuf message failed to be decoded.
     #[error("ProtoBuf decoding error: {0}")]
     ProtoDecodeFailed(#[from] tendermint_proto::Error),
@@ -165,7 +152,6 @@ impl P2pError {
             | P2pError::BootnodeAddrsWithoutPeerId(_) => true,
             P2pError::HeaderEx(_)
             | P2pError::ShrEx(_)
-            | P2pError::Bitswap(_)
             | P2pError::ProtoDecodeFailed(_)
             | P2pError::Cid(_)
             | P2pError::RequestTimedOut
@@ -207,9 +193,8 @@ pub(crate) struct P2p {
 }
 
 /// Arguments used to configure the [`P2p`].
-pub struct P2pArgs<B, S>
+pub struct P2pArgs<S>
 where
-    B: Blockstore,
     S: Store,
 {
     /// An id of the network to connect to.
@@ -220,8 +205,6 @@ where
     pub bootnodes: Vec<Multiaddr>,
     /// List of the addresses on which to listen for incoming connections.
     pub listen_on: Vec<Multiaddr>,
-    /// The store for headers.
-    pub blockstore: Arc<B>,
     /// The store for headers.
     pub store: Arc<S>,
     /// Event publisher.
@@ -255,10 +238,6 @@ pub(crate) enum P2pCmd {
     #[cfg(any(test, feature = "test-utils"))]
     MarkAsArchival {
         peer_id: PeerId,
-    },
-    GetShwapCid {
-        cid: Cid,
-        respond_to: OneshotResultSender<Vec<u8>, P2pError>,
     },
     GetNetworkCompromisedToken {
         respond_to: oneshot::Sender<Token>,
@@ -294,9 +273,8 @@ pub(crate) enum P2pCmd {
 
 impl P2p {
     /// Creates and starts a new p2p handler.
-    pub async fn start<B, S>(args: P2pArgs<B, S>) -> Result<Self>
+    pub async fn start<S>(args: P2pArgs<S>) -> Result<Self>
     where
-        B: Blockstore + 'static,
         S: Store + 'static,
     {
         validate_bootnode_addrs(&args.bootnodes)?;
@@ -523,30 +501,6 @@ impl P2p {
         Ok(headers)
     }
 
-    /// Request a [`Cid`] on bitswap protocol.
-    pub(crate) async fn get_shwap_cid(
-        &self,
-        cid: Cid,
-        timeout: Option<Duration>,
-    ) -> Result<Vec<u8>> {
-        let (tx, rx) = oneshot::channel();
-
-        self.send_command(P2pCmd::GetShwapCid {
-            cid,
-            respond_to: tx,
-        })
-        .await?;
-
-        let data = match timeout {
-            Some(dur) => time::timeout(dur, rx)
-                .await
-                .map_err(|_| P2pError::RequestTimedOut)???,
-            None => rx.await??,
-        };
-
-        get_block_container(&cid, &data)
-    }
-
     /// Request a [`Row`] on bitswap protocol.
     pub async fn get_row(
         &self,
@@ -616,23 +570,6 @@ impl P2p {
                 .map_err(|_| P2pError::RequestTimedOut)??,
             None => rx.await?,
         }
-    }
-
-    /// Request a [`RowNamespaceData`] on bitswap protocol.
-    pub async fn get_row_namespace_data(
-        &self,
-        namespace: Namespace,
-        row_index: u16,
-        block_height: u64,
-        timeout: Option<Duration>,
-    ) -> Result<RowNamespaceData> {
-        let id = RowNamespaceDataId::new(namespace, row_index, block_height)?;
-        let cid = convert_cid(&id.into())?;
-
-        let data = self.get_shwap_cid(cid, timeout).await?;
-        let row_namespace_data =
-            RowNamespaceData::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
-        Ok(row_namespace_data)
     }
 
     pub async fn get_namespace_data(
@@ -763,29 +700,25 @@ impl Drop for P2p {
 }
 
 #[derive(NetworkBehaviour)]
-struct Behaviour<B, S>
+struct Behaviour<S>
 where
-    B: Blockstore + 'static,
     S: Store + 'static,
 {
-    bitswap: beetswap::Behaviour<MAX_MH_SIZE, B>,
     header_ex: header_ex::Behaviour<S>,
     shr_ex: shrex::Behaviour<S>,
     gossipsub: gossipsub::Behaviour,
 }
 
-struct Worker<B, S>
+struct Worker<S>
 where
-    B: Blockstore + 'static,
     S: Store + 'static,
 {
     cancellation_token: CancellationToken,
-    swarm: SwarmManager<Behaviour<B, S>>,
+    swarm: SwarmManager<Behaviour<S>>,
     header_sub_topic_hash: TopicHash,
     bad_encoding_fraud_sub_topic: TopicHash,
     cmd_rx: mpsc::Receiver<P2pCmd>,
     header_sub_state: Option<HeaderSubState>,
-    bitswap_queries: HashMap<beetswap::QueryId, OneshotResultSender<Vec<u8>, P2pError>>,
     network_compromised_token: Token,
     store: Arc<S>,
 }
@@ -795,13 +728,12 @@ struct HeaderSubState {
     channel: mpsc::Sender<ExtendedHeader>,
 }
 
-impl<B, S> Worker<B, S>
+impl<S> Worker<S>
 where
-    B: Blockstore,
     S: Store,
 {
     async fn new(
-        args: P2pArgs<B, S>,
+        args: P2pArgs<S>,
         cancellation_token: CancellationToken,
         cmd_rx: mpsc::Receiver<P2pCmd>,
         peer_tracker: PeerTracker,
@@ -821,12 +753,6 @@ where
             fraudsub_ident_topic(BadEncodingFraudProof::TYPE, &args.network_id);
         let gossipsub = init_gossipsub(&args, [&header_sub_topic, &bad_encoding_fraud_sub_topic])?;
 
-        let bitswap = init_bitswap(
-            args.blockstore.clone(),
-            args.store.clone(),
-            &args.network_id,
-        )?;
-
         let header_ex = header_ex::Behaviour::new(header_ex::Config {
             network_id: &args.network_id,
             header_store: args.store.clone(),
@@ -840,7 +766,6 @@ where
         })?;
 
         swarm.attach_behaviour(Behaviour {
-            bitswap,
             gossipsub,
             header_ex,
             shr_ex,
@@ -853,7 +778,6 @@ where
             bad_encoding_fraud_sub_topic: bad_encoding_fraud_sub_topic.hash(),
             header_sub_topic_hash: header_sub_topic.hash(),
             header_sub_state: None,
-            bitswap_queries: HashMap::new(),
             network_compromised_token: Token::new(),
             store: args.store,
         })
@@ -867,9 +791,6 @@ where
                 _ = self.cancellation_token.cancelled() => break,
                 _ = report_interval.tick() => {
                     self.report();
-                }
-                _ = poll_closed(&mut self.bitswap_queries) => {
-                    self.prune_canceled_bitswap_queries();
                 }
                 res = self.swarm.poll() => {
                     match res {
@@ -894,25 +815,9 @@ where
         self.swarm.stop().await;
     }
 
-    fn prune_canceled_bitswap_queries(&mut self) {
-        let mut cancelled = SmallVec::<[_; 16]>::new();
-
-        for (query_id, chan) in &self.bitswap_queries {
-            if chan.is_closed() {
-                cancelled.push(*query_id);
-            }
-        }
-
-        for query_id in cancelled {
-            self.bitswap_queries.remove(&query_id);
-            self.swarm.context().behaviour.bitswap.cancel(query_id);
-        }
-    }
-
-    async fn on_behaviour_event(&mut self, ev: BehaviourEvent<B, S>) -> Result<()> {
+    async fn on_behaviour_event(&mut self, ev: BehaviourEvent<S>) -> Result<()> {
         match ev {
             BehaviourEvent::Gossipsub(ev) => self.on_gossip_sub_event(ev).await,
-            BehaviourEvent::Bitswap(ev) => self.on_bitswap_event(ev).await,
             BehaviourEvent::HeaderEx(ev) => self.on_header_ex_event(ev).await,
             BehaviourEvent::ShrEx(ev) => self.on_shrex_event(ev).await,
         }
@@ -966,9 +871,6 @@ where
             #[cfg(any(test, feature = "test-utils"))]
             P2pCmd::MarkAsArchival { peer_id } => {
                 self.swarm.mark_as_archival(&peer_id);
-            }
-            P2pCmd::GetShwapCid { cid, respond_to } => {
-                self.on_get_shwap_cid(cid, respond_to);
             }
             P2pCmd::GetNetworkCompromisedToken { respond_to } => {
                 respond_to.maybe_send(self.network_compromised_token.clone())
@@ -1079,30 +981,6 @@ where
                     .report_message_validation_result(&message_id, &peer, acceptance);
             }
             _ => trace!("Unhandled gossipsub event"),
-        }
-    }
-
-    #[instrument(level = "trace", skip_all)]
-    fn on_get_shwap_cid(&mut self, cid: Cid, respond_to: OneshotResultSender<Vec<u8>, P2pError>) {
-        trace!("Requesting CID {cid} from bitswap");
-        let query_id = self.swarm.context().behaviour.bitswap.get(&cid);
-        self.bitswap_queries.insert(query_id, respond_to);
-    }
-
-    #[instrument(level = "trace", skip(self))]
-    async fn on_bitswap_event(&mut self, ev: beetswap::Event) {
-        match ev {
-            beetswap::Event::GetQueryResponse { query_id, data } => {
-                if let Some(respond_to) = self.bitswap_queries.remove(&query_id) {
-                    respond_to.maybe_send_ok(data);
-                }
-            }
-            beetswap::Event::GetQueryError { query_id, error } => {
-                if let Some(respond_to) = self.bitswap_queries.remove(&query_id) {
-                    let error: P2pError = error.into();
-                    respond_to.maybe_send_err(error);
-                }
-            }
         }
     }
 
@@ -1252,23 +1130,6 @@ where
     }
 }
 
-/// Awaits at least one channel from the `bitswap_queries` to close.
-async fn poll_closed(
-    bitswap_queries: &mut HashMap<beetswap::QueryId, OneshotResultSender<Vec<u8>, P2pError>>,
-) {
-    poll_fn(|cx| {
-        for chan in bitswap_queries.values_mut() {
-            match chan.poll_closed(cx) {
-                Poll::Pending => continue,
-                Poll::Ready(_) => return Poll::Ready(()),
-            }
-        }
-
-        Poll::Pending
-    })
-    .await
-}
-
 fn validate_bootnode_addrs(addrs: &[Multiaddr]) -> Result<(), P2pError> {
     let mut invalid_addrs = Vec::new();
 
@@ -1285,12 +1146,11 @@ fn validate_bootnode_addrs(addrs: &[Multiaddr]) -> Result<(), P2pError> {
     }
 }
 
-fn init_gossipsub<'a, B, S>(
-    args: &'a P2pArgs<B, S>,
+fn init_gossipsub<'a, S>(
+    args: &'a P2pArgs<S>,
     topics: impl IntoIterator<Item = &'a gossipsub::IdentTopic>,
 ) -> Result<gossipsub::Behaviour>
 where
-    B: Blockstore,
     S: Store,
 {
     // Set the message authenticity - How we expect to publish messages
@@ -1315,22 +1175,4 @@ where
     }
 
     Ok(gossipsub)
-}
-
-fn init_bitswap<B, S>(
-    blockstore: Arc<B>,
-    store: Arc<S>,
-    network_id: &str,
-) -> Result<beetswap::Behaviour<MAX_MH_SIZE, B>>
-where
-    B: Blockstore + 'static,
-    S: Store + 'static,
-{
-    let protocol_prefix = celestia_protocol_id(network_id, "shwap");
-
-    Ok(beetswap::Behaviour::builder(blockstore)
-        .protocol_prefix(protocol_prefix.as_ref())?
-        .register_multihasher(ShwapMultihasher::new(store))
-        .client_set_send_dont_have(false)
-        .build())
 }

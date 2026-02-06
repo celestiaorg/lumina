@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use celestia_rpc::ShareClient;
-use celestia_types::nmt::{Namespace, NamespacedSha2Hasher};
+use celestia_types::nmt::Namespace;
 use celestia_types::{AppVersion, Blob, ExtendedHeader};
 use lumina_node::blockstore::InMemoryBlockstore;
 use lumina_node::events::NodeEvent;
@@ -184,71 +184,6 @@ async fn shwap_request_row() {
         .await
         .unwrap_err();
     assert!(matches!(err, NodeError::P2p(P2pError::ShrEx(_))));
-}
-
-#[tokio::test]
-async fn shwap_request_row_namespace_data() {
-    let (node, _) = new_connected_node().await;
-    let client = bridge_client().await;
-
-    let ns = Namespace::const_v0(rand::random());
-    let blob_len = rand::random::<usize>() % 4096 + 1;
-    let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
-
-    let height = blob_submit(&client, &[blob]).await;
-    let header = wait_for_height(&node, height).await;
-    let eds = client
-        .share_get_eds(header.height(), header.app_version())
-        .await
-        .unwrap();
-    let square_width = header.square_width();
-
-    // check existing row namespace data
-    let rows_with_ns: Vec<_> = header
-        .dah
-        .row_roots()
-        .iter()
-        .enumerate()
-        .filter_map(|(n, hash)| {
-            hash.contains::<NamespacedSha2Hasher>(*ns)
-                .then_some(n as u16)
-        })
-        .collect();
-    let eds_ns_data = eds.get_namespace_data(ns, &header.dah, height).unwrap();
-
-    for (n, &row) in rows_with_ns.iter().enumerate() {
-        let row_ns_data = node
-            .request_row_namespace_data(ns, row, height, Some(Duration::from_secs(1)))
-            .await
-            .unwrap();
-        assert_eq!(eds_ns_data[n].1, row_ns_data);
-    }
-
-    // check nonexisting row row namespace data
-    let err = node
-        .request_row_namespace_data(ns, square_width + 1, height, Some(Duration::from_secs(1)))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, NodeError::P2p(P2pError::RequestTimedOut)));
-
-    // check nonexisting namespace row namespace data
-    // for namespace that row actually contains
-    // PFB (0x04) < 0x05 < Primary ns padding (0x255)
-    let unknown_ns = Namespace::const_v0([0, 0, 0, 0, 0, 0, 0, 0, 0, 5]);
-    let row = node
-        .request_row_namespace_data(unknown_ns, 0, height, Some(Duration::from_secs(1)))
-        .await
-        .unwrap();
-    assert!(row.shares.is_empty());
-
-    // check nonexisting namespace row namespace data
-    // for namespace that row doesn't contain
-    let unknown_ns = Namespace::TAIL_PADDING;
-    let err = node
-        .request_row_namespace_data(unknown_ns, 0, height, Some(Duration::from_secs(1)))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, NodeError::P2p(P2pError::RequestTimedOut)));
 }
 
 #[tokio::test]

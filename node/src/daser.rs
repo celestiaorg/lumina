@@ -5,9 +5,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use blockstore::block::CidError;
 use blockstore::{Blockstore, Error as BlockstoreError};
 use bytes::{Bytes, BytesMut};
-use cid::Cid;
+use celestia_types::sample::SampleId;
+use cid::multihash::Multihash;
+use cid::{Cid, CidGeneric};
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
@@ -21,7 +24,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::events::{EventPublisher, NodeEvent};
-use crate::p2p::shwap::sample_cid;
 use crate::p2p::{P2p, P2pError, ShrExError};
 use crate::store::{BlockRanges, Store, StoreError};
 use crate::utils::{OneshotSenderExt, TimeExt};
@@ -651,6 +653,19 @@ fn random_indexes(square_width: u16, max_samples_needed: usize) -> HashSet<(u16,
     }
 
     indexes
+}
+
+fn sample_cid(row_index: u16, column_index: u16, block_height: u64) -> Result<Cid, P2pError> {
+    let sample_id = SampleId::new(row_index, column_index, block_height)?;
+    convert_cid(&sample_id.into())
+}
+
+fn convert_cid<const S: usize>(cid: &CidGeneric<S>) -> Result<Cid, P2pError> {
+    let multihash = Multihash::wrap(cid.hash().code(), cid.hash().digest())
+        .map_err(|_| P2pError::Cid(CidError::InvalidMultihashLength(64)))?;
+
+    Cid::new(cid.version(), cid.codec(), multihash)
+        .map_err(|_| P2pError::Cid(CidError::InvalidMultihashLength(64)))
 }
 
 #[cfg(test)]

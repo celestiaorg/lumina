@@ -21,12 +21,11 @@ use celestia_types::hash::Hash;
 use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::Namespace;
 use celestia_types::row::Row;
-use celestia_types::row_namespace_data::RowNamespaceData;
 use celestia_types::sample::Sample;
 use celestia_types::{Blob, ExtendedDataSquare, ExtendedHeader, SharesAtHeight};
 use lumina_utils::executor::{JoinHandle, spawn, spawn_cancellable};
 
-use crate::blockstore::{InMemoryBlockstore, SampleBlockstore};
+use crate::blockstore::InMemoryBlockstore;
 use crate::daser::{
     DEFAULT_ADDITIONAL_HEADER_SUB_CONCURENCY, DEFAULT_CONCURENCY_LIMIT, Daser, DaserArgs,
 };
@@ -104,7 +103,7 @@ where
 {
     event_channel: EventChannel,
     p2p: Option<Arc<P2p>>,
-    blockstore: Option<Arc<SampleBlockstore<B>>>,
+    blockstore: Option<Arc<B>>,
     store: Option<Arc<S>>,
     syncer: Option<Arc<Syncer<S>>>,
     daser: Option<Arc<Daser>>,
@@ -148,7 +147,7 @@ where
         let event_channel = EventChannel::new();
         let event_sub = event_channel.subscribe();
         let store = Arc::new(config.store);
-        let blockstore = Arc::new(SampleBlockstore::new(config.blockstore));
+        let blockstore = Arc::new(config.blockstore);
 
         let p2p = Arc::new(
             P2p::start(P2pArgs {
@@ -156,7 +155,6 @@ where
                 local_keypair: config.p2p_local_keypair,
                 bootnodes: config.p2p_bootnodes,
                 listen_on: config.p2p_listen_on,
-                blockstore: blockstore.clone(),
                 store: store.clone(),
                 event_pub: event_channel.publisher(),
             })
@@ -417,25 +415,6 @@ where
         timeout: Option<Duration>,
     ) -> Result<ExtendedDataSquare> {
         Ok(self.p2p().get_eds(block_height, timeout).await?)
-    }
-
-    /// Request a verified [`RowNamespaceData`] from the network.
-    ///
-    /// # Errors
-    ///
-    /// On failure to receive a verified [`RowNamespaceData`] within a certain time, the
-    /// `NodeError::P2p(P2pError::RequestTimedOut)` error will be returned.
-    pub async fn request_row_namespace_data(
-        &self,
-        namespace: Namespace,
-        row_index: u16,
-        block_height: u64,
-        timeout: Option<Duration>,
-    ) -> Result<RowNamespaceData> {
-        Ok(self
-            .p2p()
-            .get_row_namespace_data(namespace, row_index, block_height, timeout)
-            .await?)
     }
 
     /// Request a verified [`NamespaceData`] from the network.

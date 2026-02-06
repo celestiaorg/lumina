@@ -7,7 +7,6 @@ use celestia_types::ExtendedHeader;
 use celestia_types::hash::Hash;
 use celestia_types::sample::Sample;
 use celestia_types::test_utils::ExtendedHeaderGenerator;
-use cid::Cid;
 use lumina_utils::time::timeout;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -209,16 +208,6 @@ impl MockP2pHandle {
                 *head
             }
             cmd => panic!("Expecting InitHeaderSub, but received: {cmd:?}"),
-        }
-    }
-
-    /// Assert that a CID request was sent to the [`P2p`] worker and obtain a response channel.
-    ///
-    /// [`P2p`]: crate::p2p::P2p
-    pub async fn expect_get_shwap_cid(&mut self) -> (Cid, OneshotResultSender<Vec<u8>, P2pError>) {
-        match self.expect_cmd().await {
-            P2pCmd::GetShwapCid { cid, respond_to } => (cid, respond_to),
-            cmd => panic!("Expecting GetShwapCid, but received: {cmd:?}"),
         }
     }
 

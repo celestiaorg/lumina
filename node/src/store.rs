@@ -41,6 +41,9 @@ pub(crate) mod utils;
 /// Sampling metadata for a block.
 ///
 /// This struct persists DAS-ing information in a header store for future reference.
+// TODO: after removal of bitswap, we no longer need to use blockstore to store samples. We could
+// just store them directly in a store in some new table, indexed by height. This way we could
+// remove sampling metadata and simplify pruner.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[cfg_attr(all(feature = "wasm-bindgen", target_arch = "wasm32"), wasm_bindgen)]
 pub struct SamplingMetadata {
