@@ -109,7 +109,7 @@ pub enum P2pError {
     #[error("ProtoBuf decoding error: {0}")]
     ProtoDecodeFailed(#[from] tendermint_proto::Error),
 
-    /// An error propagated from [`celestia_types`] that is related to [`Cid`].
+    /// An error propagated from [`celestia_types`] that is related to `CID`.
     #[error("CID error: {0}")]
     Cid(CidError),
 
