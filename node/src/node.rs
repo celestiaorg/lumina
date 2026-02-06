@@ -21,18 +21,16 @@ use celestia_types::hash::Hash;
 use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::Namespace;
 use celestia_types::row::Row;
-use celestia_types::row_namespace_data::RowNamespaceData;
 use celestia_types::sample::Sample;
 use celestia_types::{Blob, ExtendedDataSquare, ExtendedHeader, SharesAtHeight};
 use lumina_utils::executor::{JoinHandle, spawn, spawn_cancellable};
 
-use crate::blockstore::{InMemoryBlockstore, SampleBlockstore};
+use crate::blockstore::InMemoryBlockstore;
 use crate::daser::{
     DEFAULT_ADDITIONAL_HEADER_SUB_CONCURENCY, DEFAULT_CONCURENCY_LIMIT, Daser, DaserArgs,
 };
 use crate::events::{EventChannel, EventSubscriber, NodeEvent};
 use crate::node::subscriptions::{SubscriptionError, forward_new_blobs, forward_new_shares};
-use crate::p2p::shwap::sample_cid;
 use crate::p2p::{P2p, P2pArgs};
 use crate::pruner::{Pruner, PrunerArgs};
 use crate::store::{InMemoryStore, SamplingMetadata, Store, StoreError};
@@ -105,7 +103,7 @@ where
 {
     event_channel: EventChannel,
     p2p: Option<Arc<P2p>>,
-    blockstore: Option<Arc<SampleBlockstore<B>>>,
+    blockstore: Option<Arc<B>>,
     store: Option<Arc<S>>,
     syncer: Option<Arc<Syncer<S>>>,
     daser: Option<Arc<Daser>>,
@@ -149,7 +147,7 @@ where
         let event_channel = EventChannel::new();
         let event_sub = event_channel.subscribe();
         let store = Arc::new(config.store);
-        let blockstore = Arc::new(SampleBlockstore::new(config.blockstore));
+        let blockstore = Arc::new(config.blockstore);
 
         let p2p = Arc::new(
             P2p::start(P2pArgs {
@@ -157,7 +155,6 @@ where
                 local_keypair: config.p2p_local_keypair,
                 bootnodes: config.p2p_bootnodes,
                 listen_on: config.p2p_listen_on,
-                blockstore: blockstore.clone(),
                 store: store.clone(),
                 event_pub: event_channel.publisher(),
             })
@@ -176,6 +173,7 @@ where
         let daser = Arc::new(Daser::start(DaserArgs {
             p2p: p2p.clone(),
             store: store.clone(),
+            blockstore: blockstore.clone(),
             event_pub: event_channel.publisher(),
             sampling_window: config.sampling_window,
             concurrency_limit: DEFAULT_CONCURENCY_LIMIT,
@@ -402,26 +400,6 @@ where
             .get_sample(row_index, column_index, block_height, timeout)
             .await?;
 
-        // We want to immediately remove the sample from blockstore
-        // but **only if** it wasn't chosen for DASing. Otherwise, we could
-        // accidentally remove samples needed for the block reconstruction.
-        //
-        // There's a small possibility of permanently storing this sample if
-        // persistent blockstore is used and user closes tab / kills process
-        // before the remove is called, but it is acceptable tradeoff to avoid complexity.
-        //
-        // TODO: It should be properly solved when we switch from bitswap to shrex.
-        if let Some(metadata) = self.get_sampling_metadata(block_height).await? {
-            let cid = sample_cid(row_index, column_index, block_height)?;
-            if !metadata.cids.contains(&cid) {
-                let blockstore = self
-                    .blockstore
-                    .as_ref()
-                    .expect("Blockstore not initialized");
-                let _ = blockstore.remove(&cid).await;
-            }
-        }
-
         Ok(sample)
     }
 
@@ -437,25 +415,6 @@ where
         timeout: Option<Duration>,
     ) -> Result<ExtendedDataSquare> {
         Ok(self.p2p().get_eds(block_height, timeout).await?)
-    }
-
-    /// Request a verified [`RowNamespaceData`] from the network.
-    ///
-    /// # Errors
-    ///
-    /// On failure to receive a verified [`RowNamespaceData`] within a certain time, the
-    /// `NodeError::P2p(P2pError::RequestTimedOut)` error will be returned.
-    pub async fn request_row_namespace_data(
-        &self,
-        namespace: Namespace,
-        row_index: u16,
-        block_height: u64,
-        timeout: Option<Duration>,
-    ) -> Result<RowNamespaceData> {
-        Ok(self
-            .p2p()
-            .get_row_namespace_data(namespace, row_index, block_height, timeout)
-            .await?)
     }
 
     /// Request a verified [`NamespaceData`] from the network.

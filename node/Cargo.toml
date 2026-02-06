@@ -23,7 +23,6 @@ categories = [
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
-beetswap.workspace = true
 celestia-proto.workspace = true
 celestia-types.workspace = true
 lumina-utils = { workspace = true, features = ["executor", "token", "time"] }
@@ -84,7 +83,6 @@ rustls-pki-types = "1.11"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 backoff = { version = "0.4", features = ["wasm-bindgen"] }
-beetswap = { workspace = true, features = ["wasm-bindgen"] }
 blockstore = { workspace = true, features = ["indexeddb"] }
 celestia-types = { workspace = true, features = ["wasm-bindgen"] }
 getrandom_03.workspace = true

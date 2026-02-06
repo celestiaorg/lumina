@@ -203,16 +203,16 @@ pub enum NodeEvent {
         row: u16,
         /// The column of the share.
         column: u16,
-        /// Share sampling timed out.
-        timed_out: bool,
+        /// Share sampling failed.
+        failed: bool,
     },
 
     /// Sampling result.
     SamplingResult {
         /// The block height that was sampled.
         height: u64,
-        /// Sampling timed out.
-        timed_out: bool,
+        /// Sampling failed.
+        failed: bool,
         /// How much time sampling took.
         took: Duration,
     },
@@ -362,10 +362,10 @@ impl fmt::Display for NodeEvent {
                 height,
                 row,
                 column,
-                timed_out,
+                failed,
                 ..
             } => {
-                let s = if *timed_out { "timed out" } else { "finished" };
+                let s = if *failed { "failed" } else { "finished" };
                 write!(
                     f,
                     "Sampling for share [{row}, {column}] of block {height} {s}"
@@ -373,10 +373,10 @@ impl fmt::Display for NodeEvent {
             }
             NodeEvent::SamplingResult {
                 height,
-                timed_out,
+                failed,
                 took,
             } => {
-                let s = if *timed_out { "timed out" } else { "finished" };
+                let s = if *failed { "failed" } else { "finished" };
                 write!(f, "Sampling of block {height} {s}. Took: {took:?}")
             }
             NodeEvent::FatalDaserError { error } => {
