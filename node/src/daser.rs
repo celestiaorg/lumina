@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blockstore::{Blockstore, Error as BlockstoreError};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
+use cid::Cid;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
@@ -215,6 +216,8 @@ impl Drop for Daser {
     }
 }
 
+type SamplingFut = BoxFuture<'static, Result<(u64, Vec<(Cid, Bytes)>, bool)>>;
+
 struct Worker<B, S>
 where
     B: Blockstore + 'static,
@@ -227,7 +230,7 @@ where
     store: Arc<S>,
     blockstore: Arc<B>,
     max_samples_needed: usize,
-    sampling_futs: FuturesUnordered<BoxFuture<'static, Result<(u64, bool)>>>,
+    sampling_futs: FuturesUnordered<SamplingFut>,
     queue: BlockRanges,
     failed: BlockRanges,
     ongoing: BlockRanges,
@@ -363,7 +366,11 @@ where
                 Some(res) = self.sampling_futs.next() => {
                     // The future only returns fatal errors that are not related
                     // to P2P nor networking.
-                    let (height, failed) = res?;
+                    let (height, samples, failed) = res?;
+
+                    for (cid, sample) in samples {
+                        self.blockstore.put_keyed(&cid, &sample).await?;
+                    }
 
                     if failed {
                         self.failed.insert_relaxed(height..=height).expect("invalid height");
@@ -502,7 +509,6 @@ where
         self.store.update_sampling_metadata(height, cids).await?;
 
         let p2p = self.p2p.clone();
-        let blockstore = self.blockstore.clone();
         let event_pub = self.event_pub.clone();
         let sampling_window = self.sampling_window;
 
@@ -533,6 +539,7 @@ where
                 .collect::<FuturesUnordered<_>>();
 
             let mut sampling_failed = false;
+            let mut samples = Vec::with_capacity(futs.len());
 
             // Run futures to completion
             while let Some((row, column, res)) = futs.next().await {
@@ -542,7 +549,7 @@ where
                         let cid = sample_cid(row, column, height).expect("Block height not 0");
                         let mut bytes = BytesMut::new();
                         sample.encode(&mut bytes);
-                        blockstore.put_keyed(&cid, &bytes).await?;
+                        samples.push((cid, bytes.freeze()));
 
                         false
                     }
@@ -573,7 +580,7 @@ where
                 took: now.elapsed(),
             });
 
-            Ok((height, sampling_failed))
+            Ok((height, samples, sampling_failed))
         }
         .boxed();
 
