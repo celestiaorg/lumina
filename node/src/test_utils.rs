@@ -5,6 +5,7 @@ use std::time::Duration;
 use celestia_proto::p2p::pb::{HeaderRequest, header_request::Data};
 use celestia_types::ExtendedHeader;
 use celestia_types::hash::Hash;
+use celestia_types::sample::Sample;
 use celestia_types::test_utils::ExtendedHeaderGenerator;
 use cid::Cid;
 use lumina_utils::time::timeout;
@@ -218,6 +219,23 @@ impl MockP2pHandle {
         match self.expect_cmd().await {
             P2pCmd::GetShwapCid { cid, respond_to } => (cid, respond_to),
             cmd => panic!("Expecting GetShwapCid, but received: {cmd:?}"),
+        }
+    }
+
+    /// Assert that a sample request was sent to the [`P2p`] worker and obtain a response channel.
+    ///
+    /// [`P2p`]: crate::p2p::P2p
+    pub async fn expect_get_sample(
+        &mut self,
+    ) -> (u16, u16, u64, OneshotResultSender<Sample, P2pError>) {
+        match self.expect_cmd().await {
+            P2pCmd::GetSample {
+                row_index,
+                column_index,
+                block_height,
+                respond_to,
+            } => (row_index, column_index, block_height, respond_to),
+            cmd => panic!("Expecting GetSample, but received: {cmd:?}"),
         }
     }
 }

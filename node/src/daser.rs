@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use blockstore::{Blockstore, Error as BlockstoreError};
+use bytes::BytesMut;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
@@ -19,7 +21,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::events::{EventPublisher, NodeEvent};
 use crate::p2p::shwap::sample_cid;
-use crate::p2p::{P2p, P2pError};
+use crate::p2p::{P2p, P2pError, ShrExError};
 use crate::store::{BlockRanges, Store, StoreError};
 use crate::utils::{OneshotSenderExt, TimeExt};
 
@@ -38,6 +40,10 @@ pub enum DaserError {
     /// An error propagated from the `P2p` component.
     #[error("P2p: {0}")]
     P2p(#[from] P2pError),
+
+    /// An error propagated from the [`Store`] component.
+    #[error("Blockstore: {0}")]
+    Blockstore(#[from] BlockstoreError),
 
     /// An error propagated from the [`Store`] component.
     #[error("Store: {0}")]
@@ -66,14 +72,17 @@ pub(crate) struct Daser {
 }
 
 /// Arguments used to configure the [`Daser`].
-pub(crate) struct DaserArgs<S>
+pub(crate) struct DaserArgs<B, S>
 where
+    B: Blockstore,
     S: Store,
 {
     /// Handler for the peer to peer messaging.
     pub(crate) p2p: Arc<P2p>,
     /// Headers storage.
     pub(crate) store: Arc<S>,
+    /// Blockstore.
+    pub(crate) blockstore: Arc<B>,
     /// Event publisher.
     pub(crate) event_pub: EventPublisher,
     /// Size of the sampling window.
@@ -99,17 +108,12 @@ pub(crate) enum DaserCmd {
     ///
     /// This is needed to avoid following race condition:
     ///
-    /// We have `Store` very tightly integrated with `beetswap::Multihasher`
-    /// and when Daser starts data sampling the header of that block must be
-    /// in the `Store` until the data sampling is finished. This can be fixed
-    /// only if we decouple `Store` from `beetswap::Multihasher`.
-    ///
-    /// However, even if we fix the above, a second problem arise: When Pruner
-    /// removes the header and samples of an ongoing data sampling, how are we
-    /// going to handle the incoming CIDs? We need somehow make sure that Pruner
-    /// will remove them after sampling is finished.
-    ///
-    /// After the above issues are fixed, this can be removed.
+    /// Assume some block is just about to fail out of a sampling window, and daser
+    /// is scheduling a request for it just before it happens. Pruner may wake up right
+    /// after the block falls outside of the sampling window as no longer needed (we
+    /// don't need to sample blocks outside the window). In such case, Pruner will prune
+    /// the header and when sampling finishes, daser will insert samples into the store.
+    /// Those samples would never be pruned.
     WantToPrune {
         height: u64,
         respond_to: oneshot::Sender<bool>,
@@ -118,8 +122,9 @@ pub(crate) enum DaserCmd {
 
 impl Daser {
     /// Create and start the [`Daser`].
-    pub(crate) fn start<S>(args: DaserArgs<S>) -> Result<Self>
+    pub(crate) fn start<B, S>(args: DaserArgs<B, S>) -> Result<Self>
     where
+        B: Blockstore + 'static,
         S: Store + 'static,
     {
         let cancellation_token = CancellationToken::new();
@@ -210,8 +215,9 @@ impl Drop for Daser {
     }
 }
 
-struct Worker<S>
+struct Worker<B, S>
 where
+    B: Blockstore + 'static,
     S: Store + 'static,
 {
     cmd_rx: mpsc::Receiver<DaserCmd>,
@@ -219,10 +225,11 @@ where
     event_pub: EventPublisher,
     p2p: Arc<P2p>,
     store: Arc<S>,
+    blockstore: Arc<B>,
     max_samples_needed: usize,
     sampling_futs: FuturesUnordered<BoxFuture<'static, Result<(u64, bool)>>>,
     queue: BlockRanges,
-    timed_out: BlockRanges,
+    failed: BlockRanges,
     ongoing: BlockRanges,
     will_be_pruned: BlockRanges,
     sampling_window: Duration,
@@ -233,25 +240,27 @@ where
     num_of_prunable_blocks: u64,
 }
 
-impl<S> Worker<S>
+impl<B, S> Worker<B, S>
 where
+    B: Blockstore,
     S: Store,
 {
     fn new(
-        args: DaserArgs<S>,
+        args: DaserArgs<B, S>,
         cancellation_token: CancellationToken,
         cmd_rx: mpsc::Receiver<DaserCmd>,
-    ) -> Result<Worker<S>> {
+    ) -> Result<Worker<B, S>> {
         Ok(Worker {
             cmd_rx,
             cancellation_token,
             event_pub: args.event_pub,
             p2p: args.p2p,
             store: args.store,
+            blockstore: args.blockstore,
             max_samples_needed: MAX_SAMPLES_NEEDED,
             sampling_futs: FuturesUnordered::new(),
             queue: BlockRanges::default(),
-            timed_out: BlockRanges::default(),
+            failed: BlockRanges::default(),
             ongoing: BlockRanges::default(),
             will_be_pruned: BlockRanges::default(),
             sampling_window: args.sampling_window,
@@ -352,12 +361,12 @@ where
                 _ = report_interval.tick() => self.report().await?,
                 Some(cmd) = self.cmd_rx.recv() => self.on_cmd(cmd).await,
                 Some(res) = self.sampling_futs.next() => {
-                    // Beetswap only returns fatal errors that are not related
+                    // The future only returns fatal errors that are not related
                     // to P2P nor networking.
-                    let (height, timed_out) = res?;
+                    let (height, failed) = res?;
 
-                    if timed_out {
-                        self.timed_out.insert_relaxed(height..=height).expect("invalid height");
+                    if failed {
+                        self.failed.insert_relaxed(height..=height).expect("invalid height");
                     } else {
                         self.store.mark_as_sampled(height).await?;
                     }
@@ -374,7 +383,7 @@ where
         self.sampling_futs.clear();
         self.queue = BlockRanges::default();
         self.ongoing = BlockRanges::default();
-        self.timed_out = BlockRanges::default();
+        self.failed = BlockRanges::default();
         self.head_height = None;
 
         Ok(())
@@ -475,7 +484,7 @@ where
             self.queue
                 .remove_relaxed(1..=height)
                 .expect("invalid height");
-            self.timed_out
+            self.failed
                 .insert_relaxed(1..=height)
                 .expect("invalid height");
             return Ok(false);
@@ -493,6 +502,7 @@ where
         self.store.update_sampling_metadata(height, cids).await?;
 
         let p2p = self.p2p.clone();
+        let blockstore = self.blockstore.clone();
         let event_pub = self.event_pub.clone();
         let sampling_window = self.sampling_window;
 
@@ -522,22 +532,30 @@ where
                 })
                 .collect::<FuturesUnordered<_>>();
 
-            let mut sampling_timed_out = false;
+            let mut sampling_failed = false;
 
             // Run futures to completion
             while let Some((row, column, res)) = futs.next().await {
-                let timed_out = match res {
-                    Ok(_) => false,
-                    // Validation is done at Bitswap level, through `ShwapMultihasher`.
-                    // If the sample is not valid, it will never be delivered to us
-                    // as the data of the CID. Because of that, the only signal
-                    // that data sampling verification failed is query timing out.
-                    Err(P2pError::RequestTimedOut) => true,
+                let failed = match res {
+                    Ok(sample) => {
+                        // put the sample into the blockstore
+                        let cid = sample_cid(row, column, height).expect("Block height not 0");
+                        let mut bytes = BytesMut::new();
+                        sample.encode(&mut bytes);
+                        blockstore.put_keyed(&cid, &bytes).await?;
+
+                        false
+                    }
+                    // Validation is done at DA protocol level.
+                    // If we hit the timeout or maximum retries of the request
+                    // we can mark it as failure
+                    Err(P2pError::RequestTimedOut)
+                    | Err(P2pError::ShrEx(ShrExError::MaxTriesReached)) => true,
                     Err(e) => return Err(e.into()),
                 };
 
-                if timed_out {
-                    sampling_timed_out = true;
+                if failed {
+                    sampling_failed = true;
                 }
 
                 event_pub.send(NodeEvent::ShareSamplingResult {
@@ -545,17 +563,17 @@ where
                     square_width,
                     row,
                     column,
-                    timed_out,
+                    failed,
                 });
             }
 
             event_pub.send(NodeEvent::SamplingResult {
                 height,
-                timed_out: sampling_timed_out,
+                failed: sampling_failed,
                 took: now.elapsed(),
             });
 
-            Ok((height, sampling_timed_out))
+            Ok((height, sampling_failed))
         }
         .boxed();
 
@@ -573,7 +591,7 @@ where
         let sampled = self.store.get_sampled_ranges().await?;
 
         self.head_height = stored.head();
-        self.queue = stored - &sampled - &self.timed_out - &self.ongoing - &self.will_be_pruned;
+        self.queue = stored - &sampled - &self.failed - &self.ongoing - &self.will_be_pruned;
 
         Ok(())
     }
@@ -631,23 +649,19 @@ fn random_indexes(square_width: u16, max_samples_needed: usize) -> HashSet<(u16,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blockstore::InMemoryBlockstore;
     use crate::events::{EventChannel, EventSubscriber};
     use crate::node::SAMPLING_WINDOW;
     use crate::p2p::P2pCmd;
-    use crate::p2p::shwap::convert_cid;
     use crate::store::InMemoryStore;
     use crate::test_utils::{ExtendedHeaderGeneratorExt, MockP2pHandle};
     use crate::utils::OneshotResultSender;
-    use bytes::BytesMut;
-    use celestia_proto::bitswap::Block;
     use celestia_types::consts::appconsts::AppVersion;
-    use celestia_types::sample::{Sample, SampleId};
+    use celestia_types::sample::Sample;
     use celestia_types::test_utils::{ExtendedHeaderGenerator, generate_dummy_eds};
     use celestia_types::{AxisType, DataAvailabilityHeader, ExtendedDataSquare};
-    use cid::Cid;
     use lumina_utils::test_utils::async_test;
     use lumina_utils::time::sleep;
-    use prost::Message;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -718,6 +732,7 @@ mod tests {
     async fn received_valid_samples() {
         let (mock, mut handle) = P2p::mocked();
         let store = Arc::new(InMemoryStore::new());
+        let blockstore = Arc::new(InMemoryBlockstore::new());
         let events = EventChannel::new();
         let mut event_sub = events.subscribe();
 
@@ -725,6 +740,7 @@ mod tests {
             event_pub: events.publisher(),
             p2p: Arc::new(mock),
             store: store.clone(),
+            blockstore,
             sampling_window: SAMPLING_WINDOW,
             concurrency_limit: 1,
             additional_headersub_concurrency: DEFAULT_ADDITIONAL_HEADER_SUB_CONCURENCY,
@@ -779,6 +795,7 @@ mod tests {
     async fn sampling_timeout() {
         let (mock, mut handle) = P2p::mocked();
         let store = Arc::new(InMemoryStore::new());
+        let blockstore = Arc::new(InMemoryBlockstore::new());
         let events = EventChannel::new();
         let mut event_sub = events.subscribe();
 
@@ -786,6 +803,7 @@ mod tests {
             event_pub: events.publisher(),
             p2p: Arc::new(mock),
             store: store.clone(),
+            blockstore,
             sampling_window: SAMPLING_WINDOW,
             concurrency_limit: 1,
             additional_headersub_concurrency: DEFAULT_ADDITIONAL_HEADER_SUB_CONCURENCY,
@@ -823,12 +841,14 @@ mod tests {
     async fn backward_dasing() {
         let (mock, mut handle) = P2p::mocked();
         let store = Arc::new(InMemoryStore::new());
+        let blockstore = Arc::new(InMemoryBlockstore::new());
         let events = EventChannel::new();
 
         let _daser = Daser::start(DaserArgs {
             event_pub: events.publisher(),
             p2p: Arc::new(mock),
             store: store.clone(),
+            blockstore,
             sampling_window: SAMPLING_WINDOW,
             concurrency_limit: 1,
             additional_headersub_concurrency: DEFAULT_ADDITIONAL_HEADER_SUB_CONCURENCY,
@@ -857,38 +877,40 @@ mod tests {
         store.insert(headers[4..=9].to_vec()).await.unwrap();
 
         // Sample block 10
-        handle_get_shwap_cid(&mut handle, 10, &edses[9], false).await;
+        handle_get_samples(&mut handle, 10, &edses[9], false).await;
 
         // Sample block 9
-        handle_get_shwap_cid(&mut handle, 9, &edses[8], false).await;
+        handle_get_samples(&mut handle, 9, &edses[8], false).await;
 
         // To avoid race conditions we wait a bit for the block 8 to be scheduled
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(150)).await;
 
         // Insert 16-20 block headers
         store.insert(headers[15..=19].to_vec()).await.unwrap();
 
         // To avoid race conditions we wait a bit for the new head (block 20) to be scheduled
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(150)).await;
 
         // Now daser runs two concurrent data sampling: block 8 and block 20
-        handle_concurrent_get_shwap_cid(
+        handle_concurrent_get_sample(
             &mut handle,
             [(8, &edses[9], false), (20, &edses[19], false)],
         )
         .await;
 
         // Sample and reject block 19
-        handle_get_shwap_cid(&mut handle, 19, &edses[18], true).await;
+        handle_get_samples(&mut handle, 19, &edses[18], true).await;
 
         // Simulate disconnection
         handle.announce_all_peers_disconnected();
 
         // Daser may scheduled Block 18 already, so we need to reply to that requests.
-        // For the sake of the test we reply with a bitswap timeout.
-        while let Some(cmd) = handle.try_recv_cmd().await {
+        // For the sake of the test we reply with a timeout.
+        // To avoid race conditions we wait a bit for all the potential requests to be scheduled
+        sleep(Duration::from_millis(150)).await;
+        while let Some(cmd) = dbg!(handle.try_recv_cmd().await) {
             match cmd {
-                P2pCmd::GetShwapCid { respond_to, .. } => {
+                P2pCmd::GetSample { respond_to, .. } => {
                     let _ = respond_to.send(Err(P2pError::RequestTimedOut));
                 }
                 cmd => panic!("Unexpected command: {cmd:?}"),
@@ -902,18 +924,18 @@ mod tests {
         handle.announce_peer_connected();
 
         // Because of disconnection and previous rejection of block 19, daser will resample it
-        handle_get_shwap_cid(&mut handle, 19, &edses[18], false).await;
+        handle_get_samples(&mut handle, 19, &edses[18], false).await;
 
         // Sample block 16 until 18
         for height in (16..=18).rev() {
             let idx = height as usize - 1;
-            handle_get_shwap_cid(&mut handle, height, &edses[idx], false).await;
+            handle_get_samples(&mut handle, height, &edses[idx], false).await;
         }
 
         // Sample block 5 until 7
         for height in (5..=7).rev() {
             let idx = height as usize - 1;
-            handle_get_shwap_cid(&mut handle, height, &edses[idx], false).await;
+            handle_get_samples(&mut handle, height, &edses[idx], false).await;
         }
 
         handle.expect_no_cmd().await;
@@ -925,7 +947,7 @@ mod tests {
         store.insert(header).await.unwrap();
 
         // Sample block 21
-        handle_get_shwap_cid(&mut handle, 21, &eds, false).await;
+        handle_get_samples(&mut handle, 21, &eds, false).await;
 
         handle.expect_no_cmd().await;
     }
@@ -934,6 +956,7 @@ mod tests {
     async fn concurrency_limits() {
         let (mock, mut handle) = P2p::mocked();
         let store = Arc::new(InMemoryStore::new());
+        let blockstore = Arc::new(InMemoryBlockstore::new());
         let events = EventChannel::new();
 
         // Concurrency limit
@@ -955,6 +978,7 @@ mod tests {
             event_pub: events.publisher(),
             p2p: Arc::new(mock),
             store: store.clone(),
+            blockstore,
             sampling_window: SAMPLING_WINDOW,
             concurrency_limit,
             additional_headersub_concurrency,
@@ -967,8 +991,8 @@ mod tests {
         let mut hold_respond_channels = Vec::new();
 
         for _ in 0..(concurrency_limit * shares_per_block) {
-            let (cid, respond_to) = handle.expect_get_shwap_cid().await;
-            hold_respond_channels.push((cid, respond_to));
+            let (_, _, block_height, respond_to) = handle.expect_get_sample().await;
+            hold_respond_channels.push((block_height, respond_to));
         }
 
         // Concurrency limit reached
@@ -981,8 +1005,8 @@ mod tests {
             .unwrap();
 
         for _ in 0..shares_per_block {
-            let (cid, respond_to) = handle.expect_get_shwap_cid().await;
-            hold_respond_channels.push((cid, respond_to));
+            let (_, _, block_height, respond_to) = handle.expect_get_sample().await;
+            hold_respond_channels.push((block_height, respond_to));
         }
         handle.expect_no_cmd().await;
 
@@ -994,8 +1018,8 @@ mod tests {
 
         // Now Daser will schedule the next block.
         for _ in 0..shares_per_block {
-            let (cid, respond_to) = handle.expect_get_shwap_cid().await;
-            hold_respond_channels.push((cid, respond_to));
+            let (_, _, block_height, respond_to) = handle.expect_get_sample().await;
+            hold_respond_channels.push((block_height, respond_to));
         }
 
         // And... concurrency limit is reached again.
@@ -1008,12 +1032,12 @@ mod tests {
                 .await
                 .unwrap();
             // Give some time for Daser to schedule it
-            sleep(Duration::from_millis(10)).await;
+            sleep(Duration::from_millis(150)).await;
         }
 
         for _ in 0..(additional_headersub_concurrency * shares_per_block) {
-            let (cid, respond_to) = handle.expect_get_shwap_cid().await;
-            hold_respond_channels.push((cid, respond_to));
+            let (_, _, block_height, respond_to) = handle.expect_get_sample().await;
+            hold_respond_channels.push((block_height, respond_to));
         }
 
         // Concurrency limit for heads is reached
@@ -1029,8 +1053,8 @@ mod tests {
         stop_sampling_for(&mut hold_respond_channels, 28);
 
         for _ in 0..shares_per_block {
-            let (cid, respond_to) = handle.expect_get_shwap_cid().await;
-            hold_respond_channels.push((cid, respond_to));
+            let (_, _, block_height, respond_to) = handle.expect_get_sample().await;
+            hold_respond_channels.push((block_height, respond_to));
         }
 
         // Concurrency limit for heads is reached again
@@ -1046,6 +1070,7 @@ mod tests {
     async fn ratelimit() {
         let (mock, mut handle) = P2p::mocked();
         let store = Arc::new(InMemoryStore::new());
+        let blockstore = Arc::new(InMemoryBlockstore::new());
         let events = EventChannel::new();
         let mut event_sub = events.subscribe();
 
@@ -1053,6 +1078,7 @@ mod tests {
             event_pub: events.publisher(),
             p2p: Arc::new(mock),
             store: store.clone(),
+            blockstore,
             sampling_window: Duration::from_secs(60),
             concurrency_limit: 1,
             additional_headersub_concurrency: DEFAULT_ADDITIONAL_HEADER_SUB_CONCURENCY,
@@ -1160,20 +1186,19 @@ mod tests {
     }
 
     fn stop_sampling_for(
-        responders: &mut Vec<(Cid, OneshotResultSender<Vec<u8>, P2pError>)>,
+        responders: &mut Vec<(u64, OneshotResultSender<Sample, P2pError>)>,
         height: u64,
     ) {
         let mut indexes = Vec::new();
 
-        for (idx, (cid, _)) in responders.iter().enumerate() {
-            let sample_id: SampleId = cid.try_into().unwrap();
-            if sample_id.block_height() == height {
+        for (idx, (h, _)) in responders.iter().enumerate() {
+            if *h == height {
                 indexes.push(idx)
             }
         }
 
         for idx in indexes.into_iter().rev() {
-            let (_cid, respond_to) = responders.remove(idx);
+            let (_, respond_to) = responders.remove(idx);
             respond_to.send(Err(P2pError::RequestTimedOut)).unwrap();
         }
     }
@@ -1217,10 +1242,10 @@ mod tests {
         height: u64,
         simulate_sampling_timeout: bool,
     ) {
-        let cids = handle_get_shwap_cid(handle, height, eds, simulate_sampling_timeout).await;
+        handle_get_samples(handle, height, eds, simulate_sampling_timeout).await;
 
         // Wait to be sampled
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(150)).await;
 
         // Check if block was sampled or timed-out.
         let sampled_ranges = store.get_sampled_ranges().await.unwrap();
@@ -1229,7 +1254,6 @@ mod tests {
         // Check if CIDs we requested successfully made it in the store
         let mut sampling_metadata = store.get_sampling_metadata(height).await.unwrap().unwrap();
         sampling_metadata.cids.sort();
-        assert_eq!(&sampling_metadata.cids, &cids);
 
         // Check if we received `SamplingStarted` event
         let mut remaining_shares = match event_sub.try_recv().unwrap().event {
@@ -1241,11 +1265,11 @@ mod tests {
                 assert_eq!(ev_height, height);
                 assert_eq!(square_width, eds.square_width());
 
-                // Make sure the share list matches the CIDs we received
-                let mut cids = shares
+                // Make sure the share list matches what's in metadata
+                let mut cids: Vec<_> = shares
                     .iter()
                     .map(|(row, col)| sample_cid(*row, *col, height).unwrap())
-                    .collect::<Vec<_>>();
+                    .collect();
                 cids.sort();
                 assert_eq!(&sampling_metadata.cids, &cids);
 
@@ -1262,12 +1286,12 @@ mod tests {
                     square_width,
                     row,
                     column,
-                    timed_out,
+                    failed,
                 } => {
                     assert_eq!(ev_height, height);
                     assert_eq!(square_width, eds.square_width());
                     assert_eq!(
-                        timed_out,
+                        failed,
                         simulate_sampling_timeout && i == REQ_TIMEOUT_SHARE_NUM
                     );
                     // Make sure it is in the list and remove it
@@ -1283,11 +1307,11 @@ mod tests {
         match event_sub.try_recv().unwrap().event {
             NodeEvent::SamplingResult {
                 height: ev_height,
-                timed_out,
+                failed,
                 took,
             } => {
                 assert_eq!(ev_height, height);
-                assert_eq!(timed_out, simulate_sampling_timeout);
+                assert_eq!(failed, simulate_sampling_timeout);
                 assert_ne!(took, Duration::default());
             }
             ev => panic!("Unexpected event: {ev}"),
@@ -1295,10 +1319,10 @@ mod tests {
     }
 
     /// Responds to get_shwap_cid and returns all CIDs that were requested
-    async fn handle_concurrent_get_shwap_cid<const N: usize>(
+    async fn handle_concurrent_get_sample<const N: usize>(
         handle: &mut MockP2pHandle,
         handling_args: [(u64, &ExtendedDataSquare, bool); N],
-    ) -> Vec<Cid> {
+    ) {
         struct Info<'a> {
             eds: &'a ExtendedDataSquare,
             simulate_sampling_timeout: bool,
@@ -1325,16 +1349,14 @@ mod tests {
             .collect::<HashMap<_, _>>();
 
         let needed_samples_sum = infos.values().map(|info| info.needed_samples).sum();
-        let mut cids = Vec::with_capacity(needed_samples_sum);
 
         for _ in 0..needed_samples_sum {
-            let (cid, respond_to) = handle.expect_get_shwap_cid().await;
-            cids.push(cid);
-
-            let sample_id: SampleId = cid.try_into().unwrap();
+            let (row, col, height, respond_to) = handle.expect_get_sample().await;
             let info = infos
-                .get_mut(&sample_id.block_height())
-                .unwrap_or_else(|| panic!("Unexpected height: {}", sample_id.block_height()));
+                .get_mut(&height)
+                .unwrap_or_else(|| panic!("Unexpected height: {}", height));
+
+            let sample = Sample::new(row, col, AxisType::Row, info.eds).unwrap();
 
             info.requests_count += 1;
 
@@ -1344,41 +1366,17 @@ mod tests {
                 continue;
             }
 
-            let sample = gen_sample_of_cid(sample_id, info.eds).await;
             respond_to.send(Ok(sample)).unwrap();
         }
-
-        cids.sort();
-        cids
     }
 
     /// Responds to get_shwap_cid and returns all CIDs that were requested
-    async fn handle_get_shwap_cid(
+    async fn handle_get_samples(
         handle: &mut MockP2pHandle,
         height: u64,
         eds: &ExtendedDataSquare,
         simulate_sampling_timeout: bool,
-    ) -> Vec<Cid> {
-        handle_concurrent_get_shwap_cid(handle, [(height, eds, simulate_sampling_timeout)]).await
-    }
-
-    async fn gen_sample_of_cid(sample_id: SampleId, eds: &ExtendedDataSquare) -> Vec<u8> {
-        let sample = Sample::new(
-            sample_id.row_index(),
-            sample_id.column_index(),
-            AxisType::Row,
-            eds,
-        )
-        .unwrap();
-
-        let mut container = BytesMut::new();
-        sample.encode(&mut container);
-
-        let block = Block {
-            cid: convert_cid(&sample_id.into()).unwrap().to_bytes(),
-            container: container.to_vec(),
-        };
-
-        block.encode_to_vec()
+    ) {
+        handle_concurrent_get_sample(handle, [(height, eds, simulate_sampling_timeout)]).await
     }
 }

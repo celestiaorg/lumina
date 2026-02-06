@@ -26,9 +26,9 @@ use celestia_types::fraud_proof::BadEncodingFraudProof;
 use celestia_types::hash::Hash;
 use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::Namespace;
-use celestia_types::row::{Row, RowId};
+use celestia_types::row::Row;
 use celestia_types::row_namespace_data::{RowNamespaceData, RowNamespaceDataId};
-use celestia_types::sample::{Sample, SampleId};
+use celestia_types::sample::Sample;
 use celestia_types::{Blob, ExtendedDataSquare, ExtendedHeader, FraudProof};
 use cid::Cid;
 use libp2p::gossipsub::TopicHash;
@@ -268,7 +268,6 @@ pub(crate) enum P2pCmd {
     },
     // This is dead code because `get_row` still uses Bitswap.
     // We can use this when celestia-node#4288 is merged.
-    #[allow(dead_code)]
     GetRow {
         row_index: u16,
         block_height: u64,
@@ -276,7 +275,6 @@ pub(crate) enum P2pCmd {
     },
     // This is dead code because `get_sample` still uses Bitswap.
     // We can use this when celestia-node#4288 is merged.
-    #[allow(dead_code)]
     GetSample {
         row_index: u16,
         column_index: u16,
@@ -556,12 +554,21 @@ impl P2p {
         block_height: u64,
         timeout: Option<Duration>,
     ) -> Result<Row> {
-        let id = RowId::new(row_index, block_height)?;
-        let cid = convert_cid(&id.into())?;
+        let (tx, rx) = oneshot::channel();
 
-        let data = self.get_shwap_cid(cid, timeout).await?;
-        let row = Row::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
-        Ok(row)
+        self.send_command(P2pCmd::GetRow {
+            row_index,
+            block_height,
+            respond_to: tx,
+        })
+        .await?;
+
+        match timeout {
+            Some(dur) => time::timeout(dur, rx)
+                .await
+                .map_err(|_| P2pError::RequestTimedOut)??,
+            None => rx.await?,
+        }
     }
 
     /// Request a [`Sample`] on bitswap protocol.
@@ -572,12 +579,22 @@ impl P2p {
         block_height: u64,
         timeout: Option<Duration>,
     ) -> Result<Sample> {
-        let id = SampleId::new(row_index, column_index, block_height)?;
-        let cid = convert_cid(&id.into())?;
+        let (tx, rx) = oneshot::channel();
 
-        let data = self.get_shwap_cid(cid, timeout).await?;
-        let sample = Sample::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
-        Ok(sample)
+        self.send_command(P2pCmd::GetSample {
+            row_index,
+            column_index,
+            block_height,
+            respond_to: tx,
+        })
+        .await?;
+
+        match timeout {
+            Some(dur) => time::timeout(dur, rx)
+                .await
+                .map_err(|_| P2pError::RequestTimedOut)??,
+            None => rx.await?,
+        }
     }
 
     pub async fn get_eds(

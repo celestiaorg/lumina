@@ -3,22 +3,16 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use beetswap::utils::convert_cid;
-use blockstore::Blockstore;
-use celestia_rpc::{HeaderClient, ShareClient};
+use celestia_rpc::ShareClient;
 use celestia_types::nmt::{Namespace, NamespacedSha2Hasher};
-use celestia_types::sample::SampleId;
 use celestia_types::{AppVersion, Blob, ExtendedHeader};
-use cid::{Cid, CidGeneric};
-use lumina_node::NodeError;
 use lumina_node::blockstore::InMemoryBlockstore;
 use lumina_node::events::NodeEvent;
 use lumina_node::node::P2pError;
-use lumina_node::test_utils::test_node_builder;
+use lumina_node::store::InMemoryStore;
+use lumina_node::{Node, NodeError};
 use rand::RngCore;
-use tokio::sync::mpsc;
 use tokio::time::timeout;
-use utils::new_connected_node_with_builder;
 
 use crate::utils::{blob_submit, bridge_client, new_connected_node};
 
@@ -49,15 +43,12 @@ async fn shwap_sampling_forward() {
         let wait_height_sampled = async {
             loop {
                 let ev = events.recv().await.unwrap();
-                let NodeEvent::SamplingResult {
-                    height, timed_out, ..
-                } = ev.event
-                else {
+                let NodeEvent::SamplingResult { height, failed, .. } = ev.event else {
                     continue;
                 };
 
                 if height == new_head {
-                    assert!(!timed_out);
+                    assert!(!failed);
                     break;
                 }
             }
@@ -102,14 +93,11 @@ async fn shwap_sampling_backward() {
     timeout(Duration::from_secs(10), async {
         loop {
             let ev = events.recv().await.unwrap();
-            let NodeEvent::SamplingResult {
-                height, timed_out, ..
-            } = ev.event
-            else {
+            let NodeEvent::SamplingResult { height, failed, .. } = ev.event else {
                 continue;
             };
 
-            assert!(!timed_out);
+            assert!(!failed);
             headers_to_sample.remove(&height);
 
             if headers_to_sample.is_empty() {
@@ -131,7 +119,7 @@ async fn shwap_request_sample() {
     let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_height(&node, height).await;
     let square_width = header.square_width();
 
     // check existing sample
@@ -146,7 +134,7 @@ async fn shwap_request_sample() {
         .await
         .unwrap();
     let sample = node
-        .request_sample(0, 0, height, Some(Duration::from_millis(500)))
+        .request_sample(0, 0, height, Some(Duration::from_secs(1)))
         .await
         .unwrap();
     assert_eq!(expected, sample.share);
@@ -157,11 +145,11 @@ async fn shwap_request_sample() {
             square_width + 1,
             square_width + 1,
             height,
-            Some(Duration::from_millis(500)),
+            Some(Duration::from_secs(1)),
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, NodeError::P2p(P2pError::RequestTimedOut)));
+    assert!(matches!(err, NodeError::P2p(P2pError::ShrEx(_))));
 }
 
 #[tokio::test]
@@ -174,7 +162,8 @@ async fn shwap_request_row() {
     let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+
+    let header = wait_for_height(&node, height).await;
     let eds = client
         .share_get_eds(header.height(), header.app_version())
         .await
@@ -193,7 +182,7 @@ async fn shwap_request_row() {
         .request_row(square_width + 1, height, Some(Duration::from_secs(1)))
         .await
         .unwrap_err();
-    assert!(matches!(err, NodeError::P2p(P2pError::RequestTimedOut)));
+    assert!(matches!(err, NodeError::P2p(P2pError::ShrEx(_))));
 }
 
 #[tokio::test]
@@ -206,7 +195,7 @@ async fn shwap_request_row_namespace_data() {
     let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_height(&node, height).await;
     let eds = client
         .share_get_eds(header.height(), header.app_version())
         .await
@@ -275,6 +264,7 @@ async fn shwap_request_all_blobs() {
         .collect();
 
     let height = blob_submit(&client, &blobs).await;
+    wait_for_height(&node, height).await;
 
     // check existing namespace
     let received = node
@@ -294,144 +284,37 @@ async fn shwap_request_all_blobs() {
     assert!(received.is_empty());
 }
 
-#[tokio::test]
-async fn shwap_request_sample_should_cleanup_unneeded_samples() {
-    // submit some blobs to celestia to get bigger square, so that daser
-    // doesn't sample whole block
-    let ns = Namespace::const_v0(rand::random());
-    let blobs: Vec<_> = (0..5)
-        .map(|_| {
-            let blob_len = rand::random::<usize>() % 4096 + 1;
-            Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap()
-        })
-        .collect();
-
-    // we submit before creating a node because it's quite slow and events can lag
-    let client = bridge_client().await;
-    let submitted_height = blob_submit(&client, &blobs).await;
-    let header = client.header_get_by_height(submitted_height).await.unwrap();
-
-    let (removed_sender, mut removed_receiver) = mpsc::unbounded_channel();
-    let builder = test_node_builder()
-        // explicitely set pruning window to something big so that
-        // pruner doesn't kick in
-        .pruning_window(Duration::from_secs(60 * 60 * 24))
-        .blockstore(TestBlockstore::new(removed_sender));
-
-    let (node, mut events) = new_connected_node_with_builder(builder).await;
-
-    // wait for node to sample the height we just submitted
-    timeout(Duration::from_secs(10), async {
-        loop {
-            let ev = events.recv().await.unwrap();
-            let NodeEvent::SamplingResult { height, .. } = ev.event else {
-                continue;
-            };
-
-            if height == submitted_height {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-
-    // get the cids selected by daser
-    let cids = node
-        .get_sampling_metadata(submitted_height)
-        .await
-        .unwrap()
-        .unwrap()
-        .cids;
-
-    // try to request a sample that wasn't selected by daser
-    let (row, col, cid) = loop {
-        let (row, col, cid) = random_sample(&header);
-        if !cids.contains(&cid) {
-            break (row, col, cid);
-        }
-    };
-
-    node.request_sample(row, col, submitted_height, None)
-        .await
-        .unwrap();
-
-    // it should already be removed from the blockstore
-    let removed_cid = removed_receiver.try_recv().unwrap();
-    assert_eq!(removed_cid, cid);
-
-    // now try to get a cid that was selected by daser
-    let id = SampleId::try_from(cids[0]).unwrap();
-    assert_eq!(id.block_height(), submitted_height);
-
-    node.request_sample(id.row_index(), id.column_index(), submitted_height, None)
-        .await
-        .unwrap();
-
-    // it shouldn't be removed from blockstore within pruning window
-    removed_receiver.try_recv().unwrap_err();
-}
-
-struct TestBlockstore {
-    blockstore: InMemoryBlockstore,
-    removed_sender: mpsc::UnboundedSender<Cid>,
-}
-
-impl TestBlockstore {
-    fn new(removed_sender: mpsc::UnboundedSender<Cid>) -> Self {
-        Self {
-            blockstore: InMemoryBlockstore::new(),
-            removed_sender,
-        }
-    }
-}
-
-impl Blockstore for TestBlockstore {
-    async fn get<const S: usize>(
-        &self,
-        cid: &CidGeneric<S>,
-    ) -> blockstore::Result<Option<Vec<u8>>> {
-        self.blockstore.get(cid).await
-    }
-
-    async fn put_keyed<const S: usize>(
-        &self,
-        cid: &CidGeneric<S>,
-        data: &[u8],
-    ) -> blockstore::Result<()> {
-        self.blockstore.put_keyed(cid, data).await
-    }
-
-    async fn remove<const S: usize>(&self, cid: &CidGeneric<S>) -> blockstore::Result<()> {
-        self.blockstore.remove(cid).await?;
-
-        let cid = convert_cid(cid).unwrap();
-        self.removed_sender.send(cid).unwrap();
-
-        Ok(())
-    }
-
-    async fn close(self) -> blockstore::Result<()> {
-        self.blockstore.close().await
-    }
-}
-
-fn random_sample(header: &ExtendedHeader) -> (u16, u16, Cid) {
-    let square = header.square_width();
-    let id = SampleId::new(
-        rand::random::<u16>() % square,
-        rand::random::<u16>() % square,
-        header.height(),
-    )
-    .unwrap();
-
-    let cid = convert_cid(&id.into()).unwrap();
-
-    (id.row_index(), id.column_index(), cid)
-}
-
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; len];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes
+}
+
+async fn wait_for_height(
+    node: &Node<InMemoryBlockstore, InMemoryStore>,
+    height: u64,
+) -> ExtendedHeader {
+    if let Ok(hdr) = node.get_header_by_height(height).await {
+        return hdr;
+    }
+
+    // we didn't find header, so let's wait for it on subscription
+    let mut max_tries = 5;
+    let mut sub = node.header_subscribe().await.unwrap();
+    loop {
+        if max_tries == 0 {
+            break;
+        }
+
+        let hdr = sub.recv().await.unwrap();
+        if hdr.height() == height {
+            return hdr;
+        }
+
+        max_tries -= 1;
+    }
+
+    // check last time with get by height, maybe it was inserted in a moment that
+    // we didn't get it previously yet but also missed it on subscription
+    node.get_header_by_height(height).await.unwrap()
 }

@@ -32,7 +32,6 @@ use crate::daser::{
 };
 use crate::events::{EventChannel, EventSubscriber, NodeEvent};
 use crate::node::subscriptions::{SubscriptionError, forward_new_blobs, forward_new_shares};
-use crate::p2p::shwap::sample_cid;
 use crate::p2p::{P2p, P2pArgs};
 use crate::pruner::{Pruner, PrunerArgs};
 use crate::store::{InMemoryStore, SamplingMetadata, Store, StoreError};
@@ -176,6 +175,7 @@ where
         let daser = Arc::new(Daser::start(DaserArgs {
             p2p: p2p.clone(),
             store: store.clone(),
+            blockstore: blockstore.clone(),
             event_pub: event_channel.publisher(),
             sampling_window: config.sampling_window,
             concurrency_limit: DEFAULT_CONCURENCY_LIMIT,
@@ -401,26 +401,6 @@ where
             .p2p()
             .get_sample(row_index, column_index, block_height, timeout)
             .await?;
-
-        // We want to immediately remove the sample from blockstore
-        // but **only if** it wasn't chosen for DASing. Otherwise, we could
-        // accidentally remove samples needed for the block reconstruction.
-        //
-        // There's a small possibility of permanently storing this sample if
-        // persistent blockstore is used and user closes tab / kills process
-        // before the remove is called, but it is acceptable tradeoff to avoid complexity.
-        //
-        // TODO: It should be properly solved when we switch from bitswap to shrex.
-        if let Some(metadata) = self.get_sampling_metadata(block_height).await? {
-            let cid = sample_cid(row_index, column_index, block_height)?;
-            if !metadata.cids.contains(&cid) {
-                let blockstore = self
-                    .blockstore
-                    .as_ref()
-                    .expect("Blockstore not initialized");
-                let _ = blockstore.remove(&cid).await;
-            }
-        }
 
         Ok(sample)
     }
