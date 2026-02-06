@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -121,10 +122,38 @@ pub struct ConfirmHandle<ConfirmInfo> {
     pub confirmed: oneshot::Receiver<Result<TxStatus<ConfirmInfo>>>,
 }
 
-impl<ConfirmInfo> ConfirmHandle<ConfirmInfo> {
-    async fn confirm(self) -> Result<TxStatus<ConfirmInfo>> {
-        // we should never have recv errors
-        self.confirmed.await.unwrap()
+#[derive(Debug, Clone)]
+pub enum TxUserError {
+    Rejected { reason: RejectionReason },
+    NotFound,
+}
+
+impl fmt::Display for TxUserError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TxUserError::Rejected { reason } => write!(f, "Transaction rejected: {:?}", reason),
+            TxUserError::NotFound => write!(f, "Transaction not found"),
+        }
+    }
+}
+
+impl ConfirmHandle<TxConfirmInfo> {
+    pub async fn confirm(self) -> std::result::Result<TxInfo, TxUserError> {
+        // receiver errors or internal errors are invariant violations
+        let status = self
+            .confirmed
+            .await
+            .expect("confirm receiver dropped")
+            .expect("confirm error");
+        match status {
+            // TODO: handle execution errors as erros
+            TxStatus::Confirmed { info } => Ok(info.info),
+            TxStatus::Rejected { reason } => Err(TxUserError::Rejected { reason }),
+            TxStatus::Evicted => {
+                panic!("should not get evicted statuses in confirm")
+            }
+            TxStatus::Unknown | TxStatus::Pending => Err(TxUserError::NotFound),
+        }
     }
 }
 
@@ -689,12 +718,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let confirm_status = handle.confirm().await.unwrap();
-
-        let TxStatus::Confirmed { info } = confirm_status else {
-            panic!("expected confirmed status");
-        };
-        assert!(info.info.height > 0);
+        let info = handle.confirm().await.unwrap();
+        assert!(info.height > 0);
     }
 
     fn random_blob(size: RangeInclusive<usize>) -> Blob {
