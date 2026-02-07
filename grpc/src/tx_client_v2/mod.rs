@@ -314,6 +314,23 @@ pub enum SubmitFailure {
     TxInMempoolCache,
 }
 
+impl SubmitFailure {
+    fn label(&self) -> String {
+        match self {
+            SubmitFailure::SequenceMismatch { expected } => {
+                format!("SequenceMismatch expected={}", expected)
+            }
+            SubmitFailure::Other {
+                error_code,
+                message,
+            } => format!("Other code={:?} msg={}", error_code, message),
+            SubmitFailure::NetworkError { err } => format!("NetworkError {}", err),
+            SubmitFailure::MempoolIsFull => "MempoolIsFull".to_string(),
+            SubmitFailure::TxInMempoolCache => "TxInMempoolCache".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum SigningFailure {
@@ -323,6 +340,18 @@ pub enum SigningFailure {
     Other { message: String },
     /// Transport or RPC error while submitting.
     NetworkError { err: Arc<Error> },
+}
+
+impl SigningFailure {
+    fn label(&self) -> String {
+        match self {
+            SigningFailure::SequenceMismatch { expected } => {
+                format!("SequenceMismatch expected={}", expected)
+            }
+            SigningFailure::Other { message } => format!("Other msg={}", message),
+            SigningFailure::NetworkError { err } => format!("NetworkError {}", err),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -402,8 +431,14 @@ impl<TxId: TxIdT, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
         match self {
             NodeEvent::NodeResponse { response, .. } => match response {
                 NodeResponse::Submission { sequence, result } => {
-                    let status = if result.is_ok() { "Ok" } else { "Err" };
-                    format!("NodeResponse::Submission seq={} {}", sequence, status)
+                    match result {
+                        Ok(_) => format!("NodeResponse::Submission seq={} Ok", sequence),
+                        Err(err) => format!(
+                            "NodeResponse::Submission seq={} Err {}",
+                            sequence,
+                            err.label()
+                        ),
+                    }
                 }
                 NodeResponse::Confirmation { response, .. } => match response {
                     Ok(ConfirmationResponse::Batch { statuses }) => {
@@ -412,11 +447,15 @@ impl<TxId: TxIdT, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
                     Ok(ConfirmationResponse::Single { .. }) => {
                         "NodeResponse::Confirmation Single".to_string()
                     }
-                    Err(_) => "NodeResponse::Confirmation Err".to_string(),
+                    Err(err) => format!("NodeResponse::Confirmation Err {}", err),
                 },
                 NodeResponse::Signing { sequence, result } => {
-                    let status = if result.is_ok() { "Ok" } else { "Err" };
-                    format!("NodeResponse::Signing seq={} {}", sequence, status)
+                    match result {
+                        Ok(_) => format!("NodeResponse::Signing seq={} Ok", sequence),
+                        Err(err) => {
+                            format!("NodeResponse::Signing seq={} Err {}", sequence, err.label())
+                        }
+                    }
                 }
             },
             NodeEvent::NodeStop => "NodeStop".to_string(),

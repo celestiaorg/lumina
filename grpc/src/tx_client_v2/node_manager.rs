@@ -478,6 +478,12 @@ impl<S: TxServer> NodeManager<S> {
                                     }
                                 }
                                 Err(failure) => {
+                                    debug!(
+                                        node_id = %node_id.as_ref(),
+                                        sequence,
+                                        failure = %failure.label(),
+                                        "submission error"
+                                    );
                                     if let NodeState::Active(active) = node {
                                         on_submit_failure(active);
                                     }
@@ -574,7 +580,13 @@ impl<S: TxServer> NodeManager<S> {
                                         mutations.append(&mut effects);
                                     }
                                 },
-                                Err(_err) => {
+                                Err(err) => {
+                                    debug!(
+                                        node_id = %node_id.as_ref(),
+                                        error = %err,
+                                        is_network = err.is_network_error(),
+                                        "confirmation error"
+                                    );
                                     // TODO: add error handling
                                 }
                             }
@@ -587,6 +599,12 @@ impl<S: TxServer> NodeManager<S> {
                                     push_plan_request(&mut plan_requests, PlanRequest::Submission);
                                 }
                                 Err(SigningFailure::SequenceMismatch { expected }) => {
+                                    debug!(
+                                        node_id = %node_id.as_ref(),
+                                        sequence,
+                                        expected,
+                                        "signing sequence mismatch"
+                                    );
                                     if expected >= sequence {
                                         stop_all = true;
                                     } else {
@@ -594,11 +612,23 @@ impl<S: TxServer> NodeManager<S> {
                                         push_plan_request(&mut plan_requests, PlanRequest::Signing);
                                     }
                                 }
-                                Err(SigningFailure::NetworkError { .. }) => {
+                                Err(SigningFailure::NetworkError { err }) => {
+                                    debug!(
+                                        node_id = %node_id.as_ref(),
+                                        sequence,
+                                        error = %err,
+                                        "signing network error"
+                                    );
                                     self.signing_delay = Some(confirm_interval);
                                     push_plan_request(&mut plan_requests, PlanRequest::Signing);
                                 }
-                                Err(SigningFailure::Other { .. }) => {
+                                Err(SigningFailure::Other { message }) => {
+                                    debug!(
+                                        node_id = %node_id.as_ref(),
+                                        sequence,
+                                        message = %message,
+                                        "signing error"
+                                    );
                                     stop_all = true;
                                 }
                             }
