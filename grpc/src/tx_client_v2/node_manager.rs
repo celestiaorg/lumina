@@ -959,11 +959,10 @@ fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
     status: TxStatus<ConfirmInfo>,
     txs: &TxBuffer<TxId, ConfirmInfo, Pending>,
 ) -> Vec<WorkerMutation<TxId, ConfirmInfo>> {
-    let mut effects: Vec<WorkerMutation<TxId, ConfirmInfo>> = Vec::new();
+    let effects: Vec<WorkerMutation<TxId, ConfirmInfo>> = Vec::new();
     let Some(seq) = txs.get_seq(&id) else {
         return effects;
     };
-    let mut confirmed_info: Option<ConfirmInfo> = None;
     let mut fatal: Option<TxStatus<ConfirmInfo>> = None;
     let mut confirmed = false;
     {
@@ -971,15 +970,10 @@ fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
             return effects;
         };
         match status {
-            TxStatus::Confirmed { info } => {
+            TxStatus::Confirmed { .. } | TxStatus::Pending => {
                 state.shared.last_submitted =
                     Some(state.shared.last_submitted.unwrap_or(seq).max(seq));
                 state.shared.epoch = state.shared.epoch.saturating_add(1);
-                let expected = txs.confirmed_seq() + 1;
-                if seq == expected {
-                    state.shared.last_confirmed = seq;
-                    confirmed_info = Some(info);
-                }
                 confirmed = true;
             }
             other => {
@@ -989,9 +983,6 @@ fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
     }
     if confirmed {
         node.transition_to_active();
-        if let Some(info) = confirmed_info {
-            effects.push(WorkerMutation::Confirm { seq, info });
-        }
     }
     if let Some(status) = fatal {
         node.apply_stop_error(seq, StopError::ConfirmError(status));
