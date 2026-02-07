@@ -1,7 +1,7 @@
 //! Transaction manager v2: queueing, submission, confirmation, and recovery logic.
 //!
 //! # Overview
-//! - `TransactionManager` is a front-end that signs and enqueues transactions.
+//! - `TxSubmitter` is a front-end that enqueues transactions.
 //! - `TransactionWorker` is a background event loop that submits and confirms.
 //! - `TxServer` abstracts the submission/confirmation backend (one or more nodes).
 //!
@@ -21,42 +21,55 @@
 //! # use std::time::Duration;
 //! # use celestia_grpc::{Result, TxConfig};
 //! # use celestia_grpc::tx_client_v2::{
-//! #     TransactionWorker, TxRequest, TxServer, SignFn,
+//! #     TransactionWorker, TxRequest, TxServer,
 //! # };
 //! # struct DummyServer;
 //! # #[async_trait::async_trait]
 //! # impl TxServer for DummyServer {
 //! #     type TxId = u64;
 //! #     type ConfirmInfo = u64;
-//! #     async fn submit(&self, _b: Vec<u8>, _s: u64) -> Result<u64, _> { unimplemented!() }
+//! #     type TxRequest = TxRequest;
+//! #     async fn submit(
+//! #         &self,
+//! #         _b: Arc<Vec<u8>>,
+//! #         _s: u64,
+//! #     ) -> celestia_grpc::tx_client_v2::TxSubmitResult<Self::TxId> {
+//! #         unimplemented!()
+//! #     }
 //! #     async fn status_batch(
 //! #         &self,
 //! #         _ids: Vec<u64>,
-//! #     ) -> Result<Vec<(u64, celestia_grpc::tx_client_v2::TxStatus<u64>)>> {
+//! #     ) -> celestia_grpc::tx_client_v2::TxConfirmResult<
+//! #         Vec<(Self::TxId, celestia_grpc::tx_client_v2::TxStatus<Self::ConfirmInfo>)>,
+//! #     > {
+//! #         unimplemented!()
+//! #     }
+//! #     async fn status(
+//! #         &self,
+//! #         _id: Self::TxId,
+//! #     ) -> celestia_grpc::tx_client_v2::TxConfirmResult<
+//! #         celestia_grpc::tx_client_v2::TxStatus<Self::ConfirmInfo>,
+//! #     > {
 //! #         unimplemented!()
 //! #     }
 //! #     async fn current_sequence(&self) -> Result<u64> { unimplemented!() }
-//! # }
-//! # struct DummySigner;
-//! # #[async_trait::async_trait]
-//! # impl SignFn<u64, u64> for DummySigner {
-//! #     async fn sign(
+//! #     async fn simulate_and_sign(
 //! #         &self,
+//! #         _req: Arc<Self::TxRequest>,
 //! #         _sequence: u64,
-//! #         _request: &TxRequest,
-//! #         _cfg: &TxConfig,
-//! #     ) -> Result<celestia_grpc::tx_client_v2::Transaction<u64, u64>> {
+//! #     ) -> std::result::Result<
+//! #         celestia_grpc::tx_client_v2::Transaction<Self::TxId, Self::ConfirmInfo>,
+//! #         celestia_grpc::tx_client_v2::SigningFailure,
+//! #     > {
 //! #         unimplemented!()
 //! #     }
 //! # }
 //! # async fn docs() -> Result<()> {
 //! let nodes = HashMap::from([(Arc::from("node-1"), Arc::new(DummyServer))]);
-//! let signer = Arc::new(DummySigner);
 //! let (manager, mut worker) = TransactionWorker::new(
 //!     nodes,
 //!     Duration::from_secs(1),
 //!     16,
-//!     signer,
 //!     1,
 //!     128,
 //! );
@@ -93,16 +106,41 @@ pub type NodeId = Arc<str>;
 pub type TxSubmitResult<T> = Result<T, SubmitFailure>;
 /// Result for confirmation calls.
 pub type TxConfirmResult<T> = Result<T>;
+/// Result for signing calls.
+pub type TxSigningResult<TxId, ConfirmInfo> =
+    Result<Transaction<TxId, ConfirmInfo>, SigningFailure>;
 
 pub trait TxIdT: Clone + std::fmt::Debug {}
 impl<T> TxIdT for T where T: Clone + std::fmt::Debug {}
 
 #[derive(Debug, Clone)]
-pub enum TxRequest {
+pub enum TxPayload {
     /// Pay-for-blobs transaction.
     Blobs(Vec<celestia_types::Blob>),
     /// Raw Cosmos transaction body with arbitrary messages.
     Tx(celestia_types::state::RawTxBody),
+}
+
+#[derive(Debug, Clone)]
+pub struct TxRequest {
+    pub tx: TxPayload,
+    pub cfg: TxConfig,
+}
+
+impl TxRequest {
+    pub fn tx(body: celestia_types::state::RawTxBody, cfg: TxConfig) -> Self {
+        Self {
+            tx: TxPayload::Tx(body),
+            cfg,
+        }
+    }
+
+    pub fn blobs(blobs: Vec<celestia_types::Blob>, cfg: TxConfig) -> Self {
+        Self {
+            tx: TxPayload::Blobs(blobs),
+            cfg,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -148,98 +186,87 @@ impl<TxId: TxIdT, ConfirmInfo> Default for TxCallbacks<TxId, ConfirmInfo> {
     }
 }
 
+struct RequestWithChannels<TxId, ConfirmInfo, Request> {
+    request: Arc<Request>,
+    sign_tx: oneshot::Sender<Result<()>>,
+    submit_tx: oneshot::Sender<Result<TxId>>,
+    confirm_tx: oneshot::Sender<Result<TxStatus<ConfirmInfo>>>,
+}
+
+impl<TxId: TxIdT, ConfirmInfo, Request> RequestWithChannels<TxId, ConfirmInfo, Request> {
+    fn new(
+        request: Request,
+        sign_tx: oneshot::Sender<Result<()>>,
+        submit_tx: oneshot::Sender<Result<TxId>>,
+        confirm_tx: oneshot::Sender<Result<TxStatus<ConfirmInfo>>>,
+    ) -> Self {
+        Self {
+            request: Arc::new(request),
+            sign_tx,
+            submit_tx,
+            confirm_tx,
+        }
+    }
+}
+
+struct SigningResult<TxId: TxIdT, ConfirmInfo> {
+    node_id: NodeId,
+    sequence: u64,
+    response: TxSigningResult<TxId, ConfirmInfo>,
+}
+
 #[derive(Debug)]
 pub struct TxHandle<TxId: TxIdT, ConfirmInfo> {
-    /// Sequence reserved for this transaction.
-    pub sequence: u64,
+    /// Returns if a transaction is correctly signed.
+    pub signed: oneshot::Receiver<Result<()>>,
     /// Receives submit result.
     pub submitted: oneshot::Receiver<Result<TxId>>,
     /// Receives confirm result.
     pub confirmed: oneshot::Receiver<Result<TxStatus<ConfirmInfo>>>,
 }
 
-#[async_trait]
-pub trait SignFn<TxId: TxIdT, ConfirmInfo>: Send + Sync {
-    /// Produce a signed `Transaction` for the provided request and sequence.
-    ///
-    /// # Notes
-    /// - The returned `Transaction.sequence` must match the input `sequence`.
-    /// - Returning a mismatched sequence causes the caller to fail the enqueue.
-    async fn sign(
-        &self,
-        sequence: u64,
-        request: &TxRequest,
-        cfg: &TxConfig,
-    ) -> Result<Transaction<TxId, ConfirmInfo>>;
-}
-
 #[derive(Clone)]
-pub struct TransactionManager<TxId: TxIdT, ConfirmInfo> {
-    add_tx: mpsc::Sender<Transaction<TxId, ConfirmInfo>>,
-    next_sequence: Arc<Mutex<u64>>,
-    max_sent: Arc<AtomicU64>,
-    signer: Arc<dyn SignFn<TxId, ConfirmInfo>>,
+pub struct TxSubmitter<TxId: TxIdT, ConfirmInfo, Request> {
+    add_tx: mpsc::Sender<RequestWithChannels<TxId, ConfirmInfo, Request>>,
 }
 
-impl<TxId: TxIdT, ConfirmInfo> TransactionManager<TxId, ConfirmInfo> {
-    /// Sign and enqueue a transaction, returning a handle for submit/confirm.
-    ///
-    /// # Notes
-    /// - Sequence reservation is serialized with a mutex.
-    /// - If the queue is full or closed, the sequence is not incremented.
+impl<TxId: TxIdT, ConfirmInfo, Request> TxSubmitter<TxId, ConfirmInfo, Request> {
+    /// Enqueue a transaction request for signing, returning a handle for sign/submit/confirm.
     ///
     /// # Example
     /// ```no_run
-    /// # use celestia_grpc::{TxConfig, Result};
-    /// # use celestia_grpc::tx_client_v2::{TransactionManager, TxRequest};
-    /// # async fn docs(manager: TransactionManager<u64, u64>) -> Result<()> {
+    /// # use celestia_grpc::Result;
+    /// # use celestia_grpc::tx_client_v2::{TxSubmitter, TxRequest};
+    /// # async fn docs(manager: TxSubmitter<u64, u64, TxRequest>) -> Result<()> {
     /// let handle = manager
-    ///     .add_tx(TxRequest::Tx(celestia_types::state::RawTxBody::default()), TxConfig::default())
+    ///     .add_tx(TxRequest::tx(
+    ///         celestia_types::state::RawTxBody::default(),
+    ///         TxConfig::default(),
+    ///     ))
     ///     .await?;
+    /// handle.signed.await?;
     /// handle.submitted.await?;
     /// handle.confirmed.await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn add_tx(
-        &self,
-        request: TxRequest,
-        cfg: TxConfig,
-    ) -> Result<TxHandle<TxId, ConfirmInfo>> {
-        let mut sequence = self.next_sequence.lock().await;
-        let current = *sequence;
-        let mut tx = self.signer.sign(current, &request, &cfg).await?;
-        if tx.sequence != current {
-            return Err(Error::UnexpectedResponseType(format!(
-                "tx sequence mismatch: expected {}, got {}",
-                current, tx.sequence
-            )));
-        }
+    pub async fn add_tx(&self, request: Request) -> Result<TxHandle<TxId, ConfirmInfo>> {
+        let (sign_tx, sign_rx) = oneshot::channel();
         let (submit_tx, submit_rx) = oneshot::channel();
         let (confirm_tx, confirm_rx) = oneshot::channel();
-        tx.callbacks.submitted = Some(submit_tx);
-        tx.callbacks.confirmed = Some(confirm_tx);
-        match self.add_tx.try_send(tx) {
-            Ok(()) => {
-                *sequence = sequence.saturating_add(1);
-                self.max_sent.fetch_add(1, Ordering::Relaxed);
-                Ok(TxHandle {
-                    sequence: current,
-                    submitted: submit_rx,
-                    confirmed: confirm_rx,
-                })
-            }
+        let request_with_channels =
+            RequestWithChannels::new(request, sign_tx, submit_tx, confirm_tx);
+        match self.add_tx.try_send(request_with_channels) {
+            Ok(()) => Ok(TxHandle {
+                signed: sign_rx,
+                submitted: submit_rx,
+                confirmed: confirm_rx,
+            }),
             Err(mpsc::error::TrySendError::Full(_)) => Err(Error::UnexpectedResponseType(
                 "transaction queue full".to_string(),
             )),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(Error::TxWorkerStopped),
         }
-    }
-
-    /// Return the maximum sequence successfully enqueued so far.
-    #[allow(dead_code)]
-    pub fn max_sent(&self) -> u64 {
-        self.max_sent.load(Ordering::Relaxed)
     }
 }
 
@@ -283,6 +310,17 @@ pub enum SubmitFailure {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+pub enum SigningFailure {
+    /// Server expects a different sequence.
+    SequenceMismatch { expected: u64 },
+    /// Submission failed with a specific error code and message.
+    Other { message: String },
+    /// Transport or RPC error while submitting.
+    NetworkError { err: Arc<Error> },
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConfirmFailure {
     reason: RejectionReason,
 }
@@ -309,6 +347,7 @@ pub enum RejectionReason {
 pub trait TxServer: Send + Sync {
     type TxId: TxIdT + Eq + StdHash + Send + Sync + 'static;
     type ConfirmInfo: Clone + Send + Sync + 'static;
+    type TxRequest: Send + Sync + 'static;
 
     /// Submit signed bytes with the given sequence, returning a server TxId.
     async fn submit(&self, tx_bytes: Arc<Vec<u8>>, sequence: u64) -> TxSubmitResult<Self::TxId>;
@@ -321,16 +360,30 @@ pub trait TxServer: Send + Sync {
     async fn status(&self, id: Self::TxId) -> TxConfirmResult<TxStatus<Self::ConfirmInfo>>;
     /// Fetch current sequence for the account (used by some implementations).
     async fn current_sequence(&self) -> Result<u64>;
+    /// Simulate a transaction and sign it with the given sequence, returning a signed transaction.
+    async fn simulate_and_sign(
+        &self,
+        req: Arc<Self::TxRequest>,
+        sequence: u64,
+    ) -> Result<Transaction<Self::TxId, Self::ConfirmInfo>, SigningFailure> {
+        let _ = (req, sequence);
+        Err(SigningFailure::NetworkError {
+            err: Arc::new(Error::UnexpectedResponseType(
+                "simulate_and_sign not implemented".to_string(),
+            )),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanRequest {
     Submission,
     Confirmation,
+    Signing,
 }
 
 #[derive(Debug)]
-enum NodeEvent<TxId, ConfirmInfo> {
+enum NodeEvent<TxId: TxIdT, ConfirmInfo> {
     NodeResponse {
         node_id: NodeId,
         response: NodeResponse<TxId, ConfirmInfo>,
@@ -338,7 +391,7 @@ enum NodeEvent<TxId, ConfirmInfo> {
     NodeStop,
 }
 
-impl<TxId, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
+impl<TxId: TxIdT, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
     fn summary(&self) -> String {
         match self {
             NodeEvent::NodeResponse { response, .. } => match response {
@@ -355,20 +408,24 @@ impl<TxId, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
                     }
                     Err(_) => "NodeResponse::Confirmation Err".to_string(),
                 },
+                NodeResponse::Signing { sequence, result } => {
+                    let status = if result.is_ok() { "Ok" } else { "Err" };
+                    format!("NodeResponse::Signing seq={} {}", sequence, status)
+                }
             },
             NodeEvent::NodeStop => "NodeStop".to_string(),
         }
     }
 }
 
-fn push_unique<T: PartialEq>(requests: &mut Vec<T>, request: T) {
+fn push_plan_request(requests: &mut Vec<PlanRequest>, request: PlanRequest) {
     if !requests.contains(&request) {
         requests.push(request);
     }
 }
 
 #[derive(Debug)]
-enum NodeResponse<TxId, ConfirmInfo> {
+enum NodeResponse<TxId: TxIdT, ConfirmInfo> {
     Submission {
         sequence: u64,
         result: TxSubmitResult<TxId>,
@@ -376,6 +433,10 @@ enum NodeResponse<TxId, ConfirmInfo> {
     Confirmation {
         state_epoch: u64,
         response: TxConfirmResult<ConfirmationResponse<TxId, ConfirmInfo>>,
+    },
+    Signing {
+        sequence: u64,
+        result: TxSigningResult<TxId, ConfirmInfo>,
     },
 }
 
@@ -405,11 +466,16 @@ struct ConfirmationResult<TxId, ConfirmInfo> {
 pub struct TransactionWorker<S: TxServer> {
     nodes: NodeManager<S>,
     servers: HashMap<NodeId, Arc<S>>,
-    transactions: tx_buffer::TxBuffer<S::TxId, S::ConfirmInfo>,
-    add_tx_rx: mpsc::Receiver<Transaction<S::TxId, S::ConfirmInfo>>,
+    transactions: tx_buffer::TxBuffer<
+        S::TxId,
+        S::ConfirmInfo,
+        RequestWithChannels<S::TxId, S::ConfirmInfo, S::TxRequest>,
+    >,
+    add_tx_rx: mpsc::Receiver<RequestWithChannels<S::TxId, S::ConfirmInfo, S::TxRequest>>,
     submissions: FuturesUnordered<BoxFuture<'static, Option<SubmissionResult<S::TxId>>>>,
     confirmations:
         FuturesUnordered<BoxFuture<'static, Option<ConfirmationResult<S::TxId, S::ConfirmInfo>>>>,
+    signing: Option<BoxFuture<'static, Option<SigningResult<S::TxId, S::ConfirmInfo>>>>,
     confirm_ticker: Interval,
     confirm_interval: Duration,
     max_status_batch: usize,
@@ -417,7 +483,7 @@ pub struct TransactionWorker<S: TxServer> {
 }
 
 impl<S: TxServer + 'static> TransactionWorker<S> {
-    /// Create a manager/worker pair with initial sequence and queue capacity.
+    /// Create a submitter/worker pair with initial sequence and queue capacity.
     ///
     /// # Notes
     /// - `start_sequence` should be the next sequence to submit for the signer.
@@ -426,23 +492,17 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         nodes: HashMap<NodeId, Arc<S>>,
         confirm_interval: Duration,
         max_status_batch: usize,
-        signer: Arc<dyn SignFn<S::TxId, S::ConfirmInfo>>,
         start_sequence: u64,
         add_tx_capacity: usize,
-    ) -> (TransactionManager<S::TxId, S::ConfirmInfo>, Self) {
+    ) -> (TxSubmitter<S::TxId, S::ConfirmInfo, S::TxRequest>, Self) {
         let (add_tx_tx, add_tx_rx) = mpsc::channel(add_tx_capacity);
-        let next_sequence = Arc::new(Mutex::new(start_sequence));
-        let max_sent = Arc::new(AtomicU64::new(0));
-        let manager = TransactionManager {
-            add_tx: add_tx_tx,
-            next_sequence,
-            max_sent,
-            signer,
+        let manager = TxSubmitter {
+            add_tx: add_tx_tx.clone(),
         };
         let start_confirmed = start_sequence.saturating_sub(1);
         let node_ids = nodes.keys().cloned().collect::<Vec<_>>();
         let node_manager = NodeManager::new(node_ids, start_confirmed);
-        let transactions = tx_buffer::TxBuffer::new(0);
+        let transactions = tx_buffer::TxBuffer::new(start_confirmed);
         (
             manager,
             TransactionWorker {
@@ -452,6 +512,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 transactions,
                 submissions: FuturesUnordered::new(),
                 confirmations: FuturesUnordered::new(),
+                signing: None,
                 confirm_ticker: Interval::new(confirm_interval),
                 confirm_interval,
                 max_status_batch,
@@ -460,15 +521,13 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         )
     }
 
-    fn enqueue_tx(&mut self, tx: Transaction<S::TxId, S::ConfirmInfo>) -> Result<()> {
-        let exp_seq = self.transactions.max_seq() + 1;
-        let tx_sequence = tx.sequence;
-        self.transactions.add_transaction(tx).map_err(|_| {
-            crate::Error::UnexpectedResponseType(format!(
-                "tx sequence gap: expected {}, got {}",
-                exp_seq, tx_sequence
-            ))
-        })?;
+    fn enqueue_pending(
+        &mut self,
+        request: RequestWithChannels<S::TxId, S::ConfirmInfo, S::TxRequest>,
+    ) -> Result<()> {
+        self.transactions
+            .add_pending(request)
+            .map_err(|_| crate::Error::UnexpectedResponseType("pending queue error".to_string()))?;
         Ok(())
     }
 
@@ -515,7 +574,9 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 if stop {
                     break;
                 }
-                self.plan_requests = outcome.plan_requests;
+                for request in outcome.plan_requests {
+                    push_plan_request(&mut self.plan_requests, request);
+                }
                 continue;
             }
 
@@ -525,15 +586,12 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 }
                 tx = self.add_tx_rx.recv() => {
                     if let Some(tx) = tx {
-                        let stop = self.apply_mutations(vec![WorkerMutation::EnqueueTx { tx }])?;
-                        if stop {
-                            break;
-                        }
-                        push_unique(&mut self.plan_requests, PlanRequest::Submission);
+                        self.enqueue_pending(tx)?;
+                        push_plan_request(&mut self.plan_requests, PlanRequest::Signing);
                     }
                 }
                 _ = self.confirm_ticker.tick() => {
-                    push_unique(&mut self.plan_requests, PlanRequest::Confirmation);
+                    push_plan_request(&mut self.plan_requests, PlanRequest::Confirmation);
                 }
                 result = self.submissions.next() => {
                     if let Some(Some(result)) = result {
@@ -557,6 +615,18 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                         });
                     }
                 }
+                result = poll_opt(&mut self.signing), if self.signing.is_some() => {
+                    self.signing = None;
+                    if let Some(Some(result)) = result {
+                        current_event = Some(NodeEvent::NodeResponse {
+                            node_id: result.node_id,
+                            response: NodeResponse::Signing {
+                                sequence: result.sequence,
+                                result: result.response,
+                            },
+                        });
+                    }
+                }
             }
         }
 
@@ -568,6 +638,32 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         for plan in plans {
             debug!(plan = %plan.summary(), "worker plan");
             match plan {
+                WorkerPlan::SpawnSigning {
+                    node_id,
+                    sequence,
+                    delay,
+                } => {
+                    if self.signing.is_some() {
+                        continue;
+                    }
+                    let Some(node) = self.servers.get(&node_id).cloned() else {
+                        continue;
+                    };
+                    let Some(request) = self.transactions.peek_pending() else {
+                        continue;
+                    };
+                    let request_ref = request.request.clone();
+                    let tx = self.push_signing();
+                    spawn_cancellable(token.clone(), async move {
+                        time::sleep(delay).await;
+                        let response = node.simulate_and_sign(request_ref, sequence).await;
+                        let _ = tx.send(SigningResult {
+                            node_id,
+                            sequence,
+                            response,
+                        });
+                    });
+                }
                 WorkerPlan::SpawnSubmit {
                     node_id,
                     bytes,
@@ -637,8 +733,15 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         for mutation in mutations {
             debug!(mutation = %mutation.summary(), "worker mutation");
             match mutation {
-                WorkerMutation::EnqueueTx { tx } => {
-                    self.enqueue_tx(tx)?;
+                WorkerMutation::EnqueueSigned { mut tx } => {
+                    let Some(request) = self.transactions.pop_pending() else {
+                        return Err(Error::UnexpectedResponseType(
+                            "missing pending request".to_string(),
+                        ));
+                    };
+                    tx.callbacks.submitted = Some(request.submit_tx);
+                    tx.callbacks.confirmed = Some(request.confirm_tx);
+                    self.enqueue_signed(tx, request.sign_tx)?;
                 }
                 WorkerMutation::MarkSubmitted { sequence, id } => {
                     self.mark_submitted(sequence, id);
@@ -659,6 +762,28 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         Ok(false)
     }
 
+    fn push_signing(&mut self) -> oneshot::Sender<SigningResult<S::TxId, S::ConfirmInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.signing = Some(async move { rx.await.ok() }.boxed());
+        tx
+    }
+
+    fn enqueue_signed(
+        &mut self,
+        tx: Transaction<S::TxId, S::ConfirmInfo>,
+        signed: oneshot::Sender<Result<()>>,
+    ) -> Result<()> {
+        let exp_seq = self.transactions.max_seq() + 1;
+        let tx_sequence = tx.sequence;
+        if let Err(_) = self.transactions.add_transaction(tx) {
+            let msg = format!("tx sequence gap: expected {}, got {}", exp_seq, tx_sequence);
+            let _ = signed.send(Err(crate::Error::UnexpectedResponseType(msg.clone())));
+            return Err(crate::Error::UnexpectedResponseType(msg));
+        }
+        let _ = signed.send(Ok(()));
+        Ok(())
+    }
+
     fn mark_submitted(&mut self, sequence: u64, id: S::TxId) {
         if let Some(tx) = self.transactions.get_mut(sequence) {
             tx.notify_submitted(Ok(id.clone()));
@@ -674,6 +799,11 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
     }
 
     fn finalize_remaining(&mut self, fatal: Option<TxStatus<S::ConfirmInfo>>) {
+        for pending in self.transactions.drain_pending() {
+            let _ = pending.sign_tx.send(Err(Error::TxWorkerStopped));
+            let _ = pending.submit_tx.send(Err(Error::TxWorkerStopped));
+            let _ = pending.confirm_tx.send(Err(Error::TxWorkerStopped));
+        }
         loop {
             let next = self.transactions.confirmed_seq() + 1;
             let Ok(mut tx) = self.transactions.confirm(next) else {
@@ -710,6 +840,13 @@ fn push_oneshot<T: 'static + Send>(
     let (tx, rx) = oneshot::channel();
     unordered.push(async move { rx.await.ok() }.boxed());
     tx
+}
+
+async fn poll_opt<F: std::future::Future + Unpin>(fut: &mut Option<F>) -> Option<F::Output> {
+    match fut.as_mut() {
+        Some(fut) => Some(fut.await),
+        None => futures::future::pending().await,
+    }
 }
 
 #[cfg(test)]

@@ -47,6 +47,12 @@ impl RoutedCall {
 
 #[derive(Debug)]
 enum ServerCall {
+    SimulateAndSign {
+        #[allow(dead_code)]
+        request: Arc<TxRequest>,
+        sequence: u64,
+        reply: oneshot::Sender<TxSigningResult<TestTxId, TestConfirmInfo>>,
+    },
     Submit {
         #[allow(dead_code)]
         bytes: Vec<u8>,
@@ -95,30 +101,6 @@ fn make_many_servers(
         servers.push((node_name, server));
     }
     (calls_rx, servers)
-}
-
-#[derive(Default)]
-struct TestSigner;
-
-#[async_trait]
-impl SignFn<TestTxId, TestConfirmInfo> for TestSigner {
-    async fn sign(
-        &self,
-        sequence: u64,
-        request: &TxRequest,
-        _cfg: &TxConfig,
-    ) -> Result<Transaction<TestTxId, TestConfirmInfo>> {
-        let bytes = match request {
-            TxRequest::Tx(body) => body.encode_to_vec(),
-            TxRequest::Blobs(_) => Vec::new(),
-        };
-        Ok(Transaction {
-            sequence,
-            bytes: Arc::new(bytes),
-            callbacks: TxCallbacks::default(),
-            id: None,
-        })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +269,7 @@ impl NetworkState {
 
 #[derive(Debug)]
 enum ServerReturn {
+    Signing(TxSigningResult<TestTxId, TestConfirmInfo>),
     Submit(TxSubmitResult<TestTxId>),
     StatusBatch(TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>),
     Status(TxConfirmResult<TxStatus<TestConfirmInfo>>),
@@ -298,6 +281,13 @@ impl ServerReturn {
         match self {
             ServerReturn::Submit(result) => result,
             _ => panic!("expected Submit"),
+        }
+    }
+
+    fn assert_signing(self) -> TxSigningResult<TestTxId, TestConfirmInfo> {
+        match self {
+            ServerReturn::Signing(result) => result,
+            _ => panic!("expected Signing"),
         }
     }
 
@@ -480,6 +470,7 @@ impl Rule {
 impl TxServer for MockTxServer {
     type TxId = TestTxId;
     type ConfirmInfo = TestConfirmInfo;
+    type TxRequest = TxRequest;
 
     async fn submit(&self, bytes: Arc<Vec<u8>>, sequence: u64) -> TxSubmitResult<TestTxId> {
         let (reply, rx) = oneshot::channel();
@@ -514,6 +505,21 @@ impl TxServer for MockTxServer {
         let ret = ServerCall::CurrentSequence { reply };
         self.send_call(ret, "current sequence call").await;
         rx.await.expect("current sequence reply")
+    }
+
+    async fn simulate_and_sign(
+        &self,
+        req: Arc<Self::TxRequest>,
+        sequence: u64,
+    ) -> TxSigningResult<Self::TxId, Self::ConfirmInfo> {
+        let (reply, rx) = oneshot::channel();
+        let ret = ServerCall::SimulateAndSign {
+            request: req,
+            sequence,
+            reply,
+        };
+        self.send_call(ret, "simulate and sign call").await;
+        rx.await.expect("signing reply")
     }
 }
 
@@ -550,6 +556,9 @@ impl From<&RoutedCall> for CallLogEntry {
         match &rc.call {
             ServerCall::CurrentSequence { .. } => {
                 CallLogEntry::new(node_id, "CurrentSequence", None, vec![])
+            }
+            ServerCall::SimulateAndSign { sequence, .. } => {
+                CallLogEntry::new(node_id, "Signing", Some(*sequence), vec![])
             }
             ServerCall::Status { id, .. } => {
                 CallLogEntry::new(node_id, "Status", None, vec![id.clone()])
@@ -606,6 +615,9 @@ impl Driver {
                 rule.consume();
                 let ret = rule.call(&rc, &mut self.network_state);
                 match rc.call {
+                    ServerCall::SimulateAndSign { reply, .. } => {
+                        let _ = reply.send(ret.ret.assert_signing());
+                    }
                     ServerCall::Submit { reply, .. } => {
                         let _ = reply.send(ret.ret.assert_submit());
                     }
@@ -649,7 +661,7 @@ struct Harness {
     driver_handle: JoinHandle<DriverResult>,
     #[allow(dead_code)]
     confirm_interval: Duration,
-    manager: TransactionManager<TestTxId, TestConfirmInfo>,
+    manager: TxSubmitter<TestTxId, TestConfirmInfo, TxRequest>,
 }
 
 impl Harness {
@@ -668,12 +680,10 @@ impl Harness {
             node_map.insert(node_id.clone(), node_server);
             node_states.insert(node_id.clone(), NodeState::new());
         }
-        let signer = Arc::new(TestSigner::default());
         let (manager, worker) = TransactionWorker::new(
             node_map,
             confirm_interval,
             max_status_batch,
-            signer,
             1,
             add_tx_capacity,
         );
@@ -700,11 +710,6 @@ impl Harness {
         self.manager_handle = Some(tokio::spawn(async move { manager.process(shutdown).await }));
     }
 
-    #[allow(dead_code)]
-    async fn pump(&self) {
-        tokio::task::yield_now().await;
-    }
-
     async fn stop(self) -> DriverResult {
         self.shutdown.cancel();
         let handle = self.manager_handle.unwrap();
@@ -716,7 +721,7 @@ impl Harness {
         &self,
         bytes: Vec<u8>,
     ) -> (
-        u64,
+        oneshot::Receiver<Result<()>>,
         oneshot::Receiver<Result<TestTxId>>,
         oneshot::Receiver<Result<TxStatus<TestConfirmInfo>>>,
     ) {
@@ -726,10 +731,10 @@ impl Harness {
         };
         let handle = self
             .manager
-            .add_tx(TxRequest::Tx(body), TxConfig::default())
+            .add_tx(TxRequest::tx(body, TxConfig::default()))
             .await
             .expect("add tx");
-        (handle.sequence, handle.submitted, handle.confirmed)
+        (handle.signed, handle.submitted, handle.confirmed)
     }
 }
 
@@ -741,6 +746,39 @@ async fn test_eviction() {
     let _is_evicted_submit = is_evicted.clone();
 
     let rules: Vec<Rule> = vec![
+        // Signing rule
+        Rule::new(
+            "sign",
+            Match::new("match sign", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::SimulateAndSign { .. })
+            }),
+            Action::new(
+                "sign_action",
+                |rc: &RoutedCall, _states: &mut NetworkState| match rc.call {
+                    ServerCall::SimulateAndSign {
+                        ref request,
+                        sequence,
+                        ..
+                    } => {
+                        let bytes = match &request.as_ref().tx {
+                            TxPayload::Tx(body) => body.encode_to_vec(),
+                            TxPayload::Blobs(_) => Vec::new(),
+                        };
+                        ActionResult {
+                            ret: ServerReturn::Signing(Ok(Transaction {
+                                sequence,
+                                bytes: Arc::new(bytes),
+                                callbacks: TxCallbacks::default(),
+                                id: None,
+                            })),
+                        }
+                    }
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Any,
+            0,
+        ),
         // Generic submit rule
         Rule::new(
             "submit",
@@ -863,8 +901,11 @@ async fn test_eviction() {
         let handle = harness.add_tx(vec![0, 0]).await;
         add_handles.push_back(handle);
     }
+    let mut seq = 0;
     while let Some(handle) = add_handles.pop_front() {
-        let (seq, submit, confirm) = handle;
+        seq += 1;
+        let (signed, submit, confirm) = handle;
+        let _ = signed.await;
         let _ = submit.await;
         match confirm.await {
             Err(e) => {
@@ -896,6 +937,39 @@ async fn test_recovering() {
     let recovery_triggered_check = recovery_triggered.clone();
 
     let rules: Vec<Rule> = vec![
+        // Signing rule
+        Rule::new(
+            "sign",
+            Match::new("match sign", |rc: &RoutedCall| {
+                matches!(&rc.call, ServerCall::SimulateAndSign { .. })
+            }),
+            Action::new(
+                "sign_action",
+                |rc: &RoutedCall, _states: &mut NetworkState| match rc.call {
+                    ServerCall::SimulateAndSign {
+                        ref request,
+                        sequence,
+                        ..
+                    } => {
+                        let bytes = match &request.as_ref().tx {
+                            TxPayload::Tx(body) => body.encode_to_vec(),
+                            TxPayload::Blobs(_) => Vec::new(),
+                        };
+                        ActionResult {
+                            ret: ServerReturn::Signing(Ok(Transaction {
+                                sequence,
+                                bytes: Arc::new(bytes),
+                                callbacks: TxCallbacks::default(),
+                                id: None,
+                            })),
+                        }
+                    }
+                    _ => panic!("unexpected call"),
+                },
+            ),
+            Cardinality::Any,
+            0,
+        ),
         // Generic submit rule
         Rule::new(
             "submit",
@@ -1057,8 +1131,11 @@ async fn test_recovering() {
         let handle = harness.add_tx(vec![0, 0]).await;
         add_handles.push_back(handle);
     }
+    let mut seq = 0;
     while let Some(handle) = add_handles.pop_front() {
-        let (seq, submit, confirm) = handle;
+        seq += 1;
+        let (signed, submit, confirm) = handle;
+        let _ = signed.await;
         let _ = submit.await;
         match confirm.await {
             Err(e) => {

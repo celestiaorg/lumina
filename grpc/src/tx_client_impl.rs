@@ -24,8 +24,9 @@ use crate::grpc::{
 use crate::signer::{BoxedDocSigner, sign_tx};
 
 use crate::tx_client_v2::{
-    NodeId, RejectionReason, SignFn, SubmitFailure, Transaction, TransactionManager,
-    TransactionWorker, TxCallbacks, TxConfirmResult, TxRequest, TxServer, TxStatus, TxSubmitResult,
+    NodeId, RejectionReason, SigningFailure, SubmitFailure, Transaction, TransactionWorker,
+    TxCallbacks, TxConfirmResult, TxPayload, TxRequest, TxServer, TxStatus, TxSubmitResult,
+    TxSubmitter,
 };
 use crate::{Error, GrpcClient, Result, TxConfig, TxInfo};
 
@@ -105,7 +106,7 @@ impl SignFnBuilder {
         }
     }
 
-    pub(crate) fn build(self) -> Arc<dyn SignFn<Hash, TxConfirmInfo>> {
+    pub(crate) fn build(self) -> Arc<BuiltSignFn> {
         Arc::new(BuiltSignFn {
             context: self.context,
             pubkey: self.pubkey,
@@ -118,7 +119,6 @@ impl SignFnBuilder {
 
 pub struct ConfirmHandle<ConfirmInfo> {
     pub hash: Hash,
-    pub sequence: u64,
     pub confirmed: oneshot::Receiver<Result<TxStatus<ConfirmInfo>>>,
 }
 
@@ -180,11 +180,11 @@ pub struct TransactionService {
 }
 
 struct TransactionServiceInner {
-    manager: RwLock<TransactionManager<Hash, TxConfirmInfo>>,
+    submitter: RwLock<TxSubmitter<Hash, TxConfirmInfo, TxRequest>>,
     worker: Mutex<Option<WorkerHandle>>,
     clients: HashMap<NodeId, GrpcClient>,
     primary_client: GrpcClient,
-    sign_fn: Arc<dyn SignFn<Hash, TxConfirmInfo>>,
+    signer: Arc<BuiltSignFn>,
     confirm_interval: Duration,
     max_status_batch: usize,
     queue_capacity: usize,
@@ -216,11 +216,11 @@ impl TransactionService {
         let context = Arc::new(GrpcSignContext::new(primary_client.clone()));
         let (pubkey, signer) = primary_client.signer()?;
         let signer = Arc::new(signer);
-        let sign_fn = SignFnBuilder::new(context, pubkey, signer).build();
-        let (manager, worker_handle) = Self::spawn_worker(
+        let signer = SignFnBuilder::new(context, pubkey, signer).build();
+        let (submitter, worker_handle) = Self::spawn_worker(
             &clients,
             primary_client.clone(),
-            sign_fn.clone(),
+            signer.clone(),
             config.confirm_interval,
             config.max_status_batch,
             config.queue_capacity,
@@ -229,11 +229,11 @@ impl TransactionService {
 
         Ok(Self {
             inner: Arc::new(TransactionServiceInner {
-                manager: RwLock::new(manager),
+                submitter: RwLock::new(submitter),
                 worker: Mutex::new(Some(worker_handle)),
                 clients,
                 primary_client,
-                sign_fn,
+                signer,
                 confirm_interval: config.confirm_interval,
                 max_status_batch: config.max_status_batch,
                 queue_capacity: config.queue_capacity,
@@ -241,17 +241,17 @@ impl TransactionService {
         })
     }
 
-    pub async fn submit(
-        &self,
-        request: TxRequest,
-        cfg: TxConfig,
-    ) -> Result<ConfirmHandle<TxConfirmInfo>> {
-        let manager = self.inner.manager.read().await.clone();
-        let handle = manager.add_tx(request, cfg).await?;
+    pub async fn submit(&self, request: TxRequest) -> Result<ConfirmHandle<TxConfirmInfo>> {
+        let submitter = self.inner.submitter.read().await.clone();
+        let handle = submitter.add_tx(request).await?;
+        match handle.signed.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err),
+            Err(_) => return Err(Error::TxWorkerStopped),
+        }
         match handle.submitted.await {
             Ok(Ok(hash)) => Ok(ConfirmHandle {
                 hash,
-                sequence: handle.sequence,
                 confirmed: handle.confirmed,
             }),
             Ok(Err(err)) => Err(err),
@@ -259,18 +259,13 @@ impl TransactionService {
         }
     }
 
-    pub async fn submit_restart(
-        &self,
-        request: TxRequest,
-        cfg: TxConfig,
-    ) -> Result<ConfirmHandle<TxConfirmInfo>> {
+    pub async fn submit_restart(&self, request: TxRequest) -> Result<ConfirmHandle<TxConfirmInfo>> {
         let retry_request = request.clone();
-        let retry_cfg = cfg.clone();
-        match self.submit(request, cfg).await {
+        match self.submit(request).await {
             Ok(handle) => Ok(handle),
             Err(Error::TxWorkerStopped) => {
                 self.recreate_worker().await?;
-                self.submit(retry_request, retry_cfg).await
+                self.submit(retry_request).await
             }
             Err(err) => Err(err),
         }
@@ -283,10 +278,10 @@ impl TransactionService {
                 return Err(Error::TxWorkerRunning);
             }
         }
-        let (manager, worker_handle) = Self::spawn_worker(
+        let (submitter, worker_handle) = Self::spawn_worker(
             &self.inner.clients,
             self.inner.primary_client.clone(),
-            self.inner.sign_fn.clone(),
+            self.inner.signer.clone(),
             self.inner.confirm_interval,
             self.inner.max_status_batch,
             self.inner.queue_capacity,
@@ -294,8 +289,8 @@ impl TransactionService {
         .await?;
         *worker_guard = Some(worker_handle);
 
-        let mut manager_guard = self.inner.manager.write().await;
-        *manager_guard = manager;
+        let mut submitter_guard = self.inner.submitter.write().await;
+        *submitter_guard = submitter;
 
         Ok(())
     }
@@ -303,11 +298,11 @@ impl TransactionService {
     async fn spawn_worker(
         clients: &HashMap<NodeId, GrpcClient>,
         primary_client: GrpcClient,
-        sign_fn: Arc<dyn SignFn<Hash, TxConfirmInfo>>,
+        signer: Arc<BuiltSignFn>,
         confirm_interval: Duration,
         max_status_batch: usize,
         queue_capacity: usize,
-    ) -> Result<(TransactionManager<Hash, TxConfirmInfo>, WorkerHandle)> {
+    ) -> Result<(TxSubmitter<Hash, TxConfirmInfo, TxRequest>, WorkerHandle)> {
         let start_sequence = current_sequence(&primary_client).await?;
         let nodes = clients
             .iter()
@@ -317,15 +312,15 @@ impl TransactionService {
                     Arc::new(NodeClient {
                         node_id: node_id.clone(),
                         client: client.clone(),
+                        signer: signer.clone(),
                     }),
                 )
             })
             .collect::<HashMap<_, _>>();
-        let (manager, mut worker) = TransactionWorker::new(
+        let (submitter, mut worker) = TransactionWorker::new(
             nodes,
             confirm_interval,
             max_status_batch,
-            sign_fn,
             start_sequence,
             queue_capacity,
         );
@@ -337,11 +332,11 @@ impl TransactionService {
             let _ = done_tx.send(result);
         });
 
-        Ok((manager, WorkerHandle { done_rx }))
+        Ok((submitter, WorkerHandle { done_rx }))
     }
 }
 
-struct BuiltSignFn {
+pub(crate) struct BuiltSignFn {
     context: Arc<dyn SignContext>,
     pubkey: VerifyingKey,
     signer: Arc<BoxedDocSigner>,
@@ -353,15 +348,14 @@ struct BuiltSignFn {
 struct NodeClient {
     node_id: NodeId,
     client: GrpcClient,
+    signer: Arc<BuiltSignFn>,
 }
 
-#[async_trait]
-impl SignFn<Hash, TxConfirmInfo> for BuiltSignFn {
+impl BuiltSignFn {
     async fn sign(
         &self,
         sequence: u64,
         request: &TxRequest,
-        cfg: &TxConfig,
     ) -> Result<Transaction<Hash, TxConfirmInfo>> {
         let chain_id = self
             .cached_chain_id
@@ -376,8 +370,9 @@ impl SignFn<Hash, TxConfirmInfo> for BuiltSignFn {
 
         let mut account = base.clone();
         account.sequence = sequence;
-        let (tx_body, blobs) = match request {
-            TxRequest::Blobs(blobs) => {
+        let cfg = &request.cfg;
+        let (tx_body, blobs) = match &request.tx {
+            TxPayload::Blobs(blobs) => {
                 let pfb = MsgPayForBlobs::new(blobs, account.address)
                     .map_err(Error::CelestiaTypesError)?;
                 let tx_body = RawTxBody {
@@ -387,7 +382,7 @@ impl SignFn<Hash, TxConfirmInfo> for BuiltSignFn {
                 };
                 (tx_body, Some(blobs))
             }
-            TxRequest::Tx(body) => (body.clone(), None),
+            TxPayload::Tx(body) => (body.clone(), None),
         };
 
         let (gas_limit, gas_price) = match cfg.gas_limit {
@@ -454,6 +449,7 @@ impl SignFn<Hash, TxConfirmInfo> for BuiltSignFn {
 impl TxServer for NodeClient {
     type TxId = Hash;
     type ConfirmInfo = TxConfirmInfo;
+    type TxRequest = TxRequest;
 
     async fn submit(&self, tx_bytes: Arc<Vec<u8>>, _sequence: u64) -> TxSubmitResult<Self::TxId> {
         let resp = self
@@ -502,6 +498,17 @@ impl TxServer for NodeClient {
 
     async fn current_sequence(&self) -> Result<u64> {
         current_sequence(&self.client).await
+    }
+
+    async fn simulate_and_sign(
+        &self,
+        req: Arc<Self::TxRequest>,
+        sequence: u64,
+    ) -> std::result::Result<Transaction<Self::TxId, Self::ConfirmInfo>, SigningFailure> {
+        self.signer
+            .sign(sequence, req.as_ref())
+            .await
+            .map_err(map_signing_failure)
     }
 }
 
@@ -559,18 +566,6 @@ fn map_status_response(
     }
 }
 
-async fn ensure_expected_sequence(
-    expected_sequence: &mut Option<u64>,
-    client: &GrpcClient,
-) -> Result<u64> {
-    if let Some(expected) = expected_sequence {
-        return Ok(*expected);
-    }
-    let expected = current_sequence(client).await?;
-    *expected_sequence = Some(expected);
-    Ok(expected)
-}
-
 async fn current_sequence(client: &GrpcClient) -> Result<u64> {
     let address = client.get_account_address().ok_or(Error::MissingSigner)?;
     let account = client.get_account(&address).await?;
@@ -590,6 +585,18 @@ fn map_submit_failure(code: ErrorCode, message: &str) -> SubmitFailure {
             error_code: code,
             message: message.to_string(),
         },
+    }
+}
+
+fn map_signing_failure(err: Error) -> SigningFailure {
+    if err.is_network_error() {
+        return SigningFailure::NetworkError { err: Arc::new(err) };
+    }
+    if let Some(expected) = extract_sequence_on_mismatch(&err.to_string()) {
+        return SigningFailure::SequenceMismatch { expected };
+    }
+    SigningFailure::Other {
+        message: err.to_string(),
     }
 }
 
@@ -687,8 +694,10 @@ mod tests {
         let tx = sign_fn
             .sign(
                 1,
-                &TxRequest::Tx(RawTxBody::default()),
-                &TxConfig::default().with_gas_limit(100),
+                &TxRequest::tx(
+                    RawTxBody::default(),
+                    TxConfig::default().with_gas_limit(100),
+                ),
             )
             .await
             .expect("sign tx");
@@ -712,10 +721,10 @@ mod tests {
                 .await
                 .unwrap();
         let handle = service
-            .submit(
-                TxRequest::Blobs(vec![random_blob(10..=1000)]),
+            .submit(TxRequest::blobs(
+                vec![random_blob(10..=1000)],
                 TxConfig::default(),
-            )
+            ))
             .await
             .unwrap();
         let info = handle.confirm().await.unwrap();

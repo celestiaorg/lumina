@@ -5,8 +5,10 @@ use std::{
 
 use crate::tx_client_v2::{Transaction, TxIdT};
 
-pub struct TxBuffer<TxId: TxIdT + Eq + Hash, ConfirmInfo> {
+pub struct TxBuffer<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> {
     confirmed: u64,
+    next_sequence: u64,
+    pending: VecDeque<Request>,
     transactions: VecDeque<Transaction<TxId, ConfirmInfo>>,
     id_to_seq: HashMap<TxId, u64>,
 }
@@ -22,10 +24,12 @@ pub enum TxBufferError {
 
 type TxBufferResult<T> = Result<T, TxBufferError>;
 
-impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxBuffer<TxId, ConfirmInfo> {
+impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, Request> {
     pub fn new(confirmed: u64) -> Self {
         TxBuffer {
             confirmed,
+            next_sequence: confirmed.saturating_add(1),
+            pending: VecDeque::new(),
             transactions: VecDeque::new(),
             id_to_seq: HashMap::new(),
         }
@@ -39,6 +43,10 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxBuffer<TxId, ConfirmInfo> {
         self.confirmed
     }
 
+    pub fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
     pub fn len(&self) -> usize {
         self.transactions.len()
     }
@@ -47,14 +55,41 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxBuffer<TxId, ConfirmInfo> {
         self.transactions.is_empty()
     }
 
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub fn peek_pending(&self) -> Option<&Request> {
+        self.pending.front()
+    }
+
+    pub fn add_pending(&mut self, request: Request) -> TxBufferResult<()> {
+        self.pending.push_back(request);
+        Ok(())
+    }
+
+    pub fn pop_pending(&mut self) -> Option<Request> {
+        self.pending.pop_front()
+    }
+
+    pub fn drain_pending(&mut self) -> Vec<Request> {
+        self.pending.drain(..).collect()
+    }
+
     pub fn add_transaction(&mut self, tx: Transaction<TxId, ConfirmInfo>) -> TxBufferResult<()> {
         if self.confirmed == 0 && self.transactions.is_empty() {
             self.confirmed = tx.sequence - 1;
+            self.next_sequence = tx.sequence;
         }
         if tx.sequence != self.max_seq() + 1 {
             return Err(TxBufferError::InvalidSequence);
         }
         self.transactions.push_back(tx);
+        self.next_sequence = self.max_seq() + 1;
         Ok(())
     }
 
@@ -124,23 +159,6 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo> TxBuffer<TxId, ConfirmInfo> {
         self.confirmed += 1;
         Ok(tx)
     }
-
-    pub fn truncate_right_from(&mut self, seq: u64) -> Option<Vec<Transaction<TxId, ConfirmInfo>>> {
-        if let Some(idx) = self.tx_idx(seq) {
-            let count = self.transactions.len() - idx;
-            let mut tx_ret = Vec::new();
-            for _ in 0..count {
-                let tx = self.transactions.pop_back().unwrap();
-                if let Some(id) = tx.id.as_ref() {
-                    self.id_to_seq.remove(id);
-                }
-                tx_ret.push(tx);
-            }
-            Some(tx_ret)
-        } else {
-            None
-        }
-    }
 }
 
 #[cfg(test)]
@@ -158,7 +176,7 @@ mod tests {
         }
     }
 
-    fn make_buffer(confirmed: u64) -> TxBuffer<u64, ()> {
+    fn make_buffer(confirmed: u64) -> TxBuffer<u64, (), ()> {
         TxBuffer::new(confirmed)
     }
 
@@ -299,60 +317,6 @@ mod tests {
 
             buffer.confirm(6).unwrap();
             assert!(buffer.get_seq(&600).is_none());
-        }
-    }
-
-    mod truncate_right_from {
-        use super::*;
-
-        #[test]
-        fn removes_from_seq_onwards() {
-            let mut buffer = make_buffer(5);
-            for seq in 6..=10 {
-                buffer
-                    .add_transaction(make_tx(seq, Some(seq * 100)))
-                    .unwrap();
-            }
-
-            let removed = buffer.truncate_right_from(8).unwrap();
-            assert_eq!(removed.len(), 3);
-            assert_eq!(removed[0].sequence, 10);
-            assert_eq!(removed[1].sequence, 9);
-            assert_eq!(removed[2].sequence, 8);
-
-            assert_eq!(buffer.max_seq(), 7);
-        }
-
-        #[test]
-        fn removes_ids_from_mapping() {
-            let mut buffer = make_buffer(5);
-            for seq in 6..=8 {
-                buffer
-                    .add_transaction(make_tx(seq, Some(seq * 100)))
-                    .unwrap();
-            }
-
-            buffer.set_submitted_id(6, 600);
-            buffer.set_submitted_id(7, 700);
-            buffer.set_submitted_id(8, 800);
-
-            assert!(buffer.get_seq(&700).is_some());
-            assert!(buffer.get_seq(&800).is_some());
-
-            buffer.truncate_right_from(7).unwrap();
-
-            assert!(buffer.get_seq(&600).is_some());
-            assert!(buffer.get_seq(&700).is_none());
-            assert!(buffer.get_seq(&800).is_none());
-        }
-
-        #[test]
-        fn returns_none_for_invalid_seq() {
-            let mut buffer = make_buffer(5);
-            buffer.add_transaction(make_tx(6, None)).unwrap();
-
-            assert!(buffer.truncate_right_from(5).is_none());
-            assert!(buffer.truncate_right_from(10).is_none());
         }
     }
 
