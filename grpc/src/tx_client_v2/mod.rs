@@ -86,7 +86,7 @@ mod node_manager;
 mod tx_buffer;
 
 use crate::{Error, Result, TxConfig};
-use node_manager::{NodeManager, WorkerEvent};
+use node_manager::{NodeManager, WorkerMutation, WorkerPlan};
 /// Identifier for a submission/confirmation node.
 pub type NodeId = Arc<str>;
 /// Result for submission calls: either a server TxId or a submission failure.
@@ -324,14 +324,13 @@ pub trait TxServer: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WakeUpKind {
+enum PlanRequest {
     Submission,
     Confirmation,
 }
 
 #[derive(Debug)]
 enum NodeEvent<TxId, ConfirmInfo> {
-    WakeUp(WakeUpKind),
     NodeResponse {
         node_id: NodeId,
         response: NodeResponse<TxId, ConfirmInfo>,
@@ -342,10 +341,6 @@ enum NodeEvent<TxId, ConfirmInfo> {
 impl<TxId, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
     fn summary(&self) -> String {
         match self {
-            NodeEvent::WakeUp(kind) => match kind {
-                WakeUpKind::Submission => "WakeUp(Submission)".to_string(),
-                WakeUpKind::Confirmation => "WakeUp(Confirmation)".to_string(),
-            },
             NodeEvent::NodeResponse { response, .. } => match response {
                 NodeResponse::Submission { sequence, result } => {
                     let status = if result.is_ok() { "Ok" } else { "Err" };
@@ -363,6 +358,12 @@ impl<TxId, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
             },
             NodeEvent::NodeStop => "NodeStop".to_string(),
         }
+    }
+}
+
+fn push_unique<T: PartialEq>(requests: &mut Vec<T>, request: T) {
+    if !requests.contains(&request) {
+        requests.push(request);
     }
 }
 
@@ -412,6 +413,7 @@ pub struct TransactionWorker<S: TxServer> {
     confirm_ticker: Interval,
     confirm_interval: Duration,
     max_status_batch: usize,
+    plan_requests: Vec<PlanRequest>,
 }
 
 impl<S: TxServer + 'static> TransactionWorker<S> {
@@ -453,6 +455,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 confirm_ticker: Interval::new(confirm_interval),
                 confirm_interval,
                 max_status_batch,
+                plan_requests: Vec::new(),
             },
         )
     }
@@ -496,20 +499,23 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         let mut current_event: Option<NodeEvent<S::TxId, S::ConfirmInfo>> = None;
 
         loop {
+            if !self.plan_requests.is_empty() {
+                let plan_requests = std::mem::take(&mut self.plan_requests);
+                let plans =
+                    self.nodes
+                        .plan(&plan_requests, &self.transactions, self.max_status_batch);
+                self.execute_plans(plans, shutdown.clone());
+            }
+
             if let Some(event) = current_event.take() {
-                let outcome = self.nodes.handle_event(
-                    event,
-                    &self.transactions,
-                    self.confirm_interval,
-                    self.max_status_batch,
-                );
-                let stop = self.apply_worker_events(outcome.worker_events, shutdown.clone())?;
+                let outcome =
+                    self.nodes
+                        .apply_event(event, &self.transactions, self.confirm_interval);
+                let stop = self.apply_mutations(outcome.mutations)?;
                 if stop {
                     break;
                 }
-                if let Some(kind) = outcome.wake_up {
-                    current_event = Some(NodeEvent::WakeUp(kind));
-                }
+                self.plan_requests = outcome.plan_requests;
                 continue;
             }
 
@@ -519,18 +525,15 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 }
                 tx = self.add_tx_rx.recv() => {
                     if let Some(tx) = tx {
-                        let stop = self.apply_worker_events(
-                            vec![WorkerEvent::EnqueueTx { tx }],
-                            shutdown.clone(),
-                        )?;
+                        let stop = self.apply_mutations(vec![WorkerMutation::EnqueueTx { tx }])?;
                         if stop {
                             break;
                         }
-                        current_event = Some(NodeEvent::WakeUp(WakeUpKind::Submission));
+                        push_unique(&mut self.plan_requests, PlanRequest::Submission);
                     }
                 }
                 _ = self.confirm_ticker.tick() => {
-                    current_event = Some(NodeEvent::WakeUp(WakeUpKind::Confirmation));
+                    push_unique(&mut self.plan_requests, PlanRequest::Confirmation);
                 }
                 result = self.submissions.next() => {
                     if let Some(Some(result)) = result {
@@ -561,18 +564,11 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         Ok(())
     }
 
-    fn apply_worker_events(
-        &mut self,
-        events: Vec<WorkerEvent<S::TxId, S::ConfirmInfo>>,
-        token: CancellationToken,
-    ) -> Result<bool> {
-        for event in events {
-            debug!(event = %event.summary(), "worker event");
-            match event {
-                WorkerEvent::EnqueueTx { tx } => {
-                    self.enqueue_tx(tx)?;
-                }
-                WorkerEvent::SpawnSubmit {
+    fn execute_plans(&mut self, plans: Vec<WorkerPlan<S::TxId>>, token: CancellationToken) {
+        for plan in plans {
+            debug!(plan = %plan.summary(), "worker plan");
+            match plan {
+                WorkerPlan::SpawnSubmit {
                     node_id,
                     bytes,
                     sequence,
@@ -592,7 +588,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                         });
                     });
                 }
-                WorkerEvent::SpawnConfirmBatch {
+                WorkerPlan::SpawnConfirmBatch {
                     node_id,
                     ids,
                     epoch,
@@ -613,7 +609,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                         });
                     });
                 }
-                WorkerEvent::SpawnRecover { node_id, id, epoch } => {
+                WorkerPlan::SpawnRecover { node_id, id, epoch } => {
                     let Some(node) = self.servers.get(&node_id).cloned() else {
                         continue;
                     };
@@ -630,13 +626,27 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                         });
                     });
                 }
-                WorkerEvent::MarkSubmitted { sequence, id } => {
+            }
+        }
+    }
+
+    fn apply_mutations(
+        &mut self,
+        mutations: Vec<WorkerMutation<S::TxId, S::ConfirmInfo>>,
+    ) -> Result<bool> {
+        for mutation in mutations {
+            debug!(mutation = %mutation.summary(), "worker mutation");
+            match mutation {
+                WorkerMutation::EnqueueTx { tx } => {
+                    self.enqueue_tx(tx)?;
+                }
+                WorkerMutation::MarkSubmitted { sequence, id } => {
                     self.mark_submitted(sequence, id);
                 }
-                WorkerEvent::Confirm { seq, info } => {
+                WorkerMutation::Confirm { seq, info } => {
                     self.confirm_tx(seq, info);
                 }
-                WorkerEvent::WorkerStop => {
+                WorkerMutation::WorkerStop => {
                     let fatal = self.nodes.tail_error_status();
                     self.finalize_remaining(fatal);
                     return Ok(true);

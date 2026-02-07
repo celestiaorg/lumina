@@ -7,15 +7,12 @@ use tracing::debug;
 
 use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
-    NodeEvent, NodeId, NodeResponse, RejectionReason, SubmitFailure, TxIdT, TxServer, TxStatus,
-    WakeUpKind,
+    NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason, SubmitFailure, TxIdT, TxServer,
+    TxStatus,
 };
 
 #[derive(Debug)]
-pub(crate) enum WorkerEvent<TxId: TxIdT, ConfirmInfo> {
-    EnqueueTx {
-        tx: crate::tx_client_v2::Transaction<TxId, ConfirmInfo>,
-    },
+pub(crate) enum WorkerPlan<TxId: TxIdT> {
     SpawnSubmit {
         node_id: NodeId,
         bytes: Arc<Vec<u8>>,
@@ -32,6 +29,33 @@ pub(crate) enum WorkerEvent<TxId: TxIdT, ConfirmInfo> {
         id: TxId,
         epoch: u64,
     },
+}
+
+impl<TxId: TxIdT> WorkerPlan<TxId> {
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            WorkerPlan::SpawnSubmit {
+                node_id, sequence, ..
+            } => format!("SpawnSubmit node={} seq={}", node_id.as_ref(), sequence),
+            WorkerPlan::SpawnConfirmBatch { node_id, ids, .. } => {
+                format!(
+                    "SpawnConfirmBatch node={} count={}",
+                    node_id.as_ref(),
+                    ids.len()
+                )
+            }
+            WorkerPlan::SpawnRecover { node_id, .. } => {
+                format!("SpawnRecover node={}", node_id.as_ref())
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum WorkerMutation<TxId: TxIdT, ConfirmInfo> {
+    EnqueueTx {
+        tx: crate::tx_client_v2::Transaction<TxId, ConfirmInfo>,
+    },
     MarkSubmitted {
         sequence: u64,
         id: TxId,
@@ -43,35 +67,22 @@ pub(crate) enum WorkerEvent<TxId: TxIdT, ConfirmInfo> {
     WorkerStop,
 }
 
-impl<TxId: TxIdT, ConfirmInfo> WorkerEvent<TxId, ConfirmInfo> {
+impl<TxId: TxIdT, ConfirmInfo> WorkerMutation<TxId, ConfirmInfo> {
     pub(crate) fn summary(&self) -> String {
         match self {
-            WorkerEvent::EnqueueTx { tx } => format!("EnqueueTx seq={}", tx.sequence),
-            WorkerEvent::SpawnSubmit {
-                node_id, sequence, ..
-            } => format!("SpawnSubmit node={} seq={}", node_id.as_ref(), sequence),
-            WorkerEvent::SpawnConfirmBatch { node_id, ids, .. } => {
-                format!(
-                    "SpawnConfirmBatch node={} count={}",
-                    node_id.as_ref(),
-                    ids.len()
-                )
-            }
-            WorkerEvent::SpawnRecover { node_id, .. } => {
-                format!("SpawnRecover node={}", node_id.as_ref())
-            }
-            WorkerEvent::MarkSubmitted { sequence, .. } => {
+            WorkerMutation::EnqueueTx { tx } => format!("EnqueueTx seq={}", tx.sequence),
+            WorkerMutation::MarkSubmitted { sequence, .. } => {
                 format!("MarkSubmitted seq={}", sequence)
             }
-            WorkerEvent::Confirm { seq, .. } => format!("Confirm seq={}", seq),
-            WorkerEvent::WorkerStop => "WorkerStop".to_string(),
+            WorkerMutation::Confirm { seq, .. } => format!("Confirm seq={}", seq),
+            WorkerMutation::WorkerStop => "WorkerStop".to_string(),
         }
     }
 }
 
-pub(crate) struct NodeOutcome<TxId: TxIdT, ConfirmInfo> {
-    pub(crate) worker_events: Vec<WorkerEvent<TxId, ConfirmInfo>>,
-    pub(crate) wake_up: Option<WakeUpKind>,
+pub(crate) struct NodeApplyOutcome<TxId: TxIdT, ConfirmInfo> {
+    pub(crate) mutations: Vec<WorkerMutation<TxId, ConfirmInfo>>,
+    pub(crate) plan_requests: Vec<PlanRequest>,
 }
 
 #[derive(Debug, Clone)]
@@ -343,41 +354,50 @@ impl<S: TxServer> NodeManager<S> {
         best.map(|(_, status)| status)
     }
 
-    pub(crate) fn handle_event(
+    pub(crate) fn plan(
         &mut self,
-        event: NodeEvent<S::TxId, S::ConfirmInfo>,
+        plan_requests: &[PlanRequest],
         txs: &TxBuffer<S::TxId, S::ConfirmInfo>,
-        confirm_interval: Duration,
         max_status_batch: usize,
-    ) -> NodeOutcome<S::TxId, S::ConfirmInfo> {
-        let mut worker_events = Vec::new();
-        let mut wake_up = None;
-
-        debug!(event = %event.summary(), "node event");
-        match event {
-            NodeEvent::WakeUp(kind) => {
-                for (node_id, node) in self.nodes.iter_mut() {
-                    debug!(
-                        node_id = %node_id.as_ref(),
-                        state = %node.log_state(),
-                        "node state (wakeup)"
-                    );
-                    match kind {
-                        WakeUpKind::Submission => {
-                            if let Some(event) = plan_submission(node_id, node, txs) {
-                                worker_events.push(event);
-                            }
+    ) -> Vec<WorkerPlan<S::TxId>> {
+        let mut plans = Vec::new();
+        for request in plan_requests {
+            for (node_id, node) in self.nodes.iter_mut() {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    state = %node.log_state(),
+                    request = ?request,
+                    "node state (plan)"
+                );
+                match request {
+                    PlanRequest::Submission => {
+                        if let Some(plan) = plan_submission(node_id, node, txs) {
+                            plans.push(plan);
                         }
-                        WakeUpKind::Confirmation => {
-                            if let Some(event) =
-                                plan_confirmation(node_id, node, txs, max_status_batch)
-                            {
-                                worker_events.push(event);
-                            }
+                    }
+                    PlanRequest::Confirmation => {
+                        if let Some(plan) = plan_confirmation(node_id, node, txs, max_status_batch)
+                        {
+                            plans.push(plan);
                         }
                     }
                 }
             }
+        }
+        plans
+    }
+
+    pub(crate) fn apply_event(
+        &mut self,
+        event: NodeEvent<S::TxId, S::ConfirmInfo>,
+        txs: &TxBuffer<S::TxId, S::ConfirmInfo>,
+        confirm_interval: Duration,
+    ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
+        let mut mutations = Vec::new();
+        let mut plan_requests = Vec::new();
+
+        debug!(event = %event.summary(), "node event");
+        match event {
             NodeEvent::NodeResponse { node_id, response } => {
                 let node = self.nodes.get_mut(&node_id).unwrap();
                 debug!(
@@ -388,16 +408,17 @@ impl<S: TxServer> NodeManager<S> {
                 match response {
                     NodeResponse::Submission { sequence, result } => {
                         if node.is_stopped() {
-                            return NodeOutcome {
-                                worker_events,
-                                wake_up,
+                            return NodeApplyOutcome {
+                                mutations,
+                                plan_requests,
                             };
                         }
                         match result {
                             Ok(id) => {
                                 if let NodeState::Active(active) = node {
                                     on_submit_success(active, sequence);
-                                    worker_events.push(WorkerEvent::MarkSubmitted { sequence, id });
+                                    mutations
+                                        .push(WorkerMutation::MarkSubmitted { sequence, id });
                                 }
                             }
                             Err(failure) => {
@@ -410,7 +431,10 @@ impl<S: TxServer> NodeManager<S> {
                                             node, &node_id, sequence, expected, txs,
                                         );
                                         if recovering {
-                                            wake_up = Some(WakeUpKind::Confirmation);
+                                            push_plan_request(
+                                                &mut plan_requests,
+                                                PlanRequest::Confirmation,
+                                            );
                                         }
                                     }
                                     SubmitFailure::MempoolIsFull => {
@@ -441,9 +465,7 @@ impl<S: TxServer> NodeManager<S> {
                                 }
                             }
                         }
-                        if wake_up.is_none() {
-                            wake_up = Some(WakeUpKind::Submission);
-                        }
+                        push_plan_request(&mut plan_requests, PlanRequest::Submission);
                     }
                     NodeResponse::Confirmation {
                         state_epoch,
@@ -457,12 +479,10 @@ impl<S: TxServer> NodeManager<S> {
                                 "confirmation epoch mismatch"
                             );
                             node.shared_mut().confirm_inflight = false;
-                            if wake_up.is_none() {
-                                wake_up = Some(WakeUpKind::Confirmation);
-                            }
-                            return NodeOutcome {
-                                worker_events,
-                                wake_up,
+                            push_plan_request(&mut plan_requests, PlanRequest::Confirmation);
+                            return NodeApplyOutcome {
+                                mutations,
+                                plan_requests,
                             };
                         }
                         node.shared_mut().confirm_inflight = false;
@@ -474,9 +494,9 @@ impl<S: TxServer> NodeManager<S> {
                                         node,
                                         statuses,
                                         txs,
-                                        &mut wake_up,
+                                        &mut plan_requests,
                                     );
-                                    worker_events.append(&mut effects);
+                                    mutations.append(&mut effects);
                                 }
                                 crate::tx_client_v2::ConfirmationResponse::Single {
                                     id,
@@ -484,11 +504,12 @@ impl<S: TxServer> NodeManager<S> {
                                 } => {
                                     let was_recovering = matches!(node, NodeState::Recovering(_));
                                     let mut effects = process_recover_status(node, id, status, txs);
-                                    worker_events.append(&mut effects);
+                                    mutations.append(&mut effects);
                                     if was_recovering && matches!(node, NodeState::Active(_)) {
-                                        if wake_up.is_none() {
-                                            wake_up = Some(WakeUpKind::Confirmation);
-                                        }
+                                        push_plan_request(
+                                            &mut plan_requests,
+                                            PlanRequest::Confirmation,
+                                        );
                                     }
                                 }
                             },
@@ -524,13 +545,19 @@ impl<S: TxServer> NodeManager<S> {
         }
 
         if self.should_stop(txs.confirmed_seq()) {
-            worker_events.push(WorkerEvent::WorkerStop);
+            mutations.push(WorkerMutation::WorkerStop);
         }
 
-        NodeOutcome {
-            worker_events,
-            wake_up,
+        NodeApplyOutcome {
+            mutations,
+            plan_requests,
         }
+    }
+}
+
+fn push_plan_request(requests: &mut Vec<PlanRequest>, request: PlanRequest) {
+    if !requests.contains(&request) {
+        requests.push(request);
     }
 }
 
@@ -587,7 +614,7 @@ fn plan_submission<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
     node_id: &NodeId,
     node: &mut NodeState<ConfirmInfo>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
-) -> Option<WorkerEvent<TxId, ConfirmInfo>> {
+) -> Option<WorkerPlan<TxId>> {
     match node {
         NodeState::Active(state) => {
             if state.pending.is_some() {
@@ -605,7 +632,7 @@ fn plan_submission<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
                 .take()
                 .unwrap_or_else(|| Duration::from_nanos(0));
             state.pending = Some(next_seq);
-            Some(WorkerEvent::SpawnSubmit {
+            Some(WorkerPlan::SpawnSubmit {
                 node_id: node_id.clone(),
                 bytes: tx.bytes.clone(),
                 sequence: tx.sequence,
@@ -621,7 +648,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
     node: &mut NodeState<ConfirmInfo>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
     max_batch: usize,
-) -> Option<WorkerEvent<TxId, ConfirmInfo>> {
+) -> Option<WorkerPlan<TxId>> {
     match node {
         NodeState::Active(state) => {
             if state.shared.confirm_inflight {
@@ -634,7 +661,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
             }
             let epoch = state.shared.epoch;
             state.shared.confirm_inflight = true;
-            Some(WorkerEvent::SpawnConfirmBatch {
+            Some(WorkerPlan::SpawnConfirmBatch {
                 node_id: node_id.clone(),
                 ids,
                 epoch,
@@ -648,7 +675,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
             let id = tx.id.clone()?;
             let epoch = state.shared.epoch;
             state.shared.confirm_inflight = true;
-            Some(WorkerEvent::SpawnRecover {
+            Some(WorkerPlan::SpawnRecover {
                 node_id: node_id.clone(),
                 id,
                 epoch,
@@ -666,7 +693,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
             }
             let epoch = state.shared.epoch;
             state.shared.confirm_inflight = true;
-            Some(WorkerEvent::SpawnConfirmBatch {
+            Some(WorkerPlan::SpawnConfirmBatch {
                 node_id: node_id.clone(),
                 ids,
                 epoch,
@@ -732,9 +759,9 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
     node: &mut NodeState<ConfirmInfo>,
     statuses: Vec<(TxId, TxStatus<ConfirmInfo>)>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
-    wake_up: &mut Option<WakeUpKind>,
-) -> Vec<WorkerEvent<TxId, ConfirmInfo>> {
-    let mut effects: Vec<WorkerEvent<TxId, ConfirmInfo>> = Vec::new();
+    plan_requests: &mut Vec<PlanRequest>,
+) -> Vec<WorkerMutation<TxId, ConfirmInfo>> {
+    let mut effects: Vec<WorkerMutation<TxId, ConfirmInfo>> = Vec::new();
     let mut collected = statuses
         .into_iter()
         .filter_map(|(tx_id, status)| txs.get_by_id(&tx_id).map(|tx| (tx.sequence, status)))
@@ -764,9 +791,7 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
                 TxStatus::Evicted => {
                     let clamped = sequence.saturating_sub(1).max(txs.confirmed_seq());
                     shared.last_submitted = Some(clamped);
-                    if wake_up.is_none() {
-                        *wake_up = Some(WakeUpKind::Submission);
-                    }
+                    push_plan_request(plan_requests, PlanRequest::Submission);
                     break;
                 }
                 TxStatus::Rejected { reason } => match reason {
@@ -781,7 +806,7 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
                 },
                 TxStatus::Confirmed { info } => {
                     shared.last_confirmed = sequence;
-                    effects.push(WorkerEvent::Confirm {
+                    effects.push(WorkerMutation::Confirm {
                         seq: sequence,
                         info,
                     });
@@ -795,8 +820,8 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
     }
     if let Some((sequence, expected)) = seq_mismatch {
         let recovering = on_sequence_mismatch(node, node_id, sequence, expected, txs);
-        if recovering && wake_up.is_none() {
-            *wake_up = Some(WakeUpKind::Confirmation);
+        if recovering {
+            push_plan_request(plan_requests, PlanRequest::Confirmation);
         }
     }
     if let Some((sequence, status)) = fatal {
@@ -810,8 +835,8 @@ fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
     id: TxId,
     status: TxStatus<ConfirmInfo>,
     txs: &TxBuffer<TxId, ConfirmInfo>,
-) -> Vec<WorkerEvent<TxId, ConfirmInfo>> {
-    let mut effects: Vec<WorkerEvent<TxId, ConfirmInfo>> = Vec::new();
+) -> Vec<WorkerMutation<TxId, ConfirmInfo>> {
+    let mut effects: Vec<WorkerMutation<TxId, ConfirmInfo>> = Vec::new();
     let Some(seq) = txs.get_seq(&id) else {
         return effects;
     };
@@ -842,7 +867,7 @@ fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone>(
     if confirmed {
         node.transition_to_active();
         if let Some(info) = confirmed_info {
-            effects.push(WorkerEvent::Confirm { seq, info });
+            effects.push(WorkerMutation::Confirm { seq, info });
         }
     }
     if let Some(status) = fatal {
@@ -918,18 +943,12 @@ mod tests {
         let mut txs = TxBuffer::new(0);
         txs.add_transaction(make_tx(1, None)).unwrap();
 
-        let outcome = manager.handle_event(
-            NodeEvent::WakeUp(WakeUpKind::Submission),
-            &txs,
-            Duration::from_secs(1),
-            16,
-        );
+        let plans = manager.plan(&[PlanRequest::Submission], &txs, 16);
 
-        assert!(outcome.wake_up.is_none());
-        assert!(outcome.worker_events.iter().any(|event| {
+        assert!(plans.iter().any(|event| {
             matches!(
                 event,
-                WorkerEvent::SpawnSubmit { node_id: id, sequence, .. }
+                WorkerPlan::SpawnSubmit { node_id: id, sequence, .. }
                     if id == &node_id && *sequence == 1
             )
         }));
@@ -941,7 +960,7 @@ mod tests {
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
         let txs = TxBuffer::new(0);
 
-        let outcome = manager.handle_event(
+        let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Submission {
@@ -951,14 +970,13 @@ mod tests {
             },
             &txs,
             Duration::from_secs(1),
-            16,
         );
 
-        assert_eq!(outcome.wake_up, Some(WakeUpKind::Submission));
-        assert!(outcome.worker_events.iter().any(|event| {
+        assert!(outcome.plan_requests.contains(&PlanRequest::Submission));
+        assert!(outcome.mutations.iter().any(|event| {
             matches!(
                 event,
-                WorkerEvent::MarkSubmitted { sequence, id } if *sequence == 1 && *id == 10
+                WorkerMutation::MarkSubmitted { sequence, id } if *sequence == 1 && *id == 10
             )
         }));
     }
@@ -973,7 +991,7 @@ mod tests {
             (10, TxStatus::Pending),
             (11, TxStatus::Confirmed { info: 2 }),
         ];
-        let outcome = manager.handle_event(
+        let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id,
                 response: NodeResponse::Confirmation {
@@ -983,14 +1001,13 @@ mod tests {
             },
             &txs,
             Duration::from_secs(1),
-            16,
         );
 
         assert!(
             !outcome
-                .worker_events
+                .mutations
                 .iter()
-                .any(|event| matches!(event, WorkerEvent::Confirm { .. }))
+                .any(|event| matches!(event, WorkerMutation::Confirm { .. }))
         );
     }
 
@@ -1004,7 +1021,7 @@ mod tests {
             (10, TxStatus::Confirmed { info: 1 }),
             (11, TxStatus::Confirmed { info: 2 }),
         ];
-        let outcome = manager.handle_event(
+        let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id,
                 response: NodeResponse::Confirmation {
@@ -1014,12 +1031,11 @@ mod tests {
             },
             &txs,
             Duration::from_secs(1),
-            16,
         );
 
         let mut confirmed = Vec::new();
-        for event in outcome.worker_events {
-            if let WorkerEvent::Confirm { seq, info } = event {
+        for event in outcome.mutations {
+            if let WorkerMutation::Confirm { seq, info } = event {
                 confirmed.push((seq, info));
             }
         }
@@ -1034,7 +1050,7 @@ mod tests {
         txs.add_transaction(make_tx(1, None)).unwrap();
         txs.set_submitted_id(1, 10);
 
-        let outcome = manager.handle_event(
+        let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Submission {
@@ -1044,22 +1060,16 @@ mod tests {
             },
             &txs,
             Duration::from_secs(1),
-            16,
         );
 
-        assert_eq!(outcome.wake_up, Some(WakeUpKind::Confirmation));
+        assert!(outcome.plan_requests.contains(&PlanRequest::Confirmation));
 
-        let wake = manager.handle_event(
-            NodeEvent::WakeUp(WakeUpKind::Confirmation),
-            &txs,
-            Duration::from_secs(1),
-            16,
-        );
+        let wake = manager.plan(&outcome.plan_requests, &txs, 16);
 
-        assert!(wake.worker_events.iter().any(|event| {
+        assert!(wake.iter().any(|event| {
             matches!(
                 event,
-                WorkerEvent::SpawnRecover { node_id: id, id: tx_id, .. }
+                WorkerPlan::SpawnRecover { node_id: id, id: tx_id, .. }
                     if id == &node_id && *tx_id == 10
             )
         }));
@@ -1072,7 +1082,7 @@ mod tests {
         let mut txs = TxBuffer::new(0);
         txs.add_transaction(make_tx(1, None)).unwrap();
 
-        let _ = manager.handle_event(
+        let _ = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Submission {
@@ -1082,7 +1092,6 @@ mod tests {
             },
             &txs,
             Duration::from_secs(1),
-            16,
         );
 
         assert!(matches!(
@@ -1123,7 +1132,7 @@ mod tests {
                 },
             },
         )];
-        let _ = manager.handle_event(
+        let _ = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Confirmation {
@@ -1133,7 +1142,6 @@ mod tests {
             },
             &txs,
             Duration::from_secs(1),
-            16,
         );
 
         assert!(matches!(
@@ -1162,13 +1170,13 @@ mod tests {
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id], 0);
         let txs = TxBuffer::new(0);
 
-        let outcome = manager.handle_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1), 16);
+        let outcome = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
 
         assert!(
             outcome
-                .worker_events
+                .mutations
                 .iter()
-                .any(|event| matches!(event, WorkerEvent::WorkerStop))
+                .any(|event| matches!(event, WorkerMutation::WorkerStop))
         );
     }
 }
