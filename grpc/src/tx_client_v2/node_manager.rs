@@ -108,26 +108,24 @@ struct NodeShared {
     epoch: u64,
     last_submitted: Option<u64>,
     last_confirmed: u64,
+    confirm_inflight: bool,
 }
 
 #[derive(Debug, Clone)]
 struct ActiveState {
     shared: NodeShared,
     pending: Option<u64>,
-    confirm_inflight: bool,
 }
 
 #[derive(Debug, Clone)]
 struct RecoveringState {
     shared: NodeShared,
-    confirm_inflight: bool,
     target: u64,
 }
 
 #[derive(Debug, Clone)]
 struct StoppedState<ConfirmInfo> {
     shared: NodeShared,
-    confirm_inflight: bool,
     stop_seq: u64,
     error: StopError<ConfirmInfo>,
 }
@@ -146,6 +144,7 @@ impl Default for NodeShared {
             epoch: 0,
             last_submitted: None,
             last_confirmed: 0,
+            confirm_inflight: false,
         }
     }
 }
@@ -159,7 +158,6 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
         NodeState::Active(ActiveState {
             shared,
             pending: None,
-            confirm_inflight: false,
         })
     }
 
@@ -169,14 +167,6 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
 
     fn epoch(&self) -> u64 {
         self.shared().epoch
-    }
-
-    fn confirm_inflight(&self) -> bool {
-        match self {
-            NodeState::Active(state) => state.confirm_inflight,
-            NodeState::Recovering(state) => state.confirm_inflight,
-            NodeState::Stopped(state) => state.confirm_inflight,
-        }
     }
 
     fn shared(&self) -> &NodeShared {
@@ -202,7 +192,7 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
                 state.shared.last_confirmed,
                 state.shared.last_submitted,
                 state.pending,
-                state.confirm_inflight,
+                state.shared.confirm_inflight,
                 state.shared.epoch,
                 state.shared.submit_delay,
             ),
@@ -211,7 +201,7 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
                 state.target,
                 state.shared.last_confirmed,
                 state.shared.last_submitted,
-                state.confirm_inflight,
+                state.shared.confirm_inflight,
                 state.shared.epoch,
                 state.shared.submit_delay,
             ),
@@ -221,7 +211,7 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
                 state.error.label(),
                 state.shared.last_confirmed,
                 state.shared.last_submitted,
-                state.confirm_inflight,
+                state.shared.confirm_inflight,
                 state.shared.epoch,
                 state.shared.submit_delay,
             ),
@@ -231,13 +221,11 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
     fn stop_submissions(&mut self) {
         let shared = self.shared().clone();
         let last_submitted = shared.last_submitted;
-        let confirm_inflight = self.confirm_inflight();
         let stop_seq = last_submitted
             .unwrap_or(shared.last_confirmed)
             .max(shared.last_confirmed);
         *self = NodeState::Stopped(StoppedState {
             shared,
-            confirm_inflight,
             stop_seq,
             error: StopError::Other,
         });
@@ -245,11 +233,9 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
 
     fn stop_with_error(&mut self, seq: u64, error: StopError<ConfirmInfo>) {
         let shared = self.shared().clone();
-        let confirm_inflight = self.confirm_inflight();
         let stop_seq = seq;
         *self = NodeState::Stopped(StoppedState {
             shared,
-            confirm_inflight,
             stop_seq,
             error,
         });
@@ -272,20 +258,15 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
 
     fn transition_to_recovering(&mut self, target: u64) {
         let shared = self.shared().clone();
-        let confirm_inflight = self.confirm_inflight();
-        *self = NodeState::Recovering(RecoveringState {
-            shared,
-            confirm_inflight,
-            target,
-        });
+        *self = NodeState::Recovering(RecoveringState { shared, target });
     }
 
     fn transition_to_active(&mut self) {
-        let shared = self.shared().clone();
+        let mut shared = self.shared().clone();
+        shared.confirm_inflight = false;
         *self = NodeState::Active(ActiveState {
             shared,
             pending: None,
-            confirm_inflight: false,
         });
     }
 }
@@ -475,15 +456,7 @@ impl<S: TxServer> NodeManager<S> {
                                 response_epoch = state_epoch,
                                 "confirmation epoch mismatch"
                             );
-                            match node {
-                                NodeState::Active(active) => active.confirm_inflight = false,
-                                NodeState::Recovering(recovering) => {
-                                    recovering.confirm_inflight = false;
-                                }
-                                NodeState::Stopped(stopped) => {
-                                    stopped.confirm_inflight = false;
-                                }
-                            }
+                            node.shared_mut().confirm_inflight = false;
                             if wake_up.is_none() {
                                 wake_up = Some(WakeUpKind::Confirmation);
                             }
@@ -492,15 +465,7 @@ impl<S: TxServer> NodeManager<S> {
                                 wake_up,
                             };
                         }
-                        match node {
-                            NodeState::Active(active) => active.confirm_inflight = false,
-                            NodeState::Recovering(recovering) => {
-                                recovering.confirm_inflight = false;
-                            }
-                            NodeState::Stopped(stopped) => {
-                                stopped.confirm_inflight = false;
-                            }
-                        }
+                        node.shared_mut().confirm_inflight = false;
                         match response {
                             Ok(confirmation) => match confirmation {
                                 crate::tx_client_v2::ConfirmationResponse::Batch { statuses } => {
@@ -659,7 +624,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
 ) -> Option<WorkerEvent<TxId, ConfirmInfo>> {
     match node {
         NodeState::Active(state) => {
-            if state.confirm_inflight {
+            if state.shared.confirm_inflight {
                 return None;
             }
             let last = state.shared.last_submitted?;
@@ -668,7 +633,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
                 return None;
             }
             let epoch = state.shared.epoch;
-            state.confirm_inflight = true;
+            state.shared.confirm_inflight = true;
             Some(WorkerEvent::SpawnConfirmBatch {
                 node_id: node_id.clone(),
                 ids,
@@ -676,13 +641,13 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
             })
         }
         NodeState::Recovering(state) => {
-            if state.confirm_inflight {
+            if state.shared.confirm_inflight {
                 return None;
             }
             let tx = txs.get(state.target)?;
             let id = tx.id.clone()?;
             let epoch = state.shared.epoch;
-            state.confirm_inflight = true;
+            state.shared.confirm_inflight = true;
             Some(WorkerEvent::SpawnRecover {
                 node_id: node_id.clone(),
                 id,
@@ -690,7 +655,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
             })
         }
         NodeState::Stopped(state) => {
-            if state.confirm_inflight {
+            if state.shared.confirm_inflight {
                 return None;
             }
             let last = state.shared.last_submitted?;
@@ -700,7 +665,7 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo>(
                 return None;
             }
             let epoch = state.shared.epoch;
-            state.confirm_inflight = true;
+            state.shared.confirm_inflight = true;
             Some(WorkerEvent::SpawnConfirmBatch {
                 node_id: node_id.clone(),
                 ids,
