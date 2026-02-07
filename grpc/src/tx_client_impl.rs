@@ -581,6 +581,7 @@ fn map_submit_failure(code: ErrorCode, message: &str) -> SubmitFailure {
 
     match code {
         ErrorCode::MempoolIsFull => SubmitFailure::MempoolIsFull,
+        ErrorCode::TxInMempoolCache => SubmitFailure::TxInMempoolCache,
         _ => SubmitFailure::Other {
             error_code: code,
             message: message.to_string(),

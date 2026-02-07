@@ -296,16 +296,22 @@ pub enum TxStatus<ConfirmInfo> {
 #[allow(dead_code)]
 pub enum SubmitFailure {
     /// Server expects a different sequence.
-    SequenceMismatch { expected: u64 },
+    SequenceMismatch {
+        expected: u64,
+    },
     /// Submission failed with a specific error code and message.
     Other {
         error_code: ErrorCode,
         message: String,
     },
     /// Transport or RPC error while submitting.
-    NetworkError { err: Arc<Error> },
+    NetworkError {
+        err: Arc<Error>,
+    },
     /// Node mempool is full.
     MempoolIsFull,
+    /// Transaction is already in the mempool cache.
+    TxInMempoolCache,
 }
 
 #[derive(Debug, Clone)]

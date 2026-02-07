@@ -439,6 +439,7 @@ impl<S: TxServer> NodeManager<S> {
     ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
         let mut mutations = Vec::new();
         let mut plan_requests = Vec::new();
+        let max_sub = self.max_active_last_submitted();
 
         debug!(event = %event.summary(), "node event");
         match event {
@@ -494,6 +495,21 @@ impl<S: TxServer> NodeManager<S> {
                                         }
                                         SubmitFailure::MempoolIsFull
                                         | SubmitFailure::NetworkError { .. } => {
+                                            node.shared_mut().submit_delay = Some(confirm_interval);
+                                        }
+                                        SubmitFailure::TxInMempoolCache => {
+                                            if max_sub
+                                                .map(|(_, max)| {
+                                                    max > node.shared().last_submitted.unwrap_or(0)
+                                                })
+                                                .unwrap_or(false)
+                                            {
+                                                let last = node
+                                                    .shared_mut()
+                                                    .last_submitted
+                                                    .get_or_insert(0);
+                                                *last = last.saturating_add(1);
+                                            }
                                             node.shared_mut().submit_delay = Some(confirm_interval);
                                         }
                                         SubmitFailure::Other {
