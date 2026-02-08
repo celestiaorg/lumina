@@ -64,13 +64,13 @@ async fn new_node(path: impl AsRef<Path>) -> (Node<RedbBlockstore, RedbStore>, E
     let store = RedbStore::new(db.clone()).await.unwrap();
     let blockstore = RedbBlockstore::new(db);
 
-    let (_, bridge_ma) = fetch_bridge_info().await;
+    let (_, bridge_addrs) = fetch_bridge_info().await;
 
     Node::builder()
         .store(store)
         .blockstore(blockstore)
         .network(Network::custom("private").unwrap())
-        .bootnodes([bridge_ma])
+        .bootnodes(bridge_addrs)
         .start_subscribed()
         .await
         .unwrap()

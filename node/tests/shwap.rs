@@ -1,5 +1,3 @@
-#![cfg(not(target_arch = "wasm32"))]
-
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -7,20 +5,46 @@ use std::time::Duration;
 use celestia_rpc::ShareClient;
 use celestia_types::nmt::Namespace;
 use celestia_types::{AppVersion, Blob, ExtendedHeader};
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use lumina_node::blockstore::InMemoryBlockstore;
 use lumina_node::events::NodeEvent;
 use lumina_node::node::P2pError;
 use lumina_node::store::InMemoryStore;
+use lumina_node::test_utils::test_node_builder;
 use lumina_node::{Node, NodeError};
+use lumina_utils::test_utils::async_test;
+use lumina_utils::time::timeout;
 use rand::RngCore;
-use tokio::time::timeout;
 
-use crate::utils::{blob_submit, bridge_client, new_connected_node};
+use crate::utils::{
+    blob_submit, bridge_client, new_connected_node, new_connected_node_with_builder,
+};
 
 mod utils;
 
-#[tokio::test]
+// TODO: running each of those tests in browser separately makes them pass in milliseconds,
+// but running them all at once hangs after 2-3 tests. Probably an issue with opening connections
+// to the same go node over and over. Couldn't dig deep enough to understand it fully tho. Would
+// need to investigate the QLOG of chrome to see what happens on quic level, maybe it is
+// https://issues.chromium.org/issues/400699540
+// ^- above link is now private, which means they think it is security issue, it was public before
+// more info: https://github.com/celestiaorg/lumina/issues/287, it's the old bug
+
+#[async_test]
 async fn shwap_sampling_forward() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, _) = new_connected_node().await;
 
     // create new events sub to ignore all previous events
@@ -37,7 +61,7 @@ async fn shwap_sampling_forward() {
                 break height;
             }
         };
-        // timeout is double of the block time on CI
+        // Timeout is double of the block time on CI
         let new_head = timeout(Duration::from_secs(9), get_new_head).await.unwrap();
 
         // wait for height to be sampled
@@ -58,10 +82,25 @@ async fn shwap_sampling_forward() {
             .await
             .unwrap();
     }
+
+    // shouldn't be needed but I'm trying anything
+    node.stop().await;
 }
 
-#[tokio::test]
+#[async_test]
 async fn shwap_sampling_backward() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, mut events) = new_connected_node().await;
 
     let current_head = node.get_local_head_header().await.unwrap().height();
@@ -83,7 +122,7 @@ async fn shwap_sampling_backward() {
             }
         }
     };
-    let (from_height, to_height) = timeout(Duration::from_secs(4), new_batch_synced)
+    let (from_height, to_height) = timeout(Duration::from_secs(5), new_batch_synced)
         .await
         .unwrap();
 
@@ -108,10 +147,24 @@ async fn shwap_sampling_backward() {
     })
     .await
     .unwrap();
+
+    node.stop().await;
 }
 
-#[tokio::test]
+#[async_test]
 async fn shwap_request_sample() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -146,15 +199,29 @@ async fn shwap_request_sample() {
             square_width + 1,
             square_width + 1,
             height,
-            Some(Duration::from_secs(1)),
+            Some(Duration::from_secs(10)),
         )
         .await
         .unwrap_err();
     assert!(matches!(err, NodeError::P2p(P2pError::ShrEx(_))));
+
+    node.stop().await;
 }
 
-#[tokio::test]
+#[async_test]
 async fn shwap_request_row() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -184,10 +251,24 @@ async fn shwap_request_row() {
         .await
         .unwrap_err();
     assert!(matches!(err, NodeError::P2p(P2pError::ShrEx(_))));
+
+    node.stop().await;
 }
 
-#[tokio::test]
+#[async_test]
 async fn shwap_request_all_blobs() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -218,6 +299,94 @@ async fn shwap_request_all_blobs() {
         .unwrap();
 
     assert!(received.is_empty());
+
+    node.stop().await;
+}
+
+#[async_test]
+async fn shwap_request_concurrent() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
+
+    let builder = test_node_builder().pruning_window(Duration::from_secs(60));
+    let (node, _) = new_connected_node_with_builder(builder).await;
+    let client = bridge_client().await;
+
+    let blob_ns = Namespace::const_v0(rand::random());
+
+    let mut headers = Vec::new();
+
+    for _ in 0..3 {
+        let blobs: Vec<_> = (0..3)
+            .map(|_| {
+                let blob_len = rand::random::<usize>() % 512 + 1;
+                Blob::new(blob_ns, random_bytes(blob_len), None, AppVersion::V2).unwrap()
+            })
+            .collect();
+
+        let height = blob_submit(&client, &blobs).await;
+        headers.push(wait_for_height(&node, height).await);
+    }
+
+    let mut futs = FuturesUnordered::new();
+
+    for hdr in &headers {
+        // samples for each header
+        for _ in 0..4 {
+            let row = rand::random::<u16>() % hdr.square_width();
+            let col = rand::random::<u16>() % hdr.square_width();
+
+            futs.push(
+                node.request_sample(row, col, hdr.height(), Some(Duration::from_secs(1)))
+                    .map(|res| res.map(|_| ()))
+                    .boxed(),
+            );
+        }
+
+        // rows
+        for _ in 0..2 {
+            let row = rand::random::<u16>() % hdr.square_width();
+
+            futs.push(
+                node.request_row(row, hdr.height(), Some(Duration::from_secs(1)))
+                    .map(|res| res.map(|_| ()))
+                    .boxed(),
+            );
+        }
+
+        // namespace data
+        for ns in [Namespace::PAY_FOR_BLOB, blob_ns] {
+            futs.push(
+                node.request_namespace_data(ns, hdr.height(), Some(Duration::from_secs(2)))
+                    .map(|res| res.map(|_| ()))
+                    .boxed(),
+            );
+        }
+
+        // eds
+        futs.push(
+            node.request_extended_data_square(hdr.height(), Some(Duration::from_secs(2)))
+                .map(|res| res.map(|_| ()))
+                .boxed(),
+        );
+    }
+
+    while let Some(res) = futs.next().await {
+        res.expect("Request failed");
+    }
+
+    drop(futs);
+    node.stop().await;
 }
 
 fn random_bytes(len: usize) -> Vec<u8> {

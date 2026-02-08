@@ -115,6 +115,9 @@ web-sys = { workspace = true, features = [
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test.workspace = true
 celestia-rpc = { workspace = true, features = ["wasm-bindgen"] }
+# TODO: added for debugging
+tracing-subscriber = { workspace = true, features = ["time"] }
+tracing-web = "*"
 
 [dev-dependencies]
 celestia-rpc = { workspace = true, features = ["p2p"] }
