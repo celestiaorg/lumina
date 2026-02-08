@@ -228,11 +228,6 @@ impl NetworkState {
         }
 
         state.confirmed_sequence = seq_id;
-
-        println!(
-            "state.confirmed_sequence: {}, {:?}",
-            state.confirmed_sequence, state.mempool
-        );
     }
 
     fn max_submitted_sequence(&self) -> u64 {
@@ -316,7 +311,7 @@ impl ServerReturn {
 type ActionFunc =
     dyn for<'a> Fn(&'a RoutedCall, &mut NetworkState) -> ActionResult + Send + Sync + 'static;
 type MatchFunc = dyn for<'a> Fn(&'a RoutedCall) -> bool + Send + Sync + 'static;
-type PeriodicFunc = dyn for<'a> Fn(usize, &mut NetworkState) -> () + Send + Sync + 'static;
+type PeriodicFunc = dyn for<'a> Fn(&mut NetworkState) -> () + Send + Sync + 'static;
 
 struct ActionResult {
     ret: ServerReturn,
@@ -411,15 +406,15 @@ struct PeriodicCall {
 impl PeriodicCall {
     fn new<F>(call: F) -> Self
     where
-        F: for<'a> Fn(usize, &mut NetworkState) -> () + Send + Sync + 'static,
+        F: for<'a> Fn(&mut NetworkState) -> () + Send + Sync + 'static,
     {
         Self {
             call: Arc::new(call),
         }
     }
 
-    fn call(&self, iteration: usize, states: &mut NetworkState) {
-        (self.call)(iteration, states);
+    fn call(&self, states: &mut NetworkState) {
+        (self.call)(states);
     }
 }
 
@@ -604,36 +599,44 @@ impl Driver {
         periodic: PeriodicCall,
         shutdown: CancellationToken,
     ) -> DriverResult {
-        let mut iterations = 0;
-        while let Some(rc) = tokio::select! {
-            _ = shutdown.cancelled() => None,
-            msg = self.inbox.recv() => msg,
-        } {
-            self.log_call(&rc);
-            let res = self.rules.iter_mut().find(|rule| rule.matches(&rc));
-            if let Some(rule) = res {
-                rule.consume();
-                let ret = rule.call(&rc, &mut self.network_state);
-                match rc.call {
-                    ServerCall::SimulateAndSign { reply, .. } => {
-                        let _ = reply.send(ret.ret.assert_signing());
-                    }
-                    ServerCall::Submit { reply, .. } => {
-                        let _ = reply.send(ret.ret.assert_submit());
-                    }
-                    ServerCall::Status { reply, .. } => {
-                        let _ = reply.send(ret.ret.assert_status());
-                    }
-                    ServerCall::StatusBatch { reply, .. } => {
-                        let _ = reply.send(ret.ret.assert_status_batch());
-                    }
-                    ServerCall::CurrentSequence { reply, .. } => {
-                        let _ = reply.send(ret.ret.assert_sequence());
+        let mut timer = time::Interval::new(Duration::from_millis(10));
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    break;
+                }
+                _ = timer.tick() => {
+                    periodic.call(&mut self.network_state);
+                }
+                msg = self.inbox.recv() => {
+                    let Some(rc) = msg else {
+                        continue;
+                    };
+                    self.log_call(&rc);
+                    let res = self.rules.iter_mut().find(|rule| rule.matches(&rc));
+                    if let Some(rule) = res {
+                        rule.consume();
+                        let ret = rule.call(&rc, &mut self.network_state);
+                        match rc.call {
+                            ServerCall::SimulateAndSign { reply, .. } => {
+                                let _ = reply.send(ret.ret.assert_signing());
+                            }
+                            ServerCall::Submit { reply, .. } => {
+                                let _ = reply.send(ret.ret.assert_submit());
+                            }
+                            ServerCall::Status { reply, .. } => {
+                                let _ = reply.send(ret.ret.assert_status());
+                            }
+                            ServerCall::StatusBatch { reply, .. } => {
+                                let _ = reply.send(ret.ret.assert_status_batch());
+                            }
+                            ServerCall::CurrentSequence { reply, .. } => {
+                                let _ = reply.send(ret.ret.assert_sequence());
+                            }
+                        }
                     }
                 }
             }
-            periodic.call(iterations, &mut self.network_state);
-            iterations += 1;
         }
         let mut unmet = vec![];
         for rule in self.rules.iter() {
@@ -742,9 +745,6 @@ impl Harness {
 async fn test_eviction() {
     init_tracing();
     let evict_sequence = 15;
-    let is_evicted = Arc::new(AtomicBool::new(false));
-    let _is_evicted_submit = is_evicted.clone();
-
     let rules: Vec<Rule> = vec![
         // Signing rule
         Rule::new(
@@ -813,7 +813,6 @@ async fn test_eviction() {
                 move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
                     ServerCall::Submit { .. } => {
                         states.evict(rc.node_id.clone(), 2);
-                        is_evicted.store(true, Ordering::Relaxed);
                         ActionResult {
                             ret: ServerReturn::Submit(TxSubmitResult::Err(
                                 SubmitFailure::SequenceMismatch { expected: 2 },
@@ -887,11 +886,9 @@ async fn test_eviction() {
             0,
         ),
     ];
-    let update = PeriodicCall::new(|iterations: usize, states: &mut NetworkState| {
-        if iterations % 10 == 0 {
-            let max_seq = states.max_submitted_sequence() - 1;
-            states.update_confirmed_all(max_seq);
-        }
+    let update = PeriodicCall::new(|states: &mut NetworkState| {
+        let max_seq = states.max_submitted_sequence() - 1;
+        states.update_confirmed_all(max_seq);
     });
     let (mut harness, manager_worker) =
         Harness::new(Duration::from_millis(1), 10, 1000, 2, rules, update);
@@ -905,26 +902,27 @@ async fn test_eviction() {
     while let Some(handle) = add_handles.pop_front() {
         seq += 1;
         let (signed, submit, confirm) = handle;
-        let _ = signed.await;
-        let _ = submit.await;
-        match confirm.await {
-            Err(e) => {
-                panic!("confirm await error: {:?} with seq {}", e, seq);
-            }
-            Ok(res) => match res {
-                Ok(_conf) => {
-                    println!("confirm successful for {}", seq);
-                }
-                Err(e) => {
-                    println!("confirm failed for {}: {}", seq, e);
-                }
-            },
+        let signed = signed.await.expect("signed channel closed");
+        assert!(
+            signed.is_ok(),
+            "signing failed for seq {}: {:?}",
+            seq,
+            signed
+        );
+        let submitted = submit.await.expect("submit channel closed");
+        assert!(
+            submitted.is_ok(),
+            "submit failed for seq {}: {:?}",
+            seq,
+            submitted
+        );
+        let confirmed = confirm.await.expect("confirm channel closed");
+        match confirmed {
+            Ok(TxStatus::Confirmed { .. }) => {}
+            other => panic!("confirm failed for seq {}: {:?}", seq, other),
         }
     }
     let results = harness.stop().await;
-    for log in results.log {
-        log.println();
-    }
 }
 
 #[tokio::test]
@@ -933,8 +931,10 @@ async fn test_recovering() {
     let evict_sequence = 15;
     let is_evicted = Arc::new(AtomicBool::new(false));
     let is_evicted_submit = is_evicted.clone();
+    let is_evicted_check = is_evicted.clone();
     let recovery_triggered = Arc::new(AtomicBool::new(false));
     let recovery_triggered_check = recovery_triggered.clone();
+    let recovery_triggered_check2 = recovery_triggered.clone();
 
     let rules: Vec<Rule> = vec![
         // Signing rule
@@ -980,30 +980,10 @@ async fn test_recovering() {
                 "submit_action",
                 move |rc: &RoutedCall, states: &mut NetworkState| match rc.call {
                     ServerCall::Submit { sequence, .. } => {
-                        let node_state = states.node_states.get(&rc.node_id).unwrap();
-                        let expected_seq = node_state.next_submit_seq();
-                        println!(
-                            "[SUBMIT] node={}, seq={}, expected={}, confirmed={}, mempool_len={}",
-                            rc.node_id,
-                            sequence,
-                            expected_seq,
-                            node_state.confirmed_sequence,
-                            node_state.mempool.len()
-                        );
                         let result =
                             states.submit(rc.node_id.clone(), sequence, TxModifier::CorrectTx);
-                        if let Err(ref e) = result {
-                            println!(
-                                "[SUBMIT] FAILED: node={}, seq={}, error={:?}",
-                                rc.node_id, sequence, e
-                            );
-                        }
                         if is_evicted_submit.load(Ordering::Relaxed) {
                             if !recovery_triggered.load(Ordering::Relaxed) {
-                                println!(
-                                    "[SUBMIT] recovery not triggered, updating confirmed to {}",
-                                    evict_sequence
-                                );
                                 states.update_confirmed_all(evict_sequence);
                                 recovery_triggered.store(true, Ordering::Relaxed);
                             }
@@ -1076,10 +1056,6 @@ async fn test_recovering() {
                 |rc: &RoutedCall, states: &mut NetworkState| match &rc.call {
                     ServerCall::StatusBatch { ids, .. } => {
                         let results = states.confirm_batch(rc.node_id.clone(), ids);
-                        println!(
-                            "[DEBUG STATUS_BATCH] node={}, ids={:?}, results={:?}",
-                            rc.node_id, ids, results
-                        );
                         ActionResult {
                             ret: ServerReturn::StatusBatch(TxConfirmResult::Ok(results)),
                         }
@@ -1110,18 +1086,12 @@ async fn test_recovering() {
         ),
     ];
 
-    let update = PeriodicCall::new(move |iterations: usize, states: &mut NetworkState| {
+    let update = PeriodicCall::new(move |states: &mut NetworkState| {
         if !recovery_triggered_check.load(Ordering::Relaxed) {
             return;
         }
-        if iterations % 100 == 0 {
-            let max_seq = states.max_submitted_sequence() - 1;
-            println!(
-                "[SUBMIT] recovery triggered, updating confirmed to {}",
-                max_seq
-            );
-            states.update_confirmed_all(max_seq);
-        }
+        let max_seq = states.max_submitted_sequence() - 1;
+        states.update_confirmed_all(max_seq);
     });
     let (mut harness, manager_worker) =
         Harness::new(Duration::from_millis(1), 10, 1000, 2, rules, update);
@@ -1135,24 +1105,33 @@ async fn test_recovering() {
     while let Some(handle) = add_handles.pop_front() {
         seq += 1;
         let (signed, submit, confirm) = handle;
-        let _ = signed.await;
-        let _ = submit.await;
-        match confirm.await {
-            Err(e) => {
-                println!("confirm await error: {:?} with seq {}", e, seq);
-            }
-            Ok(res) => match res {
-                Ok(_conf) => {
-                    println!("confirm successful for {}", seq);
-                }
-                Err(e) => {
-                    println!("confirm failed for {}: {}", seq, e);
-                }
-            },
+        let signed = signed.await.expect("signed channel closed");
+        assert!(
+            signed.is_ok(),
+            "signing failed for seq {}: {:?}",
+            seq,
+            signed
+        );
+        let submitted = submit.await.expect("submit channel closed");
+        assert!(
+            submitted.is_ok(),
+            "submit failed for seq {}: {:?}",
+            seq,
+            submitted
+        );
+        let confirmed = confirm.await.expect("confirm channel closed");
+        match confirmed {
+            Ok(TxStatus::Confirmed { .. }) => {}
+            other => panic!("confirm failed for seq {}: {:?}", seq, other),
         }
     }
+    assert!(
+        is_evicted_check.load(Ordering::Relaxed),
+        "expected eviction to be triggered"
+    );
+    assert!(
+        recovery_triggered_check2.load(Ordering::Relaxed),
+        "expected recovery to be triggered"
+    );
     let results = harness.stop().await;
-    for log in results.log {
-        log.println();
-    }
 }
