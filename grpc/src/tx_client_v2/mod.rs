@@ -81,7 +81,6 @@
 use std::collections::HashMap;
 use std::hash::Hash as StdHash;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -91,9 +90,9 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use lumina_utils::executor::spawn_cancellable;
 use lumina_utils::time::{self, Interval};
 use tokio::select;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, info};
 
 mod node_manager;
 mod tx_buffer;
@@ -601,6 +600,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         );
 
         let mut current_event: Option<NodeEvent<S::TxId, S::ConfirmInfo>> = None;
+        let mut shutdown_seen = false;
 
         loop {
             if !self.plan_requests.is_empty() {
@@ -626,7 +626,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             }
 
             select! {
-                _ = shutdown.cancelled() => {
+                _ = poll_shutdown(&shutdown, &mut shutdown_seen) => {
                     current_event = Some(NodeEvent::NodeStop);
                 }
                 tx = self.add_tx_rx.recv() => {
@@ -674,7 +674,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 }
             }
         }
-
+        info!("stopping nodes");
         shutdown.cancel();
         Ok(())
     }
@@ -802,7 +802,16 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             }
         }
         if let Some(limit) = self.nodes.min_confirmed_non_stopped() {
+            let before = self.transactions.confirmed_seq();
+            debug!(
+                before,
+                limit,
+                max_seq = self.transactions.max_seq(),
+                "clear_confirmed_up_to candidate"
+            );
             self.clear_confirmed_up_to(limit);
+            let after = self.transactions.confirmed_seq();
+            debug!(before, after, limit, "clear_confirmed_up_to result");
         }
         Ok(false)
     }
@@ -891,6 +900,15 @@ async fn poll_opt<F: std::future::Future + Unpin>(fut: &mut Option<F>) -> Option
     match fut.as_mut() {
         Some(fut) => Some(fut.await),
         None => futures::future::pending().await,
+    }
+}
+
+async fn poll_shutdown(shutdown: &CancellationToken, seen: &mut bool) {
+    if *seen {
+        futures::future::pending::<()>().await;
+    } else {
+        shutdown.cancelled().await;
+        *seen = true;
     }
 }
 

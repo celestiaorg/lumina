@@ -326,16 +326,16 @@ impl<S: TxServer> NodeManager<S> {
         }
     }
 
-    pub(crate) fn should_stop(&self, confirmed_seq: u64) -> bool {
-        let mut any_active = false;
+    pub(crate) fn should_stop(&self) -> bool {
+        let mut all_stopped = true;
         for (node_id, node) in self.nodes.iter() {
+            let submitted_seq = node.shared().last_submitted.unwrap_or(0);
+            let confirmed_seq = node.shared().last_confirmed;
             let node_should_stop = match node {
-                NodeState::Stopped(state) => confirmed_seq >= state.stop_seq,
-                _ => {
-                    any_active = true;
-                    false
-                }
+                NodeState::Stopped(state) => confirmed_seq >= state.stop_seq.min(submitted_seq),
+                _ => false,
             };
+            all_stopped = all_stopped && node_should_stop;
             debug!(
                 node_id = %node_id.as_ref(),
                 state = %node.log_state(),
@@ -344,11 +344,7 @@ impl<S: TxServer> NodeManager<S> {
                 "should_stop check"
             );
         }
-        if any_active {
-            return false;
-        }
-        debug!("all nodes stopped; stopping worker");
-        true
+        all_stopped
     }
 
     pub(crate) fn min_confirmed_non_stopped(&self) -> Option<u64> {
@@ -663,7 +659,7 @@ impl<S: TxServer> NodeManager<S> {
             }
         }
 
-        if self.should_stop(txs.confirmed_seq()) {
+        if self.should_stop() {
             mutations.push(WorkerMutation::WorkerStop);
         }
 
@@ -821,15 +817,51 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo, Pending>(
     match node {
         NodeState::Active(state) => {
             if state.shared.confirm_inflight {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    "plan_confirmation: skip active, confirm_inflight"
+                );
                 return None;
             }
-            let last = state.shared.last_submitted?;
-            let ids = txs.ids_up_to(last, max_batch)?;
+            let Some(last) = state.shared.last_submitted else {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    "plan_confirmation: skip active, no last_submitted"
+                );
+                return None;
+            };
+            let ids = match txs.ids_from_to(state.shared.last_confirmed + 1, last, max_batch) {
+                Some(ids) => ids,
+                None => {
+                    debug!(
+                        node_id = %node_id.as_ref(),
+                        start = state.shared.last_confirmed + 1,
+                        stop = last,
+                        confirmed_seq = txs.confirmed_seq(),
+                        max_seq = txs.max_seq(),
+                        "plan_confirmation: skip active, no ids in range"
+                    );
+                    return None;
+                }
+            };
             if ids.is_empty() {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    start = state.shared.last_confirmed + 1,
+                    stop = last,
+                    "plan_confirmation: skip active, empty ids"
+                );
                 return None;
             }
             let epoch = state.shared.epoch;
             state.shared.confirm_inflight = true;
+            debug!(
+                node_id = %node_id.as_ref(),
+                start = state.shared.last_confirmed + 1,
+                stop = last,
+                ids_len = ids.len(),
+                "plan_confirmation: spawn active confirm batch"
+            );
             Some(WorkerPlan::SpawnConfirmBatch {
                 node_id: node_id.clone(),
                 ids,
@@ -838,6 +870,10 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo, Pending>(
         }
         NodeState::Recovering(state) => {
             if state.shared.confirm_inflight {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    "plan_confirmation: skip recovering, confirm_inflight"
+                );
                 return None;
             }
             let tx = txs.get(state.target)?;
@@ -852,16 +888,53 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo, Pending>(
         }
         NodeState::Stopped(state) => {
             if state.shared.confirm_inflight {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    "plan_confirmation: skip stopped, confirm_inflight"
+                );
                 return None;
             }
-            let last = state.shared.last_submitted?;
+            let Some(last) = state.shared.last_submitted else {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    "plan_confirmation: skip stopped, no last_submitted"
+                );
+                return None;
+            };
             let confirm_upto = last.min(state.stop_seq);
-            let ids = txs.ids_up_to(confirm_upto, max_batch)?;
+            let ids =
+                match txs.ids_from_to(state.shared.last_confirmed + 1, confirm_upto, max_batch) {
+                    Some(ids) => ids,
+                    None => {
+                        debug!(
+                            node_id = %node_id.as_ref(),
+                            start = state.shared.last_confirmed + 1,
+                            stop = confirm_upto,
+                            confirmed_seq = txs.confirmed_seq(),
+                            max_seq = txs.max_seq(),
+                            "plan_confirmation: skip stopped, no ids in range"
+                        );
+                        return None;
+                    }
+                };
             if ids.is_empty() {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    start = state.shared.last_confirmed + 1,
+                    stop = confirm_upto,
+                    "plan_confirmation: skip stopped, empty ids"
+                );
                 return None;
             }
             let epoch = state.shared.epoch;
             state.shared.confirm_inflight = true;
+            debug!(
+                node_id = %node_id.as_ref(),
+                start = state.shared.last_confirmed + 1,
+                stop = confirm_upto,
+                ids_len = ids.len(),
+                "plan_confirmation: spawn stopped confirm batch"
+            );
             Some(WorkerPlan::SpawnConfirmBatch {
                 node_id: node_id.clone(),
                 ids,
@@ -949,12 +1022,28 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
             _ => node.shared_mut(),
         };
         let offset = shared.last_confirmed + 1;
+        let last_confirmed = shared.last_confirmed;
+        let last_submitted = shared.last_submitted;
         for (idx, (sequence, status)) in collected.into_iter().enumerate() {
             if idx as u64 + offset != sequence {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    idx,
+                    expected_seq = idx as u64 + offset,
+                    got_seq = sequence,
+                    "process_status_batch: gap encountered"
+                );
                 break;
             }
             match status {
                 TxStatus::Pending => {
+                    debug!(
+                        node_id = %node_id.as_ref(),
+                        sequence,
+                        last_confirmed,
+                        last_submitted = ?last_submitted,
+                        "process_status_batch: pending encountered"
+                    );
                     break;
                 }
                 TxStatus::Evicted => {

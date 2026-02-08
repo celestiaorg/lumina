@@ -4,7 +4,7 @@ use celestia_types::state::RawTxBody;
 use prost::Message;
 use std::collections::VecDeque;
 use std::sync::Once;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 

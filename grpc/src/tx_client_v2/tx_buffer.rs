@@ -127,14 +127,25 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, 
         true
     }
 
-    pub fn ids_up_to(&self, seq: u64, limit: usize) -> Option<Vec<TxId>> {
-        let idx = self.tx_idx(seq)?;
-        let take = limit.min(idx + 1);
+    pub fn ids_from_to(&self, start: u64, stop: u64, limit: usize) -> Option<Vec<TxId>> {
+        if self.transactions.is_empty() {
+            return None;
+        }
+        let lower = (self.confirmed + 1).max(start);
+        let upper = self.max_seq().min(stop);
+        if lower > upper {
+            return None;
+        }
+        let idx = self.tx_idx(lower)?;
+        let stop_idx = self.tx_idx(upper)?;
         Some(
             self.transactions
                 .iter()
-                .take(take)
-                .filter_map(|tx| tx.id.clone())
+                .enumerate()
+                .skip_while(|(i, _)| *i < idx)
+                .take_while(|(i, _)| *i <= stop_idx)
+                .filter_map(|(_, tx)| tx.id.clone())
+                .take(limit)
                 .collect(),
         )
     }
@@ -258,18 +269,18 @@ mod tests {
         }
 
         #[test]
-        fn ids_up_to_filters_none_ids() {
+        fn ids_from_to_filters_none_ids() {
             let mut buffer = make_buffer(5);
             buffer.add_transaction(make_tx(6, Some(600))).unwrap();
             buffer.add_transaction(make_tx(7, None)).unwrap();
             buffer.add_transaction(make_tx(8, Some(800))).unwrap();
 
-            let ids = buffer.ids_up_to(8, 10).unwrap();
+            let ids = buffer.ids_from_to(6, 8, 10).unwrap();
             assert_eq!(ids, vec![600, 800]);
         }
 
         #[test]
-        fn ids_up_to_respects_limit() {
+        fn ids_from_to_respects_limit() {
             let mut buffer = make_buffer(5);
             for seq in 6..=10 {
                 buffer
@@ -277,8 +288,21 @@ mod tests {
                     .unwrap();
             }
 
-            let ids = buffer.ids_up_to(10, 2).unwrap();
+            let ids = buffer.ids_from_to(6, 10, 2).unwrap();
             assert_eq!(ids, vec![600, 700]);
+        }
+
+        #[test]
+        fn ids_from_to_clamps_bounds() {
+            let mut buffer = make_buffer(5);
+            for seq in 6..=8 {
+                buffer
+                    .add_transaction(make_tx(seq, Some(seq * 100)))
+                    .unwrap();
+            }
+
+            let ids = buffer.ids_from_to(1, 20, 10).unwrap();
+            assert_eq!(ids, vec![600, 700, 800]);
         }
     }
 
