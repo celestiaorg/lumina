@@ -1,31 +1,50 @@
-#![cfg(not(target_arch = "wasm32"))]
-
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use beetswap::utils::convert_cid;
-use blockstore::Blockstore;
-use celestia_rpc::{HeaderClient, ShareClient};
-use celestia_types::nmt::{Namespace, NamespacedSha2Hasher};
-use celestia_types::sample::SampleId;
+use celestia_rpc::ShareClient;
+use celestia_types::nmt::Namespace;
 use celestia_types::{AppVersion, Blob, ExtendedHeader};
-use cid::{Cid, CidGeneric};
-use lumina_node::NodeError;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use lumina_node::blockstore::InMemoryBlockstore;
 use lumina_node::events::NodeEvent;
 use lumina_node::node::P2pError;
+use lumina_node::store::InMemoryStore;
 use lumina_node::test_utils::test_node_builder;
+use lumina_node::{Node, NodeError};
+use lumina_utils::test_utils::async_test;
+use lumina_utils::time::timeout;
 use rand::RngCore;
-use tokio::sync::mpsc;
-use tokio::time::timeout;
-use utils::new_connected_node_with_builder;
 
-use crate::utils::{blob_submit, bridge_client, new_connected_node};
+use crate::utils::{
+    blob_submit, bridge_client, new_connected_node, new_connected_node_with_builder,
+};
 
 mod utils;
 
-#[tokio::test]
+// TODO: running each of those tests in browser separately makes them pass in milliseconds,
+// but running them all at once hangs after 2-3 tests. Probably an issue with opening connections
+// to the same go node over and over. Couldn't dig deep enough to understand it fully tho. Would
+// need to investigate the QLOG of chrome to see what happens on quic level, maybe it is
+// https://issues.chromium.org/issues/400699540
+// ^- above link is now private, which means they think it is security issue, it was public before
+// more info: https://github.com/celestiaorg/lumina/issues/287, it's the old bug
+
+#[async_test]
 async fn shwap_sampling_forward() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, _) = new_connected_node().await;
 
     // create new events sub to ignore all previous events
@@ -42,22 +61,19 @@ async fn shwap_sampling_forward() {
                 break height;
             }
         };
-        // timeout is double of the block time on CI
+        // Timeout is double of the block time on CI
         let new_head = timeout(Duration::from_secs(9), get_new_head).await.unwrap();
 
         // wait for height to be sampled
         let wait_height_sampled = async {
             loop {
                 let ev = events.recv().await.unwrap();
-                let NodeEvent::SamplingResult {
-                    height, timed_out, ..
-                } = ev.event
-                else {
+                let NodeEvent::SamplingResult { height, failed, .. } = ev.event else {
                     continue;
                 };
 
                 if height == new_head {
-                    assert!(!timed_out);
+                    assert!(!failed);
                     break;
                 }
             }
@@ -66,10 +82,25 @@ async fn shwap_sampling_forward() {
             .await
             .unwrap();
     }
+
+    // shouldn't be needed but I'm trying anything
+    node.stop().await;
 }
 
-#[tokio::test]
+#[async_test]
 async fn shwap_sampling_backward() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, mut events) = new_connected_node().await;
 
     let current_head = node.get_local_head_header().await.unwrap().height();
@@ -91,7 +122,7 @@ async fn shwap_sampling_backward() {
             }
         }
     };
-    let (from_height, to_height) = timeout(Duration::from_secs(4), new_batch_synced)
+    let (from_height, to_height) = timeout(Duration::from_secs(5), new_batch_synced)
         .await
         .unwrap();
 
@@ -102,14 +133,11 @@ async fn shwap_sampling_backward() {
     timeout(Duration::from_secs(10), async {
         loop {
             let ev = events.recv().await.unwrap();
-            let NodeEvent::SamplingResult {
-                height, timed_out, ..
-            } = ev.event
-            else {
+            let NodeEvent::SamplingResult { height, failed, .. } = ev.event else {
                 continue;
             };
 
-            assert!(!timed_out);
+            assert!(!failed);
             headers_to_sample.remove(&height);
 
             if headers_to_sample.is_empty() {
@@ -119,10 +147,24 @@ async fn shwap_sampling_backward() {
     })
     .await
     .unwrap();
+
+    node.stop().await;
 }
 
-#[tokio::test]
+#[async_test]
 async fn shwap_request_sample() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -131,7 +173,7 @@ async fn shwap_request_sample() {
     let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_height(&node, height).await;
     let square_width = header.square_width();
 
     // check existing sample
@@ -146,7 +188,7 @@ async fn shwap_request_sample() {
         .await
         .unwrap();
     let sample = node
-        .request_sample(0, 0, height, Some(Duration::from_millis(500)))
+        .request_sample(0, 0, height, Some(Duration::from_secs(1)))
         .await
         .unwrap();
     assert_eq!(expected, sample.share);
@@ -157,15 +199,29 @@ async fn shwap_request_sample() {
             square_width + 1,
             square_width + 1,
             height,
-            Some(Duration::from_millis(500)),
+            Some(Duration::from_secs(10)),
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, NodeError::P2p(P2pError::RequestTimedOut)));
+    assert!(matches!(err, NodeError::P2p(P2pError::ShrEx(_))));
+
+    node.stop().await;
 }
 
-#[tokio::test]
+#[async_test]
 async fn shwap_request_row() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -174,7 +230,8 @@ async fn shwap_request_row() {
     let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+
+    let header = wait_for_height(&node, height).await;
     let eds = client
         .share_get_eds(header.height(), header.app_version())
         .await
@@ -193,76 +250,25 @@ async fn shwap_request_row() {
         .request_row(square_width + 1, height, Some(Duration::from_secs(1)))
         .await
         .unwrap_err();
-    assert!(matches!(err, NodeError::P2p(P2pError::RequestTimedOut)));
+    assert!(matches!(err, NodeError::P2p(P2pError::ShrEx(_))));
+
+    node.stop().await;
 }
 
-#[tokio::test]
-async fn shwap_request_row_namespace_data() {
-    let (node, _) = new_connected_node().await;
-    let client = bridge_client().await;
-
-    let ns = Namespace::const_v0(rand::random());
-    let blob_len = rand::random::<usize>() % 4096 + 1;
-    let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
-
-    let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
-    let eds = client
-        .share_get_eds(header.height(), header.app_version())
-        .await
-        .unwrap();
-    let square_width = header.square_width();
-
-    // check existing row namespace data
-    let rows_with_ns: Vec<_> = header
-        .dah
-        .row_roots()
-        .iter()
-        .enumerate()
-        .filter_map(|(n, hash)| {
-            hash.contains::<NamespacedSha2Hasher>(*ns)
-                .then_some(n as u16)
-        })
-        .collect();
-    let eds_ns_data = eds.get_namespace_data(ns, &header.dah, height).unwrap();
-
-    for (n, &row) in rows_with_ns.iter().enumerate() {
-        let row_ns_data = node
-            .request_row_namespace_data(ns, row, height, Some(Duration::from_secs(1)))
-            .await
-            .unwrap();
-        assert_eq!(eds_ns_data[n].1, row_ns_data);
-    }
-
-    // check nonexisting row row namespace data
-    let err = node
-        .request_row_namespace_data(ns, square_width + 1, height, Some(Duration::from_secs(1)))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, NodeError::P2p(P2pError::RequestTimedOut)));
-
-    // check nonexisting namespace row namespace data
-    // for namespace that row actually contains
-    // PFB (0x04) < 0x05 < Primary ns padding (0x255)
-    let unknown_ns = Namespace::const_v0([0, 0, 0, 0, 0, 0, 0, 0, 0, 5]);
-    let row = node
-        .request_row_namespace_data(unknown_ns, 0, height, Some(Duration::from_secs(1)))
-        .await
-        .unwrap();
-    assert!(row.shares.is_empty());
-
-    // check nonexisting namespace row namespace data
-    // for namespace that row doesn't contain
-    let unknown_ns = Namespace::TAIL_PADDING;
-    let err = node
-        .request_row_namespace_data(unknown_ns, 0, height, Some(Duration::from_secs(1)))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, NodeError::P2p(P2pError::RequestTimedOut)));
-}
-
-#[tokio::test]
+#[async_test]
 async fn shwap_request_all_blobs() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -275,6 +281,7 @@ async fn shwap_request_all_blobs() {
         .collect();
 
     let height = blob_submit(&client, &blobs).await;
+    wait_for_height(&node, height).await;
 
     // check existing namespace
     let received = node
@@ -292,146 +299,123 @@ async fn shwap_request_all_blobs() {
         .unwrap();
 
     assert!(received.is_empty());
+
+    node.stop().await;
 }
 
-#[tokio::test]
-async fn shwap_request_sample_should_cleanup_unneeded_samples() {
-    // submit some blobs to celestia to get bigger square, so that daser
-    // doesn't sample whole block
-    let ns = Namespace::const_v0(rand::random());
-    let blobs: Vec<_> = (0..5)
-        .map(|_| {
-            let blob_len = rand::random::<usize>() % 4096 + 1;
-            Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap()
-        })
-        .collect();
+#[async_test]
+async fn shwap_request_concurrent() {
+    #[cfg(target_arch = "wasm32")]
+    use tracing_subscriber::prelude::*;
 
-    // we submit before creating a node because it's quite slow and events can lag
+    #[cfg(target_arch = "wasm32")]
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+        .with_writer(tracing_web::MakeConsoleWriter) // write events to the console
+        .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    #[cfg(target_arch = "wasm32")]
+    let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
+
+    let builder = test_node_builder().pruning_window(Duration::from_secs(60));
+    let (node, _) = new_connected_node_with_builder(builder).await;
     let client = bridge_client().await;
-    let submitted_height = blob_submit(&client, &blobs).await;
-    let header = client.header_get_by_height(submitted_height).await.unwrap();
 
-    let (removed_sender, mut removed_receiver) = mpsc::unbounded_channel();
-    let builder = test_node_builder()
-        // explicitely set pruning window to something big so that
-        // pruner doesn't kick in
-        .pruning_window(Duration::from_secs(60 * 60 * 24))
-        .blockstore(TestBlockstore::new(removed_sender));
+    let blob_ns = Namespace::const_v0(rand::random());
 
-    let (node, mut events) = new_connected_node_with_builder(builder).await;
+    let mut headers = Vec::new();
 
-    // wait for node to sample the height we just submitted
-    timeout(Duration::from_secs(10), async {
-        loop {
-            let ev = events.recv().await.unwrap();
-            let NodeEvent::SamplingResult { height, .. } = ev.event else {
-                continue;
-            };
+    for _ in 0..3 {
+        let blobs: Vec<_> = (0..3)
+            .map(|_| {
+                let blob_len = rand::random::<usize>() % 512 + 1;
+                Blob::new(blob_ns, random_bytes(blob_len), None, AppVersion::V2).unwrap()
+            })
+            .collect();
 
-            if height == submitted_height {
-                break;
-            }
+        let height = blob_submit(&client, &blobs).await;
+        headers.push(wait_for_height(&node, height).await);
+    }
+
+    let mut futs = FuturesUnordered::new();
+
+    for hdr in &headers {
+        // samples for each header
+        for _ in 0..4 {
+            let row = rand::random::<u16>() % hdr.square_width();
+            let col = rand::random::<u16>() % hdr.square_width();
+
+            futs.push(
+                node.request_sample(row, col, hdr.height(), Some(Duration::from_secs(1)))
+                    .map(|res| res.map(|_| ()))
+                    .boxed(),
+            );
         }
-    })
-    .await
-    .unwrap();
 
-    // get the cids selected by daser
-    let cids = node
-        .get_sampling_metadata(submitted_height)
-        .await
-        .unwrap()
-        .unwrap()
-        .cids;
+        // rows
+        for _ in 0..2 {
+            let row = rand::random::<u16>() % hdr.square_width();
 
-    // try to request a sample that wasn't selected by daser
-    let (row, col, cid) = loop {
-        let (row, col, cid) = random_sample(&header);
-        if !cids.contains(&cid) {
-            break (row, col, cid);
+            futs.push(
+                node.request_row(row, hdr.height(), Some(Duration::from_secs(1)))
+                    .map(|res| res.map(|_| ()))
+                    .boxed(),
+            );
         }
-    };
 
-    node.request_sample(row, col, submitted_height, None)
-        .await
-        .unwrap();
-
-    // it should already be removed from the blockstore
-    let removed_cid = removed_receiver.try_recv().unwrap();
-    assert_eq!(removed_cid, cid);
-
-    // now try to get a cid that was selected by daser
-    let id = SampleId::try_from(cids[0]).unwrap();
-    assert_eq!(id.block_height(), submitted_height);
-
-    node.request_sample(id.row_index(), id.column_index(), submitted_height, None)
-        .await
-        .unwrap();
-
-    // it shouldn't be removed from blockstore within pruning window
-    removed_receiver.try_recv().unwrap_err();
-}
-
-struct TestBlockstore {
-    blockstore: InMemoryBlockstore,
-    removed_sender: mpsc::UnboundedSender<Cid>,
-}
-
-impl TestBlockstore {
-    fn new(removed_sender: mpsc::UnboundedSender<Cid>) -> Self {
-        Self {
-            blockstore: InMemoryBlockstore::new(),
-            removed_sender,
+        // namespace data
+        for ns in [Namespace::PAY_FOR_BLOB, blob_ns] {
+            futs.push(
+                node.request_namespace_data(ns, hdr.height(), Some(Duration::from_secs(2)))
+                    .map(|res| res.map(|_| ()))
+                    .boxed(),
+            );
         }
-    }
-}
 
-impl Blockstore for TestBlockstore {
-    async fn get<const S: usize>(
-        &self,
-        cid: &CidGeneric<S>,
-    ) -> blockstore::Result<Option<Vec<u8>>> {
-        self.blockstore.get(cid).await
+        // eds
+        futs.push(
+            node.request_extended_data_square(hdr.height(), Some(Duration::from_secs(2)))
+                .map(|res| res.map(|_| ()))
+                .boxed(),
+        );
     }
 
-    async fn put_keyed<const S: usize>(
-        &self,
-        cid: &CidGeneric<S>,
-        data: &[u8],
-    ) -> blockstore::Result<()> {
-        self.blockstore.put_keyed(cid, data).await
+    while let Some(res) = futs.next().await {
+        res.expect("Request failed");
     }
 
-    async fn remove<const S: usize>(&self, cid: &CidGeneric<S>) -> blockstore::Result<()> {
-        self.blockstore.remove(cid).await?;
-
-        let cid = convert_cid(cid).unwrap();
-        self.removed_sender.send(cid).unwrap();
-
-        Ok(())
-    }
-
-    async fn close(self) -> blockstore::Result<()> {
-        self.blockstore.close().await
-    }
-}
-
-fn random_sample(header: &ExtendedHeader) -> (u16, u16, Cid) {
-    let square = header.square_width();
-    let id = SampleId::new(
-        rand::random::<u16>() % square,
-        rand::random::<u16>() % square,
-        header.height(),
-    )
-    .unwrap();
-
-    let cid = convert_cid(&id.into()).unwrap();
-
-    (id.row_index(), id.column_index(), cid)
+    drop(futs);
+    node.stop().await;
 }
 
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; len];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes
+}
+
+async fn wait_for_height(
+    node: &Node<InMemoryBlockstore, InMemoryStore>,
+    height: u64,
+) -> ExtendedHeader {
+    if let Ok(hdr) = node.get_header_by_height(height).await {
+        return hdr;
+    }
+
+    // we didn't find header, so let's wait for it on subscription
+    let mut sub = node.header_subscribe().await.unwrap();
+    loop {
+        let hdr = sub.recv().await.unwrap();
+
+        match hdr.height().cmp(&height) {
+            Ordering::Less => continue,
+            Ordering::Equal => return hdr,
+            Ordering::Greater => break,
+        }
+    }
+
+    // check last time with get by height, maybe it was inserted in a moment that
+    // we didn't get it previously yet but also missed it on subscription
+    node.get_header_by_height(height).await.unwrap()
 }

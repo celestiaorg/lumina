@@ -1,28 +1,14 @@
-#![cfg(not(target_arch = "wasm32"))]
-
-use std::time::Duration;
-
 use celestia_types::consts::HASH_SIZE;
-use celestia_types::consts::appconsts::AppVersion;
-use celestia_types::fraud_proof::BadEncodingFraudProof;
 use celestia_types::hash::Hash;
-use celestia_types::test_utils::{ExtendedHeaderGenerator, corrupt_eds, generate_dummy_eds};
-use futures::StreamExt;
-use libp2p::swarm::NetworkBehaviour;
-use libp2p::{Multiaddr, SwarmBuilder, gossipsub, noise, ping, tcp, yamux};
-use lumina_node::store::{InMemoryStore, Store};
-use lumina_node::test_utils::{
-    ExtendedHeaderGeneratorExt, gen_filled_store, listening_test_node_builder, test_node_builder,
-};
+use lumina_node::test_utils::{gen_filled_store, test_node_builder};
+use lumina_utils::test_utils::async_test;
 use rand::Rng;
-use tendermint_proto::Protobuf;
-use tokio::{select, spawn, sync::mpsc, time::sleep};
 
-use crate::utils::{fetch_bridge_info, new_connected_node};
+use crate::utils::new_connected_node;
 
 mod utils;
 
-#[tokio::test]
+#[async_test]
 async fn connects_to_the_go_bridge_node() {
     let (node, _) = new_connected_node().await;
 
@@ -30,7 +16,7 @@ async fn connects_to_the_go_bridge_node() {
     assert!(info.num_peers() >= 1);
 }
 
-#[tokio::test]
+#[async_test]
 async fn header_store_access() {
     let (store, _) = gen_filled_store(100).await;
     let node = test_node_builder().store(store).start().await.unwrap();
@@ -84,17 +70,25 @@ async fn header_store_access() {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn peer_discovery() {
+    use std::time::Duration;
+
+    use lumina_node::test_utils::listening_test_node_builder;
+    use tokio::time::sleep;
+
+    use crate::utils::fetch_bridge_info;
+
     // Bridge node cannot connect to other nodes because it is behind Docker's NAT.
     // However Node2 and Node3 can discover its address via Node1.
-    let (bridge_peer_id, bridge_ma) = fetch_bridge_info().await;
+    let (bridge_peer_id, bridge_addrs) = fetch_bridge_info().await;
 
     // Node1
     //
     // This node connects to Bridge node.
     let node1 = listening_test_node_builder()
-        .bootnodes([bridge_ma])
+        .bootnodes(bridge_addrs)
         .start()
         .await
         .unwrap();
@@ -160,8 +154,18 @@ async fn peer_discovery() {
     assert_eq!(tracker_info.num_connected_trusted_peers, 1);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn stops_services_when_network_is_compromised() {
+    use std::time::Duration;
+
+    use tokio::time::sleep;
+
+    use celestia_types::AppVersion;
+    use celestia_types::test_utils::{ExtendedHeaderGenerator, corrupt_eds, generate_dummy_eds};
+    use lumina_node::store::{InMemoryStore, Store};
+    use lumina_node::test_utils::{ExtendedHeaderGeneratorExt, listening_test_node_builder};
+
     let mut generator = ExtendedHeaderGenerator::new();
     let store = InMemoryStore::new();
 
@@ -205,7 +209,18 @@ async fn stops_services_when_network_is_compromised() {
     assert!(node.syncer_info().await.is_err());
 }
 
-fn spawn_befp_announcer(connect_to: Multiaddr) -> mpsc::Sender<BadEncodingFraudProof> {
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_befp_announcer(
+    connect_to: libp2p::Multiaddr,
+) -> tokio::sync::mpsc::Sender<celestia_types::fraud_proof::BadEncodingFraudProof> {
+    use celestia_types::fraud_proof::BadEncodingFraudProof;
+    use futures::StreamExt;
+    use libp2p::swarm::NetworkBehaviour;
+    use libp2p::{SwarmBuilder, gossipsub, noise, ping, tcp, yamux};
+    use tendermint_proto::Protobuf;
+    use tokio::sync::mpsc;
+    use tokio::{select, spawn};
+
     #[derive(NetworkBehaviour)]
     struct Behaviour {
         ping: ping::Behaviour,

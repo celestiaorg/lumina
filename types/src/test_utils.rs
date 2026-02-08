@@ -166,7 +166,7 @@ impl ExtendedHeaderGenerator {
         let time = self
             .spoofed_block_time
             .map(|t| t.0)
-            .unwrap_or_else(Time::now);
+            .unwrap_or_else(|| self.now());
         generate_next(1, header, time, &self.key, None)
     }
 
@@ -197,7 +197,7 @@ impl ExtendedHeaderGenerator {
         let time = self
             .spoofed_block_time
             .map(|t| t.0)
-            .unwrap_or_else(Time::now);
+            .unwrap_or_else(|| self.now());
         generate_next(1, header, time, &self.key, Some(dah))
     }
 
@@ -307,11 +307,22 @@ impl ExtendedHeaderGenerator {
         self.spoofed_block_time = None;
     }
 
+    pub fn now(&self) -> Time {
+        let now = Time::now();
+        if let Some(hdr) = &self.current_header
+            && hdr.time() >= now
+        {
+            (hdr.time() + Duration::from_millis(1)).expect("time overflow")
+        } else {
+            now
+        }
+    }
+
     // private function which gets and increments generator time, since we cannot have multiple headers on the
     // exact same timestamp
     fn get_and_increment_time(&mut self, amount: u64) -> Time {
         let Some((spoofed_time, block_time)) = self.spoofed_block_time.take() else {
-            return Time::now();
+            return self.now();
         };
 
         let block_time_ms: u64 = block_time.as_millis().try_into().expect("u64 overflow");
