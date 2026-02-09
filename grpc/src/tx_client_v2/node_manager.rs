@@ -7,8 +7,9 @@ use tracing::debug;
 
 use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
-    NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason, RequestWithChannels,
-    SigningFailure, SubmitFailure, TxIdT, TxServer, TxStatus,
+    ConfirmationResponse, NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason,
+    RequestWithChannels, SigningFailure, SubmitFailure, TxConfirmResult, TxIdT, TxServer,
+    TxSigningResult, TxStatus, TxSubmitResult,
 };
 
 #[derive(Debug)]
@@ -435,12 +436,10 @@ impl<S: TxServer> NodeManager<S> {
     ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
         let mut mutations = Vec::new();
         let mut plan_requests = Vec::new();
-        let max_sub = self.max_active_last_submitted();
 
         debug!(event = %event.summary(), "node event");
         match event {
             NodeEvent::NodeResponse { node_id, response } => {
-                let mut stop_all = false;
                 {
                     let node = self.nodes.get_mut(&node_id).unwrap();
                     debug!(
@@ -448,196 +447,34 @@ impl<S: TxServer> NodeManager<S> {
                         state = %node.log_state(),
                         "node state (before response)"
                     );
-                    match response {
-                        NodeResponse::Submission { sequence, result } => {
-                            if node.is_stopped() {
-                                return NodeApplyOutcome {
-                                    mutations,
-                                    plan_requests,
-                                };
-                            }
-                            match result {
-                                Ok(id) => {
-                                    if let NodeState::Active(active) = node {
-                                        on_submit_success(active, sequence);
-                                        mutations
-                                            .push(WorkerMutation::MarkSubmitted { sequence, id });
-                                        let last_submitted =
-                                            active.shared.last_submitted.unwrap_or(0);
-                                        let next_sequence = txs.next_sequence().saturating_sub(1);
-                                        if last_submitted == next_sequence && txs.has_pending() {
-                                            push_plan_request(
-                                                &mut plan_requests,
-                                                PlanRequest::Signing,
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(failure) => {
-                                    debug!(
-                                        node_id = %node_id.as_ref(),
-                                        sequence,
-                                        failure = %failure.label(),
-                                        "submission error"
-                                    );
-                                    if let NodeState::Active(active) = node {
-                                        on_submit_failure(active);
-                                    }
-                                    match failure {
-                                        SubmitFailure::SequenceMismatch { expected } => {
-                                            let recovering = on_sequence_mismatch(
-                                                node, &node_id, sequence, expected, txs,
-                                            );
-                                            if recovering {
-                                                push_plan_request(
-                                                    &mut plan_requests,
-                                                    PlanRequest::Confirmation,
-                                                );
-                                            }
-                                        }
-                                        SubmitFailure::MempoolIsFull
-                                        | SubmitFailure::NetworkError { .. } => {
-                                            node.shared_mut().submit_delay = Some(confirm_interval);
-                                        }
-                                        SubmitFailure::TxInMempoolCache => {
-                                            if max_sub
-                                                .map(|(_, max)| {
-                                                    max > node.shared().last_submitted.unwrap_or(0)
-                                                })
-                                                .unwrap_or(false)
-                                            {
-                                                let last = node
-                                                    .shared_mut()
-                                                    .last_submitted
-                                                    .get_or_insert(0);
-                                                *last = last.saturating_add(1);
-                                            }
-                                            node.shared_mut().submit_delay = Some(confirm_interval);
-                                        }
-                                        SubmitFailure::Other {
-                                            error_code,
-                                            message,
-                                        } => {
-                                            let stop_at = node
-                                                .shared()
-                                                .last_submitted
-                                                .unwrap_or(node.shared().last_confirmed);
-                                            let status =
-                                                submit_other_status(&node_id, error_code, message);
-                                            node.stop_with_error(
-                                                stop_at,
-                                                StopError::SubmitError(status),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            push_plan_request(&mut plan_requests, PlanRequest::Submission);
-                        }
-                        NodeResponse::Confirmation {
-                            state_epoch,
-                            response,
-                        } => {
-                            if state_epoch != node.epoch() {
-                                debug!(
-                                    node_id = %node_id.as_ref(),
-                                    expected_epoch = node.epoch(),
-                                    response_epoch = state_epoch,
-                                    "confirmation epoch mismatch"
-                                );
-                                node.shared_mut().confirm_inflight = false;
-                                push_plan_request(&mut plan_requests, PlanRequest::Confirmation);
-                                return NodeApplyOutcome {
-                                    mutations,
-                                    plan_requests,
-                                };
-                            }
-                            node.shared_mut().confirm_inflight = false;
-                            match response {
-                                Ok(confirmation) => match confirmation {
-                                    crate::tx_client_v2::ConfirmationResponse::Batch {
-                                        statuses,
-                                    } => {
-                                        let mut effects = process_status_batch(
-                                            &node_id,
-                                            node,
-                                            statuses,
-                                            txs,
-                                            &mut plan_requests,
-                                        );
-                                        mutations.append(&mut effects);
-                                    }
-                                    crate::tx_client_v2::ConfirmationResponse::Single {
-                                        id,
-                                        status,
-                                    } => {
-                                        let mut effects =
-                                            process_recover_status(node, id, status, txs);
-                                        mutations.append(&mut effects);
-                                    }
-                                },
-                                Err(err) => {
-                                    debug!(
-                                        node_id = %node_id.as_ref(),
-                                        error = %err,
-                                        is_network = err.is_network_error(),
-                                        "confirmation error"
-                                    );
-                                    // TODO: add error handling
-                                }
-                            }
-                        }
-                        NodeResponse::Signing { sequence, result } => {
-                            node.shared_mut().signing_inflight = false;
-                            match result {
-                                Ok(tx) => {
-                                    mutations.push(WorkerMutation::EnqueueSigned { tx });
-                                    push_plan_request(&mut plan_requests, PlanRequest::Submission);
-                                }
-                                Err(SigningFailure::SequenceMismatch { expected }) => {
-                                    debug!(
-                                        node_id = %node_id.as_ref(),
-                                        sequence,
-                                        expected,
-                                        "signing sequence mismatch"
-                                    );
-                                    if expected >= sequence {
-                                        stop_all = true;
-                                    } else {
-                                        self.signing_delay = Some(confirm_interval);
-                                        push_plan_request(&mut plan_requests, PlanRequest::Signing);
-                                    }
-                                }
-                                Err(SigningFailure::NetworkError { err }) => {
-                                    debug!(
-                                        node_id = %node_id.as_ref(),
-                                        sequence,
-                                        error = %err,
-                                        "signing network error"
-                                    );
-                                    self.signing_delay = Some(confirm_interval);
-                                    push_plan_request(&mut plan_requests, PlanRequest::Signing);
-                                }
-                                Err(SigningFailure::Other { message }) => {
-                                    debug!(
-                                        node_id = %node_id.as_ref(),
-                                        sequence,
-                                        message = %message,
-                                        "signing error"
-                                    );
-                                    stop_all = true;
-                                }
-                            }
-                        }
+                }
+                let outcome = match response {
+                    NodeResponse::Submission { sequence, result } => {
+                        self.handle_submission(&node_id, sequence, result, txs, confirm_interval)
                     }
+                    NodeResponse::Confirmation {
+                        state_epoch,
+                        response,
+                    } => self.handle_confirmation(
+                        &node_id,
+                        state_epoch,
+                        response,
+                        txs,
+                        confirm_interval,
+                    ),
+                    NodeResponse::Signing { sequence, result } => {
+                        self.handle_signing(&node_id, sequence, result, confirm_interval)
+                    }
+                };
+                mutations.extend(outcome.mutations);
+                plan_requests.extend(outcome.plan_requests);
+                {
+                    let node = self.nodes.get_mut(&node_id).unwrap();
                     debug!(
                         node_id = %node_id.as_ref(),
                         state = %node.log_state(),
                         "node state (after response)"
                     );
-                }
-                if stop_all {
-                    self.stop_all_nodes();
                 }
             }
             NodeEvent::NodeStop => {
@@ -663,6 +500,219 @@ impl<S: TxServer> NodeManager<S> {
             mutations.push(WorkerMutation::WorkerStop);
         }
 
+        NodeApplyOutcome {
+            mutations,
+            plan_requests,
+        }
+    }
+
+    fn handle_submission(
+        &mut self,
+        node_id: &NodeId,
+        sequence: u64,
+        result: TxSubmitResult<S::TxId>,
+        txs: &NodeBuffer<S>,
+        confirm_interval: Duration,
+    ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
+        let mut mutations = Vec::new();
+        let mut plan_requests = Vec::new();
+
+        let max_sub = self.max_active_last_submitted();
+        let Some(node) = self.nodes.get_mut(node_id) else {
+            return NodeApplyOutcome {
+                mutations,
+                plan_requests,
+            };
+        };
+        if node.is_stopped() {
+            return NodeApplyOutcome {
+                mutations,
+                plan_requests,
+            };
+        }
+        match result {
+            Ok(id) => {
+                if let NodeState::Active(active) = node {
+                    on_submit_success(active, sequence);
+                    mutations.push(WorkerMutation::MarkSubmitted { sequence, id });
+                    let last_submitted = active.shared.last_submitted.unwrap_or(0);
+                    let next_sequence = txs.next_sequence().saturating_sub(1);
+                    if last_submitted == next_sequence && txs.has_pending() {
+                        push_plan_request(&mut plan_requests, PlanRequest::Signing);
+                    }
+                }
+            }
+            Err(failure) => {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    sequence,
+                    failure = %failure.label(),
+                    "submission error"
+                );
+                if let NodeState::Active(active) = node {
+                    on_submit_failure(active);
+                }
+                match failure {
+                    SubmitFailure::SequenceMismatch { expected } => {
+                        let recovering =
+                            on_sequence_mismatch(node, node_id, sequence, expected, txs);
+                        if recovering {
+                            push_plan_request(&mut plan_requests, PlanRequest::Confirmation);
+                        }
+                    }
+                    SubmitFailure::MempoolIsFull | SubmitFailure::NetworkError { .. } => {
+                        node.shared_mut().submit_delay = Some(confirm_interval);
+                    }
+                    SubmitFailure::TxInMempoolCache => {
+                        if max_sub
+                            .map(|(_, max)| max > node.shared().last_submitted.unwrap_or(0))
+                            .unwrap_or(false)
+                        {
+                            let last = node.shared_mut().last_submitted.get_or_insert(0);
+                            *last = last.saturating_add(1);
+                        }
+                        node.shared_mut().submit_delay = Some(confirm_interval);
+                    }
+                    SubmitFailure::Other {
+                        error_code,
+                        message,
+                    } => {
+                        let stop_at = node
+                            .shared()
+                            .last_submitted
+                            .unwrap_or(node.shared().last_confirmed);
+                        let status = submit_other_status(node_id, error_code, message);
+                        node.stop_with_error(stop_at, StopError::SubmitError(status));
+                    }
+                }
+            }
+        }
+        push_plan_request(&mut plan_requests, PlanRequest::Submission);
+        NodeApplyOutcome {
+            mutations,
+            plan_requests,
+        }
+    }
+
+    fn handle_confirmation(
+        &mut self,
+        node_id: &NodeId,
+        state_epoch: u64,
+        response: TxConfirmResult<ConfirmationResponse<S::TxId, S::ConfirmInfo>>,
+        txs: &NodeBuffer<S>,
+        _confirm_interval: Duration,
+    ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
+        let mut mutations = Vec::new();
+        let mut plan_requests = Vec::new();
+
+        let Some(node) = self.nodes.get_mut(node_id) else {
+            return NodeApplyOutcome {
+                mutations,
+                plan_requests,
+            };
+        };
+        if state_epoch != node.epoch() {
+            debug!(
+                node_id = %node_id.as_ref(),
+                expected_epoch = node.epoch(),
+                response_epoch = state_epoch,
+                "confirmation epoch mismatch"
+            );
+            node.shared_mut().confirm_inflight = false;
+            push_plan_request(&mut plan_requests, PlanRequest::Confirmation);
+            return NodeApplyOutcome {
+                mutations,
+                plan_requests,
+            };
+        }
+        node.shared_mut().confirm_inflight = false;
+        match response {
+            Ok(confirmation) => match confirmation {
+                ConfirmationResponse::Batch { statuses } => {
+                    let mut effects =
+                        process_status_batch(node_id, node, statuses, txs, &mut plan_requests);
+                    mutations.append(&mut effects);
+                }
+                ConfirmationResponse::Single { id, status } => {
+                    let mut effects = process_recover_status(node, id, status, txs);
+                    mutations.append(&mut effects);
+                }
+            },
+            Err(err) => {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    error = %err,
+                    is_network = err.is_network_error(),
+                    "confirmation error"
+                );
+                // TODO: add error handling
+            }
+        }
+        NodeApplyOutcome {
+            mutations,
+            plan_requests,
+        }
+    }
+
+    fn handle_signing(
+        &mut self,
+        node_id: &NodeId,
+        sequence: u64,
+        result: TxSigningResult<S::TxId, S::ConfirmInfo>,
+        confirm_interval: Duration,
+    ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
+        let mut mutations = Vec::new();
+        let mut plan_requests = Vec::new();
+        let mut stop_all = false;
+        let Some(node) = self.nodes.get_mut(node_id) else {
+            return NodeApplyOutcome {
+                mutations,
+                plan_requests,
+            };
+        };
+        node.shared_mut().signing_inflight = false;
+        match result {
+            Ok(tx) => {
+                mutations.push(WorkerMutation::EnqueueSigned { tx });
+                push_plan_request(&mut plan_requests, PlanRequest::Submission);
+            }
+            Err(SigningFailure::SequenceMismatch { expected }) => {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    sequence,
+                    expected,
+                    "signing sequence mismatch"
+                );
+                if expected >= sequence {
+                    stop_all = true;
+                } else {
+                    self.signing_delay = Some(confirm_interval);
+                    push_plan_request(&mut plan_requests, PlanRequest::Signing);
+                }
+            }
+            Err(SigningFailure::NetworkError { err }) => {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    sequence,
+                    error = %err,
+                    "signing network error"
+                );
+                self.signing_delay = Some(confirm_interval);
+                push_plan_request(&mut plan_requests, PlanRequest::Signing);
+            }
+            Err(SigningFailure::Other { message }) => {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    sequence,
+                    message = %message,
+                    "signing error"
+                );
+                stop_all = true;
+            }
+        }
+        if stop_all {
+            self.stop_all_nodes();
+        }
         NodeApplyOutcome {
             mutations,
             plan_requests,
