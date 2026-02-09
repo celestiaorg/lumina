@@ -1489,4 +1489,178 @@ mod tests {
                 .any(|event| matches!(event, WorkerMutation::WorkerStop))
         );
     }
+
+    #[test]
+    fn signing_success_enqueues_and_requests_submission() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
+        let mut txs = TestBuffer::new(0);
+
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
+            state.shared.signing_inflight = true;
+        }
+
+        let outcome = manager.apply_event(
+            NodeEvent::NodeResponse {
+                node_id: node_id.clone(),
+                response: NodeResponse::Signing {
+                    sequence: 1,
+                    result: Ok(make_tx(1, None)),
+                },
+            },
+            &mut txs,
+            Duration::from_secs(1),
+        );
+
+        assert!(outcome.plan_requests.contains(&PlanRequest::Submission));
+        assert!(outcome.mutations.iter().any(
+            |event| matches!(event, WorkerMutation::EnqueueSigned { tx } if tx.sequence == 1)
+        ));
+        assert!(
+            !manager
+                .nodes
+                .get(&node_id)
+                .unwrap()
+                .shared()
+                .signing_inflight
+        );
+    }
+
+    #[test]
+    fn signing_sequence_mismatch_reschedules_with_delay() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
+        let mut txs = TestBuffer::new(0);
+
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
+            state.shared.signing_inflight = true;
+        }
+
+        let outcome = manager.apply_event(
+            NodeEvent::NodeResponse {
+                node_id: node_id.clone(),
+                response: NodeResponse::Signing {
+                    sequence: 10,
+                    result: Err(SigningFailure::SequenceMismatch { expected: 9 }),
+                },
+            },
+            &mut txs,
+            Duration::from_secs(3),
+        );
+
+        assert!(outcome.plan_requests.contains(&PlanRequest::Signing));
+        assert!(manager.signing_delay.is_some());
+        assert!(matches!(
+            manager.nodes.get(&node_id).unwrap(),
+            NodeState::Active(_)
+        ));
+    }
+
+    #[test]
+    fn confirmation_epoch_mismatch_resets_inflight_and_requests_confirmation() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
+        let mut txs = TestBuffer::new(0);
+
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
+            state.shared.confirm_inflight = true;
+        }
+
+        let outcome = manager.apply_event(
+            NodeEvent::NodeResponse {
+                node_id: node_id.clone(),
+                response: NodeResponse::Confirmation {
+                    state_epoch: 1,
+                    response: Ok(ConfirmationResponse::Batch {
+                        statuses: Vec::new(),
+                    }),
+                },
+            },
+            &mut txs,
+            Duration::from_secs(1),
+        );
+
+        assert!(outcome.plan_requests.contains(&PlanRequest::Confirmation));
+        assert!(outcome.mutations.is_empty());
+        assert!(
+            !manager
+                .nodes
+                .get(&node_id)
+                .unwrap()
+                .shared()
+                .confirm_inflight
+        );
+    }
+
+    #[test]
+    fn submission_mempool_cache_advances_last_submitted() {
+        let node_a: NodeId = Arc::from("node-a");
+        let node_b: NodeId = Arc::from("node-b");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_a.clone(), node_b.clone()], 0);
+        let mut txs = TestBuffer::new(0);
+
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_a).unwrap() {
+            state.shared.last_submitted = Some(5);
+        }
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_b).unwrap() {
+            state.shared.last_submitted = Some(7);
+        }
+
+        let outcome = manager.apply_event(
+            NodeEvent::NodeResponse {
+                node_id: node_a.clone(),
+                response: NodeResponse::Submission {
+                    sequence: 6,
+                    result: Err(SubmitFailure::TxInMempoolCache),
+                },
+            },
+            &mut txs,
+            Duration::from_secs(2),
+        );
+
+        assert!(outcome.plan_requests.contains(&PlanRequest::Submission));
+        let NodeState::Active(state) = manager.nodes.get(&node_a).unwrap() else {
+            panic!("node_a should be active");
+        };
+        assert_eq!(state.shared.last_submitted, Some(6));
+        assert_eq!(state.shared.submit_delay, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn confirmation_pending_keeps_last_confirmed() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
+        let mut txs = TestBuffer::new(0);
+
+        txs.add_transaction(make_tx(6, None)).unwrap();
+        txs.add_transaction(make_tx(7, None)).unwrap();
+        txs.set_submitted_id(6, 10);
+        txs.set_submitted_id(7, 11);
+
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
+            state.shared.last_confirmed = 5;
+            state.shared.last_submitted = Some(7);
+        }
+
+        let statuses = vec![
+            (10, TxStatus::Pending),
+            (11, TxStatus::Confirmed { info: 2 }),
+        ];
+        let _ = manager.apply_event(
+            NodeEvent::NodeResponse {
+                node_id: node_id.clone(),
+                response: NodeResponse::Confirmation {
+                    state_epoch: 0,
+                    response: Ok(ConfirmationResponse::Batch { statuses }),
+                },
+            },
+            &mut txs,
+            Duration::from_secs(1),
+        );
+
+        let NodeState::Active(state) = manager.nodes.get(&node_id).unwrap() else {
+            panic!("node should be active");
+        };
+        assert_eq!(state.shared.last_confirmed, 5);
+    }
 }

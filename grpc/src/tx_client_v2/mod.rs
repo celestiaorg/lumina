@@ -295,18 +295,14 @@ pub enum TxStatus<ConfirmInfo> {
 #[allow(dead_code)]
 pub enum SubmitFailure {
     /// Server expects a different sequence.
-    SequenceMismatch {
-        expected: u64,
-    },
+    SequenceMismatch { expected: u64 },
     /// Submission failed with a specific error code and message.
     Other {
         error_code: ErrorCode,
         message: String,
     },
     /// Transport or RPC error while submitting.
-    NetworkError {
-        err: Arc<Error>,
-    },
+    NetworkError { err: Arc<Error> },
     /// Node mempool is full.
     MempoolIsFull,
     /// Transaction is already in the mempool cache.
@@ -393,6 +389,7 @@ pub trait TxServer: Send + Sync {
     /// Status lookup for submitted TxId.
     async fn status(&self, id: Self::TxId) -> TxConfirmResult<TxStatus<Self::ConfirmInfo>>;
     /// Fetch current sequence for the account (used by some implementations).
+    #[allow(dead_code)]
     async fn current_sequence(&self) -> Result<u64>;
     /// Simulate a transaction and sign it with the given sequence, returning a signed transaction.
     async fn simulate_and_sign(
@@ -429,16 +426,14 @@ impl<TxId: TxIdT, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
     fn summary(&self) -> String {
         match self {
             NodeEvent::NodeResponse { response, .. } => match response {
-                NodeResponse::Submission { sequence, result } => {
-                    match result {
-                        Ok(_) => format!("NodeResponse::Submission seq={} Ok", sequence),
-                        Err(err) => format!(
-                            "NodeResponse::Submission seq={} Err {}",
-                            sequence,
-                            err.label()
-                        ),
-                    }
-                }
+                NodeResponse::Submission { sequence, result } => match result {
+                    Ok(_) => format!("NodeResponse::Submission seq={} Ok", sequence),
+                    Err(err) => format!(
+                        "NodeResponse::Submission seq={} Err {}",
+                        sequence,
+                        err.label()
+                    ),
+                },
                 NodeResponse::Confirmation { response, .. } => match response {
                     Ok(ConfirmationResponse::Batch { statuses }) => {
                         format!("NodeResponse::Confirmation Batch {}", statuses.len())
@@ -448,14 +443,12 @@ impl<TxId: TxIdT, ConfirmInfo> NodeEvent<TxId, ConfirmInfo> {
                     }
                     Err(err) => format!("NodeResponse::Confirmation Err {}", err),
                 },
-                NodeResponse::Signing { sequence, result } => {
-                    match result {
-                        Ok(_) => format!("NodeResponse::Signing seq={} Ok", sequence),
-                        Err(err) => {
-                            format!("NodeResponse::Signing seq={} Err {}", sequence, err.label())
-                        }
+                NodeResponse::Signing { sequence, result } => match result {
+                    Ok(_) => format!("NodeResponse::Signing seq={} Ok", sequence),
+                    Err(err) => {
+                        format!("NodeResponse::Signing seq={} Err {}", sequence, err.label())
                     }
-                }
+                },
             },
             NodeEvent::NodeStop => "NodeStop".to_string(),
         }

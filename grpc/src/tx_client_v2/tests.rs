@@ -46,6 +46,7 @@ impl RoutedCall {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum ServerCall {
     SimulateAndSign {
         #[allow(dead_code)]
@@ -519,6 +520,7 @@ impl TxServer for MockTxServer {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CallLogEntry {
     #[allow(dead_code)]
     node_id: NodeId,
@@ -527,6 +529,7 @@ struct CallLogEntry {
     ids: Vec<TestTxId>,
 }
 
+#[allow(dead_code)]
 impl CallLogEntry {
     fn new(node_id: NodeId, kind: &'static str, seq: Option<u64>, ids: Vec<TestTxId>) -> Self {
         Self {
@@ -653,6 +656,7 @@ impl Driver {
 
 #[derive(Debug)]
 struct DriverResult {
+    #[allow(dead_code)]
     log: Vec<CallLogEntry>,
     #[allow(dead_code)]
     unmet: Vec<Rule>,
@@ -922,7 +926,7 @@ async fn test_eviction() {
             other => panic!("confirm failed for seq {}: {:?}", seq, other),
         }
     }
-    let results = harness.stop().await;
+    let _results = harness.stop().await;
 }
 
 #[tokio::test]
@@ -1133,5 +1137,5 @@ async fn test_recovering() {
         recovery_triggered_check2.load(Ordering::Relaxed),
         "expected recovery to be triggered"
     );
-    let results = harness.stop().await;
+    let _results = harness.stop().await;
 }

@@ -55,6 +55,7 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, 
         self.transactions.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
