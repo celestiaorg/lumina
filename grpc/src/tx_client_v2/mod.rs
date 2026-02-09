@@ -393,7 +393,11 @@ pub struct SubmitFailure<T> {
 
 impl<T: fmt::Debug> SubmitFailure<T> {
     fn label(&self) -> String {
-        format!("{} original={:?}", self.mapped_error.label(), self.original_error)
+        format!(
+            "{} original={:?}",
+            self.mapped_error.label(),
+            self.original_error
+        )
     }
 }
 
@@ -428,7 +432,11 @@ pub struct SigningFailure<T> {
 
 impl<T: fmt::Debug> SigningFailure<T> {
     fn label(&self) -> String {
-        format!("{} original={:?}", self.mapped_error.label(), self.original_error)
+        format!(
+            "{} original={:?}",
+            self.mapped_error.label(),
+            self.original_error
+        )
     }
 }
 

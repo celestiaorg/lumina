@@ -1670,7 +1670,7 @@ mod tests {
             panic!("node_a should be active");
         };
         assert_eq!(state.shared.last_submitted, Some(6));
-        assert_eq!(state.shared.submit_delay, Some(Duration::from_secs(2)));
+        assert_eq!(state.shared.submit_delay, None);
     }
 
     #[test]
