@@ -69,7 +69,7 @@
 //! #             Self::ConfirmResponse,
 //! #             Self::SubmitError,
 //! #         >,
-//! #         celestia_grpc::tx_client_v2::SigningFailure,
+//! #         celestia_grpc::tx_client_v2::SigningFailure<Self::SubmitError>,
 //! #     > {
 //! #         unimplemented!()
 //! #     }
@@ -117,7 +117,7 @@ pub type TxSubmitResult<T, E> = Result<T, SubmitFailure<E>>;
 pub type TxConfirmResult<T> = Result<T>;
 /// Result for signing calls.
 pub type TxSigningResult<TxId, ConfirmInfo, ConfirmResponse, SubmitErr> =
-    Result<Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>, SigningFailure>;
+    Result<Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>, SigningFailure<SubmitErr>>;
 
 pub trait TxIdT: Clone + std::fmt::Debug {}
 impl<T> TxIdT for T where T: Clone + std::fmt::Debug {}
@@ -140,7 +140,8 @@ pub struct TxRequest {
 pub enum StopError<SubmitErr, ConfirmInfo, ConfirmResponse> {
     ConfirmError(TxStatus<ConfirmInfo, ConfirmResponse>),
     SubmitError(SubmitErr),
-    Other,
+    SignError(SubmitErr),
+    WorkerStopped,
 }
 
 pub type ConfirmResult<ConfirmInfo, SubmitErr, ConfirmResponse> =
@@ -380,24 +381,36 @@ impl<T> SubmitFailure<T> {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub enum SigningFailure {
+pub enum SigningError {
     /// Server expects a different sequence.
     SequenceMismatch { expected: u64 },
-    /// Submission failed with a specific error code and message.
+    /// Signing failed with a specific error message.
     Other { message: String },
-    /// Transport or RPC error while submitting.
-    NetworkError { err: Arc<Error> },
+    /// Transport or RPC error while signing.
+    NetworkError,
 }
 
-impl SigningFailure {
+impl SigningError {
     fn label(&self) -> String {
         match self {
-            SigningFailure::SequenceMismatch { expected } => {
+            SigningError::SequenceMismatch { expected } => {
                 format!("SequenceMismatch expected={}", expected)
             }
-            SigningFailure::Other { message } => format!("Other msg={}", message),
-            SigningFailure::NetworkError { err } => format!("NetworkError {}", err),
+            SigningError::Other { message } => format!("Other msg={}", message),
+            SigningError::NetworkError => "NetworkError".to_string(),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SigningFailure<T> {
+    pub mapped_error: SigningError,
+    pub original_error: T,
+}
+
+impl<T> SigningFailure<T> {
+    fn label(&self) -> String {
+        self.mapped_error.label()
     }
 }
 
@@ -464,15 +477,8 @@ pub trait TxServer: Send + Sync {
         sequence: u64,
     ) -> Result<
         Transaction<Self::TxId, Self::ConfirmInfo, Self::ConfirmResponse, Self::SubmitError>,
-        SigningFailure,
-    > {
-        let _ = (req, sequence);
-        Err(SigningFailure::NetworkError {
-            err: Arc::new(Error::UnexpectedResponseType(
-                "simulate_and_sign not implemented".to_string(),
-            )),
-        })
-    }
+        SigningFailure<Self::SubmitError>,
+    >;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -988,14 +994,14 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         for pending in self.transactions.drain_pending() {
             let _ = pending.sign_tx.send(Err(Error::TxWorkerStopped));
             let _ = pending.submit_tx.send(Err(Error::TxWorkerStopped));
-            let _ = pending.confirm_tx.send(Err(StopError::Other));
+            let _ = pending.confirm_tx.send(Err(StopError::WorkerStopped));
         }
         loop {
             let next = self.transactions.confirmed_seq() + 1;
             let Ok(mut tx) = self.transactions.confirm(next) else {
                 break;
             };
-            let status = fatal.clone().unwrap_or(StopError::Other);
+            let status = fatal.clone().unwrap_or(StopError::WorkerStopped);
             if tx.id.is_none() {
                 tx.notify_submitted(Err(Error::TxWorkerStopped));
             }

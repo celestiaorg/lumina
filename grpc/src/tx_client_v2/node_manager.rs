@@ -7,8 +7,8 @@ use tracing::debug;
 use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
     ConfirmationResponse, NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason,
-    RequestWithChannels, SigningFailure, StopError, SubmitError, SubmitFailure, TxConfirmResult,
-    TxIdT, TxServer, TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult,
+    RequestWithChannels, SigningError, SigningFailure, StopError, SubmitError, SubmitFailure,
+    TxConfirmResult, TxIdT, TxServer, TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult,
 };
 
 #[derive(Debug)]
@@ -152,7 +152,8 @@ impl<SubmitErr, ConfirmInfo, ConfirmResponse> StopError<SubmitErr, ConfirmInfo, 
                 format!("ConfirmError({})", tx_status_label(status))
             }
             StopError::SubmitError(_) => "SubmitError".to_string(),
-            StopError::Other => "Other".to_string(),
+            StopError::SignError(_) => "SignError".to_string(),
+            StopError::WorkerStopped => "WorkerStopped".to_string(),
         }
     }
 }
@@ -267,17 +268,13 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
         }
     }
 
-    fn stop_submissions(&mut self) {
-        let shared = self.shared().clone();
+    fn stop_submissions(&mut self, error: StopError<SubmitErr, ConfirmInfo, ConfirmResponse>) {
+        let shared = self.shared();
         let last_submitted = shared.last_submitted;
         let stop_seq = last_submitted
             .unwrap_or(shared.last_confirmed)
             .max(shared.last_confirmed);
-        *self = NodeState::Stopped(StoppedState {
-            shared,
-            stop_seq,
-            error: StopError::Other,
-        });
+        self.stop_with_error(stop_seq, error);
     }
 
     fn stop_with_error(
@@ -305,7 +302,7 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
                 if seq < state.stop_seq {
                     state.stop_seq = seq;
                 }
-                if matches!(state.error, StopError::Other) || seq < prev_stop_seq {
+                if matches!(state.error, StopError::WorkerStopped) || seq < prev_stop_seq {
                     state.error = error;
                 }
             }
@@ -503,7 +500,7 @@ impl<S: TxServer> NodeManager<S> {
                         "node state (before stop)"
                     );
                     if !node.is_stopped() {
-                        node.stop_submissions();
+                        node.stop_submissions(StopError::WorkerStopped);
                     }
                     debug!(
                         node_id = %node_id.as_ref(),
@@ -591,27 +588,16 @@ impl<S: TxServer> NodeManager<S> {
                             let last = node.shared_mut().last_submitted.get_or_insert(0);
                             *last = last.saturating_add(1);
                         }
-                        node.shared_mut().submit_delay = Some(confirm_interval);
                     }
                     SubmitError::InsufficientFee { .. } => {
-                        let stop_at = node
-                            .shared()
-                            .last_submitted
-                            .unwrap_or(node.shared().last_confirmed);
-                        node.stop_with_error(
-                            stop_at,
-                            StopError::SubmitError(failure.original_error.clone()),
-                        );
+                        node.stop_submissions(StopError::SubmitError(
+                            failure.original_error.clone(),
+                        ));
                     }
                     SubmitError::Other { .. } => {
-                        let stop_at = node
-                            .shared()
-                            .last_submitted
-                            .unwrap_or(node.shared().last_confirmed);
-                        node.stop_with_error(
-                            stop_at,
-                            StopError::SubmitError(failure.original_error.clone()),
-                        );
+                        node.stop_submissions(StopError::SubmitError(
+                            failure.original_error.clone(),
+                        ));
                     }
                 }
             }
@@ -694,7 +680,7 @@ impl<S: TxServer> NodeManager<S> {
     ) -> NodeOutcome<S> {
         let mut mutations = Vec::new();
         let mut plan_requests = Vec::new();
-        let mut stop_all = false;
+        let mut stop_error: Option<StopErrorFor<S>> = None;
         let Some(node) = self.nodes.get_mut(node_id) else {
             return NodeApplyOutcome {
                 mutations,
@@ -707,42 +693,34 @@ impl<S: TxServer> NodeManager<S> {
                 mutations.push(WorkerMutation::EnqueueSigned { tx });
                 push_plan_request(&mut plan_requests, PlanRequest::Submission);
             }
-            Err(SigningFailure::SequenceMismatch { expected }) => {
+            Err(failure) => {
                 debug!(
                     node_id = %node_id.as_ref(),
                     sequence,
-                    expected,
-                    "signing sequence mismatch"
-                );
-                if expected >= sequence {
-                    stop_all = true;
-                } else {
-                    self.signing_delay = Some(confirm_interval);
-                    push_plan_request(&mut plan_requests, PlanRequest::Signing);
-                }
-            }
-            Err(SigningFailure::NetworkError { err }) => {
-                debug!(
-                    node_id = %node_id.as_ref(),
-                    sequence,
-                    error = %err,
-                    "signing network error"
-                );
-                self.signing_delay = Some(confirm_interval);
-                push_plan_request(&mut plan_requests, PlanRequest::Signing);
-            }
-            Err(SigningFailure::Other { message }) => {
-                debug!(
-                    node_id = %node_id.as_ref(),
-                    sequence,
-                    message = %message,
+                    failure = %failure.label(),
                     "signing error"
                 );
-                stop_all = true;
+                match failure.mapped_error {
+                    SigningError::SequenceMismatch { expected } => {
+                        if expected >= sequence {
+                            stop_error = Some(StopError::SignError(failure.original_error.clone()));
+                        } else {
+                            self.signing_delay = Some(confirm_interval);
+                            push_plan_request(&mut plan_requests, PlanRequest::Signing);
+                        }
+                    }
+                    SigningError::NetworkError => {
+                        self.signing_delay = Some(confirm_interval);
+                        push_plan_request(&mut plan_requests, PlanRequest::Signing);
+                    }
+                    SigningError::Other { .. } => {
+                        stop_error = Some(StopError::SignError(failure.original_error.clone()));
+                    }
+                }
             }
         }
-        if stop_all {
-            self.stop_all_nodes();
+        if let Some(stop_error) = stop_error {
+            self.stop_all_nodes(stop_error);
         }
         NodeApplyOutcome {
             mutations,
@@ -792,11 +770,12 @@ impl<S: TxServer> NodeManager<S> {
             .max_by_key(|(_, last_submitted)| *last_submitted)
     }
 
-    fn stop_all_nodes(&mut self) {
+    fn stop_all_nodes(&mut self, error: StopErrorFor<S>) {
         for node in self.nodes.values_mut() {
-            if !node.is_stopped() {
-                node.stop_submissions();
+            if node.is_stopped() {
+                continue;
             }
+            node.stop_submissions(error.clone());
         }
     }
 }
@@ -1600,7 +1579,10 @@ mod tests {
                 node_id: node_id.clone(),
                 response: NodeResponse::Signing {
                     sequence: 10,
-                    result: Err(SigningFailure::SequenceMismatch { expected: 9 }),
+                    result: Err(SigningFailure {
+                        mapped_error: SigningError::SequenceMismatch { expected: 9 },
+                        original_error: (),
+                    }),
                 },
             },
             &txs,

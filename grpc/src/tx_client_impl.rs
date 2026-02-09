@@ -20,9 +20,9 @@ use crate::grpc::{BroadcastMode, GasEstimate, TxStatus as GrpcTxStatus, TxStatus
 use crate::signer::sign_tx;
 
 use crate::tx_client_v2::{
-    ConfirmResult, NodeId, RejectionReason, SigningFailure, StopError, SubmitError, SubmitFailure,
-    Transaction, TransactionWorker, TxCallbacks, TxConfirmResult, TxPayload, TxRequest, TxServer,
-    TxStatus, TxStatusKind, TxSubmitResult, TxSubmitter,
+    ConfirmResult, NodeId, RejectionReason, SigningError, SigningFailure, StopError, SubmitError,
+    SubmitFailure, Transaction, TransactionWorker, TxCallbacks, TxConfirmResult, TxPayload,
+    TxRequest, TxServer, TxStatus, TxStatusKind, TxSubmitResult, TxSubmitter,
 };
 use crate::{Error, GrpcClient, Result, TxConfig, TxInfo};
 
@@ -352,7 +352,7 @@ impl TxServer for NodeClient {
         sequence: u64,
     ) -> std::result::Result<
         Transaction<Self::TxId, Self::ConfirmInfo, Self::ConfirmResponse, Self::SubmitError>,
-        SigningFailure,
+        SigningFailure<Self::SubmitError>,
     > {
         sign_with_client(self.account.clone(), &self.client, req.as_ref(), sequence)
             .await
@@ -558,15 +558,24 @@ fn parse_leading_digits(input: &str) -> Option<u64> {
     }
 }
 
-fn map_signing_failure(err: Error) -> SigningFailure {
+fn map_signing_failure(err: Error) -> SigningFailure<Arc<Error>> {
     if err.is_network_error() {
-        return SigningFailure::NetworkError { err: Arc::new(err) };
+        return SigningFailure {
+            mapped_error: SigningError::NetworkError,
+            original_error: Arc::new(err),
+        };
     }
     if let Some(expected) = extract_sequence_on_mismatch(&err.to_string()) {
-        return SigningFailure::SequenceMismatch { expected };
+        return SigningFailure {
+            mapped_error: SigningError::SequenceMismatch { expected },
+            original_error: Arc::new(err),
+        };
     }
-    SigningFailure::Other {
-        message: err.to_string(),
+    SigningFailure {
+        mapped_error: SigningError::Other {
+            message: err.to_string(),
+        },
+        original_error: Arc::new(err),
     }
 }
 
