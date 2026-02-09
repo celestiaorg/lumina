@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/celestiaorg/lumina/compare/celestia-grpc-macros-v0.6.0...celestia-grpc-macros-v0.7.0) - 2026-01-27
+
+### Added
+
+- *(grpc)* [**breaking**] add per-endpoint configuration for metadata and timeouts ([#875](https://github.com/celestiaorg/lumina/pull/875))
+
+### Fixed
+
+- update npm repo ([#880](https://github.com/celestiaorg/lumina/pull/880))
+
 ## [0.6.0](https://github.com/eigerco/lumina/compare/celestia-grpc-macros-v0.5.0...celestia-grpc-macros-v0.6.0) - 2026-01-05
 
 ### Added

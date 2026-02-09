@@ -2,14 +2,14 @@
     "name": "lumina-node",
     "type": "module",
     "collaborators": [
-        "Eiger <hello@eiger.co>"
+        "Celestia <contact@celestia.org>"
     ],
     "description": "Lumina node for Celestia, running in browser",
-    "version": "0.13.0",
+    "version": "0.13.2",
     "license": "Apache-2.0",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/eigerco/lumina.git"
+        "url": "git+https://github.com/celestiaorg/lumina.git"
     },
     "files": [
         "index.js",
@@ -17,7 +17,7 @@
         "worker.js"
     ],
     "main": "index.js",
-    "homepage": "https://www.eiger.co",
+    "homepage": "https://www.celestia.org",
     "dependencies": {
         "lumina-node-wasm": "file:../pkg"
     },

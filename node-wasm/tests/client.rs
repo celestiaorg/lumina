@@ -1,5 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
+use std::cmp::Ordering;
 use std::time::Duration;
 
 use celestia_rpc::TxConfig;
@@ -39,10 +40,10 @@ async fn request_network_head_header() {
 
     // due to head selection algorithm, we may get the network head or a previous header
     // if not enough nodes got a new head already
-    if head_header.height() == bridge_head_header.height() {
-        assert_eq!(head_header, bridge_head_header);
-    } else {
-        assert!(head_header.verify_adjacent(&bridge_head_header).is_ok());
+    match head_header.height().cmp(&bridge_head_header.height()) {
+        Ordering::Equal => assert_eq!(head_header, bridge_head_header),
+        Ordering::Less => assert!(head_header.verify_adjacent(&bridge_head_header).is_ok()),
+        Ordering::Greater => assert!(bridge_head_header.verify_adjacent(&head_header).is_ok()),
     }
 
     rpc_client

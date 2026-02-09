@@ -1,12 +1,12 @@
 [package]
 name = "lumina-node-uniffi"
-version = "0.5.1"
+version = "0.5.3"
 edition.workspace = true
 license = "Apache-2.0"
 description = "Mobile bindings for Lumina node"
-authors = ["Eiger <hello@eiger.co>"]
-homepage = "https://www.eiger.co"
-repository = "https://github.com/eigerco/lumina"
+authors = ["Celestia <contact@celestia.org>"]
+homepage = "https://www.celestia.org"
+repository = "https://github.com/celestiaorg/lumina"
 readme = "README.md"
 rust-version = "1.88"
 

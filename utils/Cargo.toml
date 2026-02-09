@@ -1,12 +1,12 @@
 [package]
 name = "lumina-utils"
-version = "0.5.1"
+version = "0.5.2"
 edition.workspace = true
 license = "Apache-2.0"
 description = "Platform abstraction utilities used across lumina project"
-authors = ["Eiger <hello@eiger.co>"]
-homepage = "https://www.eiger.co"
-repository = "https://github.com/eigerco/lumina"
+authors = ["Celestia <contact@celestia.org>"]
+homepage = "https://www.celestia.org"
+repository = "https://github.com/celestiaorg/lumina"
 rust-version = "1.85"
 
 [dependencies]

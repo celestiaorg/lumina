@@ -107,7 +107,7 @@ jobs:
           query='{"query": "mutation {
             createCommitOnBranch(input: {
               branch: {
-                repositoryNameWithOwner: \"eigerco/lumina\",
+                repositoryNameWithOwner: \"celestiaorg/lumina\",
                 branchName: \"'"$pr_branch_name"'\"
               },
               message: {

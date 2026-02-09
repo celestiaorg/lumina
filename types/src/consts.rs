@@ -118,9 +118,26 @@ pub mod appconsts {
         pub const MAX_TX_SIZE: u64 = 8_388_608; // 8MB
     }
 
+    // https://github.com/celestiaorg/celestia-app/blob/v7.0.0-rc0/pkg/appconsts/app_consts.go
+    /// Consts of App v7.
+    pub mod v7 {
+        /// App version.
+        pub const VERSION: u64 = 7;
+        /// Maximum width of the original data square.
+        pub const SQUARE_SIZE_UPPER_BOUND: usize = 512;
+        /// Maximum width of a single subtree root when generating blob's commitment.
+        pub const SUBTREE_ROOT_THRESHOLD: u64 = 64;
+        /// Cost of each byte in a transaction (in units of gas).
+        pub const TX_SIZE_COST_PER_BYTE: u64 = 10;
+        /// Cost of each byte in blob (in units of gas).
+        pub const GAS_PER_BLOB_BYTE: u64 = 8;
+        /// Maximum size of the transaction (in bytes).
+        pub const MAX_TX_SIZE: u64 = 8_388_608; // 8MB
+    }
+
     // celestia-app/pkg/appconsts/versioned_consts.go
     /// Latest App version.
-    pub const LATEST_VERSION: u64 = v6::VERSION;
+    pub const LATEST_VERSION: u64 = v7::VERSION;
 
     /// Enum with all valid App versions.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,6 +156,8 @@ pub mod appconsts {
         V5 = v5::VERSION,
         /// App v6
         V6 = v6::VERSION,
+        /// App v7
+        V7 = v7::VERSION,
     }
 
     /// Enum with all valid App versions.
@@ -158,6 +177,8 @@ pub mod appconsts {
         V5 = 5,
         /// App v6
         V6 = 6,
+        /// App v7
+        V7 = 7,
     }
 
     impl AppVersion {
@@ -175,6 +196,7 @@ pub mod appconsts {
                 v4::VERSION => Some(AppVersion::V4),
                 v5::VERSION => Some(AppVersion::V5),
                 v6::VERSION => Some(AppVersion::V6),
+                v7::VERSION => Some(AppVersion::V7),
                 _ => None,
             }
         }
@@ -233,6 +255,12 @@ pub mod appconsts {
             JsAppVersion(AppVersion::V6)
         }
 
+        /// App v7
+        #[wasm_bindgen(js_name = V7, getter)]
+        pub fn v7() -> JsAppVersion {
+            JsAppVersion(AppVersion::V7)
+        }
+
         /// Latest App version variant.
         pub fn latest() -> JsAppVersion {
             AppVersion::latest().into()
@@ -262,6 +290,7 @@ pub mod appconsts {
             AppVersion::V4 => v4::SQUARE_SIZE_UPPER_BOUND,
             AppVersion::V5 => v5::SQUARE_SIZE_UPPER_BOUND,
             AppVersion::V6 => v6::SQUARE_SIZE_UPPER_BOUND,
+            AppVersion::V7 => v7::SQUARE_SIZE_UPPER_BOUND,
         }
     }
 
@@ -274,6 +303,7 @@ pub mod appconsts {
             AppVersion::V4 => v4::SUBTREE_ROOT_THRESHOLD,
             AppVersion::V5 => v5::SUBTREE_ROOT_THRESHOLD,
             AppVersion::V6 => v6::SUBTREE_ROOT_THRESHOLD,
+            AppVersion::V7 => v7::SUBTREE_ROOT_THRESHOLD,
         }
     }
 
@@ -286,6 +316,7 @@ pub mod appconsts {
             AppVersion::V4 => v4::TX_SIZE_COST_PER_BYTE,
             AppVersion::V5 => v5::TX_SIZE_COST_PER_BYTE,
             AppVersion::V6 => v6::TX_SIZE_COST_PER_BYTE,
+            AppVersion::V7 => v7::TX_SIZE_COST_PER_BYTE,
         }
     }
 
@@ -298,6 +329,7 @@ pub mod appconsts {
             AppVersion::V4 => v4::GAS_PER_BLOB_BYTE,
             AppVersion::V5 => v5::GAS_PER_BLOB_BYTE,
             AppVersion::V6 => v6::GAS_PER_BLOB_BYTE,
+            AppVersion::V7 => v7::GAS_PER_BLOB_BYTE,
         }
     }
 
@@ -313,6 +345,7 @@ pub mod appconsts {
             AppVersion::V4 => v4::MAX_TX_SIZE,
             AppVersion::V5 => v5::MAX_TX_SIZE,
             AppVersion::V6 => v6::MAX_TX_SIZE,
+            AppVersion::V7 => v7::MAX_TX_SIZE,
         }
     }
 

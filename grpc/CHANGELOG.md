@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v0.11.0...celestia-grpc-v0.12.0) - 2026-01-27
+
+### Added
+
+- *(grpc)* [**breaking**] add per-endpoint configuration for metadata and timeouts ([#875](https://github.com/celestiaorg/lumina/pull/875))
+
+### Fixed
+
+- update npm repo ([#880](https://github.com/celestiaorg/lumina/pull/880))
+
+## [0.11.0](https://github.com/eigerco/lumina/compare/celestia-grpc-v0.10.0...celestia-grpc-v0.11.0) - 2026-01-08
+
+### Added
+
+- implement custom confirm interval ([#865](https://github.com/eigerco/lumina/pull/865))
+
+### Fixed
+
+- *(client)* Fix CI errors, adding all possible error codes ([#866](https://github.com/eigerco/lumina/pull/866))
+
 ## [0.10.0](https://github.com/eigerco/lumina/compare/celestia-grpc-v0.9.0...celestia-grpc-v0.10.0) - 2026-01-05
 
 ### Added

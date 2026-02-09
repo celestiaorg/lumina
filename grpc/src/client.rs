@@ -92,7 +92,6 @@ struct GrpcClientInner {
     transports: Arc<ArcSwap<Vec<BoxedTransport>>>,
     account: Option<AccountState>,
     chain_state: OnceCell<ChainState>,
-    context: Context,
 }
 
 impl GrpcClient {
@@ -100,14 +99,12 @@ impl GrpcClient {
     pub(crate) fn new(
         transports: Arc<ArcSwap<Vec<BoxedTransport>>>,
         account: Option<AccountState>,
-        context: Context,
     ) -> Self {
         Self {
             inner: Arc::new(GrpcClientInner {
                 transports,
                 account,
                 chain_state: OnceCell::new(),
-                context,
             }),
         }
     }
@@ -154,7 +151,6 @@ impl GrpcClient {
             this.get_verified_balance_impl(&address, &header, &context)
                 .await
         })
-        .context(&self.inner.context)
     }
 
     /// Retrieves the Celestia coin balance for the given address.
@@ -330,7 +326,6 @@ impl GrpcClient {
                 .await?;
             this.confirm_tx(tx, cfg, &context).await
         })
-        .context(&self.inner.context)
     }
 
     /// Submit given message to celestia network, and return without confirming.
@@ -384,7 +379,6 @@ impl GrpcClient {
                 .context(&context),
             ))
         })
-        .context(&self.inner.context)
     }
 
     /// Submit given blobs to celestia network.
@@ -427,7 +421,6 @@ impl GrpcClient {
                 .await?;
             this.confirm_tx(tx, cfg, &context).await
         })
-        .context(&self.inner.context)
     }
 
     /// Submit given blobs to celestia network, and return without confirming.
@@ -478,7 +471,6 @@ impl GrpcClient {
                 .context(&context),
             ))
         })
-        .context(&self.inner.context)
     }
 
     /// Get client's app version
@@ -489,7 +481,6 @@ impl GrpcClient {
             let ChainState { app_version, .. } = this.load_chain_state(&context).await?;
             Ok(*app_version)
         })
-        .context(&self.inner.context)
     }
 
     /// Get client's chain id
@@ -500,7 +491,6 @@ impl GrpcClient {
             let ChainState { chain_id, .. } = this.load_chain_state(&context).await?;
             Ok(chain_id.clone())
         })
-        .context(&self.inner.context)
     }
 
     /// Manually confirm transaction broadcasted with [`GrpcClient::broadcast_blobs`] or [`GrpcClient::broadcast_message`].
@@ -522,7 +512,6 @@ impl GrpcClient {
         let this = self.clone();
 
         AsyncGrpcCall::new(move |context| async move { this.confirm_tx(tx, cfg, &context).await })
-            .context(&self.inner.context)
     }
 
     /// Get client's account public key if the signer is set
@@ -1060,16 +1049,18 @@ mod tests {
     use crate::{Error, TxConfig};
 
     #[async_test]
-    async fn extending_client_context() {
+    async fn per_call_context_works() {
+        use crate::Endpoint;
+
         let client = GrpcClient::builder()
-            .url("http://foo")
-            .metadata("x-token", "secret-token")
+            .endpoint(Endpoint::from("http://foo").metadata("x-token", "secret-token"))
             .build()
             .unwrap();
-        let call = client.app_version().block_height(1234);
 
-        assert!(call.context.metadata.contains_key("x-token"));
+        // Per-call metadata (.block_height) should be in call.context
+        let call = client.app_version().block_height(1234);
         assert!(call.context.metadata.contains_key("x-cosmos-block-height"));
+        // The token metadata is not in the call.context, because it is merged at runtime whenever we decide which transport we use
     }
 
     #[async_test]
@@ -1561,10 +1552,9 @@ mod tests {
         };
         assert!(timeout.code() == Code::DeadlineExceeded || timeout.code() == Code::Cancelled);
 
-        // too short timeout set in builder
+        // too short timeout set in endpoint config
         let client = GrpcClient::builder()
-            .url(CELESTIA_GRPC_URL)
-            .timeout(Duration::from_nanos(1))
+            .endpoint(crate::Endpoint::from(CELESTIA_GRPC_URL).timeout(Duration::from_nanos(1)))
             .build()
             .unwrap();
 
@@ -1665,5 +1655,143 @@ mod tests {
 
         let result = client.get_auth_params().await;
         assert!(result.is_err());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn auth_proxy_with_valid_token() {
+        use crate::Endpoint;
+        use crate::test_utils::{CELESTIA_GRPC_URL, TEST_AUTH_TOKEN, spawn_grpc_auth_proxy};
+
+        // Spawn the auth proxy
+        let (addr, _handle) = spawn_grpc_auth_proxy(CELESTIA_GRPC_URL, TEST_AUTH_TOKEN).await;
+        let proxy_url = format!("http://{}", addr);
+
+        // Connect with correct authorization token - should succeed
+        let client = GrpcClient::builder()
+            .endpoint(
+                Endpoint::from(proxy_url.as_str())
+                    .metadata("authorization", format!("Bearer {}", TEST_AUTH_TOKEN)),
+            )
+            .build()
+            .unwrap();
+
+        let params = client.get_auth_params().await.unwrap();
+        assert!(params.max_memo_characters > 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn auth_proxy_without_token() {
+        use crate::test_utils::{CELESTIA_GRPC_URL, TEST_AUTH_TOKEN, spawn_grpc_auth_proxy};
+
+        // Spawn the auth proxy
+        let (addr, _handle) = spawn_grpc_auth_proxy(CELESTIA_GRPC_URL, TEST_AUTH_TOKEN).await;
+        let proxy_url = format!("http://{}", addr);
+
+        // Connect without authorization token - should fail with Unauthenticated
+        let client = GrpcClient::builder()
+            .url(proxy_url.as_str())
+            .build()
+            .unwrap();
+
+        let result = client.get_auth_params().await;
+        let Error::TonicError(status) = result.unwrap_err() else {
+            panic!("expected TonicError");
+        };
+        // Proxy returns HTTP 401 which maps to Unauthenticated or Unknown depending on tonic version
+        assert!(
+            status.code() == Code::Unauthenticated || status.code() == Code::Unknown,
+            "expected Unauthenticated or Unknown, got {:?}",
+            status.code()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn auth_proxy_with_wrong_token() {
+        use crate::Endpoint;
+        use crate::test_utils::{CELESTIA_GRPC_URL, TEST_AUTH_TOKEN, spawn_grpc_auth_proxy};
+
+        // Spawn the auth proxy
+        let (addr, _handle) = spawn_grpc_auth_proxy(CELESTIA_GRPC_URL, TEST_AUTH_TOKEN).await;
+        let proxy_url = format!("http://{}", addr);
+
+        // Connect with wrong authorization token - should fail with Unauthenticated
+        let client = GrpcClient::builder()
+            .endpoint(
+                Endpoint::from(proxy_url.as_str()).metadata("authorization", "Bearer wrong-token"),
+            )
+            .build()
+            .unwrap();
+
+        let result = client.get_auth_params().await;
+        let Error::TonicError(status) = result.unwrap_err() else {
+            panic!("expected TonicError");
+        };
+        // Proxy returns HTTP 401 which maps to Unauthenticated or Unknown depending on tonic version
+        assert!(
+            status.code() == Code::Unauthenticated || status.code() == Code::Unknown,
+            "expected Unauthenticated or Unknown, got {:?}",
+            status.code()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn auth_proxy_failover_unreachable_then_authenticated() {
+        use crate::Endpoint;
+        use crate::test_utils::{CELESTIA_GRPC_URL, TEST_AUTH_TOKEN, spawn_grpc_auth_proxy};
+
+        // Spawn the auth proxy
+        let (addr, _handle) = spawn_grpc_auth_proxy(CELESTIA_GRPC_URL, TEST_AUTH_TOKEN).await;
+        let proxy_url = format!("http://{}", addr);
+
+        // Two endpoints with different configurations:
+        // 1. First endpoint is unreachable (network error triggers failover)
+        // 2. Second endpoint is auth proxy with correct token
+        // This tests that per-endpoint metadata is correctly applied during failover
+        let client = GrpcClient::builder()
+            .endpoints([
+                Endpoint::from("http://localhost:19999"),
+                Endpoint::from(proxy_url.as_str())
+                    .metadata("authorization", format!("Bearer {}", TEST_AUTH_TOKEN)),
+            ])
+            .build()
+            .unwrap();
+
+        // Should succeed - first endpoint fails (network error), falls back to second with auth
+        let params = client.get_auth_params().await.unwrap();
+        assert!(params.max_memo_characters > 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn multiple_endpoints_different_configs() {
+        use crate::Endpoint;
+        use crate::test_utils::{CELESTIA_GRPC_URL, TEST_AUTH_TOKEN, spawn_grpc_auth_proxy};
+        use std::time::Duration;
+
+        // Spawn the auth proxy
+        let (addr, _handle) = spawn_grpc_auth_proxy(CELESTIA_GRPC_URL, TEST_AUTH_TOKEN).await;
+        let proxy_url = format!("http://{}", addr);
+
+        // Test that different endpoints can have completely different configurations:
+        // - First: direct gRPC (no auth needed) with short timeout
+        // - Second: auth proxy (needs auth token) with longer timeout
+        // Both should be valid configurations
+        let client = GrpcClient::builder()
+            .endpoints([
+                Endpoint::from(CELESTIA_GRPC_URL).timeout(Duration::from_secs(5)),
+                Endpoint::from(proxy_url.as_str())
+                    .metadata("authorization", format!("Bearer {}", TEST_AUTH_TOKEN))
+                    .timeout(Duration::from_secs(10)),
+            ])
+            .build()
+            .unwrap();
+
+        // First endpoint (direct, no auth) should work
+        let params = client.get_auth_params().await.unwrap();
+        assert!(params.max_memo_characters > 0);
     }
 }

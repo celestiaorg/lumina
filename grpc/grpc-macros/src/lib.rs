@@ -56,7 +56,7 @@ impl GrpcMethod {
                 let transports = self.inner.transports.clone();
                 let param = crate::grpc::IntoGrpcParam::into_parameter(( #( #params ),* ));
 
-                crate::grpc::AsyncGrpcCall::new(move |context: crate::grpc::Context| async move {
+                crate::grpc::AsyncGrpcCall::new(move |call_context: crate::grpc::Context| async move {
                     // 256 mb, future proof as celestia blocks grow
                     const MAX_MSG_SIZE: usize = 256 * 1024 * 1024;
 
@@ -65,18 +65,25 @@ impl GrpcMethod {
 
                     for idx in 0..transport_snapshot.len() {
                         let transport_url = transport_snapshot[idx].metadata.url.as_deref();
+                        // Get the transport's endpoint-specific context
+                        let transport_context = &transport_snapshot[idx].metadata.context;
+
                         let transport = transport_snapshot[idx].clone();
                         let mut client = #grpc_client_struct::new(transport)
                             .max_decoding_message_size(MAX_MSG_SIZE)
                             .max_encoding_message_size(MAX_MSG_SIZE);
 
+                        // Merge transport context with per-call context
+                        let mut merged_context = transport_context.clone();
+                        merged_context.extend(&call_context);
+
                         let mut request = ::tonic::Request::from_parts(
-                            context.metadata.clone(),
+                            merged_context.metadata.clone(),
                             ::tonic::Extensions::new(),
                             ::std::clone::Clone::clone(&param),
                         );
 
-                        if let Some(timeout) = context.timeout {
+                        if let Some(timeout) = merged_context.timeout {
                             request.set_timeout(timeout);
                         } else {
                             request.set_timeout(::std::time::Duration::from_secs(30));
@@ -114,7 +121,6 @@ impl GrpcMethod {
 
                     Err(last_error.expect("at least one transport should be tried"))
                 })
-                .context(&self.inner.context)
             }
         };
 

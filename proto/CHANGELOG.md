@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/celestiaorg/lumina/compare/celestia-proto-v0.12.0...celestia-proto-v0.12.1) - 2026-01-27
+
+### Fixed
+
+- update npm repo ([#880](https://github.com/celestiaorg/lumina/pull/880))
+
 ## [0.12.0](https://github.com/eigerco/lumina/compare/celestia-proto-v0.11.0...celestia-proto-v0.12.0) - 2026-01-05
 
 ### Added

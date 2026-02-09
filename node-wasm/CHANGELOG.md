@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2](https://github.com/celestiaorg/lumina/compare/lumina-node-wasm-v0.13.1...lumina-node-wasm-v0.13.2) - 2026-01-27
+
+### Fixed
+
+- update npm repo ([#880](https://github.com/celestiaorg/lumina/pull/880))
+
+### Other
+
+- *(node-wasm)* fix flaky head headers comparison ([#878](https://github.com/celestiaorg/lumina/pull/878))
+
+## [0.13.1](https://github.com/eigerco/lumina/compare/lumina-node-wasm-v0.13.0...lumina-node-wasm-v0.13.1) - 2026-01-08
+
+### Other
+
+- moves non re-usable types from types to rpc ([#856](https://github.com/eigerco/lumina/pull/856))
+
 ## [0.13.0](https://github.com/eigerco/lumina/compare/lumina-node-wasm-v0.12.0...lumina-node-wasm-v0.13.0) - 2026-01-05
 
 ### Added

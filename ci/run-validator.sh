@@ -93,7 +93,7 @@ create_or_import_key() {
   fi
 
   # otherwise, just import it
-  echo "password" | celestia-appd keys import "$node_name" "$key_file" \
+  celestia-appd keys import-hex "$node_name" "$(cat "$plaintext_key_file")" \
     --keyring-backend "test"
 }
 

@@ -18,7 +18,7 @@ pub mod tx_client_v2;
 pub mod uniffi_client;
 mod utils;
 
-pub use crate::builder::GrpcClientBuilder;
+pub use crate::builder::{Endpoint, GrpcClientBuilder};
 pub use crate::client::GrpcClient;
 pub use crate::error::{Error, GrpcClientBuilderError, Result};
 pub use crate::signer::DocSigner;

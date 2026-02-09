@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blockstore::cond_send::CondSend;
+pub use celestia_grpc::Endpoint;
 use celestia_grpc::{GrpcClient, GrpcClientBuilder};
 use celestia_rpc::{Client as RpcClient, HeaderClient};
 use http::Request;
 use tonic::body::Body as TonicBody;
 use tonic::codegen::{Bytes, Service};
-use tonic::metadata::MetadataMap;
 
 use crate::blob::BlobApi;
 use crate::blobstream::BlobstreamApi;
@@ -48,12 +48,17 @@ use crate::{Error, Result};
 /// Submit mode:
 ///
 /// ```no_run
-/// # use celestia_client::{Client, Result};
+/// # use celestia_client::{Client, Endpoint, Result};
 /// # use celestia_client::tx::TxConfig;
+/// # use std::time::Duration;
 /// # async fn docs() -> Result<()> {
+/// let endpoint = Endpoint::from("http://localhost:9090")
+///     .metadata("x-token", "auth-token")
+///     .timeout(Duration::from_secs(30));
+///
 /// let client = Client::builder()
 ///     .rpc_url("ws://localhost:26658")
-///     .grpc_url("http://localhost:9090")
+///     .grpc_endpoint(endpoint)
 ///     .private_key_hex("393fdb5def075819de55756b45c9e2c8531a8c78dd6eede483d3440e9457d839")
 ///     .build()
 ///     .await?;
@@ -225,16 +230,27 @@ impl ClientBuilder {
 
     /// Set the gRPC endpoint.
     ///
+    /// Alias of [`ClientBuilder::grpc_endpoint`].
+    ///
+    /// Accepts `Endpoint`, `&str`, or `String`.
+    ///
     /// # Note
     ///
     /// In WASM the endpoint needs to support gRPC-Web.
-    pub fn grpc_url(mut self, url: &str) -> ClientBuilder {
+    pub fn grpc_url(self, url: impl Into<Endpoint>) -> ClientBuilder {
+        self.grpc_endpoint(url)
+    }
+
+    /// Set the gRPC endpoint.
+    pub fn grpc_endpoint(mut self, endpoint: impl Into<Endpoint>) -> ClientBuilder {
         let grpc_builder = self.grpc_builder.unwrap_or_default();
-        self.grpc_builder = Some(grpc_builder.url(url));
+        self.grpc_builder = Some(grpc_builder.endpoint(endpoint));
         self
     }
 
     /// Add multiple gRPC endpoints at once for fallback support.
+    ///
+    /// Accepts `Endpoint`, `&str`, or `String` items.
     ///
     /// When multiple endpoints are configured, the client will automatically
     /// fall back to the next endpoint if a network-related error occurs.
@@ -242,10 +258,23 @@ impl ClientBuilder {
     /// # Note
     ///
     /// In WASM the endpoints need to support gRPC-Web.
-    pub fn grpc_urls(mut self, urls: impl IntoIterator<Item = impl AsRef<str>>) -> ClientBuilder {
+    pub fn grpc_endpoints<I, E>(mut self, endpoints: I) -> ClientBuilder
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<Endpoint>,
+    {
         let grpc_builder = self.grpc_builder.unwrap_or_default();
-        self.grpc_builder = Some(grpc_builder.urls(urls));
+        self.grpc_builder = Some(grpc_builder.endpoints(endpoints));
         self
+    }
+
+    /// Add multiple gRPC endpoints. Alias of [`ClientBuilder::grpc_endpoints`].
+    pub fn grpc_urls<I, E>(self, urls: I) -> ClientBuilder
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<Endpoint>,
+    {
+        self.grpc_endpoints(urls)
     }
 
     /// Set manually configured gRPC transport
@@ -263,29 +292,6 @@ impl ClientBuilder {
     {
         let grpc_builder = self.grpc_builder.unwrap_or_default();
         self.grpc_builder = Some(grpc_builder.transport(transport));
-        self
-    }
-
-    /// Appends ascii metadata to all requests made by the client.
-    pub fn grpc_metadata(mut self, key: &str, value: &str) -> Self {
-        let grpc_builder = self.grpc_builder.unwrap_or_default();
-        self.grpc_builder = Some(grpc_builder.metadata(key, value));
-        self
-    }
-
-    /// Appends binary metadata to all requests made by the client.
-    ///
-    /// Keys for binary metadata must have `-bin` suffix.
-    pub fn grpc_metadata_bin(mut self, key: &str, value: &[u8]) -> Self {
-        let grpc_builder = self.grpc_builder.unwrap_or_default();
-        self.grpc_builder = Some(grpc_builder.metadata_bin(key, value));
-        self
-    }
-
-    /// Sets the initial metadata map that will be attached to all requestes made by the client.
-    pub fn grpc_metadata_map(mut self, metadata: MetadataMap) -> Self {
-        let grpc_builder = self.grpc_builder.unwrap_or_default();
-        self.grpc_builder = Some(grpc_builder.metadata_map(metadata));
         self
     }
 

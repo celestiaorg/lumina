@@ -1,7 +1,7 @@
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, ready};
+use std::task::{Context as TaskContext, Poll, ready};
 use std::{error::Error as StdError, future::Future};
 
 use bytes::Bytes;
@@ -11,6 +11,7 @@ use http_body::Frame;
 use tonic::body::Body as TonicBody;
 use tonic::codegen::Service;
 
+use crate::grpc::Context as GrpcContext;
 use crate::utils::CondSend;
 
 /// Metadata associated with a transport endpoint
@@ -18,16 +19,15 @@ use crate::utils::CondSend;
 pub(crate) struct TransportMetadata {
     /// URL or identifier for the transport endpoint
     pub url: Option<String>,
+    /// Context (metadata, timeout) specific to this endpoint
+    pub context: GrpcContext,
 }
 
 impl TransportMetadata {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_url(url: impl Into<String>) -> Self {
+    pub fn with_url_and_context(url: impl Into<String>, context: GrpcContext) -> Self {
         Self {
             url: Some(url.into()),
+            context,
         }
     }
 }
@@ -53,14 +53,14 @@ pub(crate) trait ConditionalSendFuture: Future + CondSend {}
 trait AbstractBody {
     fn poll_frame_inner(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BoxedError>>>;
 }
 
 impl<T: Future + CondSend> ConditionalSendFuture for T {}
 
 trait AbstractTransport: DynClone {
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxedError>>;
+    fn poll_ready(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), BoxedError>>;
 
     fn call(&mut self, req: http::Request<TonicBody>) -> BoxedResponseFuture;
 }
@@ -76,7 +76,7 @@ impl http_body::Body for BoxedBody {
 
     fn poll_frame(
         mut self: Pin<&mut BoxedBody>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         AbstractBody::poll_frame_inner(Pin::new(self.inner.deref_mut()), cx)
     }
@@ -89,7 +89,7 @@ where
 {
     fn poll_frame_inner(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BoxedError>>> {
         let ready = ready!(self.poll_frame(cx));
 
@@ -126,7 +126,7 @@ where
     <T as Service<http::Request<TonicBody>>>::Error: StdError + Send + Sync + 'static,
     <T as Service<http::Request<TonicBody>>>::Future: CondSend + 'static,
 {
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxedError>> {
+    fn poll_ready(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), BoxedError>> {
         Service::poll_ready(self, cx).map_err(box_err)
     }
 
@@ -143,7 +143,7 @@ impl Service<http::Request<TonicBody>> for BoxedTransport {
     type Error = BoxedError;
     type Future = BoxedResponseFuture;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 
@@ -195,7 +195,7 @@ mod tests {
     #[allow(unused_variables)]
     fn can_box_tonic_channel() {
         let endpoint: tonic::transport::Endpoint = unimplemented!();
-        let _boxed = boxed(endpoint.connect_lazy(), TransportMetadata::new());
+        let _boxed = boxed(endpoint.connect_lazy(), TransportMetadata::default());
     }
 
     // compile-only test for type compliance
@@ -206,6 +206,6 @@ mod tests {
     #[allow(unused_variables)]
     fn can_box_grpc_web_client() {
         let client: tonic_web_wasm_client::Client = unimplemented!();
-        let _boxed = boxed(client, TransportMetadata::new());
+        let _boxed = boxed(client, TransportMetadata::default());
     }
 }

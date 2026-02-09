@@ -101,13 +101,14 @@ impl Context {
     }
 
     /// Merges the other context into self.
+    /// When both contexts have a timeout, the other (per-request) timeout takes precedence.
     pub(crate) fn extend(&mut self, other: &Context) {
         self.append_metadata_map(&other.metadata);
         self.timeout = match (self.timeout, other.timeout) {
             (None, None) => None,
             (Some(t), None) => Some(t),
             (None, Some(t)) => Some(t),
-            (Some(t0), Some(t1)) => Some(t0.min(t1)),
+            (Some(_), Some(t1)) => Some(t1), // per-request timeout overrides endpoint timeout
         };
     }
 

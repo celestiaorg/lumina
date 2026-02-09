@@ -14,7 +14,7 @@ use crate::Result;
 use crate::grpc::{
     ConfigResponse, GasInfo, GetTxResponse, JsBroadcastMode, TxPriority, TxStatusResponse,
 };
-use crate::js_client::GrpcClientBuilder;
+use crate::js_client::{GrpcClientBuilder, endpoints_from_js};
 use crate::tx::{BroadcastedTx, JsBroadcastedTx, JsTxConfig, JsTxInfo};
 
 /// Celestia gRPC client, for builder see [`GrpcClientBuilder`]
@@ -25,19 +25,41 @@ pub struct GrpcClient {
 
 #[wasm_bindgen]
 impl GrpcClient {
-    /// Create a builder for [`GrpcClient`] connected to `url`
+    /// Create a builder for [`GrpcClient`] connected to `url`.
+    ///
+    /// Accepts a string, an `Endpoint`, or an array of strings/endpoints.
+    ///
+    /// # Example
+    ///
+    /// ```js
+    /// const client = await GrpcClient.withUrl("http://localhost:18080").build();
+    /// ```
     #[wasm_bindgen(js_name = withUrl)]
-    pub fn with_url(url: String) -> GrpcClientBuilder {
-        crate::GrpcClientBuilder::new().url(url).into()
+    pub fn with_url(
+        #[wasm_bindgen(unchecked_param_type = "UrlsOrEndpoints")] url: JsValue,
+    ) -> Result<GrpcClientBuilder, JsValue> {
+        let endpoints = endpoints_from_js(url)?;
+        Ok(crate::GrpcClientBuilder::new().endpoints(endpoints).into())
     }
 
     /// Create a builder for [`GrpcClient`] with multiple URL endpoints for fallback support.
     ///
+    /// Accepts a string, an `Endpoint`, or an array of strings/endpoints.
+    ///
     /// When multiple endpoints are configured, the client will automatically
     /// fall back to the next endpoint if a network-related error occurs.
+    ///
+    /// # Example
+    ///
+    /// ```js
+    /// const client = await GrpcClient.withUrls(["http://primary:9090", "http://fallback:9090"]).build();
+    /// ```
     #[wasm_bindgen(js_name = withUrls)]
-    pub fn with_urls(urls: Vec<String>) -> GrpcClientBuilder {
-        crate::GrpcClientBuilder::new().urls(urls).into()
+    pub fn with_urls(
+        #[wasm_bindgen(unchecked_param_type = "UrlsOrEndpoints")] urls: JsValue,
+    ) -> Result<GrpcClientBuilder, JsValue> {
+        let endpoints = endpoints_from_js(urls)?;
+        Ok(crate::GrpcClientBuilder::new().endpoints(endpoints).into())
     }
 
     /// Get auth params
