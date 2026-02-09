@@ -7,8 +7,8 @@ use tracing::debug;
 use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
     ConfirmationResponse, NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason,
-    RequestWithChannels, SigningError, SigningFailure, StopError, SubmitError, SubmitFailure,
-    TxConfirmResult, TxIdT, TxServer, TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult,
+    RequestWithChannels, SigningError, StopError, SubmitError, TxConfirmResult, TxIdT, TxServer,
+    TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult,
 };
 
 #[derive(Debug)]
@@ -95,6 +95,10 @@ type NodeOutcome<S> = NodeApplyOutcome<
 >;
 type StatusesFor<S> =
     Statuses<<S as TxServer>::TxId, <S as TxServer>::ConfirmInfo, <S as TxServer>::ConfirmResponse>;
+type FatalStatus<S> = Option<(
+    u64,
+    TxStatus<<S as TxServer>::ConfirmInfo, <S as TxServer>::ConfirmResponse>,
+)>;
 type MutationsFor<S> = Mutations<
     <S as TxServer>::TxId,
     <S as TxServer>::ConfirmInfo,
@@ -1051,7 +1055,7 @@ fn process_status_batch<S: TxServer>(
     if collected.is_empty() {
         return effects;
     }
-    let mut fatal: Option<(u64, TxStatus<S::ConfirmInfo, S::ConfirmResponse>)> = None;
+    let mut fatal: FatalStatus<S> = None;
     let mut seq_mismatch: Option<(u64, u64, StopErrorFor<S>)> = None;
     {
         let shared = match node {
@@ -1190,7 +1194,9 @@ fn process_recover_status<S: TxServer>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tx_client_v2::{ConfirmationResponse, Transaction, TxCallbacks};
+    use crate::tx_client_v2::{
+        ConfirmationResponse, SigningFailure, SubmitFailure, Transaction, TxCallbacks,
+    };
     use async_trait::async_trait;
 
     type TestConfirmResponse = ();

@@ -89,6 +89,7 @@
 //! # }
 //! ```
 use std::collections::HashMap;
+use std::fmt;
 use std::hash::Hash as StdHash;
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,6 +147,23 @@ pub enum StopError<SubmitErr, ConfirmInfo, ConfirmResponse> {
 
 pub type ConfirmResult<ConfirmInfo, SubmitErr, ConfirmResponse> =
     std::result::Result<ConfirmInfo, StopError<SubmitErr, ConfirmInfo, ConfirmResponse>>;
+
+impl<SubmitErr, ConfirmInfo, ConfirmResponse> fmt::Display
+    for StopError<SubmitErr, ConfirmInfo, ConfirmResponse>
+where
+    SubmitErr: fmt::Debug,
+    ConfirmInfo: fmt::Debug,
+    ConfirmResponse: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StopError::ConfirmError(status) => write!(f, "ConfirmError({:?})", status),
+            StopError::SubmitError(err) => write!(f, "SubmitError({:?})", err),
+            StopError::SignError(err) => write!(f, "SignError({:?})", err),
+            StopError::WorkerStopped => write!(f, "WorkerStopped"),
+        }
+    }
+}
 
 impl TxRequest {
     pub fn tx(body: celestia_types::state::RawTxBody, cfg: TxConfig) -> Self {
@@ -584,6 +602,18 @@ type PendingRequest<S> = RequestWithChannels<
     <S as TxServer>::SubmitError,
     <S as TxServer>::TxRequest,
 >;
+type NodeEventFor<S> = NodeEvent<
+    <S as TxServer>::TxId,
+    <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::ConfirmResponse,
+    <S as TxServer>::SubmitError,
+>;
+type SigningResultFor<S> = SigningResult<
+    <S as TxServer>::TxId,
+    <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::ConfirmResponse,
+    <S as TxServer>::SubmitError,
+>;
 type StopErrorFor<S> = StopError<
     <S as TxServer>::SubmitError,
     <S as TxServer>::ConfirmInfo,
@@ -695,16 +725,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         )
     }
 
-    fn enqueue_pending(
-        &mut self,
-        request: RequestWithChannels<
-            S::TxId,
-            S::ConfirmInfo,
-            S::ConfirmResponse,
-            S::SubmitError,
-            S::TxRequest,
-        >,
-    ) -> Result<()> {
+    fn enqueue_pending(&mut self, request: PendingRequest<S>) -> Result<()> {
         self.transactions
             .add_pending(request)
             .map_err(|_| crate::Error::UnexpectedResponseType("pending queue error".to_string()))?;
@@ -735,9 +756,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             .boxed(),
         );
 
-        let mut current_event: Option<
-            NodeEvent<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>,
-        > = None;
+        let mut current_event: Option<NodeEventFor<S>> = None;
         let mut shutdown_seen = false;
 
         loop {
@@ -951,10 +970,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         Ok(false)
     }
 
-    fn push_signing(
-        &mut self,
-    ) -> oneshot::Sender<SigningResult<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>>
-    {
+    fn push_signing(&mut self) -> oneshot::Sender<SigningResultFor<S>> {
         let (tx, rx) = oneshot::channel();
         self.signing = Some(async move { rx.await.ok() }.boxed());
         tx
