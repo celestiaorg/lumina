@@ -13,6 +13,7 @@ use crate::tx_client_v2::{
 };
 
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum WorkerPlan<TxId: TxIdT> {
     SpawnSigning {
         node_id: NodeId,
@@ -135,7 +136,7 @@ impl<ConfirmInfo: Clone> StopError<ConfirmInfo> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct NodeShared {
     submit_delay: Option<Duration>,
     epoch: u64,
@@ -169,19 +170,6 @@ enum NodeState<ConfirmInfo> {
     Active(ActiveState),
     Recovering(RecoveringState),
     Stopped(StoppedState<ConfirmInfo>),
-}
-
-impl Default for NodeShared {
-    fn default() -> Self {
-        Self {
-            submit_delay: None,
-            epoch: 0,
-            last_submitted: None,
-            last_confirmed: 0,
-            confirm_inflight: false,
-            signing_inflight: false,
-        }
-    }
 }
 
 impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
@@ -1253,7 +1241,7 @@ mod tests {
         let mut txs = TestBuffer::new(0);
         txs.add_transaction(make_tx(1, None)).unwrap();
 
-        let plans = manager.plan(&[PlanRequest::Submission], &mut txs, 16);
+        let plans = manager.plan(&[PlanRequest::Submission], &txs, 16);
 
         assert!(plans.iter().any(|event| {
             matches!(
@@ -1268,7 +1256,7 @@ mod tests {
     fn submission_success_marks_and_wakes() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let txs = TestBuffer::new(0);
 
         let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
@@ -1278,7 +1266,7 @@ mod tests {
                     result: Ok(10),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 
@@ -1295,7 +1283,7 @@ mod tests {
     fn confirmation_batch_skips_gap() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = make_buffer_with_ids();
+        let txs = make_buffer_with_ids();
 
         let statuses = vec![
             (10, TxStatus::Pending),
@@ -1309,7 +1297,7 @@ mod tests {
                     response: Ok(ConfirmationResponse::Batch { statuses }),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 
@@ -1325,7 +1313,7 @@ mod tests {
     fn confirmation_batch_confirms_contiguous() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = make_buffer_with_ids();
+        let txs = make_buffer_with_ids();
 
         let statuses = vec![
             (10, TxStatus::Confirmed { info: 1 }),
@@ -1339,7 +1327,7 @@ mod tests {
                     response: Ok(ConfirmationResponse::Batch { statuses }),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 
@@ -1368,13 +1356,13 @@ mod tests {
                     result: Err(SubmitFailure::SequenceMismatch { expected: 2 }),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 
         assert!(outcome.plan_requests.contains(&PlanRequest::Confirmation));
 
-        let wake = manager.plan(&outcome.plan_requests, &mut txs, 16);
+        let wake = manager.plan(&outcome.plan_requests, &txs, 16);
 
         assert!(wake.iter().any(|event| {
             matches!(
@@ -1400,7 +1388,7 @@ mod tests {
                     result: Err(SubmitFailure::SequenceMismatch { expected: 2 }),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 
@@ -1450,7 +1438,7 @@ mod tests {
                     response: Ok(ConfirmationResponse::Batch { statuses }),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 
@@ -1478,9 +1466,9 @@ mod tests {
     fn node_stop_emits_worker_stop() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id], 0);
-        let mut txs = TestBuffer::new(0);
+        let txs = TestBuffer::new(0);
 
-        let outcome = manager.apply_event(NodeEvent::NodeStop, &mut txs, Duration::from_secs(1));
+        let outcome = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
 
         assert!(
             outcome
@@ -1494,7 +1482,7 @@ mod tests {
     fn signing_success_enqueues_and_requests_submission() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let txs = TestBuffer::new(0);
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
             state.shared.signing_inflight = true;
@@ -1508,7 +1496,7 @@ mod tests {
                     result: Ok(make_tx(1, None)),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 
@@ -1530,7 +1518,7 @@ mod tests {
     fn signing_sequence_mismatch_reschedules_with_delay() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let txs = TestBuffer::new(0);
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
             state.shared.signing_inflight = true;
@@ -1544,7 +1532,7 @@ mod tests {
                     result: Err(SigningFailure::SequenceMismatch { expected: 9 }),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(3),
         );
 
@@ -1560,7 +1548,7 @@ mod tests {
     fn confirmation_epoch_mismatch_resets_inflight_and_requests_confirmation() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let txs = TestBuffer::new(0);
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
             state.shared.confirm_inflight = true;
@@ -1576,7 +1564,7 @@ mod tests {
                     }),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 
@@ -1597,7 +1585,7 @@ mod tests {
         let node_a: NodeId = Arc::from("node-a");
         let node_b: NodeId = Arc::from("node-b");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_a.clone(), node_b.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let txs = TestBuffer::new(0);
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_a).unwrap() {
             state.shared.last_submitted = Some(5);
@@ -1614,7 +1602,7 @@ mod tests {
                     result: Err(SubmitFailure::TxInMempoolCache),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(2),
         );
 
@@ -1654,7 +1642,7 @@ mod tests {
                     response: Ok(ConfirmationResponse::Batch { statuses }),
                 },
             },
-            &mut txs,
+            &txs,
             Duration::from_secs(1),
         );
 

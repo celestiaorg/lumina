@@ -481,24 +481,40 @@ struct ConfirmationResult<TxId, ConfirmInfo> {
     response: TxConfirmResult<ConfirmationResponse<TxId, ConfirmInfo>>,
 }
 
+type PendingRequest<S> = RequestWithChannels<
+    <S as TxServer>::TxId,
+    <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::TxRequest,
+>;
+type TxBuf<S> =
+    tx_buffer::TxBuffer<<S as TxServer>::TxId, <S as TxServer>::ConfirmInfo, PendingRequest<S>>;
+type SubmissionFuture<S> = BoxFuture<'static, Option<SubmissionResult<<S as TxServer>::TxId>>>;
+type ConfirmationFuture<S> = BoxFuture<
+    'static,
+    Option<ConfirmationResult<<S as TxServer>::TxId, <S as TxServer>::ConfirmInfo>>,
+>;
+type SigningFuture<S> =
+    BoxFuture<'static, Option<SigningResult<<S as TxServer>::TxId, <S as TxServer>::ConfirmInfo>>>;
+
 pub struct TransactionWorker<S: TxServer> {
     nodes: NodeManager<S>,
     servers: HashMap<NodeId, Arc<S>>,
-    transactions: tx_buffer::TxBuffer<
-        S::TxId,
-        S::ConfirmInfo,
-        RequestWithChannels<S::TxId, S::ConfirmInfo, S::TxRequest>,
-    >,
-    add_tx_rx: mpsc::Receiver<RequestWithChannels<S::TxId, S::ConfirmInfo, S::TxRequest>>,
-    submissions: FuturesUnordered<BoxFuture<'static, Option<SubmissionResult<S::TxId>>>>,
-    confirmations:
-        FuturesUnordered<BoxFuture<'static, Option<ConfirmationResult<S::TxId, S::ConfirmInfo>>>>,
-    signing: Option<BoxFuture<'static, Option<SigningResult<S::TxId, S::ConfirmInfo>>>>,
+    transactions: TxBuf<S>,
+    add_tx_rx: mpsc::Receiver<PendingRequest<S>>,
+    submissions: FuturesUnordered<SubmissionFuture<S>>,
+    confirmations: FuturesUnordered<ConfirmationFuture<S>>,
+    signing: Option<SigningFuture<S>>,
     confirm_ticker: Interval,
     confirm_interval: Duration,
     max_status_batch: usize,
     plan_requests: Vec<PlanRequest>,
 }
+
+/// Return type for [`TransactionWorker::new`].
+pub type WorkerPair<S> = (
+    TxSubmitter<<S as TxServer>::TxId, <S as TxServer>::ConfirmInfo, <S as TxServer>::TxRequest>,
+    TransactionWorker<S>,
+);
 
 impl<S: TxServer + 'static> TransactionWorker<S> {
     /// Create a submitter/worker pair with initial sequence and queue capacity.
@@ -512,7 +528,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         max_status_batch: usize,
         start_sequence: u64,
         add_tx_capacity: usize,
-    ) -> (TxSubmitter<S::TxId, S::ConfirmInfo, S::TxRequest>, Self) {
+    ) -> WorkerPair<S> {
         let (add_tx_tx, add_tx_rx) = mpsc::channel(add_tx_capacity);
         let manager = TxSubmitter {
             add_tx: add_tx_tx.clone(),
@@ -803,7 +819,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
     ) -> Result<()> {
         let exp_seq = self.transactions.max_seq() + 1;
         let tx_sequence = tx.sequence;
-        if let Err(_) = self.transactions.add_transaction(tx) {
+        if self.transactions.add_transaction(tx).is_err() {
             let msg = format!("tx sequence gap: expected {}, got {}", exp_seq, tx_sequence);
             let _ = signed.send(Err(crate::Error::UnexpectedResponseType(msg.clone())));
             return Err(crate::Error::UnexpectedResponseType(msg));

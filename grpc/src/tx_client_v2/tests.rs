@@ -45,6 +45,9 @@ impl RoutedCall {
     }
 }
 
+type StatusBatchReply =
+    oneshot::Sender<TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>>;
+
 #[derive(Debug)]
 #[allow(dead_code)]
 enum ServerCall {
@@ -62,7 +65,7 @@ enum ServerCall {
     },
     StatusBatch {
         ids: Vec<TestTxId>,
-        reply: oneshot::Sender<TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>>,
+        reply: StatusBatchReply,
     },
     Status {
         id: TestTxId,
@@ -205,7 +208,7 @@ impl NetworkState {
     fn confirm_batch(
         &mut self,
         node_id: NodeId,
-        txs: &Vec<TestTxId>,
+        txs: &[TestTxId],
     ) -> Vec<(TestTxId, TxStatus<TestConfirmInfo>)> {
         let state = self.node_states.get_mut(&node_id).unwrap();
         txs.iter().map(|&tx| (tx, state.status_of(tx))).collect()
@@ -232,12 +235,11 @@ impl NetworkState {
     }
 
     fn max_submitted_sequence(&self) -> u64 {
-        return self
-            .node_states
-            .iter()
-            .map(|(_, state)| state.next_submit_seq())
+        self.node_states
+            .values()
+            .map(|state| state.next_submit_seq())
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
     }
 
     fn update_confirmed_all(&mut self, seq_id: u64) {
@@ -312,7 +314,7 @@ impl ServerReturn {
 type ActionFunc =
     dyn for<'a> Fn(&'a RoutedCall, &mut NetworkState) -> ActionResult + Send + Sync + 'static;
 type MatchFunc = dyn for<'a> Fn(&'a RoutedCall) -> bool + Send + Sync + 'static;
-type PeriodicFunc = dyn for<'a> Fn(&mut NetworkState) -> () + Send + Sync + 'static;
+type PeriodicFunc = dyn for<'a> Fn(&mut NetworkState) + Send + Sync + 'static;
 
 struct ActionResult {
     ret: ServerReturn,
@@ -407,7 +409,7 @@ struct PeriodicCall {
 impl PeriodicCall {
     fn new<F>(call: F) -> Self
     where
-        F: for<'a> Fn(&mut NetworkState) -> () + Send + Sync + 'static,
+        F: for<'a> Fn(&mut NetworkState) + Send + Sync + 'static,
     {
         Self {
             call: Arc::new(call),
@@ -450,7 +452,7 @@ impl Rule {
         if self.card.exhausted() {
             return false;
         }
-        self.matcher.check(&call)
+        self.matcher.check(call)
     }
 
     fn consume(&mut self) {
@@ -558,14 +560,12 @@ impl From<&RoutedCall> for CallLogEntry {
             ServerCall::SimulateAndSign { sequence, .. } => {
                 CallLogEntry::new(node_id, "Signing", Some(*sequence), vec![])
             }
-            ServerCall::Status { id, .. } => {
-                CallLogEntry::new(node_id, "Status", None, vec![id.clone()])
-            }
+            ServerCall::Status { id, .. } => CallLogEntry::new(node_id, "Status", None, vec![*id]),
             ServerCall::StatusBatch { ids, .. } => {
                 CallLogEntry::new(node_id, "StatusBatch", None, ids.clone())
             }
             ServerCall::Submit { sequence, .. } => {
-                CallLogEntry::new(node_id, "Submit", Some(sequence.clone()), vec![])
+                CallLogEntry::new(node_id, "Submit", Some(*sequence), vec![])
             }
         }
     }
@@ -986,11 +986,11 @@ async fn test_recovering() {
                     ServerCall::Submit { sequence, .. } => {
                         let result =
                             states.submit(rc.node_id.clone(), sequence, TxModifier::CorrectTx);
-                        if is_evicted_submit.load(Ordering::Relaxed) {
-                            if !recovery_triggered.load(Ordering::Relaxed) {
-                                states.update_confirmed_all(evict_sequence);
-                                recovery_triggered.store(true, Ordering::Relaxed);
-                            }
+                        if is_evicted_submit.load(Ordering::Relaxed)
+                            && !recovery_triggered.load(Ordering::Relaxed)
+                        {
+                            states.update_confirmed_all(evict_sequence);
+                            recovery_triggered.store(true, Ordering::Relaxed);
                         }
                         ActionResult {
                             ret: ServerReturn::Submit(result),
