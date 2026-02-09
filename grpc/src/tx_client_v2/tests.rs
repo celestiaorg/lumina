@@ -10,6 +10,24 @@ use tokio::task::JoinHandle;
 
 type TestTxId = u64;
 type TestConfirmInfo = ();
+type TestConfirmResponse = ();
+type TestSubmitError = ();
+type TestStatus = TxStatus<TestConfirmInfo, TestConfirmResponse>;
+type TestSigningResult =
+    TxSigningResult<TestTxId, TestConfirmInfo, TestConfirmResponse, TestSubmitError>;
+type TestSubmitResult = TxSubmitResult<TestTxId, TestSubmitError>;
+type TestConfirmResult = ConfirmResult<TestConfirmInfo, TestSubmitError, TestConfirmResponse>;
+
+fn status(kind: TxStatusKind<TestConfirmInfo>) -> TestStatus {
+    TxStatus::new(kind, ())
+}
+
+fn submit_failure(mapped_error: SubmitError) -> SubmitFailure<TestSubmitError> {
+    SubmitFailure {
+        mapped_error,
+        original_error: (),
+    }
+}
 
 fn init_tracing() {
     static INIT: Once = Once::new();
@@ -45,8 +63,7 @@ impl RoutedCall {
     }
 }
 
-type StatusBatchReply =
-    oneshot::Sender<TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>>;
+type StatusBatchReply = oneshot::Sender<TxConfirmResult<Vec<(TestTxId, TestStatus)>>>;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -55,13 +72,13 @@ enum ServerCall {
         #[allow(dead_code)]
         request: Arc<TxRequest>,
         sequence: u64,
-        reply: oneshot::Sender<TxSigningResult<TestTxId, TestConfirmInfo>>,
+        reply: oneshot::Sender<TestSigningResult>,
     },
     Submit {
         #[allow(dead_code)]
         bytes: Vec<u8>,
         sequence: u64,
-        reply: oneshot::Sender<TxSubmitResult<TestTxId>>,
+        reply: oneshot::Sender<TestSubmitResult>,
     },
     StatusBatch {
         ids: Vec<TestTxId>,
@@ -69,7 +86,7 @@ enum ServerCall {
     },
     Status {
         id: TestTxId,
-        reply: oneshot::Sender<TxConfirmResult<TxStatus<TestConfirmInfo>>>,
+        reply: oneshot::Sender<TxConfirmResult<TestStatus>>,
     },
     CurrentSequence {
         reply: oneshot::Sender<Result<u64>>,
@@ -110,7 +127,7 @@ fn make_many_servers(
 #[derive(Debug, Clone)]
 struct NodeState {
     confirmed_sequence: u64,
-    mempool: VecDeque<TxStatus<TestConfirmInfo>>,
+    mempool: VecDeque<TestStatus>,
 }
 
 impl NodeState {
@@ -129,7 +146,7 @@ impl NodeState {
         let last_non_evicted = self
             .mempool
             .iter()
-            .rposition(|s| !matches!(s, TxStatus::Evicted));
+            .rposition(|s| !matches!(s.kind, TxStatusKind::Evicted));
 
         let next_index = match last_non_evicted {
             Some(i) => i + 1,
@@ -151,13 +168,16 @@ impl NodeState {
         }
     }
 
-    fn status_of(&self, tx: TestTxId) -> TxStatus<TestConfirmInfo> {
+    fn status_of(&self, tx: TestTxId) -> TestStatus {
         if tx <= self.confirmed_sequence {
-            return TxStatus::Confirmed { info: () };
+            return status(TxStatusKind::Confirmed { info: () });
         }
         let start = self.confirmed_sequence + 1;
         let idx = (tx - start) as usize;
-        self.mempool.get(idx).cloned().unwrap_or(TxStatus::Unknown)
+        self.mempool
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| status(TxStatusKind::Unknown))
     }
 }
 
@@ -180,36 +200,32 @@ impl NetworkState {
         node_id: NodeId,
         tx: TestTxId,
         tx_modifier: TxModifier,
-    ) -> TxSubmitResult<TestTxId> {
+    ) -> TestSubmitResult {
         let state = self.node_states.get_mut(&node_id).unwrap();
 
         let expected_seq = state.next_submit_seq();
         if tx != expected_seq {
-            return Err(SubmitFailure::SequenceMismatch {
+            return Err(submit_failure(SubmitError::SequenceMismatch {
                 expected: expected_seq,
-            });
+            }));
         }
 
         match tx_modifier {
             TxModifier::CorrectTx => {
                 state.truncate_to_seq(tx - 1);
-                state.mempool.push_back(TxStatus::Pending);
+                state.mempool.push_back(status(TxStatusKind::Pending));
             }
         }
 
         Ok(tx)
     }
 
-    fn confirm_one(&mut self, node_id: NodeId, tx: TestTxId) -> TxStatus<TestConfirmInfo> {
+    fn confirm_one(&mut self, node_id: NodeId, tx: TestTxId) -> TestStatus {
         let state = self.node_states.get_mut(&node_id).unwrap();
         state.status_of(tx)
     }
 
-    fn confirm_batch(
-        &mut self,
-        node_id: NodeId,
-        txs: &[TestTxId],
-    ) -> Vec<(TestTxId, TxStatus<TestConfirmInfo>)> {
+    fn confirm_batch(&mut self, node_id: NodeId, txs: &[TestTxId]) -> Vec<(TestTxId, TestStatus)> {
         let state = self.node_states.get_mut(&node_id).unwrap();
         txs.iter().map(|&tx| (tx, state.status_of(tx))).collect()
     }
@@ -260,43 +276,43 @@ impl NetworkState {
         let start = state.confirmed_sequence + 1;
         let from_idx = (seq_id - start) as usize;
         for i in from_idx..state.mempool.len() {
-            state.mempool[i] = TxStatus::Evicted;
+            state.mempool[i] = status(TxStatusKind::Evicted);
         }
     }
 }
 
 #[derive(Debug)]
 enum ServerReturn {
-    Signing(TxSigningResult<TestTxId, TestConfirmInfo>),
-    Submit(TxSubmitResult<TestTxId>),
-    StatusBatch(TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>>),
-    Status(TxConfirmResult<TxStatus<TestConfirmInfo>>),
+    Signing(TestSigningResult),
+    Submit(TestSubmitResult),
+    StatusBatch(TxConfirmResult<Vec<(TestTxId, TestStatus)>>),
+    Status(TxConfirmResult<TestStatus>),
     CurrentSequence(Result<u64>),
 }
 
 impl ServerReturn {
-    fn assert_submit(self) -> TxSubmitResult<TestTxId> {
+    fn assert_submit(self) -> TestSubmitResult {
         match self {
             ServerReturn::Submit(result) => result,
             _ => panic!("expected Submit"),
         }
     }
 
-    fn assert_signing(self) -> TxSigningResult<TestTxId, TestConfirmInfo> {
+    fn assert_signing(self) -> TestSigningResult {
         match self {
             ServerReturn::Signing(result) => result,
             _ => panic!("expected Signing"),
         }
     }
 
-    fn assert_status_batch(self) -> TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>> {
+    fn assert_status_batch(self) -> TxConfirmResult<Vec<(TestTxId, TestStatus)>> {
         match self {
             ServerReturn::StatusBatch(result) => result,
             _ => panic!("expected StatusBatch"),
         }
     }
 
-    fn assert_status(self) -> TxConfirmResult<TxStatus<TestConfirmInfo>> {
+    fn assert_status(self) -> TxConfirmResult<TestStatus> {
         match self {
             ServerReturn::Status(result) => result,
             _ => panic!("expected Status"),
@@ -469,8 +485,10 @@ impl TxServer for MockTxServer {
     type TxId = TestTxId;
     type ConfirmInfo = TestConfirmInfo;
     type TxRequest = TxRequest;
+    type SubmitError = TestSubmitError;
+    type ConfirmResponse = TestConfirmResponse;
 
-    async fn submit(&self, bytes: Arc<Vec<u8>>, sequence: u64) -> TxSubmitResult<TestTxId> {
+    async fn submit(&self, bytes: Arc<Vec<u8>>, sequence: u64) -> TestSubmitResult {
         let (reply, rx) = oneshot::channel();
         let ret = ServerCall::Submit {
             bytes: bytes.to_vec(),
@@ -484,14 +502,14 @@ impl TxServer for MockTxServer {
     async fn status_batch(
         &self,
         ids: Vec<TestTxId>,
-    ) -> TxConfirmResult<Vec<(TestTxId, TxStatus<TestConfirmInfo>)>> {
+    ) -> TxConfirmResult<Vec<(TestTxId, TestStatus)>> {
         let (reply, rx) = oneshot::channel();
         let ret = ServerCall::StatusBatch { ids, reply };
         self.send_call(ret, "status batch call").await;
         rx.await.expect("status batch reply")
     }
 
-    async fn status(&self, id: Self::TxId) -> TxConfirmResult<TxStatus<Self::ConfirmInfo>> {
+    async fn status(&self, id: Self::TxId) -> TxConfirmResult<TestStatus> {
         let (reply, rx) = oneshot::channel();
         let ret = ServerCall::Status { id, reply };
         self.send_call(ret, "status call").await;
@@ -509,7 +527,7 @@ impl TxServer for MockTxServer {
         &self,
         req: Arc<Self::TxRequest>,
         sequence: u64,
-    ) -> TxSigningResult<Self::TxId, Self::ConfirmInfo> {
+    ) -> TestSigningResult {
         let (reply, rx) = oneshot::channel();
         let ret = ServerCall::SimulateAndSign {
             request: req,
@@ -668,7 +686,8 @@ struct Harness {
     driver_handle: JoinHandle<DriverResult>,
     #[allow(dead_code)]
     confirm_interval: Duration,
-    manager: TxSubmitter<TestTxId, TestConfirmInfo, TxRequest>,
+    manager:
+        TxSubmitter<TestTxId, TestConfirmInfo, TestConfirmResponse, TestSubmitError, TxRequest>,
 }
 
 impl Harness {
@@ -730,7 +749,7 @@ impl Harness {
     ) -> (
         oneshot::Receiver<Result<()>>,
         oneshot::Receiver<Result<TestTxId>>,
-        oneshot::Receiver<Result<TxStatus<TestConfirmInfo>>>,
+        oneshot::Receiver<TestConfirmResult>,
     ) {
         let body = RawTxBody {
             memo: format!("test-bytes:{:?}", bytes),
@@ -818,9 +837,9 @@ async fn test_eviction() {
                     ServerCall::Submit { .. } => {
                         states.evict(rc.node_id.clone(), 2);
                         ActionResult {
-                            ret: ServerReturn::Submit(TxSubmitResult::Err(
-                                SubmitFailure::SequenceMismatch { expected: 2 },
-                            )),
+                            ret: ServerReturn::Submit(Err(submit_failure(
+                                SubmitError::SequenceMismatch { expected: 2 },
+                            ))),
                         }
                     }
                     _ => panic!("unexpected call"),
@@ -922,7 +941,7 @@ async fn test_eviction() {
         );
         let confirmed = confirm.await.expect("confirm channel closed");
         match confirmed {
-            Ok(TxStatus::Confirmed { .. }) => {}
+            Ok(_) => {}
             other => panic!("confirm failed for seq {}: {:?}", seq, other),
         }
     }
@@ -1017,9 +1036,9 @@ async fn test_recovering() {
                         states.evict(rc.node_id.clone(), 2);
                         is_evicted.store(true, Ordering::Relaxed);
                         ActionResult {
-                            ret: ServerReturn::Submit(TxSubmitResult::Err(
-                                SubmitFailure::SequenceMismatch { expected: 2 },
-                            )),
+                            ret: ServerReturn::Submit(Err(submit_failure(
+                                SubmitError::SequenceMismatch { expected: 2 },
+                            ))),
                         }
                     }
                     _ => panic!("unexpected call"),
@@ -1125,7 +1144,7 @@ async fn test_recovering() {
         );
         let confirmed = confirm.await.expect("confirm channel closed");
         match confirmed {
-            Ok(TxStatus::Confirmed { .. }) => {}
+            Ok(_) => {}
             other => panic!("confirm failed for seq {}: {:?}", seq, other),
         }
     }

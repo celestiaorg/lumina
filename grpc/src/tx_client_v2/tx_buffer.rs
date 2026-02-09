@@ -5,11 +5,11 @@ use std::{
 
 use crate::tx_client_v2::{Transaction, TxIdT};
 
-pub struct TxBuffer<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> {
+pub struct TxBuffer<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request> {
     confirmed: u64,
     next_sequence: u64,
     pending: VecDeque<Request>,
-    transactions: VecDeque<Transaction<TxId, ConfirmInfo>>,
+    transactions: VecDeque<Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>>,
     id_to_seq: HashMap<TxId, u64>,
 }
 
@@ -24,7 +24,9 @@ pub enum TxBufferError {
 
 type TxBufferResult<T> = Result<T, TxBufferError>;
 
-impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, Request> {
+impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
+    TxBuffer<TxId, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
+{
     pub fn new(confirmed: u64) -> Self {
         TxBuffer {
             confirmed,
@@ -83,7 +85,10 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, 
         self.pending.drain(..).collect()
     }
 
-    pub fn add_transaction(&mut self, tx: Transaction<TxId, ConfirmInfo>) -> TxBufferResult<()> {
+    pub fn add_transaction(
+        &mut self,
+        tx: Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>,
+    ) -> TxBufferResult<()> {
         if self.confirmed == 0 && self.transactions.is_empty() {
             self.confirmed = tx.sequence - 1;
             self.next_sequence = tx.sequence;
@@ -101,7 +106,10 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, 
         (idx < self.transactions.len()).then_some(idx)
     }
 
-    pub fn get_by_id(&self, id: &TxId) -> Option<&Transaction<TxId, ConfirmInfo>> {
+    pub fn get_by_id(
+        &self,
+        id: &TxId,
+    ) -> Option<&Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>> {
         self.id_to_seq
             .get(id)
             .and_then(|seq| self.tx_idx(*seq))
@@ -112,11 +120,17 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, 
         self.id_to_seq.get(id).cloned()
     }
 
-    pub fn get(&self, seq: u64) -> Option<&Transaction<TxId, ConfirmInfo>> {
+    pub fn get(
+        &self,
+        seq: u64,
+    ) -> Option<&Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>> {
         self.tx_idx(seq).and_then(|idx| self.transactions.get(idx))
     }
 
-    pub fn get_mut(&mut self, seq: u64) -> Option<&mut Transaction<TxId, ConfirmInfo>> {
+    pub fn get_mut(
+        &mut self,
+        seq: u64,
+    ) -> Option<&mut Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>> {
         self.tx_idx(seq)
             .and_then(|idx| self.transactions.get_mut(idx))
     }
@@ -153,7 +167,10 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, 
         )
     }
 
-    pub fn confirm(&mut self, seq: u64) -> TxBufferResult<Transaction<TxId, ConfirmInfo>> {
+    pub fn confirm(
+        &mut self,
+        seq: u64,
+    ) -> TxBufferResult<Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>> {
         if seq != self.confirmed + 1 {
             return Err(TxBufferError::ConfirmWithGaps);
         }
@@ -181,7 +198,7 @@ mod tests {
     use crate::tx_client_v2::TxCallbacks;
     use std::sync::Arc;
 
-    fn make_tx(sequence: u64, id: Option<u64>) -> Transaction<u64, ()> {
+    fn make_tx(sequence: u64, id: Option<u64>) -> Transaction<u64, (), (), ()> {
         Transaction {
             sequence,
             bytes: Arc::new(vec![sequence as u8]),
@@ -190,7 +207,7 @@ mod tests {
         }
     }
 
-    fn make_buffer(confirmed: u64) -> TxBuffer<u64, (), ()> {
+    fn make_buffer(confirmed: u64) -> TxBuffer<u64, (), (), (), ()> {
         TxBuffer::new(confirmed)
     }
 

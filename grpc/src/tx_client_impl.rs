@@ -20,9 +20,9 @@ use crate::grpc::{BroadcastMode, GasEstimate, TxStatus as GrpcTxStatus, TxStatus
 use crate::signer::sign_tx;
 
 use crate::tx_client_v2::{
-    NodeId, RejectionReason, SigningFailure, SubmitFailure, Transaction, TransactionWorker,
-    TxCallbacks, TxConfirmResult, TxPayload, TxRequest, TxServer, TxStatus, TxSubmitResult,
-    TxSubmitter,
+    ConfirmResult, NodeId, RejectionReason, SigningFailure, StopError, SubmitError, SubmitFailure,
+    Transaction, TransactionWorker, TxCallbacks, TxConfirmResult, TxPayload, TxRequest, TxServer,
+    TxStatus, TxStatusKind, TxSubmitResult, TxSubmitter,
 };
 use crate::{Error, GrpcClient, Result, TxConfig, TxInfo};
 
@@ -31,9 +31,9 @@ const SEQUENCE_ERROR_PAT: &str = "account sequence mismatch, expected ";
 const DEFAULT_MAX_STATUS_BATCH: usize = 16;
 const DEFAULT_QUEUE_CAPACITY: usize = 128;
 
-pub struct ConfirmHandle<ConfirmInfo> {
+pub struct ConfirmHandle<ConfirmInfo, ConfirmResponse> {
     pub hash: Hash,
-    pub confirmed: oneshot::Receiver<Result<TxStatus<ConfirmInfo>>>,
+    pub confirmed: oneshot::Receiver<ConfirmResult<ConfirmInfo, Arc<Error>, ConfirmResponse>>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,23 +51,13 @@ impl fmt::Display for TxUserError {
     }
 }
 
-impl ConfirmHandle<TxConfirmInfo> {
-    pub async fn confirm(self) -> std::result::Result<TxInfo, TxUserError> {
+impl ConfirmHandle<TxConfirmInfo, TxStatusResponse> {
+    pub async fn confirm(
+        self,
+    ) -> std::result::Result<TxInfo, StopError<Arc<Error>, TxConfirmInfo, TxStatusResponse>> {
         // receiver errors or internal errors are invariant violations
-        let status = self
-            .confirmed
-            .await
-            .expect("confirm receiver dropped")
-            .expect("confirm error");
-        match status {
-            // TODO: handle execution errors as erros
-            TxStatus::Confirmed { info } => Ok(info.info),
-            TxStatus::Rejected { reason } => Err(TxUserError::Rejected { reason }),
-            TxStatus::Evicted => {
-                panic!("should not get evicted statuses in confirm")
-            }
-            TxStatus::Unknown | TxStatus::Pending => Err(TxUserError::NotFound),
-        }
+        let info = self.confirmed.await.expect("confirm receiver dropped")?;
+        Ok(info.info)
     }
 }
 
@@ -94,7 +84,7 @@ pub struct TransactionService {
 }
 
 struct TransactionServiceInner {
-    submitter: RwLock<TxSubmitter<Hash, TxConfirmInfo, TxRequest>>,
+    submitter: RwLock<TxSubmitter<Hash, TxConfirmInfo, TxStatusResponse, Arc<Error>, TxRequest>>,
     worker: Mutex<Option<WorkerHandle>>,
     clients: HashMap<NodeId, GrpcClient>,
     primary_client: GrpcClient,
@@ -155,7 +145,10 @@ impl TransactionService {
         })
     }
 
-    pub async fn submit(&self, request: TxRequest) -> Result<ConfirmHandle<TxConfirmInfo>> {
+    pub async fn submit(
+        &self,
+        request: TxRequest,
+    ) -> Result<ConfirmHandle<TxConfirmInfo, TxStatusResponse>> {
         let submitter = self.inner.submitter.read().await.clone();
         let handle = submitter.add_tx(request).await?;
         match handle.signed.await {
@@ -173,7 +166,10 @@ impl TransactionService {
         }
     }
 
-    pub async fn submit_restart(&self, request: TxRequest) -> Result<ConfirmHandle<TxConfirmInfo>> {
+    pub async fn submit_restart(
+        &self,
+        request: TxRequest,
+    ) -> Result<ConfirmHandle<TxConfirmInfo, TxStatusResponse>> {
         let retry_request = request.clone();
         match self.submit(request).await {
             Ok(handle) => Ok(handle),
@@ -186,10 +182,12 @@ impl TransactionService {
     }
 
     pub async fn recreate_worker(&self) -> Result<()> {
-        let mut worker_guard = self.inner.worker.lock().await;
-        if let Some(worker) = worker_guard.as_mut() {
-            if !worker.is_finished() {
-                return Err(Error::TxWorkerRunning);
+        {
+            let mut worker_guard = self.inner.worker.lock().await;
+            if let Some(worker) = worker_guard.as_mut() {
+                if !worker.is_finished() {
+                    return Err(Error::TxWorkerRunning);
+                }
             }
         }
         let (submitter, worker_handle) = Self::spawn_worker(
@@ -201,10 +199,10 @@ impl TransactionService {
             self.inner.queue_capacity,
         )
         .await?;
-        *worker_guard = Some(worker_handle);
-
         let mut submitter_guard = self.inner.submitter.write().await;
+        let mut worker_guard = self.inner.worker.lock().await;
         *submitter_guard = submitter;
+        *worker_guard = Some(worker_handle);
 
         Ok(())
     }
@@ -216,7 +214,10 @@ impl TransactionService {
         confirm_interval: Duration,
         max_status_batch: usize,
         queue_capacity: usize,
-    ) -> Result<(TxSubmitter<Hash, TxConfirmInfo, TxRequest>, WorkerHandle)> {
+    ) -> Result<(
+        TxSubmitter<Hash, TxConfirmInfo, TxStatusResponse, Arc<Error>, TxRequest>,
+        WorkerHandle,
+    )> {
         let start_sequence = current_sequence(&primary_client).await?;
         let nodes = clients
             .iter()
@@ -262,25 +263,52 @@ impl TxServer for NodeClient {
     type TxId = Hash;
     type ConfirmInfo = TxConfirmInfo;
     type TxRequest = TxRequest;
+    type SubmitError = Arc<Error>;
+    type ConfirmResponse = TxStatusResponse;
 
-    async fn submit(&self, tx_bytes: Arc<Vec<u8>>, _sequence: u64) -> TxSubmitResult<Self::TxId> {
-        let resp = self
+    async fn submit(
+        &self,
+        tx_bytes: Arc<Vec<u8>>,
+        _sequence: u64,
+    ) -> TxSubmitResult<Self::TxId, Self::SubmitError> {
+        let resp = match self
             .client
             .broadcast_tx(tx_bytes.to_vec(), BroadcastMode::Sync)
             .await
-            .map_err(|err| SubmitFailure::NetworkError { err: Arc::new(err) })?;
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                return Err(SubmitFailure {
+                    mapped_error: SubmitError::NetworkError,
+                    original_error: Arc::new(err),
+                });
+            }
+        };
 
         if resp.code == ErrorCode::Success {
             return Ok(resp.txhash);
         }
 
-        Err(map_submit_failure(resp.code, &resp.raw_log))
+        let original_error = Arc::new(Error::TxBroadcastFailed(
+            resp.txhash,
+            resp.code,
+            resp.raw_log.clone(),
+        ));
+        Err(SubmitFailure {
+            mapped_error: map_submit_error(resp.code, &resp.raw_log),
+            original_error,
+        })
     }
 
     async fn status_batch(
         &self,
         ids: Vec<Self::TxId>,
-    ) -> TxConfirmResult<Vec<(Self::TxId, TxStatus<Self::ConfirmInfo>)>> {
+    ) -> TxConfirmResult<
+        Vec<(
+            Self::TxId,
+            TxStatus<Self::ConfirmInfo, Self::ConfirmResponse>,
+        )>,
+    > {
         let response = self.client.tx_status_batch(ids.clone()).await?;
         let mut response_map = HashMap::new();
         for result in response.statuses {
@@ -295,7 +323,10 @@ impl TxServer for NodeClient {
                     statuses.push((hash, mapped));
                 }
                 None => {
-                    statuses.push((hash, TxStatus::Unknown));
+                    return Err(Error::UnexpectedResponseType(format!(
+                        "missing status for tx {:?}",
+                        hash
+                    )));
                 }
             }
         }
@@ -303,7 +334,10 @@ impl TxServer for NodeClient {
         Ok(statuses)
     }
 
-    async fn status(&self, id: Self::TxId) -> TxConfirmResult<TxStatus<Self::ConfirmInfo>> {
+    async fn status(
+        &self,
+        id: Self::TxId,
+    ) -> TxConfirmResult<TxStatus<Self::ConfirmInfo, Self::ConfirmResponse>> {
         let response = self.client.tx_status(id).await?;
         map_status_response(id, response, self.node_id.as_ref())
     }
@@ -316,7 +350,10 @@ impl TxServer for NodeClient {
         &self,
         req: Arc<Self::TxRequest>,
         sequence: u64,
-    ) -> std::result::Result<Transaction<Self::TxId, Self::ConfirmInfo>, SigningFailure> {
+    ) -> std::result::Result<
+        Transaction<Self::TxId, Self::ConfirmInfo, Self::ConfirmResponse, Self::SubmitError>,
+        SigningFailure,
+    > {
         sign_with_client(self.account.clone(), &self.client, req.as_ref(), sequence)
             .await
             .map_err(map_signing_failure)
@@ -328,7 +365,7 @@ async fn sign_with_client(
     client: &GrpcClient,
     request: &TxRequest,
     sequence: u64,
-) -> Result<Transaction<Hash, TxConfirmInfo>> {
+) -> Result<Transaction<Hash, TxConfirmInfo, TxStatusResponse, Arc<Error>>> {
     let (pubkey, signer) = client.signer()?;
     account.sequence = sequence;
 
@@ -409,47 +446,60 @@ fn map_status_response(
     hash: Hash,
     response: TxStatusResponse,
     node_id: &str,
-) -> Result<TxStatus<TxConfirmInfo>> {
+) -> Result<TxStatus<TxConfirmInfo, TxStatusResponse>> {
+    let original_response = response.clone();
     match response.status {
-        GrpcTxStatus::Committed => Ok(TxStatus::Confirmed {
-            info: TxConfirmInfo {
-                info: TxInfo {
-                    hash,
-                    height: response.height.value(),
+        GrpcTxStatus::Committed => Ok(TxStatus::new(
+            TxStatusKind::Confirmed {
+                info: TxConfirmInfo {
+                    info: TxInfo {
+                        hash,
+                        height: response.height.value(),
+                    },
+                    execution_code: response.execution_code,
                 },
-                execution_code: response.execution_code,
             },
-        }),
+            original_response,
+        )),
         GrpcTxStatus::Rejected => {
             if is_wrong_sequence(response.execution_code) {
                 let Some(expected) = extract_sequence_on_mismatch(&response.error) else {
-                    return Ok(TxStatus::Rejected {
+                    return Ok(TxStatus::new(
+                        TxStatusKind::Rejected {
+                            reason: RejectionReason::OtherReason {
+                                error_code: response.execution_code,
+                                message: response.error.clone(),
+                                node_id: Arc::from(node_id),
+                            },
+                        },
+                        original_response,
+                    ));
+                };
+                Ok(TxStatus::new(
+                    TxStatusKind::Rejected {
+                        reason: RejectionReason::SequenceMismatch {
+                            expected,
+                            node_id: Arc::from(node_id),
+                        },
+                    },
+                    original_response,
+                ))
+            } else {
+                Ok(TxStatus::new(
+                    TxStatusKind::Rejected {
                         reason: RejectionReason::OtherReason {
                             error_code: response.execution_code,
                             message: response.error.clone(),
                             node_id: Arc::from(node_id),
                         },
-                    });
-                };
-                Ok(TxStatus::Rejected {
-                    reason: RejectionReason::SequenceMismatch {
-                        expected,
-                        node_id: Arc::from(node_id),
                     },
-                })
-            } else {
-                Ok(TxStatus::Rejected {
-                    reason: RejectionReason::OtherReason {
-                        error_code: response.execution_code,
-                        message: response.error.clone(),
-                        node_id: Arc::from(node_id),
-                    },
-                })
+                    original_response,
+                ))
             }
         }
-        GrpcTxStatus::Evicted => Ok(TxStatus::Evicted),
-        GrpcTxStatus::Pending => Ok(TxStatus::Pending),
-        GrpcTxStatus::Unknown => Ok(TxStatus::Unknown),
+        GrpcTxStatus::Evicted => Ok(TxStatus::new(TxStatusKind::Evicted, original_response)),
+        GrpcTxStatus::Pending => Ok(TxStatus::new(TxStatusKind::Pending, original_response)),
+        GrpcTxStatus::Unknown => Ok(TxStatus::new(TxStatusKind::Unknown, original_response)),
     }
 }
 
@@ -459,20 +509,52 @@ async fn current_sequence(client: &GrpcClient) -> Result<u64> {
     Ok(account.sequence)
 }
 
-fn map_submit_failure(code: ErrorCode, message: &str) -> SubmitFailure {
+fn map_submit_error(code: ErrorCode, message: &str) -> SubmitError {
     if is_wrong_sequence(code) {
         if let Some(expected) = extract_sequence_on_mismatch(message) {
-            return SubmitFailure::SequenceMismatch { expected };
+            return SubmitError::SequenceMismatch { expected };
+        }
+    }
+    if code == ErrorCode::InsufficientFee {
+        if let Some(expected_fee) = extract_expected_fee(message) {
+            return SubmitError::InsufficientFee {
+                expected_fee,
+                message: message.to_string(),
+            };
         }
     }
 
     match code {
-        ErrorCode::MempoolIsFull => SubmitFailure::MempoolIsFull,
-        ErrorCode::TxInMempoolCache => SubmitFailure::TxInMempoolCache,
-        _ => SubmitFailure::Other {
+        ErrorCode::MempoolIsFull => SubmitError::MempoolIsFull,
+        ErrorCode::TxInMempoolCache => SubmitError::TxInMempoolCache,
+        _ => SubmitError::Other {
             error_code: code,
             message: message.to_string(),
         },
+    }
+}
+
+fn extract_expected_fee(message: &str) -> Option<u64> {
+    let patterns = ["required fee:", "required:"];
+    for pattern in patterns {
+        if let Some(index) = message.find(pattern) {
+            let rest = &message[index + pattern.len()..];
+            return parse_leading_digits(rest);
+        }
+    }
+    None
+}
+
+fn parse_leading_digits(input: &str) -> Option<u64> {
+    let digits: String = input
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
     }
 }
 
@@ -561,5 +643,23 @@ mod tests {
         blob.resize(len, 1);
 
         Blob::new(namespace, blob, None, AppVersion::latest()).unwrap()
+    }
+
+    #[test]
+    fn extract_expected_fee_parses_required_fee() {
+        let message = "insufficient fee; got: 123utest required fee: 456utest";
+        assert_eq!(super::extract_expected_fee(message), Some(456));
+    }
+
+    #[test]
+    fn extract_expected_fee_parses_required_fallback() {
+        let message = "insufficient fee; got: 123utest required: 789utest";
+        assert_eq!(super::extract_expected_fee(message), Some(789));
+    }
+
+    #[test]
+    fn extract_expected_fee_returns_none_when_missing() {
+        let message = "insufficient fee; got: 123utest";
+        assert_eq!(super::extract_expected_fee(message), None);
     }
 }

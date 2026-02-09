@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,8 +7,8 @@ use tracing::debug;
 use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
     ConfirmationResponse, NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason,
-    RequestWithChannels, SigningFailure, SubmitFailure, TxConfirmResult, TxIdT, TxServer,
-    TxSigningResult, TxStatus, TxSubmitResult,
+    RequestWithChannels, SigningFailure, StopError, SubmitError, SubmitFailure, TxConfirmResult,
+    TxIdT, TxServer, TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult,
 };
 
 #[derive(Debug)]
@@ -66,16 +65,52 @@ impl<TxId: TxIdT> WorkerPlan<TxId> {
 type PendingRequest<S> = RequestWithChannels<
     <S as TxServer>::TxId,
     <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::ConfirmResponse,
+    <S as TxServer>::SubmitError,
     <S as TxServer>::TxRequest,
 >;
-type NodeBuffer<S> =
-    TxBuffer<<S as TxServer>::TxId, <S as TxServer>::ConfirmInfo, PendingRequest<S>>;
+type StopErrorFor<S> = StopError<
+    <S as TxServer>::SubmitError,
+    <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::ConfirmResponse,
+>;
+type NodeBuffer<S> = TxBuffer<
+    <S as TxServer>::TxId,
+    <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::ConfirmResponse,
+    <S as TxServer>::SubmitError,
+    PendingRequest<S>,
+>;
 type WorkerPlanFor<S> = WorkerPlan<<S as TxServer>::TxId>;
+type NodeStateFor<S> = NodeState<
+    <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::SubmitError,
+    <S as TxServer>::ConfirmResponse,
+>;
+type NodeOutcome<S> = NodeApplyOutcome<
+    <S as TxServer>::TxId,
+    <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::ConfirmResponse,
+    <S as TxServer>::SubmitError,
+>;
+type StatusesFor<S> =
+    Statuses<<S as TxServer>::TxId, <S as TxServer>::ConfirmInfo, <S as TxServer>::ConfirmResponse>;
+type MutationsFor<S> = Mutations<
+    <S as TxServer>::TxId,
+    <S as TxServer>::ConfirmInfo,
+    <S as TxServer>::ConfirmResponse,
+    <S as TxServer>::SubmitError,
+>;
+type PlanRequestsRef<'a> = &'a mut Vec<PlanRequest>;
+type Mutations<TxId, ConfirmInfo, ConfirmResponse, SubmitErr> =
+    Vec<WorkerMutation<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>>;
+type Statuses<TxId, ConfirmInfo, ConfirmResponse> =
+    Vec<(TxId, TxStatus<ConfirmInfo, ConfirmResponse>)>;
 
 #[derive(Debug)]
-pub(crate) enum WorkerMutation<TxId: TxIdT, ConfirmInfo> {
+pub(crate) enum WorkerMutation<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
     EnqueueSigned {
-        tx: crate::tx_client_v2::Transaction<TxId, ConfirmInfo>,
+        tx: crate::tx_client_v2::Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>,
     },
     MarkSubmitted {
         sequence: u64,
@@ -88,7 +123,9 @@ pub(crate) enum WorkerMutation<TxId: TxIdT, ConfirmInfo> {
     WorkerStop,
 }
 
-impl<TxId: TxIdT, ConfirmInfo> WorkerMutation<TxId, ConfirmInfo> {
+impl<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr>
+    WorkerMutation<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>
+{
     pub(crate) fn summary(&self) -> String {
         match self {
             WorkerMutation::EnqueueSigned { tx } => {
@@ -103,34 +140,18 @@ impl<TxId: TxIdT, ConfirmInfo> WorkerMutation<TxId, ConfirmInfo> {
     }
 }
 
-pub(crate) struct NodeApplyOutcome<TxId: TxIdT, ConfirmInfo> {
-    pub(crate) mutations: Vec<WorkerMutation<TxId, ConfirmInfo>>,
+pub(crate) struct NodeApplyOutcome<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
+    pub(crate) mutations: Vec<WorkerMutation<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>>,
     pub(crate) plan_requests: Vec<PlanRequest>,
 }
 
-#[derive(Debug, Clone)]
-enum StopError<ConfirmInfo> {
-    ConfirmError(TxStatus<ConfirmInfo>),
-    SubmitError(TxStatus<ConfirmInfo>),
-    Other,
-}
-
-impl<ConfirmInfo: Clone> StopError<ConfirmInfo> {
-    fn status(&self) -> Option<TxStatus<ConfirmInfo>> {
-        match self {
-            StopError::ConfirmError(status) | StopError::SubmitError(status) => {
-                Some(status.clone())
-            }
-            StopError::Other => None,
-        }
-    }
-
+impl<SubmitErr, ConfirmInfo, ConfirmResponse> StopError<SubmitErr, ConfirmInfo, ConfirmResponse> {
     fn label(&self) -> String {
         match self {
             StopError::ConfirmError(status) => {
                 format!("ConfirmError({})", tx_status_label(status))
             }
-            StopError::SubmitError(status) => format!("SubmitError({})", tx_status_label(status)),
+            StopError::SubmitError(_) => "SubmitError".to_string(),
             StopError::Other => "Other".to_string(),
         }
     }
@@ -159,20 +180,22 @@ struct RecoveringState {
 }
 
 #[derive(Debug, Clone)]
-struct StoppedState<ConfirmInfo> {
+struct StoppedState<ConfirmInfo, SubmitErr, ConfirmResponse> {
     shared: NodeShared,
     stop_seq: u64,
-    error: StopError<ConfirmInfo>,
+    error: StopError<SubmitErr, ConfirmInfo, ConfirmResponse>,
 }
 
 #[derive(Debug, Clone)]
-enum NodeState<ConfirmInfo> {
+enum NodeState<ConfirmInfo, SubmitErr, ConfirmResponse> {
     Active(ActiveState),
     Recovering(RecoveringState),
-    Stopped(StoppedState<ConfirmInfo>),
+    Stopped(StoppedState<ConfirmInfo, SubmitErr, ConfirmResponse>),
 }
 
-impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
+impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
+    NodeState<ConfirmInfo, SubmitErr, ConfirmResponse>
+{
     fn new(start_confirmed: u64) -> Self {
         let shared = NodeShared {
             last_confirmed: start_confirmed,
@@ -257,7 +280,11 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
         });
     }
 
-    fn stop_with_error(&mut self, seq: u64, error: StopError<ConfirmInfo>) {
+    fn stop_with_error(
+        &mut self,
+        seq: u64,
+        error: StopError<SubmitErr, ConfirmInfo, ConfirmResponse>,
+    ) {
         let shared = self.shared().clone();
         let stop_seq = seq;
         *self = NodeState::Stopped(StoppedState {
@@ -267,7 +294,11 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
         });
     }
 
-    fn apply_stop_error(&mut self, seq: u64, error: StopError<ConfirmInfo>) {
+    fn apply_stop_error(
+        &mut self,
+        seq: u64,
+        error: StopError<SubmitErr, ConfirmInfo, ConfirmResponse>,
+    ) {
         match self {
             NodeState::Stopped(state) => {
                 let prev_stop_seq = state.stop_seq;
@@ -299,7 +330,7 @@ impl<ConfirmInfo: Clone> NodeState<ConfirmInfo> {
 }
 
 pub(crate) struct NodeManager<S: TxServer> {
-    nodes: HashMap<NodeId, NodeState<S::ConfirmInfo>>,
+    nodes: HashMap<NodeId, NodeStateFor<S>>,
     signing_delay: Option<Duration>,
 }
 
@@ -343,31 +374,29 @@ impl<S: TxServer> NodeManager<S> {
                 continue;
             }
             let confirmed = node.shared().last_confirmed;
-            min_confirmed = Some(match min_confirmed {
-                Some(current) => current.min(confirmed),
-                None => confirmed,
-            });
+            min_confirmed = Some(
+                min_confirmed
+                    .map(|current| current.min(confirmed))
+                    .unwrap_or(confirmed),
+            );
         }
         min_confirmed
     }
 
-    pub(crate) fn tail_error_status(&self) -> Option<TxStatus<S::ConfirmInfo>> {
-        let mut best: Option<(u64, TxStatus<S::ConfirmInfo>)> = None;
+    pub(crate) fn tail_stop_error(&self) -> Option<StopErrorFor<S>> {
+        let mut best: Option<(u64, StopErrorFor<S>)> = None;
         for node in self.nodes.values() {
             if let NodeState::Stopped(state) = node {
-                let Some(status) = state.error.status() else {
-                    continue;
-                };
                 match &best {
-                    None => best = Some((state.stop_seq, status)),
+                    None => best = Some((state.stop_seq, state.error.clone())),
                     Some((seq, _)) if state.stop_seq > *seq => {
-                        best = Some((state.stop_seq, status))
+                        best = Some((state.stop_seq, state.error.clone()))
                     }
                     _ => {}
                 }
             }
         }
-        best.map(|(_, status)| status)
+        best.map(|(_, error)| error)
     }
 
     pub(crate) fn plan(
@@ -387,7 +416,7 @@ impl<S: TxServer> NodeManager<S> {
                             request = ?request,
                             "node state (plan)"
                         );
-                        if let Some(plan) = plan_submission(node_id, node, txs) {
+                        if let Some(plan) = plan_submission::<S>(node_id, node, txs) {
                             plans.push(plan);
                         }
                     }
@@ -400,7 +429,8 @@ impl<S: TxServer> NodeManager<S> {
                             request = ?request,
                             "node state (plan)"
                         );
-                        if let Some(plan) = plan_confirmation(node_id, node, txs, max_status_batch)
+                        if let Some(plan) =
+                            plan_confirmation::<S>(node_id, node, txs, max_status_batch)
                         {
                             plans.push(plan);
                         }
@@ -418,10 +448,10 @@ impl<S: TxServer> NodeManager<S> {
 
     pub(crate) fn apply_event(
         &mut self,
-        event: NodeEvent<S::TxId, S::ConfirmInfo>,
+        event: NodeEvent<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>,
         txs: &NodeBuffer<S>,
         confirm_interval: Duration,
-    ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
+    ) -> NodeOutcome<S> {
         let mut mutations = Vec::new();
         let mut plan_requests = Vec::new();
 
@@ -498,10 +528,10 @@ impl<S: TxServer> NodeManager<S> {
         &mut self,
         node_id: &NodeId,
         sequence: u64,
-        result: TxSubmitResult<S::TxId>,
+        result: TxSubmitResult<S::TxId, S::SubmitError>,
         txs: &NodeBuffer<S>,
         confirm_interval: Duration,
-    ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
+    ) -> NodeOutcome<S> {
         let mut mutations = Vec::new();
         let mut plan_requests = Vec::new();
 
@@ -540,18 +570,20 @@ impl<S: TxServer> NodeManager<S> {
                 if let NodeState::Active(active) = node {
                     on_submit_failure(active);
                 }
-                match failure {
-                    SubmitFailure::SequenceMismatch { expected } => {
+                match failure.mapped_error {
+                    SubmitError::SequenceMismatch { expected } => {
+                        let stop_error: StopErrorFor<S> =
+                            StopError::SubmitError(failure.original_error.clone());
                         let recovering =
-                            on_sequence_mismatch(node, node_id, sequence, expected, txs);
+                            on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
                         if recovering {
                             push_plan_request(&mut plan_requests, PlanRequest::Confirmation);
                         }
                     }
-                    SubmitFailure::MempoolIsFull | SubmitFailure::NetworkError { .. } => {
+                    SubmitError::MempoolIsFull | SubmitError::NetworkError => {
                         node.shared_mut().submit_delay = Some(confirm_interval);
                     }
-                    SubmitFailure::TxInMempoolCache => {
+                    SubmitError::TxInMempoolCache => {
                         if max_sub
                             .map(|(_, max)| max > node.shared().last_submitted.unwrap_or(0))
                             .unwrap_or(false)
@@ -561,16 +593,25 @@ impl<S: TxServer> NodeManager<S> {
                         }
                         node.shared_mut().submit_delay = Some(confirm_interval);
                     }
-                    SubmitFailure::Other {
-                        error_code,
-                        message,
-                    } => {
+                    SubmitError::InsufficientFee { .. } => {
                         let stop_at = node
                             .shared()
                             .last_submitted
                             .unwrap_or(node.shared().last_confirmed);
-                        let status = submit_other_status(node_id, error_code, message);
-                        node.stop_with_error(stop_at, StopError::SubmitError(status));
+                        node.stop_with_error(
+                            stop_at,
+                            StopError::SubmitError(failure.original_error.clone()),
+                        );
+                    }
+                    SubmitError::Other { .. } => {
+                        let stop_at = node
+                            .shared()
+                            .last_submitted
+                            .unwrap_or(node.shared().last_confirmed);
+                        node.stop_with_error(
+                            stop_at,
+                            StopError::SubmitError(failure.original_error.clone()),
+                        );
                     }
                 }
             }
@@ -586,10 +627,12 @@ impl<S: TxServer> NodeManager<S> {
         &mut self,
         node_id: &NodeId,
         state_epoch: u64,
-        response: TxConfirmResult<ConfirmationResponse<S::TxId, S::ConfirmInfo>>,
+        response: TxConfirmResult<
+            ConfirmationResponse<S::TxId, S::ConfirmInfo, S::ConfirmResponse>,
+        >,
         txs: &NodeBuffer<S>,
         _confirm_interval: Duration,
-    ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
+    ) -> NodeOutcome<S> {
         let mut mutations = Vec::new();
         let mut plan_requests = Vec::new();
 
@@ -618,11 +661,11 @@ impl<S: TxServer> NodeManager<S> {
             Ok(confirmation) => match confirmation {
                 ConfirmationResponse::Batch { statuses } => {
                     let mut effects =
-                        process_status_batch(node_id, node, statuses, txs, &mut plan_requests);
+                        process_status_batch::<S>(node_id, node, statuses, txs, &mut plan_requests);
                     mutations.append(&mut effects);
                 }
                 ConfirmationResponse::Single { id, status } => {
-                    let mut effects = process_recover_status(node, id, status, txs);
+                    let mut effects = process_recover_status::<S>(node, id, status, txs);
                     mutations.append(&mut effects);
                 }
             },
@@ -646,9 +689,9 @@ impl<S: TxServer> NodeManager<S> {
         &mut self,
         node_id: &NodeId,
         sequence: u64,
-        result: TxSigningResult<S::TxId, S::ConfirmInfo>,
+        result: TxSigningResult<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>,
         confirm_interval: Duration,
-    ) -> NodeApplyOutcome<S::TxId, S::ConfirmInfo> {
+    ) -> NodeOutcome<S> {
         let mut mutations = Vec::new();
         let mut plan_requests = Vec::new();
         let mut stop_all = false;
@@ -764,36 +807,15 @@ fn push_plan_request(requests: &mut Vec<PlanRequest>, request: PlanRequest) {
     }
 }
 
-fn tx_status_label<ConfirmInfo>(status: &TxStatus<ConfirmInfo>) -> &'static str {
-    match status {
-        TxStatus::Pending => "Pending",
-        TxStatus::Confirmed { .. } => "Confirmed",
-        TxStatus::Rejected { .. } => "Rejected",
-        TxStatus::Evicted => "Evicted",
-        TxStatus::Unknown => "Unknown",
-    }
-}
-
-fn submit_other_status<ConfirmInfo>(
-    node_id: &NodeId,
-    error_code: celestia_types::state::ErrorCode,
-    message: String,
-) -> TxStatus<ConfirmInfo> {
-    TxStatus::Rejected {
-        reason: RejectionReason::OtherReason {
-            error_code,
-            message,
-            node_id: node_id.clone(),
-        },
-    }
-}
-
-fn sequence_mismatch_status<ConfirmInfo>(node_id: &NodeId, expected: u64) -> TxStatus<ConfirmInfo> {
-    TxStatus::Rejected {
-        reason: RejectionReason::SequenceMismatch {
-            expected,
-            node_id: node_id.clone(),
-        },
+fn tx_status_label<ConfirmInfo, ConfirmResponse>(
+    status: &TxStatus<ConfirmInfo, ConfirmResponse>,
+) -> &'static str {
+    match status.kind {
+        TxStatusKind::Pending => "Pending",
+        TxStatusKind::Confirmed { .. } => "Confirmed",
+        TxStatusKind::Rejected { .. } => "Rejected",
+        TxStatusKind::Evicted => "Evicted",
+        TxStatusKind::Unknown => "Unknown",
     }
 }
 
@@ -813,11 +835,11 @@ fn on_submit_failure(state: &mut ActiveState) {
     state.pending = None;
 }
 
-fn plan_submission<TxId: TxIdT + Eq + Hash, ConfirmInfo, Pending>(
+fn plan_submission<S: TxServer>(
     node_id: &NodeId,
-    node: &mut NodeState<ConfirmInfo>,
-    txs: &TxBuffer<TxId, ConfirmInfo, Pending>,
-) -> Option<WorkerPlan<TxId>> {
+    node: &mut NodeStateFor<S>,
+    txs: &NodeBuffer<S>,
+) -> Option<WorkerPlanFor<S>> {
     match node {
         NodeState::Active(state) => {
             if state.pending.is_some() {
@@ -846,12 +868,12 @@ fn plan_submission<TxId: TxIdT + Eq + Hash, ConfirmInfo, Pending>(
     }
 }
 
-fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo, Pending>(
+fn plan_confirmation<S: TxServer>(
     node_id: &NodeId,
-    node: &mut NodeState<ConfirmInfo>,
-    txs: &TxBuffer<TxId, ConfirmInfo, Pending>,
+    node: &mut NodeStateFor<S>,
+    txs: &NodeBuffer<S>,
     max_batch: usize,
-) -> Option<WorkerPlan<TxId>> {
+) -> Option<WorkerPlanFor<S>> {
     match node {
         NodeState::Active(state) => {
             if state.shared.confirm_inflight {
@@ -982,13 +1004,14 @@ fn plan_confirmation<TxId: TxIdT + Eq + Hash, ConfirmInfo, Pending>(
     }
 }
 
-fn on_sequence_mismatch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
-    node: &mut NodeState<ConfirmInfo>,
-    node_id: &NodeId,
+fn on_sequence_mismatch<S: TxServer>(
+    node: &mut NodeStateFor<S>,
     sequence: u64,
     expected: u64,
-    txs: &TxBuffer<TxId, ConfirmInfo, Pending>,
+    stop_error: StopErrorFor<S>,
+    txs: &NodeBuffer<S>,
 ) -> bool {
+    let mut stop_error = Some(stop_error);
     let mut recover_target = None;
     let mut stop_seq = None;
     let shared = match node {
@@ -1004,9 +1027,8 @@ fn on_sequence_mismatch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
     if sequence < expected {
         let target = expected - 1;
         if txs.get(target).and_then(|tx| tx.id.clone()).is_none() {
-            let status = sequence_mismatch_status(node_id, expected);
             let stop_at = shared.last_submitted.unwrap_or(shared.last_confirmed);
-            node.apply_stop_error(stop_at, StopError::ConfirmError(status));
+            node.apply_stop_error(stop_at, stop_error.take().unwrap());
             return false;
         }
         shared.epoch = shared.epoch.saturating_add(1);
@@ -1029,19 +1051,19 @@ fn on_sequence_mismatch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
         return true;
     }
     if let Some(stop_seq) = stop_seq {
-        node.apply_stop_error(stop_seq, StopError::Other);
+        node.apply_stop_error(stop_seq, stop_error.take().unwrap());
     }
     false
 }
 
-fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
+fn process_status_batch<S: TxServer>(
     node_id: &NodeId,
-    node: &mut NodeState<ConfirmInfo>,
-    statuses: Vec<(TxId, TxStatus<ConfirmInfo>)>,
-    txs: &TxBuffer<TxId, ConfirmInfo, Pending>,
-    plan_requests: &mut Vec<PlanRequest>,
-) -> Vec<WorkerMutation<TxId, ConfirmInfo>> {
-    let mut effects: Vec<WorkerMutation<TxId, ConfirmInfo>> = Vec::new();
+    node: &mut NodeStateFor<S>,
+    statuses: StatusesFor<S>,
+    txs: &NodeBuffer<S>,
+    plan_requests: PlanRequestsRef<'_>,
+) -> MutationsFor<S> {
+    let mut effects: MutationsFor<S> = Vec::new();
     let mut collected = statuses
         .into_iter()
         .filter_map(|(tx_id, status)| txs.get_by_id(&tx_id).map(|tx| (tx.sequence, status)))
@@ -1050,8 +1072,8 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
     if collected.is_empty() {
         return effects;
     }
-    let mut fatal: Option<(u64, TxStatus<ConfirmInfo>)> = None;
-    let mut seq_mismatch: Option<(u64, u64)> = None;
+    let mut fatal: Option<(u64, TxStatus<S::ConfirmInfo, S::ConfirmResponse>)> = None;
+    let mut seq_mismatch: Option<(u64, u64, StopErrorFor<S>)> = None;
     {
         let shared = match node {
             NodeState::Recovering(_) => {
@@ -1073,8 +1095,12 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
                 );
                 break;
             }
-            match status {
-                TxStatus::Pending => {
+            let TxStatus {
+                kind,
+                original_response,
+            } = status;
+            match kind {
+                TxStatusKind::Pending => {
                     debug!(
                         node_id = %node_id.as_ref(),
                         sequence,
@@ -1084,38 +1110,53 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
                     );
                     break;
                 }
-                TxStatus::Evicted => {
+                TxStatusKind::Evicted => {
                     let clamped = sequence.saturating_sub(1).max(txs.confirmed_seq());
                     shared.last_submitted = Some(clamped);
                     push_plan_request(plan_requests, PlanRequest::Submission);
                     break;
                 }
-                TxStatus::Rejected { reason } => match reason {
-                    RejectionReason::SequenceMismatch { expected, .. } => {
-                        seq_mismatch = Some((sequence, expected));
+                TxStatusKind::Rejected { reason } => match reason {
+                    RejectionReason::SequenceMismatch { expected, node_id } => {
+                        let status = TxStatus::new(
+                            TxStatusKind::Rejected {
+                                reason: RejectionReason::SequenceMismatch { expected, node_id },
+                            },
+                            original_response,
+                        );
+                        seq_mismatch = Some((sequence, expected, StopError::ConfirmError(status)));
                         break;
                     }
                     other => {
-                        fatal = Some((sequence, TxStatus::Rejected { reason: other }));
+                        fatal = Some((
+                            sequence,
+                            TxStatus::new(
+                                TxStatusKind::Rejected { reason: other },
+                                original_response,
+                            ),
+                        ));
                         break;
                     }
                 },
-                TxStatus::Confirmed { info } => {
+                TxStatusKind::Confirmed { info } => {
                     shared.last_confirmed = sequence;
                     effects.push(WorkerMutation::Confirm {
                         seq: sequence,
                         info,
                     });
                 }
-                TxStatus::Unknown => {
-                    fatal = Some((sequence, TxStatus::Unknown));
+                TxStatusKind::Unknown => {
+                    fatal = Some((
+                        sequence,
+                        TxStatus::new(TxStatusKind::Unknown, original_response),
+                    ));
                     break;
                 }
             }
         }
     }
-    if let Some((sequence, expected)) = seq_mismatch {
-        let recovering = on_sequence_mismatch(node, node_id, sequence, expected, txs);
+    if let Some((sequence, expected, stop_error)) = seq_mismatch {
+        let recovering = on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
         if recovering {
             push_plan_request(plan_requests, PlanRequest::Confirmation);
         }
@@ -1126,31 +1167,35 @@ fn process_status_batch<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
     effects
 }
 
-fn process_recover_status<TxId: TxIdT + Eq + Hash, ConfirmInfo: Clone, Pending>(
-    node: &mut NodeState<ConfirmInfo>,
-    id: TxId,
-    status: TxStatus<ConfirmInfo>,
-    txs: &TxBuffer<TxId, ConfirmInfo, Pending>,
-) -> Vec<WorkerMutation<TxId, ConfirmInfo>> {
-    let effects: Vec<WorkerMutation<TxId, ConfirmInfo>> = Vec::new();
+fn process_recover_status<S: TxServer>(
+    node: &mut NodeStateFor<S>,
+    id: S::TxId,
+    status: TxStatus<S::ConfirmInfo, S::ConfirmResponse>,
+    txs: &NodeBuffer<S>,
+) -> MutationsFor<S> {
+    let effects: MutationsFor<S> = Vec::new();
     let Some(seq) = txs.get_seq(&id) else {
         return effects;
     };
-    let mut fatal: Option<TxStatus<ConfirmInfo>> = None;
+    let mut fatal: Option<TxStatus<S::ConfirmInfo, S::ConfirmResponse>> = None;
     let mut confirmed = false;
     {
         let NodeState::Recovering(state) = node else {
             return effects;
         };
-        match status {
-            TxStatus::Confirmed { .. } | TxStatus::Pending => {
+        let TxStatus {
+            kind,
+            original_response,
+        } = status;
+        match kind {
+            TxStatusKind::Confirmed { .. } | TxStatusKind::Pending => {
                 state.shared.last_submitted =
                     Some(state.shared.last_submitted.unwrap_or(seq).max(seq));
                 state.shared.epoch = state.shared.epoch.saturating_add(1);
                 confirmed = true;
             }
             other => {
-                fatal = Some(other);
+                fatal = Some(TxStatus::new(other, original_response));
             }
         }
     }
@@ -1169,6 +1214,21 @@ mod tests {
     use crate::tx_client_v2::{ConfirmationResponse, Transaction, TxCallbacks};
     use async_trait::async_trait;
 
+    type TestConfirmResponse = ();
+    type TestSubmitError = ();
+    type TestStatus = TxStatus<u64, TestConfirmResponse>;
+
+    fn status(kind: TxStatusKind<u64>) -> TestStatus {
+        TxStatus::new(kind, ())
+    }
+
+    fn submit_failure(mapped_error: SubmitError) -> SubmitFailure<TestSubmitError> {
+        SubmitFailure {
+            mapped_error,
+            original_error: (),
+        }
+    }
+
     #[derive(Debug)]
     struct DummyServer;
 
@@ -1176,28 +1236,35 @@ mod tests {
     impl TxServer for DummyServer {
         type TxId = u64;
         type ConfirmInfo = u64;
+        type SubmitError = TestSubmitError;
+        type ConfirmResponse = TestConfirmResponse;
         type TxRequest = crate::tx_client_v2::TxRequest;
 
         async fn submit(
             &self,
             _tx_bytes: Arc<Vec<u8>>,
             _sequence: u64,
-        ) -> crate::tx_client_v2::TxSubmitResult<Self::TxId> {
+        ) -> crate::tx_client_v2::TxSubmitResult<Self::TxId, Self::SubmitError> {
             unimplemented!()
         }
 
         async fn status_batch(
             &self,
             _ids: Vec<Self::TxId>,
-        ) -> crate::tx_client_v2::TxConfirmResult<Vec<(Self::TxId, TxStatus<Self::ConfirmInfo>)>>
-        {
+        ) -> crate::tx_client_v2::TxConfirmResult<
+            Vec<(
+                Self::TxId,
+                TxStatus<Self::ConfirmInfo, Self::ConfirmResponse>,
+            )>,
+        > {
             unimplemented!()
         }
 
         async fn status(
             &self,
             _id: Self::TxId,
-        ) -> crate::tx_client_v2::TxConfirmResult<TxStatus<Self::ConfirmInfo>> {
+        ) -> crate::tx_client_v2::TxConfirmResult<TxStatus<Self::ConfirmInfo, Self::ConfirmResponse>>
+        {
             unimplemented!()
         }
 
@@ -1209,14 +1276,23 @@ mod tests {
             &self,
             _req: Arc<Self::TxRequest>,
             _sequence: u64,
-        ) -> crate::tx_client_v2::TxSigningResult<Self::TxId, Self::ConfirmInfo> {
+        ) -> crate::tx_client_v2::TxSigningResult<
+            Self::TxId,
+            Self::ConfirmInfo,
+            Self::ConfirmResponse,
+            Self::SubmitError,
+        > {
             unimplemented!()
         }
     }
 
-    type TestBuffer = TxBuffer<u64, u64, PendingRequest<DummyServer>>;
+    type TestBuffer =
+        TxBuffer<u64, u64, TestConfirmResponse, TestSubmitError, PendingRequest<DummyServer>>;
 
-    fn make_tx(sequence: u64, id: Option<u64>) -> Transaction<u64, u64> {
+    fn make_tx(
+        sequence: u64,
+        id: Option<u64>,
+    ) -> Transaction<u64, u64, TestConfirmResponse, TestSubmitError> {
         Transaction {
             sequence,
             bytes: Arc::new(vec![sequence as u8]),
@@ -1286,8 +1362,8 @@ mod tests {
         let txs = make_buffer_with_ids();
 
         let statuses = vec![
-            (10, TxStatus::Pending),
-            (11, TxStatus::Confirmed { info: 2 }),
+            (10, status(TxStatusKind::Pending)),
+            (11, status(TxStatusKind::Confirmed { info: 2 })),
         ];
         let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
@@ -1316,8 +1392,8 @@ mod tests {
         let txs = make_buffer_with_ids();
 
         let statuses = vec![
-            (10, TxStatus::Confirmed { info: 1 }),
-            (11, TxStatus::Confirmed { info: 2 }),
+            (10, status(TxStatusKind::Confirmed { info: 1 })),
+            (11, status(TxStatusKind::Confirmed { info: 2 })),
         ];
         let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
@@ -1353,7 +1429,9 @@ mod tests {
                 node_id: node_id.clone(),
                 response: NodeResponse::Submission {
                     sequence: 1,
-                    result: Err(SubmitFailure::SequenceMismatch { expected: 2 }),
+                    result: Err(submit_failure(SubmitError::SequenceMismatch {
+                        expected: 2,
+                    })),
                 },
             },
             &txs,
@@ -1385,7 +1463,9 @@ mod tests {
                 node_id: node_id.clone(),
                 response: NodeResponse::Submission {
                     sequence: 1,
-                    result: Err(SubmitFailure::SequenceMismatch { expected: 2 }),
+                    result: Err(submit_failure(SubmitError::SequenceMismatch {
+                        expected: 2,
+                    })),
                 },
             },
             &txs,
@@ -1396,20 +1476,8 @@ mod tests {
             manager.nodes.get(&node_id).unwrap(),
             NodeState::Stopped(_)
         ));
-        let status = manager.tail_error_status().expect("missing error status");
-        match status {
-            TxStatus::Rejected {
-                reason:
-                    RejectionReason::SequenceMismatch {
-                        expected,
-                        node_id: id,
-                    },
-            } => {
-                assert_eq!(expected, 2);
-                assert_eq!(id, node_id);
-            }
-            other => panic!("unexpected status: {:?}", other),
-        }
+        let error = manager.tail_stop_error().expect("missing stop error");
+        assert!(matches!(error, StopError::SubmitError(_)));
     }
 
     #[test]
@@ -1423,12 +1491,12 @@ mod tests {
 
         let statuses = vec![(
             10,
-            TxStatus::Rejected {
+            status(TxStatusKind::Rejected {
                 reason: RejectionReason::SequenceMismatch {
                     expected: 3,
                     node_id: node_id.clone(),
                 },
-            },
+            }),
         )];
         let _ = manager.apply_event(
             NodeEvent::NodeResponse {
@@ -1446,19 +1514,22 @@ mod tests {
             manager.nodes.get(&node_id).unwrap(),
             NodeState::Stopped(_)
         ));
-        let status = manager.tail_error_status().expect("missing error status");
-        match status {
-            TxStatus::Rejected {
-                reason:
-                    RejectionReason::SequenceMismatch {
-                        expected,
-                        node_id: id,
-                    },
-            } => {
-                assert_eq!(expected, 3);
-                assert_eq!(id, node_id);
-            }
-            other => panic!("unexpected status: {:?}", other),
+        let error = manager.tail_stop_error().expect("missing stop error");
+        match error {
+            StopError::ConfirmError(status) => match status.kind {
+                TxStatusKind::Rejected {
+                    reason:
+                        RejectionReason::SequenceMismatch {
+                            expected,
+                            node_id: id,
+                        },
+                } => {
+                    assert_eq!(expected, 3);
+                    assert_eq!(id, node_id);
+                }
+                other => panic!("unexpected status: {:?}", other),
+            },
+            other => panic!("unexpected stop error: {:?}", other),
         }
     }
 
@@ -1599,7 +1670,7 @@ mod tests {
                 node_id: node_a.clone(),
                 response: NodeResponse::Submission {
                     sequence: 6,
-                    result: Err(SubmitFailure::TxInMempoolCache),
+                    result: Err(submit_failure(SubmitError::TxInMempoolCache)),
                 },
             },
             &txs,
@@ -1631,8 +1702,8 @@ mod tests {
         }
 
         let statuses = vec![
-            (10, TxStatus::Pending),
-            (11, TxStatus::Confirmed { info: 2 }),
+            (10, status(TxStatusKind::Pending)),
+            (11, status(TxStatusKind::Confirmed { info: 2 })),
         ];
         let _ = manager.apply_event(
             NodeEvent::NodeResponse {
