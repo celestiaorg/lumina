@@ -47,10 +47,12 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, Request> TxBuffer<TxId, ConfirmInfo, 
         self.next_sequence
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.transactions.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.transactions.is_empty()
     }

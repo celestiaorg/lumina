@@ -230,25 +230,6 @@ pub struct TxSubmitter<TxId: TxIdT, ConfirmInfo, Request> {
 }
 
 impl<TxId: TxIdT, ConfirmInfo, Request> TxSubmitter<TxId, ConfirmInfo, Request> {
-    /// Enqueue a transaction request for signing, returning a handle for sign/submit/confirm.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use celestia_grpc::Result;
-    /// # use celestia_grpc::tx_client_v2::{TxSubmitter, TxRequest};
-    /// # async fn docs(manager: TxSubmitter<u64, u64, TxRequest>) -> Result<()> {
-    /// let handle = manager
-    ///     .add_tx(TxRequest::tx(
-    ///         celestia_types::state::RawTxBody::default(),
-    ///         TxConfig::default(),
-    ///     ))
-    ///     .await?;
-    /// handle.signed.await?;
-    /// handle.submitted.await?;
-    /// handle.confirmed.await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn add_tx(&self, request: Request) -> Result<TxHandle<TxId, ConfirmInfo>> {
         let (sign_tx, sign_rx) = oneshot::channel();
         let (submit_tx, submit_rx) = oneshot::channel();
