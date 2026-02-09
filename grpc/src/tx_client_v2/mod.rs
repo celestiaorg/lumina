@@ -391,9 +391,9 @@ pub struct SubmitFailure<T> {
     pub original_error: T,
 }
 
-impl<T> SubmitFailure<T> {
+impl<T: fmt::Debug> SubmitFailure<T> {
     fn label(&self) -> String {
-        self.mapped_error.label()
+        format!("{} original={:?}", self.mapped_error.label(), self.original_error)
     }
 }
 
@@ -426,9 +426,9 @@ pub struct SigningFailure<T> {
     pub original_error: T,
 }
 
-impl<T> SigningFailure<T> {
+impl<T: fmt::Debug> SigningFailure<T> {
     fn label(&self) -> String {
-        self.mapped_error.label()
+        format!("{} original={:?}", self.mapped_error.label(), self.original_error)
     }
 }
 
@@ -461,7 +461,7 @@ pub trait TxServer: Send + Sync {
     type TxId: TxIdT + Eq + StdHash + Send + Sync + 'static;
     type ConfirmInfo: Clone + Send + Sync + 'static;
     type TxRequest: Send + Sync + 'static;
-    type SubmitError: Clone + Send + Sync + 'static;
+    type SubmitError: Clone + Send + Sync + fmt::Debug + 'static;
     type ConfirmResponse: Clone + Send + Sync + 'static;
 
     /// Submit signed bytes with the given sequence, returning a server TxId.
@@ -515,7 +515,7 @@ enum NodeEvent<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
     NodeStop,
 }
 
-impl<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr>
+impl<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr: fmt::Debug>
     NodeEvent<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>
 {
     fn summary(&self) -> String {
