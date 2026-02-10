@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,27 +30,16 @@ const SEQUENCE_ERROR_PAT: &str = "account sequence mismatch, expected ";
 const DEFAULT_MAX_STATUS_BATCH: usize = 16;
 const DEFAULT_QUEUE_CAPACITY: usize = 128;
 
+/// Handle returned after submitting a transaction, used to await confirmation.
 pub struct ConfirmHandle<ConfirmInfo, ConfirmResponse> {
+    /// Hash of the submitted transaction.
     pub hash: Hash,
+    /// Receiver for the confirmation result.
     pub confirmed: oneshot::Receiver<ConfirmResult<ConfirmInfo, Arc<Error>, ConfirmResponse>>,
 }
 
-#[derive(Debug, Clone)]
-pub enum TxUserError {
-    Rejected { reason: RejectionReason },
-    NotFound,
-}
-
-impl fmt::Display for TxUserError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            TxUserError::Rejected { reason } => write!(f, "Transaction rejected: {:?}", reason),
-            TxUserError::NotFound => write!(f, "Transaction not found"),
-        }
-    }
-}
-
 impl ConfirmHandle<TxConfirmInfo, TxStatusResponse> {
+    /// Await confirmation of the transaction, returning the final [`TxInfo`] or a stop error.
     pub async fn confirm(
         self,
     ) -> std::result::Result<TxInfo, StopError<Arc<Error>, TxConfirmInfo, TxStatusResponse>> {
@@ -61,14 +49,20 @@ impl ConfirmHandle<TxConfirmInfo, TxStatusResponse> {
     }
 }
 
+/// Configuration for the [`TransactionService`].
 pub struct TxServiceConfig {
+    /// List of nodes (id, client) to submit and confirm transactions through.
     pub nodes: Vec<(NodeId, GrpcClient)>,
+    /// Interval between confirmation polling attempts.
     pub confirm_interval: Duration,
+    /// Maximum number of transactions to query in a single status batch.
     pub max_status_batch: usize,
+    /// Capacity of the pending transaction queue.
     pub queue_capacity: usize,
 }
 
 impl TxServiceConfig {
+    /// Create a new config with defaults and the given node list.
     pub fn new(nodes: Vec<(NodeId, GrpcClient)>) -> Self {
         Self {
             nodes,
@@ -79,6 +73,10 @@ impl TxServiceConfig {
     }
 }
 
+/// High-level service for submitting and confirming transactions across multiple nodes.
+///
+/// Wraps a [`TransactionWorker`] and provides a simple async API for submitting blobs
+/// or raw transactions and awaiting their on-chain confirmation.
 pub struct TransactionService {
     inner: Arc<TransactionServiceInner>,
 }
@@ -109,6 +107,7 @@ impl WorkerHandle {
 }
 
 impl TransactionService {
+    /// Create a new transaction service with the given configuration.
     pub async fn new(config: TxServiceConfig) -> Result<Self> {
         let Some((_, client)) = config.nodes.first() else {
             return Err(Error::UnexpectedResponseType(
@@ -145,6 +144,7 @@ impl TransactionService {
         })
     }
 
+    /// Submit a transaction and return a handle to await its confirmation.
     pub async fn submit(
         &self,
         request: TxRequest,
@@ -166,6 +166,7 @@ impl TransactionService {
         }
     }
 
+    /// Submit a transaction, restarting the worker if it has stopped.
     pub async fn submit_restart(
         &self,
         request: TxRequest,
@@ -181,6 +182,7 @@ impl TransactionService {
         }
     }
 
+    /// Recreate the internal worker if it has stopped, allowing new submissions.
     pub async fn recreate_worker(&self) -> Result<()> {
         {
             let mut worker_guard = self.inner.worker.lock().await;
@@ -436,9 +438,12 @@ async fn sign_with_client(
     })
 }
 
+/// Confirmation information returned when a transaction is committed.
 #[derive(Debug, Clone)]
 pub struct TxConfirmInfo {
+    /// Basic transaction info (hash and block height).
     pub info: TxInfo,
+    /// Execution result code from the chain.
     pub execution_code: ErrorCode,
 }
 

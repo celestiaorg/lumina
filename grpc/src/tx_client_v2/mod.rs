@@ -120,9 +120,11 @@ pub type TxConfirmResult<T> = Result<T>;
 pub type TxSigningResult<TxId, ConfirmInfo, ConfirmResponse, SubmitErr> =
     Result<Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>, SigningFailure<SubmitErr>>;
 
+/// Trait bound for transaction identifiers.
 pub trait TxIdT: Clone + std::fmt::Debug {}
 impl<T> TxIdT for T where T: Clone + std::fmt::Debug {}
 
+/// Payload for a transaction request.
 #[derive(Debug, Clone)]
 pub enum TxPayload {
     /// Pay-for-blobs transaction.
@@ -131,20 +133,29 @@ pub enum TxPayload {
     Tx(celestia_types::state::RawTxBody),
 }
 
+/// A transaction request combining payload and configuration.
 #[derive(Debug, Clone)]
 pub struct TxRequest {
+    /// The transaction payload (blobs or raw tx body).
     pub tx: TxPayload,
+    /// Configuration for gas, fees, and other settings.
     pub cfg: TxConfig,
 }
 
+/// Error indicating the worker stopped before completing an operation.
 #[derive(Debug, Clone)]
 pub enum StopError<SubmitErr, ConfirmInfo, ConfirmResponse> {
+    /// Confirmation failed with a status indicating rejection or other issue.
     ConfirmError(TxStatus<ConfirmInfo, ConfirmResponse>),
+    /// Submission failed with an error from the node.
     SubmitError(SubmitErr),
+    /// Signing failed with an error.
     SignError(SubmitErr),
+    /// The transaction worker stopped unexpectedly.
     WorkerStopped,
 }
 
+/// Result type for confirmation, either success info or a stop error.
 pub type ConfirmResult<ConfirmInfo, SubmitErr, ConfirmResponse> =
     std::result::Result<ConfirmInfo, StopError<SubmitErr, ConfirmInfo, ConfirmResponse>>;
 
@@ -166,6 +177,7 @@ where
 }
 
 impl TxRequest {
+    /// Create a request for a raw transaction body.
     pub fn tx(body: celestia_types::state::RawTxBody, cfg: TxConfig) -> Self {
         Self {
             tx: TxPayload::Tx(body),
@@ -173,6 +185,7 @@ impl TxRequest {
         }
     }
 
+    /// Create a request for a pay-for-blobs transaction.
     pub fn blobs(blobs: Vec<celestia_types::Blob>, cfg: TxConfig) -> Self {
         Self {
             tx: TxPayload::Blobs(blobs),
@@ -181,6 +194,7 @@ impl TxRequest {
     }
 }
 
+/// A signed transaction ready for submission.
 #[derive(Debug)]
 pub struct Transaction<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
     /// Transaction sequence for the signer.
@@ -189,7 +203,7 @@ pub struct Transaction<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
     pub bytes: Arc<Vec<u8>>,
     /// One-shot callbacks for submit/confirm acknowledgements.
     pub callbacks: TxCallbacks<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>,
-    /// Id of the transaction
+    /// Id of the transaction (set after submission).
     pub id: Option<TxId>,
 }
 
@@ -209,6 +223,7 @@ impl<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr>
     }
 }
 
+/// Callbacks for transaction lifecycle events.
 #[derive(Debug)]
 pub struct TxCallbacks<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
     /// Resolves when submission succeeds or fails.
@@ -259,16 +274,18 @@ struct SigningResult<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
     response: TxSigningResult<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>,
 }
 
+/// Handle for tracking a transaction through signing, submission, and confirmation.
 #[derive(Debug)]
 pub struct TxHandle<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
-    /// Returns if a transaction is correctly signed.
+    /// Resolves when signing completes successfully or fails.
     pub signed: oneshot::Receiver<Result<()>>,
-    /// Receives submit result.
+    /// Resolves when submission completes with the transaction id or an error.
     pub submitted: oneshot::Receiver<Result<TxId>>,
-    /// Receives confirm result.
+    /// Resolves when confirmation completes with info or a stop error.
     pub confirmed: oneshot::Receiver<ConfirmResult<ConfirmInfo, SubmitErr, ConfirmResponse>>,
 }
 
+/// Front-end handle for enqueuing transactions into the worker.
 #[derive(Clone)]
 pub struct TxSubmitter<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr, Request> {
     add_tx:
@@ -278,6 +295,7 @@ pub struct TxSubmitter<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr, Req
 impl<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
     TxSubmitter<TxId, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
 {
+    /// Enqueue a transaction request and return a handle for tracking its progress.
     pub async fn add_tx(
         &self,
         request: Request,
@@ -309,23 +327,33 @@ struct TxIndexEntry<TxId: TxIdT> {
     id: TxId,
 }
 
+/// The kind of status for a transaction.
 #[derive(Debug, Clone)]
 pub enum TxStatusKind<ConfirmInfo> {
     /// Submitted, but not yet committed.
     Pending,
     /// Included in a block successfully with confirmation info.
-    Confirmed { info: ConfirmInfo },
+    Confirmed {
+        /// Confirmation details.
+        info: ConfirmInfo,
+    },
     /// Rejected by the node with a specific reason.
-    Rejected { reason: RejectionReason },
+    Rejected {
+        /// The reason for rejection.
+        reason: RejectionReason,
+    },
     /// Removed from mempool; may need resubmission.
     Evicted,
     /// Status could not be determined.
     Unknown,
 }
 
+/// Transaction status with the original response from the node.
 #[derive(Debug, Clone)]
 pub struct TxStatus<ConfirmInfo, OriginalResponse> {
+    /// The mapped status kind.
     pub kind: TxStatusKind<ConfirmInfo>,
+    /// The original response from the node for additional details.
     pub original_response: OriginalResponse,
 }
 
@@ -341,16 +369,27 @@ impl<ConfirmInfo, OriginalResponse> TxStatus<ConfirmInfo, OriginalResponse> {
     }
 }
 
+/// Errors that can occur during transaction submission.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum SubmitError {
     /// Server expects a different sequence.
-    SequenceMismatch { expected: u64 },
+    SequenceMismatch {
+        /// The sequence number the server expected.
+        expected: u64,
+    },
     /// Transaction failed due to insufficient fee.
-    InsufficientFee { expected_fee: u64, message: String },
+    InsufficientFee {
+        /// The minimum fee the server requires.
+        expected_fee: u64,
+        /// Error message from the server.
+        message: String,
+    },
     /// Submission failed with a specific error code and message.
     Other {
+        /// Error code returned by the server.
         error_code: ErrorCode,
+        /// Error message from the server.
         message: String,
     },
     /// Transport or RPC error while submitting.
@@ -385,9 +424,12 @@ impl SubmitError {
     }
 }
 
+/// A submission failure containing both mapped and original errors.
 #[derive(Debug, Clone)]
 pub struct SubmitFailure<T> {
+    /// The categorized error for internal handling.
     pub mapped_error: SubmitError,
+    /// The original error from the underlying transport or node.
     pub original_error: T,
 }
 
@@ -401,13 +443,20 @@ impl<T: fmt::Debug> SubmitFailure<T> {
     }
 }
 
+/// Errors that can occur during transaction signing.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum SigningError {
-    /// Server expects a different sequence.
-    SequenceMismatch { expected: u64 },
+    /// Server expects a different sequence (detected during simulation).
+    SequenceMismatch {
+        /// The sequence number the server expected.
+        expected: u64,
+    },
     /// Signing failed with a specific error message.
-    Other { message: String },
+    Other {
+        /// Error message describing the failure.
+        message: String,
+    },
     /// Transport or RPC error while signing.
     NetworkError,
 }
@@ -424,9 +473,12 @@ impl SigningError {
     }
 }
 
+/// A signing failure containing both mapped and original errors.
 #[derive(Debug, Clone)]
 pub struct SigningFailure<T> {
+    /// The categorized error for internal handling.
     pub mapped_error: SigningError,
+    /// The original error from the underlying transport or node.
     pub original_error: T,
 }
 
@@ -440,36 +492,56 @@ impl<T: fmt::Debug> SigningFailure<T> {
     }
 }
 
+/// A confirmation failure wrapping the rejection reason.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ConfirmFailure {
     reason: RejectionReason,
 }
 
+/// Reason a transaction was rejected during confirmation.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum RejectionReason {
+    /// The transaction had a sequence mismatch.
     SequenceMismatch {
+        /// The sequence number the node expected.
         expected: u64,
+        /// The node that reported the mismatch.
         node_id: NodeId,
     },
+    /// The transaction was not found (not submitted or expired).
     TxNotSubmitted {
+        /// The expected sequence at the time of check.
         expected: u64,
+        /// The node that reported the issue.
         node_id: NodeId,
     },
+    /// Rejected for another reason.
     OtherReason {
+        /// Error code from the node.
         error_code: ErrorCode,
+        /// Error message from the node.
         message: String,
+        /// The node that rejected the transaction.
         node_id: NodeId,
     },
 }
 
+/// Backend trait for submitting and confirming transactions on a node.
+///
+/// Implementations handle the actual network communication with blockchain nodes.
 #[async_trait]
 pub trait TxServer: Send + Sync {
+    /// The transaction identifier type returned by the node.
     type TxId: TxIdT + Eq + StdHash + Send + Sync + 'static;
+    /// Information returned when a transaction is confirmed.
     type ConfirmInfo: Clone + Send + Sync + 'static;
+    /// The request type for transactions.
     type TxRequest: Send + Sync + 'static;
+    /// The error type for submission failures.
     type SubmitError: Clone + Send + Sync + fmt::Debug + 'static;
+    /// The raw response type from status queries.
     type ConfirmResponse: Clone + Send + Sync + 'static;
 
     /// Submit signed bytes with the given sequence, returning a server TxId.
@@ -668,6 +740,10 @@ type SigningFuture<S> = BoxFuture<
     >,
 >;
 
+/// Background worker that processes transaction signing, submission, and confirmation.
+///
+/// Maintains per-node state machines and coordinates submissions across multiple nodes.
+/// Handles sequence mismatches by entering recovery mode to re-sync with the network.
 pub struct TransactionWorker<S: TxServer> {
     nodes: NodeManager<S>,
     servers: HashMap<NodeId, Arc<S>>,
