@@ -50,6 +50,8 @@ impl ConfirmHandle<TxConfirmInfo, TxStatusResponse> {
 }
 
 /// Configuration for the [`TransactionService`].
+///
+/// Warning: [`TransactionService`] is experimental and not recommended for use yet.
 pub struct TxServiceConfig {
     /// List of nodes (id, client) to submit and confirm transactions through.
     pub nodes: Vec<(NodeId, GrpcClient)>,
@@ -74,6 +76,8 @@ impl TxServiceConfig {
 }
 
 /// High-level service for submitting and confirming transactions across multiple nodes.
+///
+/// Warning: this service is experimental and not recommended for use yet.
 ///
 /// Wraps a [`TransactionWorker`] and provides a simple async API for submitting blobs
 /// or raw transactions and awaiting their on-chain confirmation.
