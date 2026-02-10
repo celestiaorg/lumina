@@ -184,10 +184,10 @@ impl TransactionService {
     pub async fn recreate_worker(&self) -> Result<()> {
         {
             let mut worker_guard = self.inner.worker.lock().await;
-            if let Some(worker) = worker_guard.as_mut() {
-                if !worker.is_finished() {
-                    return Err(Error::TxWorkerRunning);
-                }
+            if let Some(worker) = worker_guard.as_mut()
+                && !worker.is_finished()
+            {
+                return Err(Error::TxWorkerRunning);
             }
         }
         let (submitter, worker_handle) = Self::spawn_worker(
@@ -510,18 +510,18 @@ async fn current_sequence(client: &GrpcClient) -> Result<u64> {
 }
 
 fn map_submit_error(code: ErrorCode, message: &str) -> SubmitError {
-    if is_wrong_sequence(code) {
-        if let Some(expected) = extract_sequence_on_mismatch(message) {
-            return SubmitError::SequenceMismatch { expected };
-        }
+    if is_wrong_sequence(code)
+        && let Some(expected) = extract_sequence_on_mismatch(message)
+    {
+        return SubmitError::SequenceMismatch { expected };
     }
-    if code == ErrorCode::InsufficientFee {
-        if let Some(expected_fee) = extract_expected_fee(message) {
-            return SubmitError::InsufficientFee {
-                expected_fee,
-                message: message.to_string(),
-            };
-        }
+    if code == ErrorCode::InsufficientFee
+        && let Some(expected_fee) = extract_expected_fee(message)
+    {
+        return SubmitError::InsufficientFee {
+            expected_fee,
+            message: message.to_string(),
+        };
     }
 
     match code {
