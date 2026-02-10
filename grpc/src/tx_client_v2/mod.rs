@@ -959,8 +959,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                     let Some(node) = self.servers.get(&node_id).cloned() else {
                         continue;
                     };
-                    let tx = push_oneshot(&mut self.submissions);
-                    spawn_cancellable(token.clone(), async move {
+                    spawn_task(&mut self.submissions, token.clone(), async move |tx| {
                         time::sleep(delay).await;
                         let result = node.submit(bytes, sequence).await;
                         let _ = tx.send(SubmissionResult {
@@ -978,8 +977,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                     let Some(node) = self.servers.get(&node_id).cloned() else {
                         continue;
                     };
-                    let tx = push_oneshot(&mut self.confirmations);
-                    spawn_cancellable(token.clone(), async move {
+                    spawn_task(&mut self.confirmations, token.clone(), async move |tx| {
                         let response = node
                             .status_batch(ids)
                             .await
@@ -995,8 +993,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                     let Some(node) = self.servers.get(&node_id).cloned() else {
                         continue;
                     };
-                    let tx = push_oneshot(&mut self.confirmations);
-                    spawn_cancellable(token.clone(), async move {
+                    spawn_task(&mut self.confirmations, token.clone(), async move |tx| {
                         let response = node
                             .status(id.clone())
                             .await
@@ -1130,12 +1127,18 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
     }
 }
 
-fn push_oneshot<T: 'static + Send>(
+fn spawn_task<T, F, Fut>(
     unordered: &mut FuturesUnordered<BoxFuture<'static, Option<T>>>,
-) -> oneshot::Sender<T> {
+    token: CancellationToken,
+    fut_fn: F,
+) where
+    T: Send + 'static,
+    F: FnOnce(oneshot::Sender<T>) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let (tx, rx) = oneshot::channel();
+    spawn_cancellable(token, fut_fn(tx));
     unordered.push(async move { rx.await.ok() }.boxed());
-    tx
 }
 
 async fn poll_opt<F: std::future::Future + Unpin>(fut: &mut Option<F>) -> Option<F::Output> {
