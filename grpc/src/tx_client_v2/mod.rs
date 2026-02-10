@@ -109,7 +109,7 @@ mod node_manager;
 mod tx_buffer;
 
 use crate::{Error, Result, TxConfig};
-use node_manager::{NodeManager, WorkerMutation, WorkerPlan};
+use node_manager::{NodeManager, WorkerPlan};
 /// Identifier for a submission/confirmation node.
 pub type NodeId = Arc<str>;
 /// Result for submission calls: either a server TxId or a submission failure.
@@ -153,6 +153,39 @@ pub enum StopError<SubmitErr, ConfirmInfo, ConfirmResponse> {
     SignError(SubmitErr),
     /// The transaction worker stopped unexpectedly.
     WorkerStopped,
+}
+
+#[derive(Debug)]
+pub(crate) enum WorkerMutation<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
+    EnqueueSigned {
+        tx: crate::tx_client_v2::Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>,
+    },
+    MarkSubmitted {
+        sequence: u64,
+        id: TxId,
+    },
+    Confirm {
+        seq: u64,
+        info: ConfirmInfo,
+    },
+    WorkerStop,
+}
+
+impl<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr>
+    WorkerMutation<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>
+{
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            WorkerMutation::EnqueueSigned { tx } => {
+                format!("EnqueueSigned seq={}", tx.sequence)
+            }
+            WorkerMutation::MarkSubmitted { sequence, .. } => {
+                format!("MarkSubmitted seq={}", sequence)
+            }
+            WorkerMutation::Confirm { seq, .. } => format!("Confirm seq={}", seq),
+            WorkerMutation::WorkerStop => "WorkerStop".to_string(),
+        }
+    }
 }
 
 /// Result type for confirmation, either success info or a stop error.
@@ -385,6 +418,12 @@ pub enum SubmitError {
         /// Error message from the server.
         message: String,
     },
+    /// Transport or RPC error while submitting.
+    NetworkError,
+    /// Node mempool is full.
+    MempoolIsFull,
+    /// Transaction is already in the mempool cache.
+    TxInMempoolCache,
     /// Submission failed with a specific error code and message.
     Other {
         /// Error code returned by the server.
@@ -392,12 +431,6 @@ pub enum SubmitError {
         /// Error message from the server.
         message: String,
     },
-    /// Transport or RPC error while submitting.
-    NetworkError,
-    /// Node mempool is full.
-    MempoolIsFull,
-    /// Transaction is already in the mempool cache.
-    TxInMempoolCache,
 }
 
 impl SubmitError {

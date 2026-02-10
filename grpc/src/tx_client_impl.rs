@@ -77,6 +77,7 @@ impl TxServiceConfig {
 ///
 /// Wraps a [`TransactionWorker`] and provides a simple async API for submitting blobs
 /// or raw transactions and awaiting their on-chain confirmation.
+#[derive(Clone)]
 pub struct TransactionService {
     inner: Arc<TransactionServiceInner>,
 }

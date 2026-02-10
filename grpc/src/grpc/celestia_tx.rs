@@ -140,7 +140,10 @@ impl IntoGrpcParam<RawTxStatusRequest> for Hash {
     }
 }
 
-impl IntoGrpcParam<RawTxStatusBatchRequest> for Vec<Hash> {
+impl<I> IntoGrpcParam<RawTxStatusBatchRequest> for I
+where
+    I: IntoIterator<Item = Hash>,
+{
     fn into_parameter(self) -> RawTxStatusBatchRequest {
         RawTxStatusBatchRequest {
             tx_ids: self.into_iter().map(|hash| hash.to_string()).collect(),

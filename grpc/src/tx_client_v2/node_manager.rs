@@ -8,7 +8,7 @@ use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
     ConfirmationResponse, NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason,
     RequestWithChannels, SigningError, StopError, SubmitError, TxConfirmResult, TxIdT, TxServer,
-    TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult,
+    TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult, WorkerMutation,
 };
 
 #[derive(Debug)]
@@ -99,50 +99,17 @@ type FatalStatus<S> = Option<(
     u64,
     TxStatus<<S as TxServer>::ConfirmInfo, <S as TxServer>::ConfirmResponse>,
 )>;
-type MutationsFor<S> = Mutations<
-    <S as TxServer>::TxId,
-    <S as TxServer>::ConfirmInfo,
-    <S as TxServer>::ConfirmResponse,
-    <S as TxServer>::SubmitError,
+type MutationsFor<S> = Vec<
+    WorkerMutation<
+        <S as TxServer>::TxId,
+        <S as TxServer>::ConfirmInfo,
+        <S as TxServer>::ConfirmResponse,
+        <S as TxServer>::SubmitError,
+    >,
 >;
 type PlanRequestsRef<'a> = &'a mut Vec<PlanRequest>;
-type Mutations<TxId, ConfirmInfo, ConfirmResponse, SubmitErr> =
-    Vec<WorkerMutation<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>>;
 type Statuses<TxId, ConfirmInfo, ConfirmResponse> =
     Vec<(TxId, TxStatus<ConfirmInfo, ConfirmResponse>)>;
-
-#[derive(Debug)]
-pub(crate) enum WorkerMutation<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
-    EnqueueSigned {
-        tx: crate::tx_client_v2::Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>,
-    },
-    MarkSubmitted {
-        sequence: u64,
-        id: TxId,
-    },
-    Confirm {
-        seq: u64,
-        info: ConfirmInfo,
-    },
-    WorkerStop,
-}
-
-impl<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr>
-    WorkerMutation<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>
-{
-    pub(crate) fn summary(&self) -> String {
-        match self {
-            WorkerMutation::EnqueueSigned { tx } => {
-                format!("EnqueueSigned seq={}", tx.sequence)
-            }
-            WorkerMutation::MarkSubmitted { sequence, .. } => {
-                format!("MarkSubmitted seq={}", sequence)
-            }
-            WorkerMutation::Confirm { seq, .. } => format!("Confirm seq={}", seq),
-            WorkerMutation::WorkerStop => "WorkerStop".to_string(),
-        }
-    }
-}
 
 pub(crate) struct NodeApplyOutcome<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
     pub(crate) mutations: Vec<WorkerMutation<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>>,
