@@ -1070,5 +1070,5 @@ async fn poll_shutdown(shutdown: &CancellationToken, seen: &mut bool) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
