@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::debug;
@@ -8,59 +7,8 @@ use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
     ConfirmationResponse, NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason,
     RequestWithChannels, SigningError, StopError, SubmitError, TxConfirmResult, TxIdT, TxServer,
-    TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult, WorkerMutation,
+    TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult, WorkerMutation, WorkerPlan,
 };
-
-#[derive(Debug)]
-#[allow(clippy::enum_variant_names)]
-pub(crate) enum WorkerPlan<TxId: TxIdT> {
-    SpawnSigning {
-        node_id: NodeId,
-        sequence: u64,
-        delay: Duration,
-    },
-    SpawnSubmit {
-        node_id: NodeId,
-        bytes: Arc<Vec<u8>>,
-        sequence: u64,
-        delay: Duration,
-    },
-    SpawnConfirmBatch {
-        node_id: NodeId,
-        ids: Vec<TxId>,
-        epoch: u64,
-    },
-    SpawnRecover {
-        node_id: NodeId,
-        id: TxId,
-        epoch: u64,
-    },
-}
-
-impl<TxId: TxIdT> WorkerPlan<TxId> {
-    pub(crate) fn summary(&self) -> String {
-        match self {
-            WorkerPlan::SpawnSigning {
-                node_id, sequence, ..
-            } => {
-                format!("SpawnSigning node={} seq={}", node_id.as_ref(), sequence)
-            }
-            WorkerPlan::SpawnSubmit {
-                node_id, sequence, ..
-            } => format!("SpawnSubmit node={} seq={}", node_id.as_ref(), sequence),
-            WorkerPlan::SpawnConfirmBatch { node_id, ids, .. } => {
-                format!(
-                    "SpawnConfirmBatch node={} count={}",
-                    node_id.as_ref(),
-                    ids.len()
-                )
-            }
-            WorkerPlan::SpawnRecover { node_id, .. } => {
-                format!("SpawnRecover node={}", node_id.as_ref())
-            }
-        }
-    }
-}
 
 type PendingRequest<S> = RequestWithChannels<
     <S as TxServer>::TxId,
@@ -129,8 +77,8 @@ impl<SubmitErr, ConfirmInfo, ConfirmResponse> StopError<SubmitErr, ConfirmInfo, 
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct NodeShared {
+#[derive(Debug, Clone, Copy, Default)]
+struct CommonState {
     submit_delay: Option<Duration>,
     epoch: u64,
     last_submitted: Option<u64>,
@@ -141,19 +89,19 @@ struct NodeShared {
 
 #[derive(Debug, Clone)]
 struct ActiveState {
-    shared: NodeShared,
+    shared: CommonState,
     pending: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 struct RecoveringState {
-    shared: NodeShared,
+    shared: CommonState,
     target: u64,
 }
 
 #[derive(Debug, Clone)]
 struct StoppedState<ConfirmInfo, SubmitErr, ConfirmResponse> {
-    shared: NodeShared,
+    shared: CommonState,
     stop_seq: u64,
     error: StopError<SubmitErr, ConfirmInfo, ConfirmResponse>,
 }
@@ -169,9 +117,9 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
     NodeState<ConfirmInfo, SubmitErr, ConfirmResponse>
 {
     fn new(start_confirmed: Option<u64>) -> Self {
-        let shared = NodeShared {
+        let shared = CommonState {
             last_confirmed: start_confirmed,
-            ..NodeShared::default()
+            ..CommonState::default()
         };
         NodeState::Active(ActiveState {
             shared,
@@ -187,15 +135,15 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
         self.shared().epoch
     }
 
-    fn shared(&self) -> &NodeShared {
+    fn shared(&self) -> CommonState {
         match self {
-            NodeState::Active(state) => &state.shared,
-            NodeState::Recovering(state) => &state.shared,
-            NodeState::Stopped(state) => &state.shared,
+            NodeState::Active(state) => state.shared,
+            NodeState::Recovering(state) => state.shared,
+            NodeState::Stopped(state) => state.shared,
         }
     }
 
-    fn shared_mut(&mut self) -> &mut NodeShared {
+    fn shared_mut(&mut self) -> &mut CommonState {
         match self {
             NodeState::Active(state) => &mut state.shared,
             NodeState::Recovering(state) => &mut state.shared,
@@ -250,7 +198,7 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
         seq: u64,
         error: StopError<SubmitErr, ConfirmInfo, ConfirmResponse>,
     ) {
-        let shared = self.shared().clone();
+        let shared = self.shared();
         *self = NodeState::Stopped(StoppedState {
             shared,
             stop_seq: seq,
@@ -279,12 +227,12 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
     }
 
     fn transition_to_recovering(&mut self, target: u64) {
-        let shared = self.shared().clone();
+        let shared = self.shared();
         *self = NodeState::Recovering(RecoveringState { shared, target });
     }
 
     fn transition_to_active(&mut self) {
-        let mut shared = self.shared().clone();
+        let mut shared = self.shared();
         shared.confirm_inflight = false;
         shared.signing_inflight = false;
         *self = NodeState::Active(ActiveState {
@@ -722,10 +670,7 @@ impl<S: TxServer> NodeManager<S> {
         if max_last_submitted != 0 && next_sequence != max_last_submitted + 1 {
             return None;
         }
-        let delay = self
-            .signing_delay
-            .take()
-            .unwrap_or_else(|| Duration::from_nanos(0));
+        let delay = self.signing_delay.take().unwrap_or_default();
         if let Some(node) = self.nodes.get_mut(&node_id) {
             node.shared_mut().signing_inflight = true;
         }
@@ -795,6 +740,7 @@ fn on_submit_success(state: &mut ActiveState, sequence: u64) {
     match state.shared.last_submitted {
         None => state.shared.last_submitted = Some(sequence),
         Some(last) => {
+            debug_assert!(last + 1 == sequence, "incorrect sequence number");
             if last + 1 == sequence {
                 state.shared.last_submitted = Some(sequence);
             }
@@ -823,11 +769,7 @@ fn plan_submission<S: TxServer>(
                 (None, None) => 0,
             };
             let tx = txs.get(next_seq)?;
-            let delay = state
-                .shared
-                .submit_delay
-                .take()
-                .unwrap_or_else(|| Duration::from_nanos(0));
+            let delay = state.shared.submit_delay.take().unwrap_or_default();
             state.pending = Some(next_seq);
             Some(WorkerPlan::SpawnSubmit {
                 node_id: node_id.clone(),
@@ -1004,6 +946,9 @@ fn on_sequence_mismatch<S: TxServer>(
     if matches!(txs.confirmed_seq(), Some(confirmed) if confirmed >= expected) {
         return false;
     }
+    // if our sequence is less than expected, we need to confirm
+    // that the transaction with higher sequence nubmer is transaction
+    // made by our client and not from outside the system
     if sequence < expected {
         let target = expected - 1;
         if txs.get(target).and_then(|tx| tx.id.clone()).is_none() {
@@ -1202,6 +1147,8 @@ fn process_recover_status<S: TxServer>(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::tx_client_v2::{
         ConfirmationResponse, SigningFailure, SubmitFailure, Transaction, TxCallbacks,

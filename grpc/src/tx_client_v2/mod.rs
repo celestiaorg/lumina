@@ -109,7 +109,7 @@ mod node_manager;
 mod tx_buffer;
 
 use crate::{Error, Result, TxConfig};
-use node_manager::{NodeManager, WorkerPlan};
+use node_manager::NodeManager;
 /// Identifier for a submission/confirmation node.
 pub type NodeId = Arc<str>;
 /// Result for submission calls: either a server TxId or a submission failure.
@@ -153,6 +153,57 @@ pub enum StopError<SubmitErr, ConfirmInfo, ConfirmResponse> {
     SignError(SubmitErr),
     /// The transaction worker stopped unexpectedly.
     WorkerStopped,
+}
+
+#[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum WorkerPlan<TxId: TxIdT> {
+    SpawnSigning {
+        node_id: NodeId,
+        sequence: u64,
+        delay: Duration,
+    },
+    SpawnSubmit {
+        node_id: NodeId,
+        bytes: Arc<Vec<u8>>,
+        sequence: u64,
+        delay: Duration,
+    },
+    SpawnConfirmBatch {
+        node_id: NodeId,
+        ids: Vec<TxId>,
+        epoch: u64,
+    },
+    SpawnRecover {
+        node_id: NodeId,
+        id: TxId,
+        epoch: u64,
+    },
+}
+
+impl<TxId: TxIdT> WorkerPlan<TxId> {
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            WorkerPlan::SpawnSigning {
+                node_id, sequence, ..
+            } => {
+                format!("SpawnSigning node={} seq={}", node_id.as_ref(), sequence)
+            }
+            WorkerPlan::SpawnSubmit {
+                node_id, sequence, ..
+            } => format!("SpawnSubmit node={} seq={}", node_id.as_ref(), sequence),
+            WorkerPlan::SpawnConfirmBatch { node_id, ids, .. } => {
+                format!(
+                    "SpawnConfirmBatch node={} count={}",
+                    node_id.as_ref(),
+                    ids.len()
+                )
+            }
+            WorkerPlan::SpawnRecover { node_id, .. } => {
+                format!("SpawnRecover node={}", node_id.as_ref())
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -855,24 +906,6 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
     /// - The worker is single-owner; it should be run in a dedicated task.
     /// - On terminal failures it returns `Ok(())` after notifying callbacks.
     pub async fn process(&mut self, shutdown: CancellationToken) -> Result<()> {
-        let submit_shutdown = shutdown.clone();
-        let confirm_shutdown = shutdown.clone();
-        // pushing pending futures to avoid busy loop
-        self.submissions.push(
-            async move {
-                submit_shutdown.cancelled().await;
-                None
-            }
-            .boxed(),
-        );
-        self.confirmations.push(
-            async move {
-                confirm_shutdown.cancelled().await;
-                None
-            }
-            .boxed(),
-        );
-
         let mut current_event: Option<NodeEventFor<S>> = None;
         let mut shutdown_seen = false;
 
@@ -912,7 +945,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 _ = self.confirm_ticker.tick() => {
                     push_plan_request(&mut self.plan_requests, PlanRequest::Confirmation);
                 }
-                result = self.submissions.next() => {
+                result = self.submissions.next(), if !self.submissions.is_empty() => {
                     if let Some(Some(result)) = result {
                         current_event = Some(NodeEvent::NodeResponse {
                             node_id: result.node_id,
@@ -923,7 +956,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                         });
                     }
                 }
-                result = self.confirmations.next() => {
+                result = self.confirmations.next(), if !self.confirmations.is_empty() => {
                     if let Some(Some(result)) = result {
                         current_event = Some(NodeEvent::NodeResponse {
                             node_id: result.node_id,
