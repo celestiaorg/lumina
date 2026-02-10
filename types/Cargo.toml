@@ -8,7 +8,7 @@ authors = ["Celestia <contact@celestia.org>"]
 homepage = "https://www.celestia.org"
 repository = "https://github.com/celestiaorg/lumina"
 readme = "README.md"
-rust-version = "1.87"
+rust-version = "1.88"
 # crates.io is limited to 5 keywords and 5 categories
 keywords = ["blockchain", "celestia", "lumina"]
 # Must be one of <https://crates.io/category_slugs>
