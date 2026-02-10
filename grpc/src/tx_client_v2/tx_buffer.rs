@@ -192,7 +192,7 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::tx_client_v2::TxCallbacks;

@@ -1022,7 +1022,7 @@ fn extract_sequence(msg: &str) -> Result<u64> {
         .map_err(|_| Error::SequenceParsingFailed(msg.into()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::future::IntoFuture;
     use std::ops::RangeInclusive;
