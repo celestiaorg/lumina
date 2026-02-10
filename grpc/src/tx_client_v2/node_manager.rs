@@ -167,7 +167,7 @@ struct NodeShared {
     submit_delay: Option<Duration>,
     epoch: u64,
     last_submitted: Option<u64>,
-    last_confirmed: u64,
+    last_confirmed: Option<u64>,
     confirm_inflight: bool,
     signing_inflight: bool,
 }
@@ -201,7 +201,7 @@ enum NodeState<ConfirmInfo, SubmitErr, ConfirmResponse> {
 impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
     NodeState<ConfirmInfo, SubmitErr, ConfirmResponse>
 {
-    fn new(start_confirmed: u64) -> Self {
+    fn new(start_confirmed: Option<u64>) -> Self {
         let shared = NodeShared {
             last_confirmed: start_confirmed,
             ..NodeShared::default()
@@ -239,7 +239,7 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
     fn log_state(&self) -> String {
         match self {
             NodeState::Active(state) => format!(
-                "Active last_confirmed={} last_submitted={:?} pending={:?} confirm_inflight={} signing_inflight={} epoch={} delay={:?}",
+                "Active last_confirmed={:?} last_submitted={:?} pending={:?} confirm_inflight={} signing_inflight={} epoch={} delay={:?}",
                 state.shared.last_confirmed,
                 state.shared.last_submitted,
                 state.pending,
@@ -249,7 +249,7 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
                 state.shared.submit_delay,
             ),
             NodeState::Recovering(state) => format!(
-                "Recovering target={} last_confirmed={} last_submitted={:?} confirm_inflight={} signing_inflight={} epoch={} delay={:?}",
+                "Recovering target={} last_confirmed={:?} last_submitted={:?} confirm_inflight={} signing_inflight={} epoch={} delay={:?}",
                 state.target,
                 state.shared.last_confirmed,
                 state.shared.last_submitted,
@@ -259,7 +259,7 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
                 state.shared.submit_delay,
             ),
             NodeState::Stopped(state) => format!(
-                "Stopped stop_seq={} error={} last_confirmed={} last_submitted={:?} confirm_inflight={} signing_inflight={} epoch={} delay={:?}",
+                "Stopped stop_seq={} error={} last_confirmed={:?} last_submitted={:?} confirm_inflight={} signing_inflight={} epoch={} delay={:?}",
                 state.stop_seq,
                 state.error.label(),
                 state.shared.last_confirmed,
@@ -274,10 +274,7 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
 
     fn stop_submissions(&mut self, error: StopError<SubmitErr, ConfirmInfo, ConfirmResponse>) {
         let shared = self.shared();
-        let last_submitted = shared.last_submitted;
-        let stop_seq = last_submitted
-            .unwrap_or(shared.last_confirmed)
-            .max(shared.last_confirmed);
+        let stop_seq = stop_seq_from_last_good(shared.last_submitted, shared.last_confirmed);
         self.stop_with_error(stop_seq, error);
     }
 
@@ -287,10 +284,9 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
         error: StopError<SubmitErr, ConfirmInfo, ConfirmResponse>,
     ) {
         let shared = self.shared().clone();
-        let stop_seq = seq;
         *self = NodeState::Stopped(StoppedState {
             shared,
-            stop_seq,
+            stop_seq: seq,
             error,
         });
     }
@@ -302,11 +298,12 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
     ) {
         match self {
             NodeState::Stopped(state) => {
-                let prev_stop_seq = state.stop_seq;
                 if seq < state.stop_seq {
                     state.stop_seq = seq;
+                    state.error = error;
+                    return;
                 }
-                if matches!(state.error, StopError::WorkerStopped) || seq < prev_stop_seq {
+                if matches!(state.error, StopError::WorkerStopped) {
                     state.error = error;
                 }
             }
@@ -336,7 +333,10 @@ pub(crate) struct NodeManager<S: TxServer> {
 }
 
 impl<S: TxServer> NodeManager<S> {
-    pub(crate) fn new(node_ids: impl IntoIterator<Item = NodeId>, start_confirmed: u64) -> Self {
+    pub(crate) fn new(
+        node_ids: impl IntoIterator<Item = NodeId>,
+        start_confirmed: Option<u64>,
+    ) -> Self {
         let nodes = node_ids
             .into_iter()
             .map(|id| (id, NodeState::new(start_confirmed)))
@@ -350,17 +350,24 @@ impl<S: TxServer> NodeManager<S> {
     pub(crate) fn should_stop(&self) -> bool {
         let mut all_stopped = true;
         for (node_id, node) in self.nodes.iter() {
-            let submitted_seq = node.shared().last_submitted.unwrap_or(0);
-            let confirmed_seq = node.shared().last_confirmed;
+            let submitted_next = node
+                .shared()
+                .last_submitted
+                .map(|seq| seq.saturating_add(1))
+                .unwrap_or(0);
+            let confirmed_next = next_after_confirmed(node.shared().last_confirmed);
             let node_should_stop = match node {
-                NodeState::Stopped(state) => confirmed_seq >= state.stop_seq.min(submitted_seq),
+                NodeState::Stopped(state) => {
+                    let target_next = state.stop_seq.min(submitted_next);
+                    confirmed_next >= target_next
+                }
                 _ => false,
             };
             all_stopped = all_stopped && node_should_stop;
             debug!(
                 node_id = %node_id.as_ref(),
                 state = %node.log_state(),
-                confirmed_seq,
+                confirmed_next,
                 node_should_stop,
                 "should_stop check"
             );
@@ -374,7 +381,7 @@ impl<S: TxServer> NodeManager<S> {
             if node.is_stopped() {
                 continue;
             }
-            let confirmed = node.shared().last_confirmed;
+            let confirmed = node.shared().last_confirmed?;
             min_confirmed = Some(
                 min_confirmed
                     .map(|current| current.min(confirmed))
@@ -802,6 +809,20 @@ fn tx_status_label<ConfirmInfo, ConfirmResponse>(
     }
 }
 
+fn next_after_confirmed(confirmed: Option<u64>) -> u64 {
+    confirmed.map(|seq| seq.saturating_add(1)).unwrap_or(0)
+}
+
+fn stop_seq_from_last_good(last_submitted: Option<u64>, last_confirmed: Option<u64>) -> u64 {
+    let last_good = match (last_submitted, last_confirmed) {
+        (Some(submitted), Some(confirmed)) => Some(submitted.max(confirmed)),
+        (Some(submitted), None) => Some(submitted),
+        (None, Some(confirmed)) => Some(confirmed),
+        (None, None) => None,
+    };
+    last_good.map(|seq| seq.saturating_add(1)).unwrap_or(0)
+}
+
 fn on_submit_success(state: &mut ActiveState, sequence: u64) {
     state.pending = None;
     match state.shared.last_submitted {
@@ -828,10 +849,11 @@ fn plan_submission<S: TxServer>(
             if state.pending.is_some() {
                 return None;
             }
-            let confirmed = txs.confirmed_seq();
-            let next_seq = match state.shared.last_submitted {
-                Some(last) => last.max(confirmed) + 1,
-                None => confirmed + 1,
+            let next_seq = match (state.shared.last_submitted, txs.confirmed_seq()) {
+                (Some(last), Some(confirmed)) => last.max(confirmed).saturating_add(1),
+                (Some(last), None) => last.saturating_add(1),
+                (None, Some(confirmed)) => confirmed.saturating_add(1),
+                (None, None) => 0,
             };
             let tx = txs.get(next_seq)?;
             let delay = state
@@ -873,15 +895,16 @@ fn plan_confirmation<S: TxServer>(
                 );
                 return None;
             };
-            let ids = match txs.ids_from_to(state.shared.last_confirmed + 1, last, max_batch) {
+            let start = next_after_confirmed(state.shared.last_confirmed);
+            let ids = match txs.ids_from_to(start, last, max_batch) {
                 Some(ids) => ids,
                 None => {
                     debug!(
                         node_id = %node_id.as_ref(),
-                        start = state.shared.last_confirmed + 1,
+                        start,
                         stop = last,
-                        confirmed_seq = txs.confirmed_seq(),
-                        max_seq = txs.max_seq(),
+                        confirmed_seq = ?txs.confirmed_seq(),
+                        max_seq = ?txs.max_seq(),
                         "plan_confirmation: skip active, no ids in range"
                     );
                     return None;
@@ -890,7 +913,7 @@ fn plan_confirmation<S: TxServer>(
             if ids.is_empty() {
                 debug!(
                     node_id = %node_id.as_ref(),
-                    start = state.shared.last_confirmed + 1,
+                    start,
                     stop = last,
                     "plan_confirmation: skip active, empty ids"
                 );
@@ -900,7 +923,7 @@ fn plan_confirmation<S: TxServer>(
             state.shared.confirm_inflight = true;
             debug!(
                 node_id = %node_id.as_ref(),
-                start = state.shared.last_confirmed + 1,
+                start,
                 stop = last,
                 ids_len = ids.len(),
                 "plan_confirmation: spawn active confirm batch"
@@ -944,26 +967,33 @@ fn plan_confirmation<S: TxServer>(
                 );
                 return None;
             };
-            let confirm_upto = last.min(state.stop_seq);
-            let ids =
-                match txs.ids_from_to(state.shared.last_confirmed + 1, confirm_upto, max_batch) {
-                    Some(ids) => ids,
-                    None => {
-                        debug!(
-                            node_id = %node_id.as_ref(),
-                            start = state.shared.last_confirmed + 1,
-                            stop = confirm_upto,
-                            confirmed_seq = txs.confirmed_seq(),
-                            max_seq = txs.max_seq(),
-                            "plan_confirmation: skip stopped, no ids in range"
-                        );
-                        return None;
-                    }
-                };
+            if state.stop_seq == 0 {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    "plan_confirmation: skip stopped, stop_seq=0"
+                );
+                return None;
+            }
+            let confirm_upto = last.min(state.stop_seq.saturating_sub(1));
+            let start = next_after_confirmed(state.shared.last_confirmed);
+            let ids = match txs.ids_from_to(start, confirm_upto, max_batch) {
+                Some(ids) => ids,
+                None => {
+                    debug!(
+                        node_id = %node_id.as_ref(),
+                        start,
+                        stop = confirm_upto,
+                        confirmed_seq = ?txs.confirmed_seq(),
+                        max_seq = ?txs.max_seq(),
+                        "plan_confirmation: skip stopped, no ids in range"
+                    );
+                    return None;
+                }
+            };
             if ids.is_empty() {
                 debug!(
                     node_id = %node_id.as_ref(),
-                    start = state.shared.last_confirmed + 1,
+                    start,
                     stop = confirm_upto,
                     "plan_confirmation: skip stopped, empty ids"
                 );
@@ -973,7 +1003,7 @@ fn plan_confirmation<S: TxServer>(
             state.shared.confirm_inflight = true;
             debug!(
                 node_id = %node_id.as_ref(),
-                start = state.shared.last_confirmed + 1,
+                start,
                 stop = confirm_upto,
                 ids_len = ids.len(),
                 "plan_confirmation: spawn stopped confirm batch"
@@ -1004,28 +1034,36 @@ fn on_sequence_mismatch<S: TxServer>(
             return false;
         }
     };
-    if txs.confirmed_seq() >= expected {
+    if matches!(txs.confirmed_seq(), Some(confirmed) if confirmed >= expected) {
         return false;
     }
     if sequence < expected {
         let target = expected - 1;
         if txs.get(target).and_then(|tx| tx.id.clone()).is_none() {
-            let stop_at = shared.last_submitted.unwrap_or(shared.last_confirmed);
-            node.apply_stop_error(stop_at, stop_error.take().unwrap());
+            let stop_seq = stop_seq_from_last_good(shared.last_submitted, shared.last_confirmed);
+            node.apply_stop_error(stop_seq, stop_error.take().unwrap());
             return false;
         }
         shared.epoch = shared.epoch.saturating_add(1);
         recover_target = Some(target);
-    } else if txs.max_seq() < expected.saturating_sub(1) {
+    } else if txs
+        .max_seq()
+        .map(|max_seq| max_seq < expected.saturating_sub(1))
+        .unwrap_or(true)
+    {
         let has_id = txs.get(sequence).and_then(|tx| tx.id.clone()).is_some();
         let stop_at = if has_id {
             sequence
         } else {
-            shared.last_submitted.unwrap_or(shared.last_confirmed)
+            stop_seq_from_last_good(shared.last_submitted, shared.last_confirmed)
         };
         stop_seq = Some(stop_at);
     } else {
-        let clamped = expected.saturating_sub(1).max(txs.confirmed_seq());
+        let expected_prev = expected.saturating_sub(1);
+        let clamped = match txs.confirmed_seq() {
+            Some(confirmed) => expected_prev.max(confirmed),
+            None => expected_prev,
+        };
         shared.last_submitted = Some(clamped);
         return false;
     }
@@ -1064,7 +1102,7 @@ fn process_status_batch<S: TxServer>(
             }
             _ => node.shared_mut(),
         };
-        let offset = shared.last_confirmed + 1;
+        let offset = next_after_confirmed(shared.last_confirmed);
         let last_confirmed = shared.last_confirmed;
         let last_submitted = shared.last_submitted;
         for (idx, (sequence, status)) in collected.into_iter().enumerate() {
@@ -1094,8 +1132,12 @@ fn process_status_batch<S: TxServer>(
                     break;
                 }
                 TxStatusKind::Evicted => {
-                    let clamped = sequence.saturating_sub(1).max(txs.confirmed_seq());
-                    shared.last_submitted = Some(clamped);
+                    let seq_minus_one = sequence.checked_sub(1);
+                    let clamped = match txs.confirmed_seq() {
+                        Some(confirmed) => Some(seq_minus_one.unwrap_or(0).max(confirmed)),
+                        None => seq_minus_one,
+                    };
+                    shared.last_submitted = clamped;
                     push_plan_request(plan_requests, PlanRequest::Submission);
                     break;
                 }
@@ -1122,7 +1164,7 @@ fn process_status_batch<S: TxServer>(
                     }
                 },
                 TxStatusKind::Confirmed { info } => {
-                    shared.last_confirmed = sequence;
+                    shared.last_confirmed = Some(sequence);
                     effects.push(WorkerMutation::Confirm {
                         seq: sequence,
                         info,
@@ -1287,7 +1329,7 @@ mod tests {
     }
 
     fn make_buffer_with_ids() -> TestBuffer {
-        let mut txs = TestBuffer::new(0);
+        let mut txs = TestBuffer::new(Some(0));
         txs.add_transaction(make_tx(1, None)).unwrap();
         txs.add_transaction(make_tx(2, None)).unwrap();
         txs.set_submitted_id(1, 10);
@@ -1298,8 +1340,8 @@ mod tests {
     #[test]
     fn wakeup_submission_spawns_submit() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(5));
+        let mut txs = TestBuffer::new(Some(0));
         txs.add_transaction(make_tx(1, None)).unwrap();
 
         let plans = manager.plan(&[PlanRequest::Submission], &txs, 16);
@@ -1314,10 +1356,28 @@ mod tests {
     }
 
     #[test]
+    fn wakeup_submission_spawns_submit_from_zero() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], None);
+        let mut txs = TestBuffer::new(None);
+        txs.add_transaction(make_tx(0, None)).unwrap();
+
+        let plans = manager.plan(&[PlanRequest::Submission], &txs, 16);
+
+        assert!(plans.iter().any(|event| {
+            matches!(
+                event,
+                WorkerPlan::SpawnSubmit { node_id: id, sequence, .. }
+                    if id == &node_id && *sequence == 0
+            )
+        }));
+    }
+
+    #[test]
     fn submission_success_marks_and_wakes() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+        let txs = TestBuffer::new(Some(0));
 
         let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
@@ -1343,7 +1403,7 @@ mod tests {
     #[test]
     fn confirmation_batch_skips_gap() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
         let txs = make_buffer_with_ids();
 
         let statuses = vec![
@@ -1373,7 +1433,7 @@ mod tests {
     #[test]
     fn confirmation_batch_confirms_contiguous() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
         let txs = make_buffer_with_ids();
 
         let statuses = vec![
@@ -1404,8 +1464,8 @@ mod tests {
     #[test]
     fn sequence_mismatch_triggers_recover_spawn() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+        let mut txs = TestBuffer::new(Some(0));
         txs.add_transaction(make_tx(1, None)).unwrap();
         txs.set_submitted_id(1, 10);
 
@@ -1439,8 +1499,8 @@ mod tests {
     #[test]
     fn sequence_mismatch_missing_id_stops_on_submit() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+        let mut txs = TestBuffer::new(Some(0));
         txs.add_transaction(make_tx(1, None)).unwrap();
 
         let _ = manager.apply_event(
@@ -1468,8 +1528,8 @@ mod tests {
     #[test]
     fn sequence_mismatch_missing_id_stops_on_confirm() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+        let mut txs = TestBuffer::new(Some(0));
         txs.add_transaction(make_tx(1, None)).unwrap();
         txs.add_transaction(make_tx(2, None)).unwrap();
         txs.set_submitted_id(1, 10);
@@ -1521,8 +1581,8 @@ mod tests {
     #[test]
     fn node_stop_emits_worker_stop() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id], 0);
-        let txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id], Some(0));
+        let txs = TestBuffer::new(Some(0));
 
         let outcome = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
 
@@ -1537,8 +1597,8 @@ mod tests {
     #[test]
     fn signing_success_enqueues_and_requests_submission() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+        let txs = TestBuffer::new(Some(0));
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
             state.shared.signing_inflight = true;
@@ -1573,8 +1633,8 @@ mod tests {
     #[test]
     fn signing_sequence_mismatch_reschedules_with_delay() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+        let txs = TestBuffer::new(Some(0));
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
             state.shared.signing_inflight = true;
@@ -1606,8 +1666,8 @@ mod tests {
     #[test]
     fn confirmation_epoch_mismatch_resets_inflight_and_requests_confirmation() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+        let txs = TestBuffer::new(Some(0));
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
             state.shared.confirm_inflight = true;
@@ -1643,8 +1703,9 @@ mod tests {
     fn submission_mempool_cache_advances_last_submitted() {
         let node_a: NodeId = Arc::from("node-a");
         let node_b: NodeId = Arc::from("node-b");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_a.clone(), node_b.clone()], 0);
-        let txs = TestBuffer::new(0);
+        let mut manager =
+            NodeManager::<DummyServer>::new(vec![node_a.clone(), node_b.clone()], Some(0));
+        let txs = TestBuffer::new(Some(0));
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_a).unwrap() {
             state.shared.last_submitted = Some(5);
@@ -1676,8 +1737,8 @@ mod tests {
     #[test]
     fn confirmation_pending_keeps_last_confirmed() {
         let node_id: NodeId = Arc::from("node-1");
-        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], 0);
-        let mut txs = TestBuffer::new(0);
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+        let mut txs = TestBuffer::new(Some(5));
 
         txs.add_transaction(make_tx(6, None)).unwrap();
         txs.add_transaction(make_tx(7, None)).unwrap();
@@ -1685,7 +1746,7 @@ mod tests {
         txs.set_submitted_id(7, 11);
 
         if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
-            state.shared.last_confirmed = 5;
+            state.shared.last_confirmed = Some(5);
             state.shared.last_submitted = Some(7);
         }
 
@@ -1708,6 +1769,160 @@ mod tests {
         let NodeState::Active(state) = manager.nodes.get(&node_id).unwrap() else {
             panic!("node should be active");
         };
-        assert_eq!(state.shared.last_confirmed, 5);
+        assert_eq!(state.shared.last_confirmed, Some(5));
+    }
+
+    #[test]
+    fn stop_submissions_without_history_sets_zero_stop_seq() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], None);
+        let txs = TestBuffer::new(None);
+
+        let _ = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
+
+        let NodeState::Stopped(state) = manager.nodes.get(&node_id).unwrap() else {
+            panic!("node should be stopped");
+        };
+        assert_eq!(state.stop_seq, 0);
+    }
+
+    #[test]
+    fn stop_submissions_uses_confirmed_plus_one() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(5));
+        let txs = TestBuffer::new(Some(5));
+
+        let _ = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
+
+        let NodeState::Stopped(state) = manager.nodes.get(&node_id).unwrap() else {
+            panic!("node should be stopped");
+        };
+        assert_eq!(state.stop_seq, 6);
+    }
+
+    #[test]
+    fn stop_submissions_uses_max_last_good_plus_one() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(5));
+        let txs = TestBuffer::new(Some(5));
+
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
+            state.shared.last_submitted = Some(7);
+        }
+
+        let _ = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
+
+        let NodeState::Stopped(state) = manager.nodes.get(&node_id).unwrap() else {
+            panic!("node should be stopped");
+        };
+        assert_eq!(state.stop_seq, 8);
+    }
+
+    #[test]
+    fn apply_stop_error_updates_to_earlier_sequence() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+
+        let node = manager.nodes.get_mut(&node_id).unwrap();
+        node.stop_with_error(10, StopError::WorkerStopped);
+
+        node.apply_stop_error(8, StopError::SubmitError(()));
+
+        let NodeState::Stopped(state) = manager.nodes.get(&node_id).unwrap() else {
+            panic!("node should be stopped");
+        };
+        assert_eq!(state.stop_seq, 8);
+        assert!(matches!(state.error, StopError::SubmitError(_)));
+    }
+
+    #[test]
+    fn apply_stop_error_replaces_worker_stopped_error() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
+
+        let node = manager.nodes.get_mut(&node_id).unwrap();
+        node.stop_with_error(10, StopError::WorkerStopped);
+
+        node.apply_stop_error(12, StopError::SubmitError(()));
+
+        let NodeState::Stopped(state) = manager.nodes.get(&node_id).unwrap() else {
+            panic!("node should be stopped");
+        };
+        assert_eq!(state.stop_seq, 10);
+        assert!(matches!(state.error, StopError::SubmitError(_)));
+    }
+
+    #[test]
+    fn plan_confirmation_stopped_respects_stop_seq_minus_one() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(3));
+        let mut txs = TestBuffer::new(Some(3));
+
+        for seq in 4..=10 {
+            txs.add_transaction(make_tx(seq, Some(seq * 10))).unwrap();
+            txs.set_submitted_id(seq, seq * 10);
+        }
+
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
+            state.shared.last_submitted = Some(10);
+        }
+
+        let node = manager.nodes.get_mut(&node_id).unwrap();
+        node.stop_with_error(6, StopError::WorkerStopped);
+
+        let plans = manager.plan(&[PlanRequest::Confirmation], &txs, 16);
+
+        let mut planned_ids = None;
+        for plan in plans {
+            if let WorkerPlan::SpawnConfirmBatch {
+                node_id: id, ids, ..
+            } = plan
+                && id == node_id
+            {
+                planned_ids = Some(ids);
+            }
+        }
+        let ids = planned_ids.expect("missing confirm batch");
+        assert_eq!(ids, vec![40, 50]);
+    }
+
+    #[test]
+    fn plan_confirmation_stopped_skips_when_stop_seq_zero() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], None);
+        let mut txs = TestBuffer::new(None);
+
+        txs.add_transaction(make_tx(0, Some(0))).unwrap();
+        txs.set_submitted_id(0, 0);
+
+        if let NodeState::Active(state) = manager.nodes.get_mut(&node_id).unwrap() {
+            state.shared.last_submitted = Some(0);
+        }
+
+        let node = manager.nodes.get_mut(&node_id).unwrap();
+        node.stop_with_error(0, StopError::WorkerStopped);
+
+        let plans = manager.plan(&[PlanRequest::Confirmation], &txs, 16);
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn should_stop_waits_for_confirmed_next() {
+        let node_id: NodeId = Arc::from("node-1");
+        let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(4));
+
+        let node = manager.nodes.get_mut(&node_id).unwrap();
+        if let NodeState::Active(state) = node {
+            state.shared.last_submitted = Some(10);
+        }
+        node.stop_with_error(6, StopError::WorkerStopped);
+
+        assert!(!manager.should_stop());
+
+        let node = manager.nodes.get_mut(&node_id).unwrap();
+        if let NodeState::Stopped(state) = node {
+            state.shared.last_confirmed = Some(5);
+        }
+        assert!(manager.should_stop());
     }
 }

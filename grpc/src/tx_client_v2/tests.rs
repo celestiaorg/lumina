@@ -126,20 +126,27 @@ fn make_many_servers(
 
 #[derive(Debug, Clone)]
 struct NodeState {
-    confirmed_sequence: u64,
+    confirmed_sequence: Option<u64>,
     mempool: VecDeque<TestStatus>,
 }
 
 impl NodeState {
     fn new() -> Self {
         Self {
-            confirmed_sequence: 0,
+            confirmed_sequence: Some(0),
             mempool: VecDeque::new(),
         }
     }
 
-    fn max_sequence(&self) -> u64 {
-        self.confirmed_sequence + self.mempool.len() as u64
+    fn max_sequence(&self) -> Option<u64> {
+        if self.mempool.is_empty() {
+            return self.confirmed_sequence;
+        }
+        let base = self
+            .confirmed_sequence
+            .map(|seq| seq.saturating_add(1))
+            .unwrap_or(0);
+        base.checked_add(self.mempool.len().saturating_sub(1) as u64)
     }
 
     fn next_submit_seq(&self) -> u64 {
@@ -153,26 +160,38 @@ impl NodeState {
             None => 0,
         };
 
-        self.confirmed_sequence + 1 + next_index as u64
+        self.confirmed_sequence
+            .map(|seq| seq.saturating_add(1))
+            .unwrap_or(0)
+            + next_index as u64
     }
 
     fn truncate_to_seq(&mut self, seq: u64) {
         // Keep mempool entries for sequences <= seq, drop the rest.
-        if seq <= self.confirmed_sequence {
+        let start = self
+            .confirmed_sequence
+            .map(|s| s.saturating_add(1))
+            .unwrap_or(0);
+        if seq < start {
             self.mempool.clear();
             return;
         }
-        let keep_len = (seq - self.confirmed_sequence) as usize;
+        let keep_len = (seq - start + 1) as usize;
         if keep_len < self.mempool.len() {
             self.mempool.truncate(keep_len);
         }
     }
 
     fn status_of(&self, tx: TestTxId) -> TestStatus {
-        if tx <= self.confirmed_sequence {
+        if let Some(confirmed) = self.confirmed_sequence
+            && tx <= confirmed
+        {
             return status(TxStatusKind::Confirmed { info: () });
         }
-        let start = self.confirmed_sequence + 1;
+        let start = self
+            .confirmed_sequence
+            .map(|s| s.saturating_add(1))
+            .unwrap_or(0);
         let idx = (tx - start) as usize;
         self.mempool
             .get(idx)
@@ -232,22 +251,31 @@ impl NetworkState {
 
     fn sequence(&mut self, node_id: NodeId) -> u64 {
         let state = self.node_states.get_mut(&node_id).unwrap();
-        state.confirmed_sequence
+        state.next_submit_seq()
     }
 
     fn update_confirmed_sequence(&mut self, node_id: NodeId, seq_id: u64) {
         let state = self.node_states.get_mut(&node_id).unwrap();
-        if seq_id <= state.confirmed_sequence {
+        if let Some(confirmed) = state.confirmed_sequence
+            && seq_id <= confirmed
+        {
             return;
         }
 
-        let drain = (seq_id - state.confirmed_sequence) as usize;
+        let start = state
+            .confirmed_sequence
+            .map(|s| s.saturating_add(1))
+            .unwrap_or(0);
+        if seq_id < start {
+            return;
+        }
+        let drain = (seq_id - start + 1) as usize;
         let drain = drain.min(state.mempool.len());
         for _ in 0..drain {
             state.mempool.pop_front();
         }
 
-        state.confirmed_sequence = seq_id;
+        state.confirmed_sequence = Some(seq_id);
     }
 
     fn max_submitted_sequence(&self) -> u64 {
@@ -268,12 +296,24 @@ impl NetworkState {
     fn evict(&mut self, node_id: NodeId, seq_id: u64) {
         let state = self.node_states.get_mut(&node_id).unwrap();
 
-        let max_seq = state.max_sequence();
-        if seq_id <= state.confirmed_sequence || seq_id > max_seq {
+        let Some(max_seq) = state.max_sequence() else {
+            return;
+        };
+        if let Some(confirmed) = state.confirmed_sequence {
+            if seq_id <= confirmed || seq_id > max_seq {
+                return;
+            }
+        } else if seq_id > max_seq {
             return;
         }
 
-        let start = state.confirmed_sequence + 1;
+        let start = state
+            .confirmed_sequence
+            .map(|s| s.saturating_add(1))
+            .unwrap_or(0);
+        if seq_id < start {
+            return;
+        }
         let from_idx = (seq_id - start) as usize;
         for i in from_idx..state.mempool.len() {
             state.mempool[i] = status(TxStatusKind::Evicted);
@@ -710,7 +750,7 @@ impl Harness {
             node_map,
             confirm_interval,
             max_status_batch,
-            1,
+            Some(0),
             add_tx_capacity,
         );
         rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));

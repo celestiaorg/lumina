@@ -220,7 +220,8 @@ impl TransactionService {
         TxSubmitter<Hash, TxConfirmInfo, TxStatusResponse, Arc<Error>, TxRequest>,
         WorkerHandle,
     )> {
-        let start_sequence = current_sequence(&primary_client).await?;
+        let next_sequence = current_sequence(&primary_client).await?;
+        let confirmed_sequence = next_sequence.checked_sub(1);
         let nodes = clients
             .iter()
             .map(|(node_id, client)| {
@@ -238,7 +239,7 @@ impl TransactionService {
             nodes,
             confirm_interval,
             max_status_batch,
-            start_sequence,
+            confirmed_sequence,
             queue_capacity,
         );
 

@@ -80,7 +80,7 @@
 //!     nodes,
 //!     Duration::from_secs(1),
 //!     16,
-//!     1,
+//!     Some(0),
 //!     128,
 //! );
 //! # let _ = manager;
@@ -771,26 +771,26 @@ pub type WorkerPair<S> = (
 );
 
 impl<S: TxServer + 'static> TransactionWorker<S> {
-    /// Create a submitter/worker pair with initial sequence and queue capacity.
+    /// Create a submitter/worker pair with initial confirmed sequence and queue capacity.
     ///
     /// # Notes
-    /// - `start_sequence` should be the next sequence to submit for the signer.
+    /// - `confirmed_sequence` is the last confirmed sequence for the signer.
+    /// - `start_sequence` is derived as `confirmed_sequence + 1` or `0` when unknown.
     /// - `confirm_interval` drives periodic confirmation polling.
     pub fn new(
         nodes: HashMap<NodeId, Arc<S>>,
         confirm_interval: Duration,
         max_status_batch: usize,
-        start_sequence: u64,
+        confirmed_sequence: Option<u64>,
         add_tx_capacity: usize,
     ) -> WorkerPair<S> {
         let (add_tx_tx, add_tx_rx) = mpsc::channel(add_tx_capacity);
         let manager = TxSubmitter {
             add_tx: add_tx_tx.clone(),
         };
-        let start_confirmed = start_sequence.saturating_sub(1);
         let node_ids = nodes.keys().cloned().collect::<Vec<_>>();
-        let node_manager = NodeManager::new(node_ids, start_confirmed);
-        let transactions = tx_buffer::TxBuffer::new(start_confirmed);
+        let node_manager = NodeManager::new(node_ids, confirmed_sequence);
+        let transactions = tx_buffer::TxBuffer::new(confirmed_sequence);
         (
             manager,
             TransactionWorker {
@@ -1042,14 +1042,14 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         if let Some(limit) = self.nodes.min_confirmed_non_stopped() {
             let before = self.transactions.confirmed_seq();
             debug!(
-                before,
+                before = ?before,
                 limit,
-                max_seq = self.transactions.max_seq(),
+                max_seq = ?self.transactions.max_seq(),
                 "clear_confirmed_up_to candidate"
             );
             self.clear_confirmed_up_to(limit);
             let after = self.transactions.confirmed_seq();
-            debug!(before, after, limit, "clear_confirmed_up_to result");
+            debug!(before = ?before, after = ?after, limit, "clear_confirmed_up_to result");
         }
         Ok(false)
     }
@@ -1065,7 +1065,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         tx: Transaction<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>,
         signed: oneshot::Sender<Result<()>>,
     ) -> Result<()> {
-        let exp_seq = self.transactions.max_seq() + 1;
+        let exp_seq = self.transactions.next_sequence();
         let tx_sequence = tx.sequence;
         if self.transactions.add_transaction(tx).is_err() {
             let msg = format!("tx sequence gap: expected {}, got {}", exp_seq, tx_sequence);
@@ -1097,7 +1097,11 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             let _ = pending.confirm_tx.send(Err(StopError::WorkerStopped));
         }
         loop {
-            let next = self.transactions.confirmed_seq() + 1;
+            let next = self
+                .transactions
+                .confirmed_seq()
+                .map(|seq| seq.saturating_add(1))
+                .unwrap_or(0);
             let Ok(mut tx) = self.transactions.confirm(next) else {
                 break;
             };
@@ -1111,7 +1115,11 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
 
     fn clear_confirmed_up_to(&mut self, limit: u64) {
         loop {
-            let next = self.transactions.confirmed_seq() + 1;
+            let next = self
+                .transactions
+                .confirmed_seq()
+                .map(|seq| seq.saturating_add(1))
+                .unwrap_or(0);
             if next > limit {
                 break;
             }

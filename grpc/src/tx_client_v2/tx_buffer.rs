@@ -6,7 +6,7 @@ use std::{
 use crate::tx_client_v2::{Transaction, TxIdT};
 
 pub struct TxBuffer<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request> {
-    confirmed: u64,
+    confirmed: Option<u64>,
     next_sequence: u64,
     pending: VecDeque<Request>,
     transactions: VecDeque<Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>>,
@@ -27,21 +27,26 @@ type TxBufferResult<T> = Result<T, TxBufferError>;
 impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
     TxBuffer<TxId, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
 {
-    pub fn new(confirmed: u64) -> Self {
+    pub fn new(confirmed: Option<u64>) -> Self {
+        let next_sequence = confirmed.map(|seq| seq.saturating_add(1)).unwrap_or(0);
         TxBuffer {
             confirmed,
-            next_sequence: confirmed.saturating_add(1),
+            next_sequence,
             pending: VecDeque::new(),
             transactions: VecDeque::new(),
             id_to_seq: HashMap::new(),
         }
     }
 
-    pub fn max_seq(&self) -> u64 {
-        self.confirmed + self.transactions.len() as u64
+    pub fn max_seq(&self) -> Option<u64> {
+        if self.transactions.is_empty() {
+            self.confirmed
+        } else {
+            self.next_sequence.checked_sub(1)
+        }
     }
 
-    pub fn confirmed_seq(&self) -> u64 {
+    pub fn confirmed_seq(&self) -> Option<u64> {
         self.confirmed
     }
 
@@ -89,20 +94,18 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
         &mut self,
         tx: Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>,
     ) -> TxBufferResult<()> {
-        if self.confirmed == 0 && self.transactions.is_empty() {
-            self.confirmed = tx.sequence - 1;
-            self.next_sequence = tx.sequence;
-        }
-        if tx.sequence != self.max_seq() + 1 {
+        let expected = self.next_sequence;
+        if tx.sequence != expected {
             return Err(TxBufferError::InvalidSequence);
         }
         self.transactions.push_back(tx);
-        self.next_sequence = self.max_seq() + 1;
+        self.next_sequence = expected.saturating_add(1);
         Ok(())
     }
 
     fn tx_idx(&self, sequence: u64) -> Option<usize> {
-        let idx = sequence.checked_sub(self.confirmed + 1)? as usize;
+        let start = self.confirmed.map(|seq| seq.saturating_add(1)).unwrap_or(0);
+        let idx = sequence.checked_sub(start)? as usize;
         (idx < self.transactions.len()).then_some(idx)
     }
 
@@ -145,11 +148,13 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
     }
 
     pub fn ids_from_to(&self, start: u64, stop: u64, limit: usize) -> Option<Vec<TxId>> {
-        if self.transactions.is_empty() {
-            return None;
-        }
-        let lower = (self.confirmed + 1).max(start);
-        let upper = self.max_seq().min(stop);
+        let max_seq = self.max_seq()?;
+        let lower = self
+            .confirmed
+            .map(|seq| seq.saturating_add(1))
+            .unwrap_or(0)
+            .max(start);
+        let upper = max_seq.min(stop);
         if lower > upper {
             return None;
         }
@@ -171,7 +176,11 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
         &mut self,
         seq: u64,
     ) -> TxBufferResult<Transaction<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>> {
-        if seq != self.confirmed + 1 {
+        let expected = self
+            .confirmed
+            .map(|confirmed| confirmed.saturating_add(1))
+            .unwrap_or(0);
+        if seq != expected {
             return Err(TxBufferError::ConfirmWithGaps);
         }
         let Some(first) = self.transactions.front() else {
@@ -187,7 +196,7 @@ impl<TxId: TxIdT + Eq + Hash, ConfirmInfo, ConfirmResponse, SubmitErr, Request>
         if let Some(id) = tx.id.clone() {
             self.id_to_seq.remove(&id);
         }
-        self.confirmed += 1;
+        self.confirmed = Some(seq);
         Ok(tx)
     }
 }
@@ -207,7 +216,7 @@ mod tests {
         }
     }
 
-    fn make_buffer(confirmed: u64) -> TxBuffer<u64, (), (), (), ()> {
+    fn make_buffer(confirmed: Option<u64>) -> TxBuffer<u64, (), (), (), ()> {
         TxBuffer::new(confirmed)
     }
 
@@ -216,23 +225,23 @@ mod tests {
 
         #[test]
         fn new_creates_empty_buffer() {
-            let buffer = make_buffer(10);
-            assert_eq!(buffer.confirmed_seq(), 10);
-            assert_eq!(buffer.max_seq(), 10);
+            let buffer = make_buffer(Some(10));
+            assert_eq!(buffer.confirmed_seq(), Some(10));
+            assert_eq!(buffer.max_seq(), Some(10));
             assert_eq!(buffer.len(), 0);
             assert!(buffer.is_empty());
         }
 
         #[test]
         fn max_seq_equals_confirmed_plus_len() {
-            let mut buffer = make_buffer(5);
-            assert_eq!(buffer.max_seq(), 5);
+            let mut buffer = make_buffer(Some(5));
+            assert_eq!(buffer.max_seq(), Some(5));
 
             buffer.add_transaction(make_tx(6, None)).unwrap();
-            assert_eq!(buffer.max_seq(), 6);
+            assert_eq!(buffer.max_seq(), Some(6));
 
             buffer.add_transaction(make_tx(7, None)).unwrap();
-            assert_eq!(buffer.max_seq(), 7);
+            assert_eq!(buffer.max_seq(), Some(7));
         }
     }
 
@@ -240,35 +249,42 @@ mod tests {
         use super::*;
 
         #[test]
-        fn auto_adjusts_confirmed_when_zero() {
-            let mut buffer = make_buffer(0);
-            buffer.add_transaction(make_tx(5, None)).unwrap();
-            assert_eq!(buffer.confirmed_seq(), 4);
-            assert_eq!(buffer.max_seq(), 5);
+        fn accepts_zero_when_no_confirmed() {
+            let mut buffer = make_buffer(None);
+            buffer.add_transaction(make_tx(0, None)).unwrap();
+            assert_eq!(buffer.confirmed_seq(), None);
+            assert_eq!(buffer.max_seq(), Some(0));
+        }
+
+        #[test]
+        fn rejects_non_zero_when_no_confirmed() {
+            let mut buffer = make_buffer(None);
+            let result = buffer.add_transaction(make_tx(1, None));
+            assert!(matches!(result, Err(TxBufferError::InvalidSequence)));
         }
 
         #[test]
         fn requires_contiguous_sequence() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             let result = buffer.add_transaction(make_tx(8, None));
             assert!(matches!(result, Err(TxBufferError::InvalidSequence)));
         }
 
         #[test]
         fn add_multiple_in_sequence() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             for seq in 6..=10 {
                 buffer
                     .add_transaction(make_tx(seq, Some(seq * 100)))
                     .unwrap();
             }
             assert_eq!(buffer.len(), 5);
-            assert_eq!(buffer.max_seq(), 10);
+            assert_eq!(buffer.max_seq(), Some(10));
         }
 
         #[test]
         fn rejects_duplicate_sequence() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, None)).unwrap();
             let result = buffer.add_transaction(make_tx(6, None));
             assert!(matches!(result, Err(TxBufferError::InvalidSequence)));
@@ -280,7 +296,7 @@ mod tests {
 
         #[test]
         fn set_submitted_id_updates_mapping() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, None)).unwrap();
 
             assert!(buffer.get_seq(&100).is_none());
@@ -290,7 +306,7 @@ mod tests {
 
         #[test]
         fn ids_from_to_filters_none_ids() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, Some(600))).unwrap();
             buffer.add_transaction(make_tx(7, None)).unwrap();
             buffer.add_transaction(make_tx(8, Some(800))).unwrap();
@@ -301,7 +317,7 @@ mod tests {
 
         #[test]
         fn ids_from_to_respects_limit() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             for seq in 6..=10 {
                 buffer
                     .add_transaction(make_tx(seq, Some(seq * 100)))
@@ -314,7 +330,7 @@ mod tests {
 
         #[test]
         fn ids_from_to_clamps_bounds() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             for seq in 6..=8 {
                 buffer
                     .add_transaction(make_tx(seq, Some(seq * 100)))
@@ -331,7 +347,7 @@ mod tests {
 
         #[test]
         fn must_be_sequential() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, None)).unwrap();
             buffer.add_transaction(make_tx(7, None)).unwrap();
 
@@ -341,18 +357,18 @@ mod tests {
 
         #[test]
         fn removes_tx_and_increments_confirmed() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, Some(600))).unwrap();
 
             let tx = buffer.confirm(6).unwrap();
             assert_eq!(tx.sequence, 6);
-            assert_eq!(buffer.confirmed_seq(), 6);
+            assert_eq!(buffer.confirmed_seq(), Some(6));
             assert!(buffer.is_empty());
         }
 
         #[test]
         fn removes_id_from_mapping() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, Some(600))).unwrap();
 
             assert_eq!(buffer.get_seq(&600), None);
@@ -369,7 +385,7 @@ mod tests {
 
         #[test]
         fn get_by_sequence() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, Some(600))).unwrap();
             buffer.add_transaction(make_tx(7, Some(700))).unwrap();
 
@@ -381,7 +397,7 @@ mod tests {
 
         #[test]
         fn get_by_id_requires_mapping() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, Some(600))).unwrap();
 
             assert!(buffer.get_by_id(&600).is_none());
@@ -391,7 +407,7 @@ mod tests {
 
         #[test]
         fn get_mut_modifies() {
-            let mut buffer = make_buffer(5);
+            let mut buffer = make_buffer(Some(5));
             buffer.add_transaction(make_tx(6, Some(600))).unwrap();
 
             buffer.get_mut(6).unwrap().id = Some(999);
