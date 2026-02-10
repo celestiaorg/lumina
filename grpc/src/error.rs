@@ -165,10 +165,7 @@ impl Error {
                 // Network-related gRPC status codes
                 matches!(
                     status.code(),
-                    tonic::Code::Unavailable
-                        | tonic::Code::Unknown
-                        | tonic::Code::DeadlineExceeded
-                        | tonic::Code::Aborted
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Aborted
                 )
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -205,12 +202,7 @@ mod tests {
 
     #[test]
     fn network_errors_return_true() {
-        let network_codes = [
-            Code::Unavailable,
-            Code::Unknown,
-            Code::DeadlineExceeded,
-            Code::Aborted,
-        ];
+        let network_codes = [Code::Unavailable, Code::DeadlineExceeded, Code::Aborted];
 
         for code in network_codes {
             let error: Error = Status::new(code, "test").into();
