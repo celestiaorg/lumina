@@ -21,15 +21,15 @@ edition = "2024"
 beetswap = "0.5"
 blockstore = "0.8"
 leopard-codec = "0.2"
-lumina-node = { version = "0.18.2", path = "node" }
-lumina-node-wasm = { version = "0.13.2", path = "node-wasm" }
+lumina-node = { version = "0.18.3", path = "node" }
+lumina-node-wasm = { version = "0.13.3", path = "node-wasm" }
 lumina-utils = { version = "0.5.2", path = "utils" }
-celestia-client = { version = "0.5.0", path = "client" }
-celestia-proto = { version = "0.12.1", path = "proto" }
-celestia-grpc = { version = "0.12.0", path = "grpc", default-features = false }
+celestia-client = { version = "0.5.1", path = "client" }
+celestia-proto = { version = "0.13.0", path = "proto" }
+celestia-grpc = { version = "0.13.0", path = "grpc", default-features = false }
 celestia-grpc-macros = { version = "0.7.0", path = "grpc/grpc-macros" }
-celestia-rpc = { version = "0.16.2", path = "rpc", default-features = false }
-celestia-types = { version = "0.20.0", path = "types", default-features = false }
+celestia-rpc = { version = "0.16.3", path = "rpc", default-features = false }
+celestia-types = { version = "0.20.1", path = "types", default-features = false }
 
 anyhow = "1.0.40"
 async-stream = "0.3.5"
