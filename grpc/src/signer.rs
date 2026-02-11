@@ -2,6 +2,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use celestia_proto::cosmos::tx::v1beta1::SignDoc;
 use k256::ecdsa::VerifyingKey;
@@ -24,7 +25,8 @@ pub type SignatureError = k256::ecdsa::signature::Error;
 
 /// Helper struct used to pass type erased signer. To implement custom signer, see
 /// [`DocSigner`] trait.
-pub(crate) struct BoxedDocSigner(Box<dyn AbstractDocSigner>);
+#[derive(Clone)]
+pub(crate) struct BoxedDocSigner(Arc<dyn AbstractDocSigner>);
 
 /// Signer capable of producing ecdsa signature using secp256k1 curve.
 pub trait DocSigner: Send + Sync {
@@ -50,7 +52,7 @@ impl BoxedDocSigner {
     where
         S: AbstractDocSigner,
     {
-        BoxedDocSigner(Box::new(signer))
+        BoxedDocSigner(Arc::new(signer))
     }
 }
 

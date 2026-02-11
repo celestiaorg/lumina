@@ -316,10 +316,10 @@ impl ClientBuilder {
         let head = rpc.header_network_head().await?;
         head.validate()?;
 
-        if let Some(grpc) = &grpc {
-            if &grpc.chain_id().await? != head.chain_id() {
-                return Err(Error::ChainIdMissmatch);
-            }
+        if let Some(grpc) = &grpc
+            && &grpc.chain_id().await? != head.chain_id()
+        {
+            return Err(Error::ChainIdMissmatch);
         }
 
         let inner = Arc::new(ClientInner {

@@ -231,7 +231,7 @@ jobs:
       id: boot-simulator
       with:
         simulator-name: iPhone 16
-        simulator-version: 26.0.1
+        simulator-version: 26.1
 
     - name: xcode clean build
       working-directory: examples/ios/LuminaDemo
