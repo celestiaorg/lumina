@@ -39,7 +39,7 @@ use crate::boxed::BoxedTransport;
 use crate::builder::GrpcClientBuilder;
 use crate::grpc::{
     AsyncGrpcCall, BroadcastMode, ConfigResponse, Context, GasEstimate, GasInfo, GetTxResponse,
-    TxPriority, TxStatus, TxStatusResponse,
+    TxPriority, TxStatus, TxStatusBatchResponse, TxStatusResponse,
 };
 use crate::signer::{BoxedDocSigner, sign_tx};
 use crate::tx::{BroadcastedTx, SubmittedTx, TxInfo};
@@ -251,6 +251,10 @@ impl GrpcClient {
     /// Get status of the transaction
     #[grpc_method(TxStatusClient::tx_status)]
     fn tx_status(&self, hash: Hash) -> AsyncGrpcCall<TxStatusResponse>;
+
+    /// Get status of transactions in batch.
+    #[grpc_method(TxStatusClient::tx_status_batch)]
+    fn tx_status_batch(&self, hashes: Vec<Hash>) -> AsyncGrpcCall<TxStatusBatchResponse>;
 
     // celestia.core.gas_estimation
 
@@ -630,6 +634,11 @@ impl GrpcClient {
 
     fn account(&self) -> Result<&AccountState> {
         self.inner.account.as_ref().ok_or(Error::MissingSigner)
+    }
+
+    pub(crate) fn signer(&self) -> Result<(VerifyingKey, BoxedDocSigner)> {
+        let account = self.account()?;
+        Ok((account.pubkey, account.signer.clone()))
     }
 
     async fn lock_account(&self, context: &Context) -> Result<AccountGuard<'_>> {
@@ -1013,7 +1022,7 @@ fn extract_sequence(msg: &str) -> Result<u64> {
         .map_err(|_| Error::SequenceParsingFailed(msg.into()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::future::IntoFuture;
     use std::ops::RangeInclusive;

@@ -5,7 +5,9 @@ use std::str::FromStr;
 use wasm_bindgen::prelude::*;
 
 use celestia_proto::celestia::core::v1::tx::{
-    TxStatusRequest as RawTxStatusRequest, TxStatusResponse as RawTxStatusResponse,
+    TxStatusBatchRequest as RawTxStatusBatchRequest,
+    TxStatusBatchResponse as RawTxStatusBatchResponse, TxStatusRequest as RawTxStatusRequest,
+    TxStatusResponse as RawTxStatusResponse, TxStatusResult as RawTxStatusResult,
 };
 use celestia_types::Height;
 use celestia_types::hash::Hash;
@@ -58,6 +60,24 @@ pub enum TxStatus {
     Rejected,
     /// The transaction was committed into the block.
     Committed,
+}
+
+/// Result entry returned in a batch tx status query.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TxStatusResult {
+    /// Transaction hash.
+    pub hash: Hash,
+    /// Status response for the transaction.
+    pub status: TxStatusResponse,
+}
+
+/// Response to a batch tx status query.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TxStatusBatchResponse {
+    /// Status results for each requested transaction.
+    pub statuses: Vec<TxStatusResult>,
 }
 
 impl fmt::Display for TxStatus {
@@ -120,8 +140,31 @@ impl IntoGrpcParam<RawTxStatusRequest> for Hash {
     }
 }
 
+impl<I> IntoGrpcParam<RawTxStatusBatchRequest> for I
+where
+    I: IntoIterator<Item = Hash>,
+{
+    fn into_parameter(self) -> RawTxStatusBatchRequest {
+        RawTxStatusBatchRequest {
+            tx_ids: self.into_iter().map(|hash| hash.to_string()).collect(),
+        }
+    }
+}
+
 impl FromGrpcResponse<TxStatusResponse> for RawTxStatusResponse {
     fn try_from_response(self) -> Result<TxStatusResponse> {
         self.try_into()
+    }
+}
+
+impl FromGrpcResponse<TxStatusBatchResponse> for RawTxStatusBatchResponse {
+    fn try_from_response(self) -> Result<TxStatusBatchResponse> {
+        let mut statuses = Vec::with_capacity(self.statuses.len());
+        for RawTxStatusResult { tx_hash, status } in self.statuses {
+            let hash = tx_hash.parse().map_err(|_| Error::FailedToParseResponse)?;
+            let status = status.ok_or(Error::FailedToParseResponse)?.try_into()?;
+            statuses.push(TxStatusResult { hash, status });
+        }
+        Ok(TxStatusBatchResponse { statuses })
     }
 }
