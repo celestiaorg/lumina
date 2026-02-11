@@ -68,6 +68,7 @@ impl<SubmitErr, ConfirmInfo, ConfirmResponse> StopError<SubmitErr, ConfirmInfo, 
 #[derive(Debug, Clone, Copy, Default)]
 struct CommonState {
     submit_delay: Option<Duration>,
+    signing_delay: Option<Duration>,
     epoch: u64,
     last_submitted: Option<u64>,
     last_confirmed: Option<u64>,
@@ -232,7 +233,7 @@ impl<ConfirmInfo: Clone, SubmitErr, ConfirmResponse>
 
 pub(crate) struct NodeManager<S: TxServer> {
     nodes: HashMap<NodeId, NodeStateFor<S>>,
-    signing_delay: Option<Duration>,
+    delay: Duration,
 }
 
 impl<S: TxServer> NodeManager<S> {
@@ -246,7 +247,7 @@ impl<S: TxServer> NodeManager<S> {
             .collect();
         Self {
             nodes,
-            signing_delay: None,
+            delay: Duration::from_millis(500),
         }
     }
 
@@ -353,7 +354,6 @@ impl<S: TxServer> NodeManager<S> {
         &mut self,
         event: NodeEvent<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>,
         txs: &NodeBuffer<S>,
-        confirm_interval: Duration,
     ) -> MutationsFor<S> {
         let mut mutations = Vec::new();
 
@@ -370,20 +370,14 @@ impl<S: TxServer> NodeManager<S> {
                 }
                 let mut outcome = match response {
                     NodeResponse::Submission { sequence, result } => {
-                        self.handle_submission(&node_id, sequence, result, txs, confirm_interval)
+                        self.handle_submission(&node_id, sequence, result, txs)
                     }
                     NodeResponse::Confirmation {
                         state_epoch,
                         response,
-                    } => self.handle_confirmation(
-                        &node_id,
-                        state_epoch,
-                        response,
-                        txs,
-                        confirm_interval,
-                    ),
+                    } => self.handle_confirmation(&node_id, state_epoch, response, txs),
                     NodeResponse::Signing { sequence, result } => {
-                        self.handle_signing(&node_id, sequence, result, confirm_interval)
+                        self.handle_signing(&node_id, sequence, result)
                     }
                 };
                 mutations.append(&mut outcome);
@@ -428,7 +422,6 @@ impl<S: TxServer> NodeManager<S> {
         sequence: u64,
         result: TxSubmitResult<S::TxId, S::SubmitError>,
         txs: &NodeBuffer<S>,
-        confirm_interval: Duration,
     ) -> MutationsFor<S> {
         let mut mutations = Vec::new();
         let Some(node) = self.nodes.get_mut(node_id) else {
@@ -458,11 +451,17 @@ impl<S: TxServer> NodeManager<S> {
                     SubmitError::SequenceMismatch { expected } => {
                         let stop_error: StopErrorFor<S> =
                             StopError::SubmitError(failure.original_error.clone());
-                        let _ =
-                            on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
+                        on_sequence_mismatch::<S>(
+                            node,
+                            sequence,
+                            expected,
+                            stop_error,
+                            txs,
+                            Some(self.delay),
+                        );
                     }
                     SubmitError::MempoolIsFull | SubmitError::NetworkError => {
-                        node.shared_mut().submit_delay = Some(confirm_interval);
+                        node.shared_mut().submit_delay = Some(self.delay);
                     }
                     SubmitError::TxInMempoolCache => {
                         if let NodeState::Active(state) = node {
@@ -493,7 +492,6 @@ impl<S: TxServer> NodeManager<S> {
             ConfirmationResponse<S::TxId, S::ConfirmInfo, S::ConfirmResponse>,
         >,
         txs: &NodeBuffer<S>,
-        _confirm_interval: Duration,
     ) -> MutationsFor<S> {
         let mut mutations = Vec::new();
 
@@ -540,7 +538,6 @@ impl<S: TxServer> NodeManager<S> {
         node_id: &NodeId,
         sequence: u64,
         result: TxSigningResult<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>,
-        confirm_interval: Duration,
     ) -> MutationsFor<S> {
         let mut mutations = Vec::new();
         let mut stop_error: Option<StopErrorFor<S>> = None;
@@ -564,7 +561,7 @@ impl<S: TxServer> NodeManager<S> {
                         if expected >= sequence {
                             stop_error = Some(StopError::SignError(failure.original_error.clone()));
                         } else {
-                            self.signing_delay = Some(confirm_interval);
+                            node.shared_mut().signing_delay = Some(self.delay);
                             let expected_prev = expected.saturating_sub(1);
                             let shared = node.shared_mut();
                             shared.last_submitted = shared
@@ -573,7 +570,7 @@ impl<S: TxServer> NodeManager<S> {
                         }
                     }
                     SigningError::NetworkError => {
-                        self.signing_delay = Some(confirm_interval);
+                        node.shared_mut().signing_delay = Some(self.delay);
                     }
                     SigningError::Other { .. } => {
                         stop_error = Some(StopError::SignError(failure.original_error.clone()));
@@ -617,10 +614,12 @@ impl<S: TxServer> NodeManager<S> {
             );
             return None;
         }
-        let delay = self.signing_delay.take().unwrap_or_default();
-        if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.shared_mut().signing_inflight = true;
-        }
+        let delay = if let Some(node) = self.nodes.get_mut(&node_id).map(|node| node.shared_mut()) {
+            node.signing_inflight = true;
+            node.signing_delay.take().unwrap_or_default()
+        } else {
+            Duration::default()
+        };
         debug!(
             node_id = %node_id.as_ref(),
             sequence = next_sequence,
@@ -907,29 +906,38 @@ fn on_sequence_mismatch<S: TxServer>(
     expected: u64,
     stop_error: StopErrorFor<S>,
     txs: &NodeBuffer<S>,
-) -> bool {
-    let mut stop_error = Some(stop_error);
+    delay: Option<Duration>,
+) {
     let mut recover_target = None;
     let mut stop_seq = None;
     let shared = match node {
         NodeState::Active(state) => &mut state.shared,
         NodeState::Stopped(state) => &mut state.shared,
         NodeState::Recovering(_) => {
-            return false;
+            return;
         }
     };
     if matches!(txs.confirmed_seq(), Some(confirmed) if confirmed >= expected) {
-        return false;
+        return;
     }
     // if our sequence is less than expected, we need to confirm
     // that the transaction with higher sequence nubmer is transaction
     // made by our client and not from outside the system
     if sequence < expected {
         let target = expected.saturating_sub(1);
-        if txs.get(target).and_then(|tx| tx.id.clone()).is_none() {
+        let Some(tx) = txs.get(target) else {
             let stop_seq = stop_seq_from_last_good(shared.last_submitted, shared.last_confirmed);
-            node.apply_stop_error(stop_seq, stop_error.take().unwrap());
-            return false;
+            node.apply_stop_error(stop_seq, stop_error);
+            return;
+        };
+        if tx.id.is_none() {
+            if let Some(value) = delay {
+                node.shared_mut().submit_delay = Some(value);
+                return;
+            }
+            let stop_seq = stop_seq_from_last_good(shared.last_submitted, shared.last_confirmed);
+            node.apply_stop_error(stop_seq, stop_error);
+            return;
         }
         shared.epoch = shared.epoch.saturating_add(1);
         recover_target = Some(target);
@@ -952,16 +960,15 @@ fn on_sequence_mismatch<S: TxServer>(
             None => expected_prev,
         };
         shared.last_submitted = Some(clamped);
-        return false;
+        return;
     }
     if let Some(target) = recover_target {
         node.transition_to_recovering(target);
-        return true;
+        return;
     }
     if let Some(stop_seq) = stop_seq {
-        node.apply_stop_error(stop_seq, stop_error.take().unwrap());
+        node.apply_stop_error(stop_seq, stop_error);
     }
-    false
 }
 
 fn process_status_batch<S: TxServer>(
@@ -1066,7 +1073,7 @@ fn process_status_batch<S: TxServer>(
         }
     }
     if let Some((sequence, expected, stop_error)) = seq_mismatch {
-        let _ = on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
+        on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs, None);
     }
     if let Some((sequence, status)) = fatal {
         node.apply_stop_error(sequence, StopError::ConfirmError(status));

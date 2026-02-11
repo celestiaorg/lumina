@@ -908,9 +908,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
             self.execute_plans(plans, shutdown.clone());
 
             if let Some(event) = current_event.take() {
-                let mutations =
-                    self.nodes
-                        .apply_event(event, &self.transactions, self.confirm_interval);
+                let mutations = self.nodes.apply_event(event, &self.transactions);
                 let stop = self.apply_mutations(mutations)?;
                 if stop {
                     break;
