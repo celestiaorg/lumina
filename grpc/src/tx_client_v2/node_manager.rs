@@ -1274,7 +1274,7 @@ mod tests {
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
         let txs = TestBuffer::new(Some(0));
 
-        let _outcome = manager.apply_event(
+        let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Submission {
@@ -1283,13 +1283,15 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
         assert!(outcome.iter().any(|event| {
             matches!(
                 event,
-                WorkerMutation::MarkSubmitted { sequence, id } if *sequence == 1 && *id == 10
+                &WorkerMutation::MarkSubmitted {
+                    sequence: 1,
+                    id: 10
+                }
             )
         }));
     }
@@ -1313,13 +1315,12 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
         assert!(
             !outcome
                 .iter()
-                .any(|event| matches!(event, WorkerMutation::Confirm { .. }))
+                .any(|event| matches!(event, &WorkerMutation::Confirm { .. }))
         );
     }
 
@@ -1342,7 +1343,6 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
         let mut confirmed = Vec::new();
@@ -1362,7 +1362,7 @@ mod tests {
         txs.add_transaction(make_tx(1, None)).unwrap();
         txs.set_submitted_id(1, 10);
 
-        let outcome = manager.apply_event(
+        let _outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Submission {
@@ -1373,7 +1373,6 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
         let wake = manager.plan(&txs, 16, true);
@@ -1388,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn sequence_mismatch_missing_id_stops_on_submit() {
+    fn sequence_mismatch_missing_id_resubmits_with_delay() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
         let mut txs = TestBuffer::new(Some(0));
@@ -1405,15 +1404,12 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
-        assert!(matches!(
-            manager.nodes.get(&node_id).unwrap(),
-            NodeState::Stopped(_)
-        ));
-        let error = manager.tail_stop_error().expect("missing stop error");
-        assert!(matches!(error, StopError::SubmitError(_)));
+        let NodeState::Active(state) = manager.nodes.get(&node_id).unwrap() else {
+            panic!("node should be active");
+        };
+        assert!(state.shared.submit_delay.is_some());
     }
 
     #[test]
@@ -1443,7 +1439,6 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
         assert!(matches!(
@@ -1475,12 +1470,12 @@ mod tests {
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id], Some(0));
         let txs = TestBuffer::new(Some(0));
 
-        let outcome = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
+        let outcome = manager.apply_event(NodeEvent::NodeStop, &txs);
 
         assert!(
             outcome
                 .iter()
-                .any(|event| matches!(event, WorkerMutation::WorkerStop))
+                .any(|event| matches!(event, &WorkerMutation::WorkerStop))
         );
     }
 
@@ -1494,7 +1489,7 @@ mod tests {
             state.shared.signing_inflight = true;
         }
 
-        let _outcome = manager.apply_event(
+        let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Signing {
@@ -1503,7 +1498,6 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
         assert!(outcome.iter().any(
@@ -1529,7 +1523,7 @@ mod tests {
             state.shared.signing_inflight = true;
         }
 
-        let outcome = manager.apply_event(
+        let _outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Signing {
@@ -1541,10 +1535,12 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(3),
         );
 
-        assert!(manager.signing_delay.is_some());
+        let NodeState::Active(state) = manager.nodes.get(&node_id).unwrap() else {
+            panic!("node should be active");
+        };
+        assert!(state.shared.signing_delay.is_some());
         assert!(matches!(
             manager.nodes.get(&node_id).unwrap(),
             NodeState::Active(_)
@@ -1561,7 +1557,7 @@ mod tests {
             state.shared.confirm_inflight = true;
         }
 
-        let _outcome = manager.apply_event(
+        let outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Confirmation {
@@ -1572,7 +1568,6 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
         assert!(outcome.is_empty());
@@ -1601,7 +1596,7 @@ mod tests {
             state.shared.last_submitted = Some(7);
         }
 
-        let outcome = manager.apply_event(
+        let _outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_a.clone(),
                 response: NodeResponse::Submission {
@@ -1610,7 +1605,6 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(2),
         );
 
         let NodeState::Active(state) = manager.nodes.get(&node_a).unwrap() else {
@@ -1649,7 +1643,6 @@ mod tests {
                 },
             },
             &txs,
-            Duration::from_secs(1),
         );
 
         let NodeState::Active(state) = manager.nodes.get(&node_id).unwrap() else {
@@ -1664,7 +1657,7 @@ mod tests {
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], None);
         let txs = TestBuffer::new(None);
 
-        let _ = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
+        let _ = manager.apply_event(NodeEvent::NodeStop, &txs);
 
         let NodeState::Stopped(state) = manager.nodes.get(&node_id).unwrap() else {
             panic!("node should be stopped");
@@ -1678,7 +1671,7 @@ mod tests {
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(5));
         let txs = TestBuffer::new(Some(5));
 
-        let _ = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
+        let _ = manager.apply_event(NodeEvent::NodeStop, &txs);
 
         let NodeState::Stopped(state) = manager.nodes.get(&node_id).unwrap() else {
             panic!("node should be stopped");
@@ -1696,7 +1689,7 @@ mod tests {
             state.shared.last_submitted = Some(7);
         }
 
-        let _ = manager.apply_event(NodeEvent::NodeStop, &txs, Duration::from_secs(1));
+        let _ = manager.apply_event(NodeEvent::NodeStop, &txs);
 
         let NodeState::Stopped(state) = manager.nodes.get(&node_id).unwrap() else {
             panic!("node should be stopped");

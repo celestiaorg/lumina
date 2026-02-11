@@ -824,7 +824,6 @@ pub struct TransactionWorker<S: TxServer> {
     confirmations: FuturesUnordered<ConfirmationFuture<S>>,
     signing: Option<SigningFuture<S>>,
     confirm_ticker: Interval,
-    confirm_interval: Duration,
     max_status_batch: usize,
     should_confirm: bool,
 }
@@ -873,7 +872,6 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 confirmations: FuturesUnordered::new(),
                 signing: None,
                 confirm_ticker: Interval::new(confirm_interval),
-                confirm_interval,
                 max_status_batch,
                 should_confirm: false,
             },
