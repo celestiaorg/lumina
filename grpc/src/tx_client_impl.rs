@@ -287,7 +287,7 @@ impl TxServer for NodeClient {
             Ok(resp) => resp,
             Err(err) => {
                 return Err(SubmitFailure {
-                    mapped_error: SubmitError::NetworkError,
+                    mapped_error: map_submit_error_from_client_error(&err),
                     original_error: Arc::new(err),
                 });
             }
@@ -543,6 +543,30 @@ fn map_submit_error(code: ErrorCode, message: &str) -> SubmitError {
             message: message.to_string(),
         },
     }
+}
+
+fn map_submit_error_from_client_error(err: &Error) -> SubmitError {
+    if let Error::TonicError(status) = err {
+        let message = status.message();
+        let lower = message.to_ascii_lowercase();
+        if let Some(expected) = extract_sequence_on_mismatch(message) {
+            return SubmitError::SequenceMismatch { expected };
+        }
+        if let Some(expected_fee) = extract_expected_fee(message) {
+            return SubmitError::InsufficientFee {
+                expected_fee,
+                message: message.to_string(),
+            };
+        }
+        if lower.contains("tx already exists in mempool") {
+            return SubmitError::TxInMempoolCache;
+        }
+        if lower.contains("mempool is full") {
+            return SubmitError::MempoolIsFull;
+        }
+    }
+
+    SubmitError::NetworkError
 }
 
 fn extract_expected_fee(message: &str) -> Option<u64> {

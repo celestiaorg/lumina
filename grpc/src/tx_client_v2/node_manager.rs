@@ -5,9 +5,9 @@ use tracing::debug;
 
 use crate::tx_client_v2::tx_buffer::TxBuffer;
 use crate::tx_client_v2::{
-    ConfirmationResponse, NodeEvent, NodeId, NodeResponse, PlanRequest, RejectionReason,
-    RequestWithChannels, SigningError, StopError, SubmitError, TxConfirmResult, TxIdT, TxServer,
-    TxSigningResult, TxStatus, TxStatusKind, TxSubmitResult, WorkerMutation, WorkerPlan,
+    ConfirmationResponse, NodeEvent, NodeId, NodeResponse, RejectionReason, RequestWithChannels,
+    SigningError, StopError, SubmitError, TxConfirmResult, TxServer, TxSigningResult, TxStatus,
+    TxStatusKind, TxSubmitResult, WorkerMutation, WorkerPlan,
 };
 
 type PendingRequest<S> = RequestWithChannels<
@@ -35,12 +35,6 @@ type NodeStateFor<S> = NodeState<
     <S as TxServer>::SubmitError,
     <S as TxServer>::ConfirmResponse,
 >;
-type NodeOutcome<S> = NodeApplyOutcome<
-    <S as TxServer>::TxId,
-    <S as TxServer>::ConfirmInfo,
-    <S as TxServer>::ConfirmResponse,
-    <S as TxServer>::SubmitError,
->;
 type StatusesFor<S> =
     Statuses<<S as TxServer>::TxId, <S as TxServer>::ConfirmInfo, <S as TxServer>::ConfirmResponse>;
 type FatalStatus<S> = Option<(
@@ -55,14 +49,8 @@ type MutationsFor<S> = Vec<
         <S as TxServer>::SubmitError,
     >,
 >;
-type PlanRequestsRef<'a> = &'a mut Vec<PlanRequest>;
 type Statuses<TxId, ConfirmInfo, ConfirmResponse> =
     Vec<(TxId, TxStatus<ConfirmInfo, ConfirmResponse>)>;
-
-pub(crate) struct NodeApplyOutcome<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
-    pub(crate) mutations: Vec<WorkerMutation<TxId, ConfirmInfo, ConfirmResponse, SubmitErr>>,
-    pub(crate) plan_requests: Vec<PlanRequest>,
-}
 
 impl<SubmitErr, ConfirmInfo, ConfirmResponse> StopError<SubmitErr, ConfirmInfo, ConfirmResponse> {
     fn label(&self) -> String {
@@ -324,48 +312,40 @@ impl<S: TxServer> NodeManager<S> {
 
     pub(crate) fn plan(
         &mut self,
-        plan_requests: &[PlanRequest],
         txs: &NodeBuffer<S>,
         max_status_batch: usize,
+        should_confirm: bool,
     ) -> Vec<WorkerPlanFor<S>> {
         let mut plans = Vec::new();
-        for request in plan_requests {
-            match request {
-                PlanRequest::Submission => {
-                    for (node_id, node) in self.nodes.iter_mut() {
-                        debug!(
-                            node_id = %node_id.as_ref(),
-                            state = %node.log_state(),
-                            request = ?request,
-                            "node state (plan)"
-                        );
-                        if let Some(plan) = plan_submission::<S>(node_id, node, txs) {
-                            plans.push(plan);
-                        }
-                    }
-                }
-                PlanRequest::Confirmation => {
-                    for (node_id, node) in self.nodes.iter_mut() {
-                        debug!(
-                            node_id = %node_id.as_ref(),
-                            state = %node.log_state(),
-                            request = ?request,
-                            "node state (plan)"
-                        );
-                        if let Some(plan) =
-                            plan_confirmation::<S>(node_id, node, txs, max_status_batch)
-                        {
-                            plans.push(plan);
-                        }
-                    }
-                }
-                PlanRequest::Signing => {
-                    if let Some(plan) = self.plan_signing(txs) {
-                        plans.push(plan);
-                    }
+
+        if let Some(plan) = self.plan_signing(txs) {
+            plans.push(plan);
+        }
+
+        for (node_id, node) in self.nodes.iter_mut() {
+            debug!(
+                node_id = %node_id.as_ref(),
+                state = %node.log_state(),
+                "node state (plan submission)"
+            );
+            if let Some(plan) = plan_submission::<S>(node_id, node, txs) {
+                plans.push(plan);
+            }
+        }
+
+        if should_confirm {
+            for (node_id, node) in self.nodes.iter_mut() {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    state = %node.log_state(),
+                    "node state (plan confirmation)"
+                );
+                if let Some(plan) = plan_confirmation::<S>(node_id, node, txs, max_status_batch) {
+                    plans.push(plan);
                 }
             }
         }
+
         plans
     }
 
@@ -374,9 +354,8 @@ impl<S: TxServer> NodeManager<S> {
         event: NodeEvent<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>,
         txs: &NodeBuffer<S>,
         confirm_interval: Duration,
-    ) -> NodeOutcome<S> {
+    ) -> MutationsFor<S> {
         let mut mutations = Vec::new();
-        let mut plan_requests = Vec::new();
 
         debug!(event = %event.summary(), "node event");
         match event {
@@ -389,7 +368,7 @@ impl<S: TxServer> NodeManager<S> {
                         "node state (before response)"
                     );
                 }
-                let outcome = match response {
+                let mut outcome = match response {
                     NodeResponse::Submission { sequence, result } => {
                         self.handle_submission(&node_id, sequence, result, txs, confirm_interval)
                     }
@@ -407,8 +386,7 @@ impl<S: TxServer> NodeManager<S> {
                         self.handle_signing(&node_id, sequence, result, confirm_interval)
                     }
                 };
-                mutations.extend(outcome.mutations);
-                plan_requests.extend(outcome.plan_requests);
+                mutations.append(&mut outcome);
                 {
                     let node = self.nodes.get_mut(&node_id).unwrap();
                     debug!(
@@ -441,10 +419,7 @@ impl<S: TxServer> NodeManager<S> {
             mutations.push(WorkerMutation::WorkerStop);
         }
 
-        NodeApplyOutcome {
-            mutations,
-            plan_requests,
-        }
+        mutations
     }
 
     fn handle_submission(
@@ -454,33 +429,19 @@ impl<S: TxServer> NodeManager<S> {
         result: TxSubmitResult<S::TxId, S::SubmitError>,
         txs: &NodeBuffer<S>,
         confirm_interval: Duration,
-    ) -> NodeOutcome<S> {
+    ) -> MutationsFor<S> {
         let mut mutations = Vec::new();
-        let mut plan_requests = Vec::new();
-
-        let max_sub = self.max_active_last_submitted();
         let Some(node) = self.nodes.get_mut(node_id) else {
-            return NodeApplyOutcome {
-                mutations,
-                plan_requests,
-            };
+            return mutations;
         };
         if node.is_stopped() {
-            return NodeApplyOutcome {
-                mutations,
-                plan_requests,
-            };
+            return mutations;
         }
         match result {
             Ok(id) => {
                 if let NodeState::Active(active) = node {
                     on_submit_success(active, sequence);
                     mutations.push(WorkerMutation::MarkSubmitted { sequence, id });
-                    let last_submitted = active.shared.last_submitted.unwrap_or(0);
-                    let next_sequence = txs.next_sequence().saturating_sub(1);
-                    if last_submitted == next_sequence && txs.has_pending() {
-                        push_plan_request(&mut plan_requests, PlanRequest::Signing);
-                    }
                 }
             }
             Err(failure) => {
@@ -491,28 +452,21 @@ impl<S: TxServer> NodeManager<S> {
                     "submission error"
                 );
                 if let NodeState::Active(active) = node {
-                    on_submit_failure(active);
+                    active.pending = None;
                 }
                 match failure.mapped_error {
                     SubmitError::SequenceMismatch { expected } => {
                         let stop_error: StopErrorFor<S> =
                             StopError::SubmitError(failure.original_error.clone());
-                        let recovering =
+                        let _ =
                             on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
-                        if recovering {
-                            push_plan_request(&mut plan_requests, PlanRequest::Confirmation);
-                        }
                     }
                     SubmitError::MempoolIsFull | SubmitError::NetworkError => {
                         node.shared_mut().submit_delay = Some(confirm_interval);
                     }
                     SubmitError::TxInMempoolCache => {
-                        if max_sub
-                            .map(|(_, max)| max > node.shared().last_submitted.unwrap_or(0))
-                            .unwrap_or(false)
-                        {
-                            let last = node.shared_mut().last_submitted.get_or_insert(0);
-                            *last = last.saturating_add(1);
+                        if let NodeState::Active(state) = node {
+                            on_submit_success(state, sequence);
                         }
                     }
                     SubmitError::InsufficientFee { .. } => {
@@ -528,11 +482,7 @@ impl<S: TxServer> NodeManager<S> {
                 }
             }
         }
-        push_plan_request(&mut plan_requests, PlanRequest::Submission);
-        NodeApplyOutcome {
-            mutations,
-            plan_requests,
-        }
+        mutations
     }
 
     fn handle_confirmation(
@@ -544,15 +494,11 @@ impl<S: TxServer> NodeManager<S> {
         >,
         txs: &NodeBuffer<S>,
         _confirm_interval: Duration,
-    ) -> NodeOutcome<S> {
+    ) -> MutationsFor<S> {
         let mut mutations = Vec::new();
-        let mut plan_requests = Vec::new();
 
         let Some(node) = self.nodes.get_mut(node_id) else {
-            return NodeApplyOutcome {
-                mutations,
-                plan_requests,
-            };
+            return mutations;
         };
         if state_epoch != node.epoch() {
             debug!(
@@ -562,18 +508,13 @@ impl<S: TxServer> NodeManager<S> {
                 "confirmation epoch mismatch"
             );
             node.shared_mut().confirm_inflight = false;
-            push_plan_request(&mut plan_requests, PlanRequest::Confirmation);
-            return NodeApplyOutcome {
-                mutations,
-                plan_requests,
-            };
+            return mutations;
         }
         node.shared_mut().confirm_inflight = false;
         match response {
             Ok(confirmation) => match confirmation {
                 ConfirmationResponse::Batch { statuses } => {
-                    let mut effects =
-                        process_status_batch::<S>(node_id, node, statuses, txs, &mut plan_requests);
+                    let mut effects = process_status_batch::<S>(node_id, node, statuses, txs);
                     mutations.append(&mut effects);
                 }
                 ConfirmationResponse::Single { id, status } => {
@@ -591,10 +532,7 @@ impl<S: TxServer> NodeManager<S> {
                 // TODO: add error handling
             }
         }
-        NodeApplyOutcome {
-            mutations,
-            plan_requests,
-        }
+        mutations
     }
 
     fn handle_signing(
@@ -603,21 +541,16 @@ impl<S: TxServer> NodeManager<S> {
         sequence: u64,
         result: TxSigningResult<S::TxId, S::ConfirmInfo, S::ConfirmResponse, S::SubmitError>,
         confirm_interval: Duration,
-    ) -> NodeOutcome<S> {
+    ) -> MutationsFor<S> {
         let mut mutations = Vec::new();
-        let mut plan_requests = Vec::new();
         let mut stop_error: Option<StopErrorFor<S>> = None;
         let Some(node) = self.nodes.get_mut(node_id) else {
-            return NodeApplyOutcome {
-                mutations,
-                plan_requests,
-            };
+            return mutations;
         };
         node.shared_mut().signing_inflight = false;
         match result {
             Ok(tx) => {
                 mutations.push(WorkerMutation::EnqueueSigned { tx });
-                push_plan_request(&mut plan_requests, PlanRequest::Submission);
             }
             Err(failure) => {
                 debug!(
@@ -632,12 +565,15 @@ impl<S: TxServer> NodeManager<S> {
                             stop_error = Some(StopError::SignError(failure.original_error.clone()));
                         } else {
                             self.signing_delay = Some(confirm_interval);
-                            push_plan_request(&mut plan_requests, PlanRequest::Signing);
+                            let expected_prev = expected.saturating_sub(1);
+                            let shared = node.shared_mut();
+                            shared.last_submitted = shared
+                                .last_submitted
+                                .map(|submitted| submitted.min(expected_prev));
                         }
                     }
                     SigningError::NetworkError => {
                         self.signing_delay = Some(confirm_interval);
-                        push_plan_request(&mut plan_requests, PlanRequest::Signing);
                     }
                     SigningError::Other { .. } => {
                         stop_error = Some(StopError::SignError(failure.original_error.clone()));
@@ -648,10 +584,7 @@ impl<S: TxServer> NodeManager<S> {
         if let Some(stop_error) = stop_error {
             self.stop_all_nodes(stop_error);
         }
-        NodeApplyOutcome {
-            mutations,
-            plan_requests,
-        }
+        mutations
     }
 
     fn plan_signing(&mut self, txs: &NodeBuffer<S>) -> Option<WorkerPlanFor<S>> {
@@ -660,20 +593,40 @@ impl<S: TxServer> NodeManager<S> {
             .values()
             .any(|node| node.shared().signing_inflight)
         {
+            debug!("plan_signing: skip, signing already inflight");
             return None;
         }
         if !txs.has_pending() {
+            debug!("plan_signing: skip, no pending transactions");
             return None;
         }
-        let (node_id, max_last_submitted) = self.max_active_last_submitted()?;
+        let (node_id, max_last_submitted) = match self.max_active_last_submitted() {
+            Some(result) => result,
+            None => {
+                debug!("plan_signing: skip, no active nodes");
+                return None;
+            }
+        };
         let next_sequence = txs.next_sequence();
         if max_last_submitted != 0 && next_sequence != max_last_submitted + 1 {
+            debug!(
+                node_id = %node_id.as_ref(),
+                next_sequence,
+                max_last_submitted,
+                "plan_signing: skip, next sequence not contiguous"
+            );
             return None;
         }
         let delay = self.signing_delay.take().unwrap_or_default();
         if let Some(node) = self.nodes.get_mut(&node_id) {
             node.shared_mut().signing_inflight = true;
         }
+        debug!(
+            node_id = %node_id.as_ref(),
+            sequence = next_sequence,
+            delay = ?delay,
+            "plan_signing: spawn signing"
+        );
         Some(WorkerPlan::SpawnSigning {
             node_id,
             sequence: next_sequence,
@@ -700,12 +653,6 @@ impl<S: TxServer> NodeManager<S> {
             }
             node.stop_submissions(error.clone());
         }
-    }
-}
-
-fn push_plan_request(requests: &mut Vec<PlanRequest>, request: PlanRequest) {
-    if !requests.contains(&request) {
-        requests.push(request);
     }
 }
 
@@ -748,10 +695,6 @@ fn on_submit_success(state: &mut ActiveState, sequence: u64) {
     }
 }
 
-fn on_submit_failure(state: &mut ActiveState) {
-    state.pending = None;
-}
-
 fn plan_submission<S: TxServer>(
     node_id: &NodeId,
     node: &mut NodeStateFor<S>,
@@ -760,6 +703,11 @@ fn plan_submission<S: TxServer>(
     match node {
         NodeState::Active(state) => {
             if state.pending.is_some() {
+                debug!(
+                    node_id = %node_id.as_ref(),
+                    pending = ?state.pending,
+                    "plan_submission: skip active, pending already set"
+                );
                 return None;
             }
             let next_seq = match (state.shared.last_submitted, txs.confirmed_seq()) {
@@ -768,9 +716,29 @@ fn plan_submission<S: TxServer>(
                 (None, Some(confirmed)) => confirmed.saturating_add(1),
                 (None, None) => 0,
             };
-            let tx = txs.get(next_seq)?;
+            let tx = match txs.get(next_seq) {
+                Some(tx) => tx,
+                None => {
+                    debug!(
+                        node_id = %node_id.as_ref(),
+                        next_seq,
+                        confirmed_seq = ?txs.confirmed_seq(),
+                        max_seq = ?txs.max_seq(),
+                        "plan_submission: skip active, no tx at sequence"
+                    );
+                    return None;
+                }
+            };
             let delay = state.shared.submit_delay.take().unwrap_or_default();
             state.pending = Some(next_seq);
+            debug!(
+                node_id = %node_id.as_ref(),
+                sequence = tx.sequence,
+                delay = ?delay,
+                last_submitted = ?state.shared.last_submitted,
+                last_confirmed = ?state.shared.last_confirmed,
+                "plan_submission: spawn submit"
+            );
             Some(WorkerPlan::SpawnSubmit {
                 node_id: node_id.clone(),
                 bytes: tx.bytes.clone(),
@@ -778,7 +746,14 @@ fn plan_submission<S: TxServer>(
                 delay,
             })
         }
-        NodeState::Recovering(_) | NodeState::Stopped(_) => None,
+        NodeState::Recovering(_) | NodeState::Stopped(_) => {
+            debug!(
+                node_id = %node_id.as_ref(),
+                state = %node.log_state(),
+                "plan_submission: skip, node not active"
+            );
+            None
+        }
     }
 }
 
@@ -950,7 +925,7 @@ fn on_sequence_mismatch<S: TxServer>(
     // that the transaction with higher sequence nubmer is transaction
     // made by our client and not from outside the system
     if sequence < expected {
-        let target = expected - 1;
+        let target = expected.saturating_sub(1);
         if txs.get(target).and_then(|tx| tx.id.clone()).is_none() {
             let stop_seq = stop_seq_from_last_good(shared.last_submitted, shared.last_confirmed);
             node.apply_stop_error(stop_seq, stop_error.take().unwrap());
@@ -994,7 +969,6 @@ fn process_status_batch<S: TxServer>(
     node: &mut NodeStateFor<S>,
     statuses: StatusesFor<S>,
     txs: &NodeBuffer<S>,
-    plan_requests: PlanRequestsRef<'_>,
 ) -> MutationsFor<S> {
     let mut effects: MutationsFor<S> = Vec::new();
     let mut collected = statuses
@@ -1050,7 +1024,6 @@ fn process_status_batch<S: TxServer>(
                         None => seq_minus_one,
                     };
                     shared.last_submitted = clamped;
-                    push_plan_request(plan_requests, PlanRequest::Submission);
                     break;
                 }
                 TxStatusKind::Rejected { reason } => match reason {
@@ -1093,10 +1066,7 @@ fn process_status_batch<S: TxServer>(
         }
     }
     if let Some((sequence, expected, stop_error)) = seq_mismatch {
-        let recovering = on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
-        if recovering {
-            push_plan_request(plan_requests, PlanRequest::Confirmation);
-        }
+        let _ = on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
     }
     if let Some((sequence, status)) = fatal {
         node.apply_stop_error(sequence, StopError::ConfirmError(status));
@@ -1115,7 +1085,7 @@ fn process_recover_status<S: TxServer>(
         return effects;
     };
     let mut fatal: Option<TxStatus<S::ConfirmInfo, S::ConfirmResponse>> = None;
-    let mut confirmed = false;
+    let mut active = false;
     {
         let NodeState::Recovering(state) = node else {
             return effects;
@@ -1129,14 +1099,18 @@ fn process_recover_status<S: TxServer>(
                 state.shared.last_submitted =
                     Some(state.shared.last_submitted.unwrap_or(seq).max(seq));
                 state.shared.epoch = state.shared.epoch.saturating_add(1);
-                confirmed = true;
+                active = true;
+            }
+            TxStatusKind::Evicted => {
+                state.shared.epoch = state.shared.epoch.saturating_add(1);
+                active = true;
             }
             other => {
                 fatal = Some(TxStatus::new(other, original_response));
             }
         }
     }
-    if confirmed {
+    if active {
         node.transition_to_active();
     }
     if let Some(status) = fatal {
@@ -1258,7 +1232,7 @@ mod tests {
         let mut txs = TestBuffer::new(Some(0));
         txs.add_transaction(make_tx(1, None)).unwrap();
 
-        let plans = manager.plan(&[PlanRequest::Submission], &txs, 16);
+        let plans = manager.plan(&txs, 16, false);
 
         assert!(plans.iter().any(|event| {
             matches!(
@@ -1276,7 +1250,7 @@ mod tests {
         let mut txs = TestBuffer::new(None);
         txs.add_transaction(make_tx(0, None)).unwrap();
 
-        let plans = manager.plan(&[PlanRequest::Submission], &txs, 16);
+        let plans = manager.plan(&txs, 16, false);
 
         assert!(plans.iter().any(|event| {
             matches!(
@@ -1293,7 +1267,7 @@ mod tests {
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
         let txs = TestBuffer::new(Some(0));
 
-        let outcome = manager.apply_event(
+        let _outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Submission {
@@ -1305,8 +1279,7 @@ mod tests {
             Duration::from_secs(1),
         );
 
-        assert!(outcome.plan_requests.contains(&PlanRequest::Submission));
-        assert!(outcome.mutations.iter().any(|event| {
+        assert!(outcome.iter().any(|event| {
             matches!(
                 event,
                 WorkerMutation::MarkSubmitted { sequence, id } if *sequence == 1 && *id == 10
@@ -1338,7 +1311,6 @@ mod tests {
 
         assert!(
             !outcome
-                .mutations
                 .iter()
                 .any(|event| matches!(event, WorkerMutation::Confirm { .. }))
         );
@@ -1367,7 +1339,7 @@ mod tests {
         );
 
         let mut confirmed = Vec::new();
-        for event in outcome.mutations {
+        for event in outcome {
             if let WorkerMutation::Confirm { seq, info } = event {
                 confirmed.push((seq, info));
             }
@@ -1397,9 +1369,7 @@ mod tests {
             Duration::from_secs(1),
         );
 
-        assert!(outcome.plan_requests.contains(&PlanRequest::Confirmation));
-
-        let wake = manager.plan(&outcome.plan_requests, &txs, 16);
+        let wake = manager.plan(&txs, 16, true);
 
         assert!(wake.iter().any(|event| {
             matches!(
@@ -1502,7 +1472,6 @@ mod tests {
 
         assert!(
             outcome
-                .mutations
                 .iter()
                 .any(|event| matches!(event, WorkerMutation::WorkerStop))
         );
@@ -1518,7 +1487,7 @@ mod tests {
             state.shared.signing_inflight = true;
         }
 
-        let outcome = manager.apply_event(
+        let _outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Signing {
@@ -1530,8 +1499,7 @@ mod tests {
             Duration::from_secs(1),
         );
 
-        assert!(outcome.plan_requests.contains(&PlanRequest::Submission));
-        assert!(outcome.mutations.iter().any(
+        assert!(outcome.iter().any(
             |event| matches!(event, WorkerMutation::EnqueueSigned { tx } if tx.sequence == 1)
         ));
         assert!(
@@ -1569,7 +1537,6 @@ mod tests {
             Duration::from_secs(3),
         );
 
-        assert!(outcome.plan_requests.contains(&PlanRequest::Signing));
         assert!(manager.signing_delay.is_some());
         assert!(matches!(
             manager.nodes.get(&node_id).unwrap(),
@@ -1587,7 +1554,7 @@ mod tests {
             state.shared.confirm_inflight = true;
         }
 
-        let outcome = manager.apply_event(
+        let _outcome = manager.apply_event(
             NodeEvent::NodeResponse {
                 node_id: node_id.clone(),
                 response: NodeResponse::Confirmation {
@@ -1601,8 +1568,7 @@ mod tests {
             Duration::from_secs(1),
         );
 
-        assert!(outcome.plan_requests.contains(&PlanRequest::Confirmation));
-        assert!(outcome.mutations.is_empty());
+        assert!(outcome.is_empty());
         assert!(
             !manager
                 .nodes
@@ -1640,7 +1606,6 @@ mod tests {
             Duration::from_secs(2),
         );
 
-        assert!(outcome.plan_requests.contains(&PlanRequest::Submission));
         let NodeState::Active(state) = manager.nodes.get(&node_a).unwrap() else {
             panic!("node_a should be active");
         };
@@ -1784,7 +1749,7 @@ mod tests {
         let node = manager.nodes.get_mut(&node_id).unwrap();
         node.stop_with_error(6, StopError::WorkerStopped);
 
-        let plans = manager.plan(&[PlanRequest::Confirmation], &txs, 16);
+        let plans = manager.plan(&txs, 16, true);
 
         let mut planned_ids = None;
         for plan in plans {
@@ -1816,7 +1781,7 @@ mod tests {
         let node = manager.nodes.get_mut(&node_id).unwrap();
         node.stop_with_error(0, StopError::WorkerStopped);
 
-        let plans = manager.plan(&[PlanRequest::Confirmation], &txs, 16);
+        let plans = manager.plan(&txs, 16, true);
         assert!(plans.is_empty());
     }
 

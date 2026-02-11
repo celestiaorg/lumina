@@ -663,13 +663,6 @@ pub trait TxServer: Send + Sync {
     >;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlanRequest {
-    Submission,
-    Confirmation,
-    Signing,
-}
-
 #[derive(Debug)]
 enum NodeEvent<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr> {
     NodeResponse {
@@ -711,12 +704,6 @@ impl<TxId: TxIdT, ConfirmInfo, ConfirmResponse, SubmitErr: fmt::Debug>
             },
             NodeEvent::NodeStop => "NodeStop".to_string(),
         }
-    }
-}
-
-fn push_plan_request(requests: &mut Vec<PlanRequest>, request: PlanRequest) {
-    if !requests.contains(&request) {
-        requests.push(request);
     }
 }
 
@@ -839,7 +826,7 @@ pub struct TransactionWorker<S: TxServer> {
     confirm_ticker: Interval,
     confirm_interval: Duration,
     max_status_batch: usize,
-    plan_requests: Vec<PlanRequest>,
+    should_confirm: bool,
 }
 
 /// Return type for [`TransactionWorker::new`].
@@ -888,7 +875,7 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 confirm_ticker: Interval::new(confirm_interval),
                 confirm_interval,
                 max_status_batch,
-                plan_requests: Vec::new(),
+                should_confirm: false,
             },
         )
     }
@@ -910,24 +897,23 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
         let mut shutdown_seen = false;
 
         loop {
-            if !self.plan_requests.is_empty() {
-                let plan_requests = std::mem::take(&mut self.plan_requests);
-                let plans =
-                    self.nodes
-                        .plan(&plan_requests, &self.transactions, self.max_status_batch);
-                self.execute_plans(plans, shutdown.clone());
+            let plans = self.nodes.plan(
+                &self.transactions,
+                self.max_status_batch,
+                self.should_confirm,
+            );
+            if self.should_confirm {
+                self.should_confirm = false;
             }
+            self.execute_plans(plans, shutdown.clone());
 
             if let Some(event) = current_event.take() {
-                let outcome =
+                let mutations =
                     self.nodes
                         .apply_event(event, &self.transactions, self.confirm_interval);
-                let stop = self.apply_mutations(outcome.mutations)?;
+                let stop = self.apply_mutations(mutations)?;
                 if stop {
                     break;
-                }
-                for request in outcome.plan_requests {
-                    push_plan_request(&mut self.plan_requests, request);
                 }
                 continue;
             }
@@ -939,11 +925,10 @@ impl<S: TxServer + 'static> TransactionWorker<S> {
                 tx = self.add_tx_rx.recv() => {
                     if let Some(tx) = tx {
                         self.enqueue_pending(tx)?;
-                        push_plan_request(&mut self.plan_requests, PlanRequest::Signing);
                     }
                 }
                 _ = self.confirm_ticker.tick() => {
-                    push_plan_request(&mut self.plan_requests, PlanRequest::Confirmation);
+                    self.should_confirm = true;
                 }
                 result = self.submissions.next(), if !self.submissions.is_empty() => {
                     if let Some(Some(result)) = result {
