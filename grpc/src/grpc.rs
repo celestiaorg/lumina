@@ -31,7 +31,7 @@ mod blob;
 // cosmos.tx
 mod cosmos_tx;
 
-pub use crate::grpc::celestia_tx::{TxStatus, TxStatusResponse};
+pub use crate::grpc::celestia_tx::{TxStatus, TxStatusBatchResponse, TxStatusResponse};
 pub use crate::grpc::cosmos_tx::{BroadcastMode, GetTxResponse};
 pub use crate::grpc::gas_estimation::{GasEstimate, TxPriority};
 pub use crate::grpc::node::ConfigResponse;

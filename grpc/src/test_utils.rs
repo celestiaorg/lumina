@@ -2,11 +2,13 @@ use celestia_types::state::{AccAddress, Address};
 use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
 use tendermint::public_key::Secp256k1 as VerifyingKey;
 
+#[allow(unused_imports)]
 pub use imp::*;
 
 /// [`TestAccount`] stores celestia account credentials and information, for cases where we don't
 /// mind just keeping the plaintext secret key in memory
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TestAccount {
     /// Bech32 `AccountId` of this account
     pub address: Address,
@@ -17,6 +19,7 @@ pub struct TestAccount {
     pub signing_key: SigningKey,
 }
 
+#[allow(dead_code)]
 impl TestAccount {
     pub fn random() -> Self {
         let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
@@ -41,6 +44,7 @@ impl TestAccount {
     }
 }
 
+#[allow(dead_code)]
 pub fn load_account() -> TestAccount {
     let hex_key = include_str!("../../ci/credentials/node-0.plaintext-key").trim();
 
@@ -48,6 +52,7 @@ pub fn load_account() -> TestAccount {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 mod imp {
     use std::{convert::Infallible, future::Future, net::SocketAddr, sync::Arc, sync::OnceLock};
 
@@ -219,6 +224,7 @@ mod imp {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
 mod imp {
     use std::future::Future;
 
