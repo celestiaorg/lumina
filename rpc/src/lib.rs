@@ -20,7 +20,9 @@ mod state;
 mod tx_config;
 
 pub use crate::blob::BlobClient;
+pub use crate::blob::BlobServer;
 pub use crate::blobstream::BlobstreamClient;
+pub use crate::blobstream::BlobstreamServer;
 #[cfg(any(
     not(target_arch = "wasm32"),
     all(target_arch = "wasm32", feature = "wasm-bindgen")
@@ -36,25 +38,35 @@ pub use crate::client::Client;
 pub use crate::das::DasClient;
 pub use crate::error::{Error, Result};
 pub use crate::fraud::FraudClient;
+pub use crate::fraud::FraudServer;
 pub use crate::header::HeaderClient;
+pub use crate::header::HeaderServer;
 #[cfg(feature = "p2p")]
 #[cfg_attr(docsrs, doc(cfg(feature = "p2p")))]
 pub use crate::p2p::P2PClient;
 pub use crate::share::ShareClient;
+pub use crate::share::ShareServer;
 pub use crate::state::StateClient;
+pub use crate::state::StateServer;
 pub use crate::tx_config::{TxConfig, TxPriority};
 
 /// Re-exports of all the RPC traits.
 pub mod prelude {
     pub use crate::BlobClient;
+    pub use crate::BlobServer;
     pub use crate::BlobstreamClient;
+    pub use crate::BlobstreamServer;
     pub use crate::DasClient;
     pub use crate::FraudClient;
+    pub use crate::FraudServer;
     pub use crate::HeaderClient;
+    pub use crate::HeaderServer;
     #[cfg(feature = "p2p")]
     pub use crate::P2PClient;
     pub use crate::ShareClient;
+    pub use crate::ShareServer;
     pub use crate::StateClient;
+    pub use crate::StateServer;
 }
 
 // helper to map errors to jsonrpsee using Display

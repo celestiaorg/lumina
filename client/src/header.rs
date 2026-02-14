@@ -60,7 +60,11 @@ impl HeaderApi {
     ) -> Result<Vec<ExtendedHeader>> {
         from.validate()?;
 
-        let headers = self.inner.rpc.header_get_range_by_height(from, to).await?;
+        let headers = self
+            .inner
+            .rpc
+            .header_get_range_by_height(from.clone(), to)
+            .await?;
 
         for header in &headers {
             header.validate()?;
