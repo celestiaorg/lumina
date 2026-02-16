@@ -348,3 +348,5 @@ fn is_ods_square(row: u16, column: u16, square_width: u16) -> bool {
 pub trait ShareServer: rpc::ShareServer {}
 
 impl<T> ShareServer for T where T: rpc::ShareServer {}
+
+pub use rpc::ShareServer as ShareRpcServer;

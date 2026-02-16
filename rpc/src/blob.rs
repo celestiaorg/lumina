@@ -209,3 +209,6 @@ pub trait BlobServer: rpc::BlobServer + rpc::BlobSubscriptionServer {}
 impl<T> BlobServer for T where T: rpc::BlobServer + rpc::BlobSubscriptionServer {}
 
 impl<T> BlobClient for T where T: ClientT {}
+
+pub use rpc::BlobServer as BlobRpcServer;
+pub use rpc::BlobSubscriptionServer as BlobSubscriptionRpcServer;

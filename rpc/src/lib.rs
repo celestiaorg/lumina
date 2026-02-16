@@ -20,8 +20,11 @@ mod state;
 mod tx_config;
 
 pub use crate::blob::BlobClient;
+pub use crate::blob::BlobRpcServer;
 pub use crate::blob::BlobServer;
+pub use crate::blob::BlobSubscriptionRpcServer;
 pub use crate::blobstream::BlobstreamClient;
+pub use crate::blobstream::BlobstreamRpcServer;
 pub use crate::blobstream::BlobstreamServer;
 #[cfg(any(
     not(target_arch = "wasm32"),
@@ -38,13 +41,18 @@ pub use crate::client::Client;
 pub use crate::das::DasClient;
 pub use crate::error::{Error, Result};
 pub use crate::fraud::FraudClient;
+pub use crate::fraud::FraudRpcServer;
 pub use crate::fraud::FraudServer;
+pub use crate::fraud::FraudSubscriptionRpcServer;
 pub use crate::header::HeaderClient;
+pub use crate::header::HeaderRpcServer;
 pub use crate::header::HeaderServer;
+pub use crate::header::HeaderSubscriptionRpcServer;
 #[cfg(feature = "p2p")]
 #[cfg_attr(docsrs, doc(cfg(feature = "p2p")))]
 pub use crate::p2p::P2PClient;
 pub use crate::share::ShareClient;
+pub use crate::share::ShareRpcServer;
 pub use crate::share::ShareServer;
 pub use crate::state::StateClient;
 pub use crate::state::StateServer;
@@ -53,17 +61,24 @@ pub use crate::tx_config::{TxConfig, TxPriority};
 /// Re-exports of all the RPC traits.
 pub mod prelude {
     pub use crate::BlobClient;
+    pub use crate::BlobRpcServer;
     pub use crate::BlobServer;
+    pub use crate::BlobSubscriptionRpcServer;
     pub use crate::BlobstreamClient;
-    pub use crate::BlobstreamServer;
+    pub use crate::BlobstreamRpcServer;
     pub use crate::DasClient;
     pub use crate::FraudClient;
+    pub use crate::FraudRpcServer;
     pub use crate::FraudServer;
+    pub use crate::FraudSubscriptionRpcServer;
     pub use crate::HeaderClient;
+    pub use crate::HeaderRpcServer;
     pub use crate::HeaderServer;
+    pub use crate::HeaderSubscriptionRpcServer;
     #[cfg(feature = "p2p")]
     pub use crate::P2PClient;
     pub use crate::ShareClient;
+    pub use crate::ShareRpcServer;
     pub use crate::ShareServer;
     pub use crate::StateClient;
     pub use crate::StateServer;

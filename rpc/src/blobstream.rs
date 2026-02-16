@@ -98,3 +98,5 @@ pub trait BlobstreamServer: rpc::BlobstreamServer {}
 impl<T> BlobstreamClient for T where T: ClientT {}
 
 impl<T> BlobstreamServer for T where T: rpc::BlobstreamServer {}
+
+pub use rpc::BlobstreamServer as BlobstreamRpcServer;

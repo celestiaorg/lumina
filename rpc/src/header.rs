@@ -196,3 +196,6 @@ impl<T> HeaderClient for T where T: ClientT {}
 pub trait HeaderServer: rpc::HeaderServer + rpc::HeaderSubscriptionServer {}
 
 impl<T> HeaderServer for T where T: rpc::HeaderServer + rpc::HeaderSubscriptionServer {}
+
+pub use rpc::HeaderServer as HeaderRpcServer;
+pub use rpc::HeaderSubscriptionServer as HeaderSubscriptionRpcServer;

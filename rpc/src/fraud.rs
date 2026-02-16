@@ -106,3 +106,6 @@ impl<T> FraudClient for T where T: ClientT {}
 pub trait FraudServer: rpc::FraudServer + rpc::FraudSubscriptionServer {}
 
 impl<T> FraudServer for T where T: rpc::FraudServer + rpc::FraudSubscriptionServer {}
+
+pub use rpc::FraudServer as FraudRpcServer;
+pub use rpc::FraudSubscriptionServer as FraudSubscriptionRpcServer;
