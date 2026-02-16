@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/celestiaorg/lumina/compare/celestia-client-v0.5.0...celestia-client-v0.5.1) - 2026-02-16
+
+### Added
+
+- tx client v2 ([#873](https://github.com/celestiaorg/lumina/pull/873))
+
 ## [0.5.0](https://github.com/celestiaorg/lumina/compare/celestia-client-v0.4.1...celestia-client-v0.5.0) - 2026-01-27
 
 ### Added
