@@ -21,11 +21,14 @@ use crate::nmt::{NS_SIZE, Namespace, NamespacedHash, NamespacedHashExt};
 use crate::{
     Blob, DataAvailabilityHeader, ExtendedDataSquare, ExtendedHeader, Share, ValidatorSet,
 };
+#[cfg(all(feature = "wasm-bindgen", target_arch = "wasm32"))]
+use wasm_bindgen::prelude::*;
 
 /// [`ExtendedHeader`] generator for testing purposes.
 ///
 /// **WARNING: ALL METHODS PANIC! DO NOT USE IT IN PRODUCTION!**
 #[derive(Debug, Clone)]
+#[cfg_attr(all(feature = "wasm-bindgen", target_arch = "wasm32"), wasm_bindgen)]
 pub struct ExtendedHeaderGenerator {
     chain_id: chain::Id,
     key: SigningKey,
@@ -327,6 +330,47 @@ impl ExtendedHeaderGenerator {
 impl Default for ExtendedHeaderGenerator {
     fn default() -> Self {
         ExtendedHeaderGenerator::new()
+    }
+}
+
+#[cfg(all(feature = "wasm-bindgen", target_arch = "wasm32"))]
+#[wasm_bindgen]
+impl ExtendedHeaderGenerator {
+    /// Creates new `ExtendedHeaderGenerator` starting from specified height.
+    ///
+    /// ```
+    /// use celestia_types::test_utils::ExtendedHeaderGenerator;
+    ///
+    /// let mut gen = ExtendedHeaderGenerator::new_from_height(5);
+    /// let header5 = gen.next();
+    /// ```
+    #[wasm_bindgen(constructor, js_name = new)]
+    pub fn js_new(from_height: Option<u64>) -> ExtendedHeaderGenerator {
+        if let Some(height) = from_height {
+            ExtendedHeaderGenerator::new_from_height(height)
+        } else {
+            ExtendedHeaderGenerator::new()
+        }
+    }
+
+    /// Generates the next header.
+    ///
+    /// ```
+    /// use celestia_types::test_utils::ExtendedHeaderGenerator;
+    ///
+    /// let mut gen = ExtendedHeaderGenerator::new();
+    /// let header1 = gen.next();
+    /// ```
+    #[wasm_bindgen(js_name = next)]
+    pub fn js_next(&mut self) -> ExtendedHeader {
+        let time = self.get_and_increment_time(1);
+        let header = match self.current_header {
+            Some(ref header) => generate_next(1, header, time, &self.key, None),
+            None => generate_new(GENESIS_HEIGHT, &self.chain_id, time, &self.key, None),
+        };
+
+        self.current_header = Some(header.clone());
+        header
     }
 }
 

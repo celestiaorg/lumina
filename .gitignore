@@ -2,4 +2,8 @@ target
 /.env
 /.ccls-cache
 
+# for vitest
+node_modules
+**/__screenshots__
+
 /.direnv
