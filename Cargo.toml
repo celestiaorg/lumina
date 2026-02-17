@@ -12,6 +12,7 @@ members = [
   "rpc",
   "types",
   "utils",
+  "xtask",
 ]
 
 [workspace.package]
