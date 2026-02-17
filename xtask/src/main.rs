@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let orchestrator = Orchestrator::new(cli.workspace_root.clone())?;
 
     match cli.command {
-        Commands::ReleaseCheck(args) => {
+        Commands::Check(args) => {
             let report = orchestrator.release_check(to_context(args.common)).await?;
             output::maybe_print_json(args.json, &report)?;
         }
@@ -36,8 +36,8 @@ async fn main() -> Result<()> {
                 .await?;
             output::maybe_print_json(args.json, &report)?;
         }
-        Commands::Release(args) => {
-            let report = orchestrator.release(to_context(args.common)).await?;
+        Commands::Publish(args) => {
+            let report = orchestrator.publish(to_context(args.common)).await?;
             output::maybe_print_json(args.json, &report)?;
         }
         Commands::Execute(args) => {
@@ -45,7 +45,6 @@ async fn main() -> Result<()> {
                 .execute(ExecuteArgs {
                     ctx: to_context(args.common),
                     dry_run: args.dry_run,
-                    do_release: args.do_release,
                 })
                 .await?;
             output::maybe_print_json(args.json, &report)?;

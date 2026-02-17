@@ -12,10 +12,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    ReleaseCheck(ReleaseCheckArgs),
+    Check(CheckArgs),
     Prepare(PrepareArgs),
     Submit(SubmitArgs),
-    Release(ReleaseArgs),
+    Publish(PublishArgs),
     Execute(ExecuteArgs),
 }
 
@@ -47,7 +47,7 @@ pub struct CommonArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct ReleaseCheckArgs {
+pub struct CheckArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
@@ -77,7 +77,7 @@ pub struct SubmitArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct ReleaseArgs {
+pub struct PublishArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
@@ -92,9 +92,6 @@ pub struct ExecuteArgs {
 
     #[arg(long)]
     pub dry_run: bool,
-
-    #[arg(long)]
-    pub do_release: bool,
 
     #[arg(long)]
     pub json: bool,

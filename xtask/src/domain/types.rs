@@ -12,10 +12,10 @@ pub enum ReleaseMode {
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum CommandKind {
-    ReleaseCheck,
+    Check,
     Prepare,
     Submit,
-    Release,
+    Publish,
     Execute,
 }
 
@@ -230,6 +230,5 @@ pub struct ExecuteReport {
     pub check: ReleaseCheckReport,
     pub prepare: PrepareReport,
     pub submit: SubmitReport,
-    pub release: Option<ReleaseReport>,
     pub stage: ExecutionStage,
 }

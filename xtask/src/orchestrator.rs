@@ -25,7 +25,6 @@ pub struct SubmitArgs {
 pub struct ExecuteArgs {
     pub ctx: ReleaseContext,
     pub dry_run: bool,
-    pub do_release: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -230,53 +229,15 @@ impl Orchestrator {
         })
     }
 
-    pub async fn release(&self, ctx: ReleaseContext) -> Result<ReleaseReport> {
-        let (check, prepare, submit) = self.run_pre_release_pipeline(ctx.clone(), false).await?;
-        let publish_payload = self.release_engine.publish(&ctx).await?;
-        let published = !publish_payload.is_null()
-            && !publish_payload
-                .as_array()
-                .is_some_and(|releases| releases.is_empty());
-
-        Ok(ReleaseReport {
-            mode: ctx.mode,
-            published,
-            payload: serde_json::json!({
-                "check": check,
-                "prepare": prepare,
-                "submit": submit,
-                "publish": publish_payload
-            }),
-            stage: ExecutionStage::Released,
-        })
-    }
-
     pub async fn execute(&self, args: ExecuteArgs) -> Result<ExecuteReport> {
         let (check, prepare, submit) = self
             .run_pre_release_pipeline(args.ctx.clone(), args.dry_run)
             .await?;
 
-        let release = if args.do_release {
-            let publish_payload = self.release_engine.publish(&args.ctx).await?;
-            let published = !publish_payload.is_null()
-                && !publish_payload
-                    .as_array()
-                    .is_some_and(|releases| releases.is_empty());
-            Some(ReleaseReport {
-                mode: args.ctx.mode,
-                published,
-                payload: publish_payload,
-                stage: ExecutionStage::Released,
-            })
-        } else {
-            None
-        };
-
         Ok(ExecuteReport {
             check,
             prepare,
             submit,
-            release,
             stage: ExecutionStage::Executed,
         })
     }
@@ -302,6 +263,20 @@ impl Orchestrator {
             })
             .await?;
         Ok((check, prepare, submit))
+    }
+
+    pub async fn publish(&self, ctx: ReleaseContext) -> Result<ReleaseReport> {
+        let publish_payload = self.release_engine.publish(&ctx).await?;
+        let published = !publish_payload.is_null()
+            && !publish_payload
+                .as_array()
+                .is_some_and(|releases| releases.is_empty());
+        Ok(ReleaseReport {
+            mode: ctx.mode,
+            published,
+            payload: publish_payload,
+            stage: ExecutionStage::Released,
+        })
     }
 }
 
