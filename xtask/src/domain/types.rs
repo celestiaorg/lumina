@@ -148,6 +148,7 @@ impl ReleaseContext {
         }
     }
 
+    #[allow(dead_code)]
     pub fn resolved_branch_name(&self) -> String {
         if let Some(name) = &self.branch_name {
             return name.clone();

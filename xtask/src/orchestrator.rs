@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
+use time::{OffsetDateTime, format_description::FormatItem, macros::format_description};
 
 use crate::app::checks::run_strict_release_simulation;
 use crate::domain::types::{
@@ -93,9 +94,14 @@ impl Orchestrator {
         ctx: ReleaseContext,
         check: ReleaseCheckReport,
     ) -> Result<PrepareReport> {
-        let mut branch_name = ctx.resolved_branch_name();
-        self.git
-            .validate_branch_name(ctx.mode, &branch_name, &ctx.rc_branch_prefix)?;
+        let mut branch_name = ctx
+            .branch_name
+            .clone()
+            .unwrap_or_else(|| generated_release_branch_name(ctx.mode));
+        if ctx.branch_name.is_some() {
+            self.git
+                .validate_branch_name(ctx.mode, &branch_name, &ctx.rc_branch_prefix)?;
+        }
 
         let branch_state = self.git.branch_state(&branch_name)?;
         let update_strategy = match branch_state {
@@ -125,13 +131,7 @@ impl Orchestrator {
                     .github
                     .close_open_release_pr(&ctx, &branch_name)
                     .await?;
-                let recreated_branch = format!(
-                    "{branch_name}-recreate-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                );
+                let recreated_branch = generated_release_branch_name(ctx.mode);
                 self.git
                     .create_release_branch_from_default(&recreated_branch, &ctx.default_branch)?;
                 branch_name = recreated_branch.clone();
@@ -165,7 +165,8 @@ impl Orchestrator {
         let mut branch_name = args
             .branch_name_override
             .clone()
-            .unwrap_or_else(|| args.ctx.resolved_branch_name());
+            .or_else(|| args.ctx.branch_name.clone())
+            .unwrap_or_else(|| generated_release_branch_name(args.ctx.mode));
         let external_contributors = self
             .github
             .has_external_contributors_on_open_release_pr(&args.ctx, &branch_name)
@@ -191,13 +192,7 @@ impl Orchestrator {
                     .await?;
                 self.git
                     .stage_all_and_commit(&commit_message, args.dry_run)?;
-                let recreated_branch = format!(
-                    "{branch_name}-recreate-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                );
+                let recreated_branch = generated_release_branch_name(args.ctx.mode);
                 self.git
                     .create_branch_from_current(&recreated_branch, args.dry_run)?;
                 self.git
@@ -308,4 +303,17 @@ impl Orchestrator {
             .await?;
         Ok((check, prepare, submit))
     }
+}
+
+fn generated_release_branch_name(mode: crate::domain::types::ReleaseMode) -> String {
+    static FORMAT: &[FormatItem<'static>] =
+        format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]Z");
+    let timestamp = OffsetDateTime::now_utc()
+        .format(FORMAT)
+        .unwrap_or_else(|_| "1970-01-01T00-00-00Z".to_string());
+    let suffix = match mode {
+        crate::domain::types::ReleaseMode::Rc => "rc",
+        crate::domain::types::ReleaseMode::Final => "final",
+    };
+    format!("lumina/release-plz-{timestamp}-{suffix}")
 }
