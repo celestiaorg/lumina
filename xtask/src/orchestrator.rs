@@ -62,6 +62,8 @@ impl Orchestrator {
             baseline_policy: computation.baseline_policy,
             default_branch: ctx.default_branch,
             base_commit: ctx.base_commit,
+            comparison_commit: computation.comparison_commit,
+            comparison_versions: computation.comparison_versions,
             plans: computation
                 .plans
                 .iter()
@@ -151,6 +153,8 @@ impl Orchestrator {
             branch_name,
             branch_state,
             update_strategy,
+            comparison_commit: check.comparison_commit,
+            comparison_versions: check.comparison_versions,
             plans: check.plans,
             actions,
             stage: ExecutionStage::Prepared,

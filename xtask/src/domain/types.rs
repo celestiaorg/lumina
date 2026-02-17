@@ -98,6 +98,13 @@ pub struct PackagePlanView {
     pub publishable: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComparisonPackageVersionView {
+    pub package: String,
+    pub version: String,
+    pub publishable: bool,
+}
+
 impl PackagePlan {
     pub fn as_view(&self) -> PackagePlanView {
         PackagePlanView {
@@ -118,6 +125,7 @@ pub struct ReleaseContext {
     pub branch_name: Option<String>,
     pub rc_branch_prefix: String,
     pub final_branch_prefix: String,
+    pub skip_pr: bool,
     pub auth: AuthContext,
 }
 
@@ -176,6 +184,8 @@ pub struct ReleaseCheckReport {
     pub baseline_policy: BaselinePolicy,
     pub default_branch: String,
     pub base_commit: Option<String>,
+    pub comparison_commit: String,
+    pub comparison_versions: Vec<ComparisonPackageVersionView>,
     pub plans: Vec<PackagePlanView>,
     pub strict_simulation_applied: bool,
     pub validation_issues: Vec<ValidationIssue>,
@@ -188,6 +198,8 @@ pub struct PrepareReport {
     pub branch_name: String,
     pub branch_state: BranchState,
     pub update_strategy: UpdateStrategy,
+    pub comparison_commit: String,
+    pub comparison_versions: Vec<ComparisonPackageVersionView>,
     pub plans: Vec<PackagePlanView>,
     pub actions: Vec<String>,
     pub stage: ExecutionStage,

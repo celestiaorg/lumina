@@ -13,4 +13,5 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 release_plz_core = "0.36.11"
 git2 = "0.20.2"
+tempfile = "3.23.0"
 toml = "0.8"

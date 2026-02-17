@@ -63,6 +63,7 @@ fn to_context(common: cli::CommonArgs) -> ReleaseContext {
         branch_name: common.branch_name,
         rc_branch_prefix: common.rc_branch_prefix,
         final_branch_prefix: common.final_branch_prefix,
+        skip_pr: common.skip_pr,
         auth: domain::types::AuthContext::from_env(),
     }
 }

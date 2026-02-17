@@ -1,13 +1,20 @@
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::semver::Version;
 use git2::build::CheckoutBuilder;
 use git2::{
-    AutotagOption, Config, Cred, CredentialType, DiffOptions, FetchOptions, ObjectType, Oid,
-    RemoteCallbacks, Repository, Sort,
+    AutotagOption, BranchType, Config, Cred, CredentialType, DiffOptions, FetchOptions, ObjectType,
+    Oid, RemoteCallbacks, Repository, Sort,
 };
+use tempfile::TempDir;
+
+#[derive(Debug)]
+pub struct RepoSnapshot {
+    pub temp_dir: TempDir,
+    pub repo_root: PathBuf,
+}
 
 pub fn resolve_comparison_commit(
     workspace_root: &Path,
@@ -28,8 +35,6 @@ pub fn resolve_comparison_commit(
         return Ok(commit_oid.to_string());
     }
 
-    let _ = fetch_origin_branch(&repo, default_branch);
-
     if let Some(oid) = resolve_branch_tip_oid(&repo, default_branch) {
         return Ok(oid.to_string());
     }
@@ -37,9 +42,38 @@ pub fn resolve_comparison_commit(
     bail!("failed to resolve comparison commit for default branch `{default_branch}`")
 }
 
-pub fn checkout_commit(workspace_root: &Path, commit: &str) -> Result<()> {
+pub fn clone_workspace_to_temp(workspace_root: &Path) -> Result<RepoSnapshot> {
+    let source = workspace_root
+        .to_str()
+        .context("workspace path is not valid UTF-8")?;
+    let temp_dir = tempfile::tempdir().context("failed to create temporary directory")?;
+    let workspace_name = workspace_root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("workspace");
+    let repo_root = temp_dir.path().join(workspace_name);
+
+    git2::build::RepoBuilder::new()
+        .clone(source, &repo_root)
+        .with_context(|| {
+            format!(
+                "failed to clone workspace repository from `{}` into `{}`",
+                workspace_root.display(),
+                repo_root.display()
+            )
+        })?;
+
+    Ok(RepoSnapshot {
+        temp_dir,
+        repo_root,
+    })
+}
+
+pub fn checkout_commit(workspace_root: &Path, commit: &str, default_branch: &str) -> Result<()> {
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
+
+    let _ = fetch_origin_branch(&repo, default_branch);
 
     let object = repo
         .revparse_single(commit)
@@ -48,12 +82,27 @@ pub fn checkout_commit(workspace_root: &Path, commit: &str) -> Result<()> {
         .peel_to_commit()
         .with_context(|| format!("failed to peel `{commit}` to commit"))?;
 
+    let short_oid = target_commit.id().to_string();
+    let branch_name = format!("xtask/snapshot-{}", &short_oid[..12]);
+    repo.branch(&branch_name, &target_commit, true)
+        .with_context(|| format!("failed to create snapshot branch `{branch_name}`"))?;
+
     let mut checkout = CheckoutBuilder::new();
     checkout.force();
     repo.checkout_tree(target_commit.as_object(), Some(&mut checkout))
         .with_context(|| format!("failed to checkout commit `{commit}`"))?;
-    repo.set_head_detached(target_commit.id())
-        .with_context(|| format!("failed to detach HEAD at `{commit}`"))?;
+    repo.set_head(&format!("refs/heads/{branch_name}"))
+        .with_context(|| format!("failed to set HEAD to snapshot branch `{branch_name}`"))?;
+
+    let mut local_branch = repo
+        .find_branch(&branch_name, BranchType::Local)
+        .with_context(|| format!("failed to resolve snapshot branch `{branch_name}`"))?;
+    let upstream = format!("origin/{default_branch}");
+    if repo.find_branch(&upstream, BranchType::Remote).is_ok() {
+        local_branch
+            .set_upstream(Some(&upstream))
+            .with_context(|| format!("failed to set upstream `{upstream}`"))?;
+    }
 
     Ok(())
 }
@@ -121,6 +170,14 @@ pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String
     .context("failed to iterate changed files in diff")?;
 
     Ok(files.into_iter().collect())
+}
+
+pub fn commit_for_tag(repo_root: &Path, tag: &str) -> Result<String> {
+    let repo = Repository::open(repo_root)
+        .with_context(|| format!("failed to open repository at {}", repo_root.display()))?;
+    let commit = resolve_tag_to_commit(&repo, tag)
+        .with_context(|| format!("failed to resolve commit for tag `{tag}`"))?;
+    Ok(commit.id().to_string())
 }
 
 #[derive(Debug, Clone, Copy)]

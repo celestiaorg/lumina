@@ -38,6 +38,12 @@ pub struct CommonArgs {
 
     #[arg(long, default_value = "release")]
     pub final_branch_prefix: String,
+
+    #[arg(
+        long,
+        help = "Run full release flow but skip opening/closing GitHub PRs"
+    )]
+    pub skip_pr: bool,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -71,7 +71,9 @@ impl GitRepoOps {
             return Ok(());
         }
 
-        fetch_origin_branch(&repo, default_branch)?;
+        if has_origin_remote(&repo) {
+            fetch_origin_branch(&repo, default_branch)?;
+        }
 
         if remote_branch_exists(&repo, branch_name) {
             create_local_from_remote_tracking(&repo, branch_name)?;
@@ -90,14 +92,24 @@ impl GitRepoOps {
         default_branch: &str,
     ) -> Result<Vec<String>> {
         let repo = self.repo()?;
-        fetch_origin_branch(&repo, default_branch)?;
+        let fetched_origin = if has_origin_remote(&repo) {
+            fetch_origin_branch(&repo, default_branch)?;
+            true
+        } else {
+            false
+        };
         drop(repo);
 
         self.ensure_branch_exists(branch_name, default_branch)?;
-        Ok(vec![
-            "fetched origin".to_string(),
-            "created release branch from latest default branch".to_string(),
-        ])
+        let mut actions = Vec::new();
+        if fetched_origin {
+            actions.push("fetched origin".to_string());
+            actions.push("created release branch from latest default branch".to_string());
+        } else {
+            actions.push("origin remote missing; used local default branch refs".to_string());
+            actions.push("created release branch from local default branch".to_string());
+        }
+        Ok(actions)
     }
 
     pub fn refresh_existing_release_branch(
@@ -120,7 +132,12 @@ impl GitRepoOps {
             actions.push("stashed local changes".to_string());
         }
 
-        fetch_origin_branch(&repo, default_branch)?;
+        if has_origin_remote(&repo) {
+            fetch_origin_branch(&repo, default_branch)?;
+            actions.push("fetched origin".to_string());
+        } else {
+            actions.push("origin remote missing; skipped fetch and used local refs".to_string());
+        }
         drop(repo);
 
         self.ensure_branch_exists(branch_name, default_branch)?;
@@ -272,6 +289,10 @@ impl GitRepoOps {
 
 fn local_branch_exists(repo: &Repository, branch_name: &str) -> bool {
     repo.find_branch(branch_name, BranchType::Local).is_ok()
+}
+
+fn has_origin_remote(repo: &Repository) -> bool {
+    repo.find_remote("origin").is_ok()
 }
 
 fn remote_branch_exists(repo: &Repository, branch_name: &str) -> bool {

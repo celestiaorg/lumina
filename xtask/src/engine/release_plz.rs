@@ -8,18 +8,30 @@ use release_plz_core::set_version::{
 use release_plz_core::update_request::UpdateRequest;
 use serde::Deserialize;
 
-use crate::domain::types::{BaselinePolicy, PackagePlan, ReleaseContext, ReleaseMode};
+use crate::domain::types::{
+    BaselinePolicy, ComparisonPackageVersionView, PackagePlan, ReleaseContext, ReleaseMode,
+};
 use crate::domain::versioning::{convert_release_version_to_rc, to_stable_if_prerelease};
 use crate::infra::git_refs::{
-    changed_files_since_tag, checkout_commit, latest_non_rc_release_tag_on_branch,
-    latest_release_tag_on_branch, remote_origin_url, resolve_comparison_commit,
+    changed_files_since_tag, checkout_commit, clone_workspace_to_temp, commit_for_tag,
+    latest_non_rc_release_tag_on_branch, latest_release_tag_on_branch, remote_origin_url,
+    resolve_comparison_commit,
 };
-use crate::infra::metadata::{copied_workspace_manifest_path, metadata_for_manifest};
+use crate::infra::metadata::metadata_for_manifest;
 
 #[derive(Debug, Clone)]
 pub struct ReleaseComputation {
     pub baseline_policy: BaselinePolicy,
+    pub comparison_commit: String,
+    pub comparison_versions: Vec<ComparisonPackageVersionView>,
     pub plans: Vec<PackagePlan>,
+}
+
+#[derive(Debug, Clone)]
+struct PlansFromContext {
+    comparison_commit: String,
+    comparison_versions: Vec<ComparisonPackageVersionView>,
+    plans: Vec<PackagePlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,11 +45,6 @@ impl ReleasePlzEngine {
     }
 
     pub async fn compute(&self, ctx: &ReleaseContext) -> Result<ReleaseComputation> {
-        let metadata = MetadataCommand::new()
-            .current_dir(&self.workspace_root)
-            .exec()
-            .context("failed to load cargo metadata for workspace")?;
-
         if matches!(ctx.mode, ReleaseMode::Final)
             && latest_non_rc_release_tag_on_branch(&self.workspace_root, &ctx.default_branch)?
                 .is_none()
@@ -45,35 +52,59 @@ impl ReleasePlzEngine {
             anyhow::bail!("final mode requires at least one non-RC release tag");
         }
 
-        let plans = self.compute_plans_for_context(&metadata, ctx).await?;
+        let from_context = self.compute_plans_for_context(ctx).await?;
 
         Ok(ReleaseComputation {
             baseline_policy: ctx.baseline_policy(),
-            plans,
+            comparison_commit: from_context.comparison_commit,
+            comparison_versions: from_context.comparison_versions,
+            plans: from_context.plans,
         })
     }
 
-    async fn compute_plans_for_context(
-        &self,
-        workspace_metadata: &Metadata,
-        ctx: &ReleaseContext,
-    ) -> Result<Vec<PackagePlan>> {
+    async fn compute_plans_for_context(&self, ctx: &ReleaseContext) -> Result<PlansFromContext> {
         let comparison_commit = resolve_comparison_commit(
             &self.workspace_root,
             &ctx.default_branch,
             ctx.base_commit.as_deref(),
         )?;
-        let temp_dir = release_plz_core::copy_to_temp_dir(&workspace_metadata.workspace_root)?;
-        let temp_manifest = copied_workspace_manifest_path(workspace_metadata, temp_dir.path())?;
-        let temp_workspace_root = temp_manifest
-            .parent()
-            .context("failed to resolve copied workspace root")?;
+        let snapshot = clone_workspace_to_temp(&self.workspace_root)?;
+        let _hold_temp_dir = &snapshot.temp_dir;
+        let temp_workspace_root = snapshot.repo_root.as_path();
+        let temp_manifest = temp_workspace_root.join("Cargo.toml");
 
-        checkout_commit(temp_workspace_root, &comparison_commit)?;
+        checkout_commit(temp_workspace_root, &comparison_commit, &ctx.default_branch)?;
 
         let temp_metadata = metadata_for_manifest(&temp_manifest)?;
-        self.compute_plans_for_snapshot(&temp_metadata, temp_workspace_root, ctx)
-            .await
+        let mut reported_comparison_commit = comparison_commit.clone();
+        let mut reported_comparison_versions = comparison_versions_from_metadata(&temp_metadata);
+
+        if matches!(ctx.mode, ReleaseMode::Final) {
+            let baseline_tag =
+                latest_non_rc_release_tag_on_branch(temp_workspace_root, &ctx.default_branch)?
+                    .context(
+                        "final mode requires latest non-RC release tag for baseline reporting",
+                    )?;
+            let baseline_commit = commit_for_tag(temp_workspace_root, &baseline_tag)?;
+
+            checkout_commit(temp_workspace_root, &baseline_commit, &ctx.default_branch)?;
+            let baseline_metadata = metadata_for_manifest(&temp_manifest)?;
+            reported_comparison_commit = baseline_commit;
+            reported_comparison_versions = comparison_versions_from_metadata(&baseline_metadata);
+
+            // Restore snapshot to the comparison commit used for plan generation.
+            checkout_commit(temp_workspace_root, &comparison_commit, &ctx.default_branch)?;
+        }
+
+        let plans = self
+            .compute_plans_for_snapshot(&temp_metadata, temp_workspace_root, ctx)
+            .await?;
+
+        Ok(PlansFromContext {
+            comparison_commit: reported_comparison_commit,
+            comparison_versions: reported_comparison_versions,
+            plans,
+        })
     }
 
     pub async fn compute_plans_for_snapshot(
@@ -273,6 +304,20 @@ fn is_publishable(publish: &Option<Vec<String>>) -> bool {
         None => true,
         Some(registries) => !registries.is_empty(),
     }
+}
+
+fn comparison_versions_from_metadata(metadata: &Metadata) -> Vec<ComparisonPackageVersionView> {
+    let mut versions = metadata
+        .workspace_packages()
+        .iter()
+        .map(|package| ComparisonPackageVersionView {
+            package: package.name.to_string(),
+            version: package.version.to_string(),
+            publishable: is_publishable(&package.publish),
+        })
+        .collect::<Vec<_>>();
+    versions.sort_by(|a, b| a.package.cmp(&b.package));
+    versions
 }
 
 fn apply_version_changes_with_metadata(

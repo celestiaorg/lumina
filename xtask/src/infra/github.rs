@@ -56,6 +56,9 @@ impl GitHubCliOps {
         ctx: &ReleaseContext,
         branch_name: &str,
     ) -> Result<Option<PullRequestInfo>> {
+        if ctx.skip_pr {
+            return Ok(None);
+        }
         let Some(client) = self.git_client(ctx)? else {
             return Ok(None);
         };
@@ -79,6 +82,9 @@ impl GitHubCliOps {
         ctx: &ReleaseContext,
         branch_name: &str,
     ) -> Result<Option<PullRequestInfo>> {
+        if ctx.skip_pr {
+            return Ok(None);
+        }
         let Some(client) = self.git_client(ctx)? else {
             return Ok(None);
         };
