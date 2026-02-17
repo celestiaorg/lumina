@@ -38,7 +38,7 @@ services:
 
   node-0:
     image: node
-    platform: "linux/amd64"
+    # platform: "linux/amd64"
     build:
       context: .
       dockerfile: Dockerfile.node
@@ -63,7 +63,7 @@ services:
 
   node-1:
     image: node
-    platform: "linux/amd64"
+    # platform: "linux/amd64"
     build:
       context: .
       dockerfile: Dockerfile.node
@@ -76,7 +76,7 @@ services:
 
   node-2:
     image: node
-    platform: "linux/amd64"
+    # platform: "linux/amd64"
     build:
       context: .
       dockerfile: Dockerfile.node
