@@ -2,7 +2,7 @@
 
 # Lumina
 
-<a href="https://github.com/eigerco/lumina/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/eigerco/lumina/actions/workflows/ci.yml/badge.svg?branch=main" alt="Build Status" /></a>
+<a href="https://github.com/celestiaorg/lumina/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/celestiaorg/lumina/actions/workflows/ci.yml/badge.svg?branch=main" alt="Build Status" /></a>
 <a href="https://lumina.rs"><img src="https://img.shields.io/website?url=https%3A%2F%2Flumina.rs&label=lumina.rs" alt="lumina.rs"></a>
 <a href="https://crates.io/crates/lumina-cli"><img src="https://img.shields.io/crates/v/lumina-cli?label=lumina-cli" alt="crates.io lumina-cli"></a>
 <a href="https://crates.io/crates/lumina-node"><img src="https://img.shields.io/crates/v/lumina-node?label=lumina-node" alt="crates.io lumina-node"></a>
@@ -59,7 +59,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
 # clone the repository
-git clone https://github.com/eigerco/lumina
+git clone https://github.com/celestiaorg/lumina
 cd lumina
 
 # install lumina
@@ -175,10 +175,8 @@ npm test
 
 ## Frontend
 
-Check out the frontend at [eigerco/lumina-front](https://github.com/eigerco/lumina-front)
+Check out the frontend at [celestiaorg/lumina-front](https://github.com/celestiaorg/lumina-front)
 
-## About Eiger
+## Contact
 
-We are engineers. We contribute to various ecosystems by building low level implementations and core components. We built Lumina because we believe in the modular thesis. We wanted to make the Celestia light node available and easy to run for as many users so that everyone can perform sampling to ensure data availability.
-
-Contact us at hello@eiger.co
+Contact us at security@celestia.org
