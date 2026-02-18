@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   release-plz:
@@ -19,6 +20,7 @@ jobs:
       prs_created: ${{ steps.release-plz.outputs.prs_created }}
       releases: ${{ steps.release-plz.outputs.releases }}
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      node_rc_prefix: ${{ steps.release-plz.outputs.node_rc_prefix }}
 
     steps:
       - name: Checkout repository
@@ -30,12 +32,118 @@ jobs:
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Run release-plz
-        uses: MarcoIeni/release-plz-action@v0.5
-        id: release-plz
+      - name: Classify push kind
+        id: classify
+        run: |
+          set -euo pipefail
+
+          release_push=false
+          release_mode=rc
+          commit_title=""
+          manual_final=false
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            manual_final=true
+            release_mode=final
+            commit_title="manual workflow_dispatch"
+          else
+            commit_message="${{ github.event.head_commit.message }}"
+            commit_title="$(printf '%s\n' "$commit_message" | head -n1)"
+            if printf '%s' "$commit_message" | grep -qi "chore: release"; then
+              release_push=true
+              if printf '%s' "$commit_message" | grep -qi "chore: release final"; then
+                release_mode=final
+              elif printf '%s' "$commit_message" | grep -qi "chore: release rc"; then
+                release_mode=rc
+              else
+                release_mode=final
+              fi
+            fi
+          fi
+
+          echo "release_push=$release_push" >> "$GITHUB_OUTPUT"
+          echo "release_mode=$release_mode" >> "$GITHUB_OUTPUT"
+          echo "commit_title=$commit_title" >> "$GITHUB_OUTPUT"
+          echo "manual_final=$manual_final" >> "$GITHUB_OUTPUT"
+
+      - name: Run xtask execute rc
+        if: github.event_name == 'push' && steps.classify.outputs.release_push != 'true'
+        run: |
+          set -euo pipefail
+          cargo xtask execute rc --json | tee xtask_execute.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Run xtask execute final (manual)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          cargo xtask execute final --json | tee xtask_execute.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Run xtask publish
+        if: github.event_name == 'push' && steps.classify.outputs.release_push == 'true'
+        run: |
+          set -euo pipefail
+          cargo xtask publish "${{ steps.classify.outputs.release_mode }}" --json | tee xtask_publish.json
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Convert xtask outputs to release-plz contract
+        id: release-plz
+        run: |
+          set -euo pipefail
+
+          pr='{}'
+          prs_created=false
+          releases='[]'
+          releases_created=false
+          node_rc_prefix=''
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -f xtask_execute.json ]; then
+              branch_name="$(jq -r '.submit.branch_name // empty' xtask_execute.json)"
+              pr_url="$(jq -r '.submit.pr_url // empty' xtask_execute.json)"
+              if [ -n "$branch_name" ]; then
+                prs_created=true
+                pr="$(jq -cn --arg head_branch "$branch_name" --arg html_url "$pr_url" '{head_branch:$head_branch, html_url:$html_url}')"
+              fi
+
+              node_next_effective="$(jq -r '.check.version_state.planned[]? | select(.package=="lumina-node") | .next_effective' xtask_execute.json | head -n1)"
+              if [ -n "$node_next_effective" ]; then
+                node_rc_prefix="$(printf '%s' "$node_next_effective" | sed -nE 's/^.*(-rc\.[0-9]+)$/\1/p')"
+              fi
+            fi
+          elif [ "${{ steps.classify.outputs.release_push }}" = "true" ]; then
+            if [ -f xtask_publish.json ]; then
+              releases="$(jq -c '.payload // []' xtask_publish.json)"
+              if [ "$(echo "$releases" | jq 'length')" -gt 0 ]; then
+                releases_created=true
+              fi
+            fi
+          else
+            if [ -f xtask_execute.json ]; then
+              branch_name="$(jq -r '.submit.branch_name // empty' xtask_execute.json)"
+              pr_url="$(jq -r '.submit.pr_url // empty' xtask_execute.json)"
+              if [ -n "$branch_name" ]; then
+                prs_created=true
+                pr="$(jq -cn --arg head_branch "$branch_name" --arg html_url "$pr_url" '{head_branch:$head_branch, html_url:$html_url}')"
+              fi
+
+              node_next_effective="$(jq -r '.check.version_state.planned[]? | select(.package=="lumina-node") | .next_effective' xtask_execute.json | head -n1)"
+              if [ -n "$node_next_effective" ]; then
+                node_rc_prefix="$(printf '%s' "$node_next_effective" | sed -nE 's/^.*(-rc\.[0-9]+)$/\1/p')"
+              fi
+            fi
+          fi
+
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "prs_created=$prs_created" >> "$GITHUB_OUTPUT"
+          echo "releases=$releases" >> "$GITHUB_OUTPUT"
+          echo "releases_created=$releases_created" >> "$GITHUB_OUTPUT"
+          echo "node_rc_prefix=$node_rc_prefix" >> "$GITHUB_OUTPUT"
 
   release-plz-pr-npm-update:
     name: Update release PR for npm
@@ -68,6 +176,7 @@ jobs:
       - name: Bump lumina-node npm version
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          NODE_RC_PREFIX: ${{ needs.release-plz.outputs.node_rc_prefix }}
         run: |
           set -xeuo pipefail
 
@@ -78,10 +187,15 @@ jobs:
           git checkout "$pr_branch_name"
 
           node_wasm_version="$(cargo pkgid --manifest-path=node-wasm/Cargo.toml | cut -d@ -f 2)"
+          node_wasm_base="${node_wasm_version%%-*}"
+          target_node_version="$node_wasm_version"
+          if [ -n "${NODE_RC_PREFIX}" ]; then
+            target_node_version="${node_wasm_base}${NODE_RC_PREFIX}"
+          fi
           cd node-wasm/js
 
           # Update lumina-node version
-          if ! npm version $node_wasm_version >/dev/null; then
+          if ! npm version "$target_node_version" >/dev/null; then
             echo "Version up to date"
             exit
           fi
@@ -149,7 +263,7 @@ jobs:
             echo "Commit failed: $(echo "$result" | jq '.errors')" >&2
             exit 1
           else
-            echo "Version updated: ${node_wasm_version}"
+            echo "Version updated: ${target_node_version}"
           fi
 
   release-npm:
@@ -186,23 +300,36 @@ jobs:
         run: |
           set -xeuo pipefail
 
-          published_version=$(npm show lumina-node-wasm version)
           local_version="$(cargo pkgid --manifest-path=node-wasm/Cargo.toml | cut -d@ -f 2)"
+          npm_node_version="$(jq -r '.version' node-wasm/js/package.json)"
 
-          if [ "$published_version" == "$local_version" ] ; then
-            echo Latest version already in npm, exiting
-            exit
+          if npm view "lumina-node-wasm@${local_version}" version >/dev/null 2>&1; then
+            echo "Local version already in npm, exiting"
+            exit 0
+          fi
+
+          npm_tag=""
+          if echo "$npm_node_version" | grep -Eq -- '-rc\.[0-9]+$'; then
+            npm_tag="rc"
           fi
 
           # publish lumina-node-wasm
           wasm-pack build node-wasm
-          wasm-pack publish --access public node-wasm
+          if [ -n "$npm_tag" ]; then
+            wasm-pack publish --access public --tag "$npm_tag" node-wasm
+          else
+            wasm-pack publish --access public node-wasm
+          fi
 
           # publish lumina-node
           cd node-wasm/js
           # replace dependency on node-wasm from path based to version in npm
           npm pkg set "dependencies[lumina-node-wasm]=$local_version"
-          npm publish --access public
+          if [ -n "$npm_tag" ]; then
+            npm publish --access public --tag "$npm_tag"
+          else
+            npm publish --access public
+          fi
 
   release-uniffi:
     name: Release-uniffi
