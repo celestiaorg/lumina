@@ -1,5 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::domain::model::ReleaseMode;
+
 #[derive(Debug, Parser)]
 #[command(name = "xtask", about = "Release process orchestrator")]
 pub struct Cli {
@@ -103,11 +105,11 @@ pub enum ReleaseModeArg {
     Final,
 }
 
-impl From<ReleaseModeArg> for crate::domain::types::ReleaseMode {
+impl From<ReleaseModeArg> for ReleaseMode {
     fn from(value: ReleaseModeArg) -> Self {
         match value {
-            ReleaseModeArg::Rc => crate::domain::types::ReleaseMode::Rc,
-            ReleaseModeArg::Final => crate::domain::types::ReleaseMode::Final,
+            ReleaseModeArg::Rc => ReleaseMode::Rc,
+            ReleaseModeArg::Final => ReleaseMode::Final,
         }
     }
 }

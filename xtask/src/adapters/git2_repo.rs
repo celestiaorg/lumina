@@ -8,14 +8,15 @@ use git2::{
     StashApplyOptions, StashFlags, StatusOptions,
 };
 
+use crate::domain::ports::GitRepo;
 use crate::domain::types::{BranchKind, BranchState, ReleaseMode};
 
 #[derive(Debug, Clone)]
-pub struct GitRepoOps {
+pub struct Git2Repo {
     workspace_root: PathBuf,
 }
 
-impl GitRepoOps {
+impl Git2Repo {
     pub fn new(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
     }
@@ -65,9 +66,7 @@ impl GitRepoOps {
             return Ok(());
         }
 
-        if remote_branch_exists(&repo, branch_name) {
-            create_local_from_remote_tracking(&repo, branch_name)?;
-            checkout_local_branch(&repo, branch_name)?;
+        if checkout_remote_branch_if_exists(&repo, branch_name)? {
             return Ok(());
         }
 
@@ -75,9 +74,7 @@ impl GitRepoOps {
             fetch_origin_branch(&repo, default_branch)?;
         }
 
-        if remote_branch_exists(&repo, branch_name) {
-            create_local_from_remote_tracking(&repo, branch_name)?;
-            checkout_local_branch(&repo, branch_name)?;
+        if checkout_remote_branch_if_exists(&repo, branch_name)? {
             return Ok(());
         }
 
@@ -304,6 +301,15 @@ fn branch_exists(repo: &Repository, branch_name: &str) -> bool {
     local_branch_exists(repo, branch_name) || remote_branch_exists(repo, branch_name)
 }
 
+fn checkout_remote_branch_if_exists(repo: &Repository, branch_name: &str) -> Result<bool> {
+    if !remote_branch_exists(repo, branch_name) {
+        return Ok(false);
+    }
+    create_local_from_remote_tracking(repo, branch_name)?;
+    checkout_local_branch(repo, branch_name)?;
+    Ok(true)
+}
+
 fn checkout_local_branch(repo: &Repository, branch_name: &str) -> Result<()> {
     let local_ref = format!("refs/heads/{branch_name}");
     let object = repo
@@ -509,4 +515,47 @@ fn auth_callbacks(config: Option<Config>) -> RemoteCallbacks<'static> {
         Cred::default()
     });
     callbacks
+}
+
+impl GitRepo for Git2Repo {
+    fn branch_state(&self, branch_name: &str) -> Result<BranchState> {
+        Git2Repo::branch_state(self, branch_name)
+    }
+
+    fn validate_branch_name(
+        &self,
+        mode: ReleaseMode,
+        branch_name: &str,
+        rc_prefix: &str,
+    ) -> Result<BranchKind> {
+        Git2Repo::validate_branch_name(self, mode, branch_name, rc_prefix)
+    }
+
+    fn create_release_branch_from_default(
+        &self,
+        branch_name: &str,
+        default_branch: &str,
+    ) -> Result<Vec<String>> {
+        Git2Repo::create_release_branch_from_default(self, branch_name, default_branch)
+    }
+
+    fn refresh_existing_release_branch(
+        &self,
+        branch_name: &str,
+        default_branch: &str,
+    ) -> Result<Vec<String>> {
+        Git2Repo::refresh_existing_release_branch(self, branch_name, default_branch)
+    }
+
+    fn stage_all_and_commit(&self, message: &str, dry_run: bool) -> Result<()> {
+        Git2Repo::stage_all_and_commit(self, message, dry_run)
+    }
+
+    fn push_branch(&self, branch_name: &str, force: bool, dry_run: bool) -> Result<()> {
+        Git2Repo::push_branch(self, branch_name, force, dry_run)
+    }
+
+    fn create_branch_from_current(&self, branch_name: &str, dry_run: bool) -> Result<()> {
+        Git2Repo::create_branch_from_current(self, branch_name, dry_run)
+    }
 }

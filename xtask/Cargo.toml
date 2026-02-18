@@ -16,3 +16,4 @@ git2 = "0.20.2"
 tempfile = "3.23.0"
 time = { workspace = true, features = ["formatting", "macros", "std"] }
 toml = "0.8"
+async-trait = "0.1"

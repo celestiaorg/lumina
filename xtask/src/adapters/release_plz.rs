@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use cargo_metadata::{Metadata, MetadataCommand};
 use release_plz_core::set_version::{
     SetVersionRequest, SetVersionSpec, VersionChange, set_version,
@@ -9,37 +10,31 @@ use release_plz_core::update_request::UpdateRequest;
 use serde::Deserialize;
 
 use crate::domain::types::{
-    BaselinePolicy, ComparisonVersionView, Plan, ReleaseContext, ReleaseMode,
+    ComparisonVersionView, Plan, PlanComputation, ReleaseContext, ReleaseMode,
 };
 use crate::domain::versioning::{convert_release_version_to_rc, to_stable_if_prerelease};
-use crate::infra::git_refs::{
-    changed_files_since_tag, checkout_commit, clone_workspace_to_temp, commit_for_tag,
-    latest_non_rc_release_tag_on_branch, latest_release_tag_on_branch, remote_origin_url,
-    resolve_comparison_commit,
+use crate::adapters::git_refs::{
+    changed_files_since_tag, commit_for_tag, latest_non_rc_release_tag_on_branch,
+    latest_release_tag_on_branch, remote_origin_url, resolve_comparison_commit,
+    snapshot_workspace_to_temp,
 };
-use crate::infra::metadata::metadata_for_manifest;
-
-#[derive(Debug, Clone)]
-pub struct PlanComputation {
-    pub baseline_policy: BaselinePolicy,
-    pub comparison_commit: String,
-    pub comparison_versions: Vec<ComparisonVersionView>,
-    pub plans: Vec<Plan>,
-}
+use crate::adapters::metadata::metadata_for_manifest;
+use crate::domain::ports::{Publisher, ReleaseEngine};
 
 #[derive(Debug, Clone)]
 struct ContextPlan {
+    baseline_commit: Option<String>,
     comparison_commit: String,
     comparison_versions: Vec<ComparisonVersionView>,
     plans: Vec<Plan>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ReleasePlzEngine {
+pub struct ReleasePlzAdapter {
     workspace_root: PathBuf,
 }
 
-impl ReleasePlzEngine {
+impl ReleasePlzAdapter {
     pub fn new(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
     }
@@ -55,7 +50,7 @@ impl ReleasePlzEngine {
         let from_context = self.plan_from_context(ctx).await?;
 
         Ok(PlanComputation {
-            baseline_policy: ctx.baseline_policy(),
+            baseline_commit: from_context.baseline_commit,
             comparison_commit: from_context.comparison_commit,
             comparison_versions: from_context.comparison_versions,
             plans: from_context.plans,
@@ -68,32 +63,26 @@ impl ReleasePlzEngine {
             &ctx.default_branch,
             ctx.base_commit.as_deref(),
         )?;
-        let snapshot = clone_workspace_to_temp(&self.workspace_root)?;
+        let snapshot =
+            snapshot_workspace_to_temp(&self.workspace_root, &comparison_commit, &ctx.default_branch)?;
         let _hold_temp_dir = &snapshot.temp_dir;
         let temp_workspace_root = snapshot.repo_root.as_path();
         let temp_manifest = temp_workspace_root.join("Cargo.toml");
 
-        checkout_commit(temp_workspace_root, &comparison_commit, &ctx.default_branch)?;
-
         let temp_metadata = metadata_for_manifest(&temp_manifest)?;
-        let mut reported_comparison_commit = comparison_commit.clone();
-        let mut reported_comparison_versions = comparison_versions_from_metadata(&temp_metadata);
+        let reported_comparison_commit = comparison_commit.clone();
+        let reported_comparison_versions = comparison_versions_from_metadata(&temp_metadata);
+        let mut baseline_commit = None;
 
         if matches!(ctx.mode, ReleaseMode::Final) {
-            let baseline_tag =
+            let final_baseline_tag =
                 latest_non_rc_release_tag_on_branch(temp_workspace_root, &ctx.default_branch)?
                     .context(
                         "final mode requires latest non-RC release tag for baseline reporting",
                     )?;
-            let baseline_commit = commit_for_tag(temp_workspace_root, &baseline_tag)?;
+            let final_baseline_commit = commit_for_tag(temp_workspace_root, &final_baseline_tag)?;
 
-            checkout_commit(temp_workspace_root, &baseline_commit, &ctx.default_branch)?;
-            let baseline_metadata = metadata_for_manifest(&temp_manifest)?;
-            reported_comparison_commit = baseline_commit;
-            reported_comparison_versions = comparison_versions_from_metadata(&baseline_metadata);
-
-            // Restore snapshot to the comparison commit used for plan generation.
-            checkout_commit(temp_workspace_root, &comparison_commit, &ctx.default_branch)?;
+            baseline_commit = Some(final_baseline_commit);
         }
 
         let plans = self
@@ -101,6 +90,7 @@ impl ReleasePlzEngine {
             .await?;
 
         Ok(ContextPlan {
+            baseline_commit,
             comparison_commit: reported_comparison_commit,
             comparison_versions: reported_comparison_versions,
             plans,
@@ -411,4 +401,26 @@ fn changed_publishable_packages_since_tag(
     }
 
     Ok(changed_packages)
+}
+
+#[async_trait(?Send)]
+impl ReleaseEngine for ReleasePlzAdapter {
+    async fn plan(&self, ctx: &ReleaseContext) -> Result<PlanComputation> {
+        ReleasePlzAdapter::plan(self, ctx).await
+    }
+
+    fn workspace_root(&self) -> &std::path::Path {
+        ReleasePlzAdapter::workspace_root(self)
+    }
+
+    async fn regenerate_artifacts(&self, ctx: &ReleaseContext) -> Result<Vec<String>> {
+        ReleasePlzAdapter::regenerate_artifacts(self, ctx).await
+    }
+}
+
+#[async_trait(?Send)]
+impl Publisher for ReleasePlzAdapter {
+    async fn publish(&self, ctx: &ReleaseContext) -> Result<serde_json::Value> {
+        ReleasePlzAdapter::publish(self, ctx).await
+    }
 }

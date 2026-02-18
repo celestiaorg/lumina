@@ -1,27 +1,63 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 
-use crate::domain::types::{ReleaseContext, ReleaseMode};
-use crate::infra::git_refs::remote_origin_url;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PullRequestInfo {
-    pub number: u64,
-    pub url: String,
-}
+use crate::adapters::git_refs::remote_origin_url;
+use crate::domain::ports::PrClient;
+use crate::domain::types::{PullRequestInfo, ReleaseContext, ReleaseMode};
 
 #[derive(Debug, Clone)]
-pub struct GitHubCliOps {
+pub struct GitHubPrClient {
     workspace_root: PathBuf,
 }
 
-impl GitHubCliOps {
+impl GitHubPrClient {
     pub fn new(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
     }
 
-    pub async fn has_external_contributors_on_open_release_pr(
+    async fn find_open_release_pr(
+        &self,
+        client: &release_plz_core::GitClient,
+        branch_name: &str,
+    ) -> Result<Option<release_plz_core::GitPr>> {
+        let prs = client
+            .opened_prs("")
+            .await
+            .context("failed to list opened PRs")?;
+        Ok(prs.into_iter().find(|pr| pr.branch() == branch_name))
+    }
+
+    fn git_client(&self, ctx: &ReleaseContext) -> Result<Option<release_plz_core::GitClient>> {
+        let token = ctx
+            .auth
+            .release_plz_token
+            .clone()
+            .or_else(|| ctx.auth.github_token.clone());
+        let Some(token) = token else {
+            return Ok(None);
+        };
+
+        let Some(repo_url) = self.remote_repo_url()? else {
+            return Ok(None);
+        };
+
+        let client = release_plz_core::GitClient::new(release_plz_core::GitForge::Github(
+            release_plz_core::GitHub::new(repo_url.owner, repo_url.name, token.into()),
+        ))
+        .context("failed to build GitHub client")?;
+        Ok(Some(client))
+    }
+
+    fn remote_repo_url(&self) -> Result<Option<release_plz_core::RepoUrl>> {
+        remote_repo_url(&self.workspace_root)
+    }
+}
+
+#[async_trait(?Send)]
+impl PrClient for GitHubPrClient {
+    async fn has_external_contributors_on_open_release_pr(
         &self,
         ctx: &ReleaseContext,
         branch_name: &str,
@@ -51,7 +87,7 @@ impl GitHubCliOps {
         Ok(!contributors.is_empty())
     }
 
-    pub async fn close_open_release_pr(
+    async fn close_open_release_pr(
         &self,
         ctx: &ReleaseContext,
         branch_name: &str,
@@ -77,7 +113,7 @@ impl GitHubCliOps {
         }))
     }
 
-    pub async fn ensure_release_pr(
+    async fn ensure_release_pr(
         &self,
         ctx: &ReleaseContext,
         branch_name: &str,
@@ -124,43 +160,6 @@ impl GitHubCliOps {
             number: opened.number,
             url: opened.html_url.to_string(),
         }))
-    }
-
-    async fn find_open_release_pr(
-        &self,
-        client: &release_plz_core::GitClient,
-        branch_name: &str,
-    ) -> Result<Option<release_plz_core::GitPr>> {
-        let prs = client
-            .opened_prs("")
-            .await
-            .context("failed to list opened PRs")?;
-        Ok(prs.into_iter().find(|pr| pr.branch() == branch_name))
-    }
-
-    fn git_client(&self, ctx: &ReleaseContext) -> Result<Option<release_plz_core::GitClient>> {
-        let token = ctx
-            .auth
-            .release_plz_token
-            .clone()
-            .or_else(|| ctx.auth.github_token.clone());
-        let Some(token) = token else {
-            return Ok(None);
-        };
-
-        let Some(repo_url) = self.remote_repo_url()? else {
-            return Ok(None);
-        };
-
-        let client = release_plz_core::GitClient::new(release_plz_core::GitForge::Github(
-            release_plz_core::GitHub::new(repo_url.owner, repo_url.name, token.into()),
-        ))
-        .context("failed to build GitHub client")?;
-        Ok(Some(client))
-    }
-
-    fn remote_repo_url(&self) -> Result<Option<release_plz_core::RepoUrl>> {
-        remote_repo_url(&self.workspace_root)
     }
 }
 

@@ -7,23 +7,24 @@ use release_plz_core::set_version::{
     SetVersionRequest, SetVersionSpec, VersionChange, set_version,
 };
 
-use crate::domain::types::ReleaseContext;
+use crate::adapters::git_refs::snapshot_workspace_to_temp;
+use crate::adapters::metadata::metadata_for_manifest;
+use crate::domain::types::Plan;
 use crate::domain::workspace::Workspace;
-use crate::engine::release_plz::ReleasePlzEngine;
-use crate::infra::git_refs::{checkout_commit, clone_workspace_to_temp, resolve_comparison_commit};
-use crate::infra::metadata::metadata_for_manifest;
 
 #[derive(Debug, Clone, Default)]
 pub struct StrictSimulationResult {
     pub duplicate_publishable_versions: Vec<(String, Vec<String>)>,
 }
 
-pub async fn run_strict_simulation(
+pub fn run_strict_simulation(
     workspace_root: &Path,
-    release_engine: &ReleasePlzEngine,
-    ctx: &ReleaseContext,
+    default_branch: &str,
+    comparison_commit: &str,
+    plans: &[Plan],
 ) -> Result<StrictSimulationResult> {
-    let snapshot = clone_workspace_to_temp(workspace_root)?;
+    let snapshot =
+        snapshot_workspace_to_temp(workspace_root, comparison_commit, default_branch)?;
     let _hold_temp_dir = &snapshot.temp_dir;
     let temp_workspace_root = snapshot.repo_root.as_path();
     let temp_manifest = temp_workspace_root.join("Cargo.toml");
@@ -34,18 +35,7 @@ pub async fn run_strict_simulation(
         temp_manifest.display()
     );
 
-    let comparison_commit = resolve_comparison_commit(
-        workspace_root,
-        &ctx.default_branch,
-        ctx.base_commit.as_deref(),
-    )?;
-    checkout_commit(temp_workspace_root, &comparison_commit, &ctx.default_branch)
-        .with_context(|| "failed to checkout comparison commit in strict simulation")?;
-
     let temp_metadata = metadata_for_manifest(&temp_manifest)?;
-    let plans = release_engine
-        .plan_from_snapshot(&temp_metadata, temp_workspace_root, ctx)
-        .await?;
     let changes = version_changes_for_mode(&plans);
     if !changes.is_empty() {
         apply_version_changes_with_metadata(changes, temp_metadata)?;
@@ -60,9 +50,7 @@ pub async fn run_strict_simulation(
     })
 }
 
-fn version_changes_for_mode(
-    plans: &[crate::domain::types::Plan],
-) -> BTreeMap<String, Version> {
+fn version_changes_for_mode(plans: &[Plan]) -> BTreeMap<String, Version> {
     plans
         .iter()
         .filter(|plan| plan.publishable)

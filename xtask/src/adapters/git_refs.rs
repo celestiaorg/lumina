@@ -1,12 +1,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::semver::Version;
-use git2::build::CheckoutBuilder;
 use git2::{
-    AutotagOption, BranchType, Config, Cred, CredentialType, DiffOptions, FetchOptions, ObjectType,
-    Oid, RemoteCallbacks, Repository, Sort,
+    BranchType, DiffOptions, ObjectType, Oid, Repository, Sort, WorktreeAddOptions,
+    WorktreePruneOptions,
 };
 use tempfile::TempDir;
 
@@ -14,6 +14,27 @@ use tempfile::TempDir;
 pub struct RepoSnapshot {
     pub temp_dir: TempDir,
     pub repo_root: PathBuf,
+    source_repo_root: PathBuf,
+    worktree_name: String,
+    snapshot_branch: String,
+}
+
+impl Drop for RepoSnapshot {
+    fn drop(&mut self) {
+        let Ok(repo) = Repository::open(&self.source_repo_root) else {
+            return;
+        };
+
+        if let Ok(worktree) = repo.find_worktree(&self.worktree_name) {
+            let mut opts = WorktreePruneOptions::new();
+            opts.valid(true).locked(true).working_tree(true);
+            let _ = worktree.prune(Some(&mut opts));
+        }
+
+        if let Ok(mut branch) = repo.find_branch(&self.snapshot_branch, BranchType::Local) {
+            let _ = branch.delete();
+        }
+    }
 }
 
 pub fn resolve_comparison_commit(
@@ -42,39 +63,13 @@ pub fn resolve_comparison_commit(
     bail!("failed to resolve comparison commit for default branch `{default_branch}`")
 }
 
-pub fn clone_workspace_to_temp(workspace_root: &Path) -> Result<RepoSnapshot> {
-    let source = workspace_root
-        .to_str()
-        .context("workspace path is not valid UTF-8")?;
-    let temp_dir = tempfile::tempdir().context("failed to create temporary directory")?;
-    let workspace_name = workspace_root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("workspace");
-    let repo_root = temp_dir.path().join(workspace_name);
-
-    git2::build::RepoBuilder::new()
-        .clone(source, &repo_root)
-        .with_context(|| {
-            format!(
-                "failed to clone workspace repository from `{}` into `{}`",
-                workspace_root.display(),
-                repo_root.display()
-            )
-        })?;
-
-    Ok(RepoSnapshot {
-        temp_dir,
-        repo_root,
-    })
-}
-
-pub fn checkout_commit(workspace_root: &Path, commit: &str, default_branch: &str) -> Result<()> {
+pub fn snapshot_workspace_to_temp(
+    workspace_root: &Path,
+    commit: &str,
+    default_branch: &str,
+) -> Result<RepoSnapshot> {
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
-
-    let _ = fetch_origin_branch(&repo, default_branch);
-
     let object = repo
         .revparse_single(commit)
         .with_context(|| format!("failed to resolve commit `{commit}`"))?;
@@ -82,29 +77,42 @@ pub fn checkout_commit(workspace_root: &Path, commit: &str, default_branch: &str
         .peel_to_commit()
         .with_context(|| format!("failed to peel `{commit}` to commit"))?;
 
-    let short_oid = target_commit.id().to_string();
-    let branch_name = format!("xtask/snapshot-{}", &short_oid[..12]);
-    repo.branch(&branch_name, &target_commit, true)
-        .with_context(|| format!("failed to create snapshot branch `{branch_name}`"))?;
+    let snapshot_id = unique_snapshot_id();
+    let worktree_name = format!("xtask-snapshot-{snapshot_id}");
+    let snapshot_branch = worktree_name.clone();
 
-    let mut checkout = CheckoutBuilder::new();
-    checkout.force();
-    repo.checkout_tree(target_commit.as_object(), Some(&mut checkout))
-        .with_context(|| format!("failed to checkout commit `{commit}`"))?;
-    repo.set_head(&format!("refs/heads/{branch_name}"))
-        .with_context(|| format!("failed to set HEAD to snapshot branch `{branch_name}`"))?;
+    repo.branch(&snapshot_branch, &target_commit, true)
+        .with_context(|| format!("failed to create snapshot branch `{snapshot_branch}`"))?;
 
-    let mut local_branch = repo
-        .find_branch(&branch_name, BranchType::Local)
-        .with_context(|| format!("failed to resolve snapshot branch `{branch_name}`"))?;
     let upstream = format!("origin/{default_branch}");
-    if repo.find_branch(&upstream, BranchType::Remote).is_ok() {
-        local_branch
-            .set_upstream(Some(&upstream))
-            .with_context(|| format!("failed to set upstream `{upstream}`"))?;
+    if repo.find_branch(&upstream, BranchType::Remote).is_ok()
+        && let Ok(mut local) = repo.find_branch(&snapshot_branch, BranchType::Local)
+    {
+        let _ = local.set_upstream(Some(&upstream));
     }
 
-    Ok(())
+    let temp_dir = tempfile::tempdir().context("failed to create temporary directory")?;
+    let repo_root = temp_dir.path().join("worktree");
+    let mut opts = WorktreeAddOptions::new();
+    opts.checkout_existing(true);
+
+    repo.worktree(&worktree_name, &repo_root, Some(&opts))
+        .with_context(|| {
+            format!(
+                "failed to create snapshot worktree `{}` in `{}` from `{}`",
+                worktree_name,
+                repo_root.display(),
+                workspace_root.display()
+            )
+        })?;
+
+    Ok(RepoSnapshot {
+        temp_dir,
+        repo_root,
+        source_repo_root: workspace_root.to_path_buf(),
+        worktree_name,
+        snapshot_branch,
+    })
 }
 
 pub fn remote_origin_url(workspace_root: &Path) -> Result<Option<String>> {
@@ -318,51 +326,10 @@ fn extract_semver_from_tag(tag: &str) -> Option<Version> {
     Version::parse(&tag[idx + 1..]).ok()
 }
 
-fn fetch_origin_branch(repo: &Repository, branch: &str) -> Result<()> {
-    let mut remote = repo
-        .find_remote("origin")
-        .context("failed to resolve `origin` remote")?;
-
-    let mut callbacks = auth_callbacks(repo.config().ok());
-    callbacks.transfer_progress(|progress| {
-        let _ = progress;
-        true
-    });
-
-    let mut fetch_options = FetchOptions::new();
-    fetch_options.download_tags(AutotagOption::All);
-    fetch_options.remote_callbacks(callbacks);
-
-    remote
-        .fetch(&[branch], Some(&mut fetch_options), None)
-        .with_context(|| format!("failed to fetch origin/{branch}"))
-}
-
-fn auth_callbacks(config: Option<Config>) -> RemoteCallbacks<'static> {
-    let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(move |url, username_from_url, allowed| {
-        if allowed.contains(CredentialType::USER_PASS_PLAINTEXT)
-            && let Ok(token) =
-                std::env::var("RELEASE_PLZ_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))
-        {
-            let username = username_from_url.unwrap_or("x-access-token");
-            return Cred::userpass_plaintext(username, &token);
-        }
-
-        if let Some(cfg) = config.as_ref()
-            && let Ok(cred) = Cred::credential_helper(cfg, url, username_from_url)
-        {
-            return Ok(cred);
-        }
-
-        if allowed.contains(CredentialType::SSH_KEY)
-            && let Some(username) = username_from_url
-            && let Ok(cred) = Cred::ssh_key_from_agent(username)
-        {
-            return Ok(cred);
-        }
-
-        Cred::default()
-    });
-    callbacks
+fn unique_snapshot_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}", std::process::id())
 }
