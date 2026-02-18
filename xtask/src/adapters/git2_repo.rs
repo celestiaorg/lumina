@@ -7,6 +7,7 @@ use git2::{
     IndexAddOption, PushOptions, RemoteCallbacks, Repository, ResetType, Signature,
     StashApplyOptions, StashFlags, StatusOptions,
 };
+use tracing::{debug, info};
 
 use crate::domain::types::BranchState;
 
@@ -23,16 +24,20 @@ impl Git2Repo {
 
     /// Reports whether the release branch exists and whether local working tree is dirty.
     pub fn branch_state(&self, branch_name: &str) -> Result<BranchState> {
+        debug!(branch=%branch_name, "git2_repo: checking branch state");
         let repo = self.repo()?;
         // Missing branch is an explicit state used by prepare strategy selection.
         if !branch_exists(&repo, branch_name) {
+            info!(branch=%branch_name, "git2_repo: branch missing");
             return Ok(BranchState::Missing);
         }
 
         // Dirty workspace influences how branch refresh behaves.
         if has_local_changes(&repo)? {
+            info!(branch=%branch_name, "git2_repo: branch exists with dirty workspace");
             Ok(BranchState::ExistsDirtyLocal)
         } else {
+            info!(branch=%branch_name, "git2_repo: branch exists and workspace clean");
             Ok(BranchState::ExistsClean)
         }
     }
@@ -40,16 +45,23 @@ impl Git2Repo {
     /// Ensures a local branch is checked out.
     /// Resolution order: local branch -> tracked remote branch -> create from default branch tip.
     pub fn ensure_branch_exists(&self, branch_name: &str, default_branch: &str) -> Result<()> {
+        info!(
+            branch=%branch_name,
+            default_branch=%default_branch,
+            "git2_repo: ensuring branch exists and is checked out"
+        );
         let repo = self.repo()?;
 
         // Fast path: local branch already exists.
         if local_branch_exists(&repo, branch_name) {
             checkout_local_branch(&repo, branch_name)?;
+            debug!(branch=%branch_name, "git2_repo: checked out existing local branch");
             return Ok(());
         }
 
         // Next preference: materialize and checkout existing remote-tracking branch.
         if checkout_remote_branch_if_exists(&repo, branch_name)? {
+            debug!(branch=%branch_name, "git2_repo: checked out branch from remote tracking");
             return Ok(());
         }
 
@@ -60,12 +72,14 @@ impl Git2Repo {
 
         // Retry remote checkout after fetch.
         if checkout_remote_branch_if_exists(&repo, branch_name)? {
+            debug!(branch=%branch_name, "git2_repo: checked out branch from remote after fetch");
             return Ok(());
         }
 
         // Last resort: create release branch from default branch tip.
         create_local_from_default_branch(&repo, branch_name, default_branch)?;
         checkout_local_branch(&repo, branch_name)?;
+        info!(branch=%branch_name, "git2_repo: created and checked out branch from default branch");
         Ok(())
     }
 
@@ -75,6 +89,11 @@ impl Git2Repo {
         branch_name: &str,
         default_branch: &str,
     ) -> Result<Vec<String>> {
+        info!(
+            branch=%branch_name,
+            default_branch=%default_branch,
+            "git2_repo: creating/reusing release branch from default"
+        );
         let repo = self.repo()?;
         // Prefer remote default-branch tip when origin is available.
         let fetched_origin = if has_origin_remote(&repo) {
@@ -104,6 +123,11 @@ impl Git2Repo {
         branch_name: &str,
         default_branch: &str,
     ) -> Result<Vec<String>> {
+        info!(
+            branch=%branch_name,
+            default_branch=%default_branch,
+            "git2_repo: refreshing existing release branch"
+        );
         let mut repo = self.repo()?;
         // Preserve local uncommitted work across branch refresh.
         let had_changes = has_local_changes(&repo)?;
@@ -142,6 +166,7 @@ impl Git2Repo {
                 .context("failed to resolve reset target for generated release commits")?;
             repo.reset(&target, ResetType::Hard, None)
                 .context("failed to reset generated release commits")?;
+            debug!(generated_count, "git2_repo: reset generated release commits");
             descriptions.push(format!(
                 "reset {} generated release commit(s)",
                 generated_count
@@ -165,6 +190,7 @@ impl Git2Repo {
     /// Stages all workspace changes and creates a commit unless there are no content changes.
     /// No-op when `dry_run` is enabled.
     pub fn stage_all_and_commit(&self, message: &str, dry_run: bool) -> Result<()> {
+        debug!(dry_run, commit_message=%message, "git2_repo: staging and committing");
         if dry_run {
             return Ok(());
         }
@@ -192,6 +218,7 @@ impl Git2Repo {
                     .context("failed to resolve HEAD commit")?;
                 // Skip empty commit when staged tree is unchanged.
                 if parent.tree_id() == tree_id {
+                    debug!("git2_repo: commit skipped because staged tree is unchanged");
                     return Ok(());
                 }
                 repo.commit(
@@ -220,6 +247,7 @@ impl Git2Repo {
     /// Pushes branch to `origin`, optionally as force push, and configures upstream tracking.
     /// No-op when `dry_run` is enabled.
     pub fn push_branch(&self, branch_name: &str, force: bool, dry_run: bool) -> Result<()> {
+        info!(branch=%branch_name, force, dry_run, "git2_repo: pushing branch");
         if dry_run {
             return Ok(());
         }
@@ -262,6 +290,7 @@ impl Git2Repo {
     /// Creates a new local branch from current `HEAD` and checks it out.
     /// No-op when `dry_run` is enabled.
     pub fn create_branch_from_current(&self, branch_name: &str, dry_run: bool) -> Result<()> {
+        info!(branch=%branch_name, dry_run, "git2_repo: creating branch from current HEAD");
         if dry_run {
             return Ok(());
         }

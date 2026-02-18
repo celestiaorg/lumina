@@ -9,6 +9,7 @@ use git2::{
     WorktreePruneOptions,
 };
 use tempfile::TempDir;
+use tracing::{debug, info};
 
 #[derive(Debug)]
 pub struct RepoSnapshot {
@@ -53,6 +54,12 @@ pub fn resolve_current_commit(
     default_branch: &str,
     current_commit: Option<&str>,
 ) -> Result<String> {
+    debug!(
+        workspace_root=%workspace_root.display(),
+        default_branch=%default_branch,
+        requested_current_commit=?current_commit,
+        "git_refs: resolving current commit"
+    );
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
 
@@ -65,12 +72,16 @@ pub fn resolve_current_commit(
             .peel_to_commit()
             .context("failed to peel current commit to a commit object")?
             .id();
-        return Ok(commit_oid.to_string());
+        let selected = commit_oid.to_string();
+        info!(selected_commit=%selected, "git_refs: selected explicit current commit");
+        return Ok(selected);
     }
 
     // Default path: compare against default-branch tip (prefer remote-tracking ref).
     if let Some(oid) = resolve_branch_tip_oid(&repo, default_branch) {
-        return Ok(oid.to_string());
+        let selected = oid.to_string();
+        info!(selected_commit=%selected, "git_refs: selected default branch tip commit");
+        return Ok(selected);
     }
 
     bail!("failed to resolve current commit for default branch `{default_branch}`")
@@ -83,6 +94,12 @@ pub fn snapshot_workspace_to_temp(
     commit: &str,
     default_branch: &str,
 ) -> Result<RepoSnapshot> {
+    debug!(
+        workspace_root=%workspace_root.display(),
+        commit=%commit,
+        default_branch=%default_branch,
+        "git_refs: creating snapshot worktree"
+    );
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
     let object = repo
@@ -123,6 +140,13 @@ pub fn snapshot_workspace_to_temp(
                 workspace_root.display()
             )
         })?;
+    info!(
+        commit=%target_commit.id(),
+        snapshot_branch=%snapshot_branch,
+        worktree_name=%worktree_name,
+        snapshot_root=%repo_root.display(),
+        "git_refs: snapshot worktree created"
+    );
 
     Ok(RepoSnapshot {
         temp_dir,
@@ -151,7 +175,15 @@ pub fn latest_release_tag_on_branch(
     workspace_root: &Path,
     default_branch: &str,
 ) -> Result<Option<String>> {
-    latest_release_tag_with_filter(workspace_root, default_branch, ReleaseTagFilter::AnyRelease)
+    let tag =
+        latest_release_tag_with_filter(workspace_root, default_branch, ReleaseTagFilter::AnyRelease)?;
+    debug!(
+        workspace_root=%workspace_root.display(),
+        default_branch=%default_branch,
+        latest_release_tag=?tag,
+        "git_refs: resolved latest release tag"
+    );
+    Ok(tag)
 }
 
 /// Finds latest non-RC release tag reachable from target branch release commits.
@@ -159,11 +191,27 @@ pub fn latest_non_rc_release_tag_on_branch(
     workspace_root: &Path,
     default_branch: &str,
 ) -> Result<Option<String>> {
-    latest_release_tag_with_filter(workspace_root, default_branch, ReleaseTagFilter::NonRcOnly)
+    let tag = latest_release_tag_with_filter(
+        workspace_root,
+        default_branch,
+        ReleaseTagFilter::NonRcOnly,
+    )?;
+    debug!(
+        workspace_root=%workspace_root.display(),
+        default_branch=%default_branch,
+        latest_non_rc_release_tag=?tag,
+        "git_refs: resolved latest non-rc release tag"
+    );
+    Ok(tag)
 }
 
 /// Lists changed file paths between tag commit and current `HEAD`.
 pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String>> {
+    debug!(
+        repo_root=%repo_root.display(),
+        tag=%tag,
+        "git_refs: collecting changed files since tag"
+    );
     let repo = Repository::open(repo_root)
         .with_context(|| format!("failed to open repository at {}", repo_root.display()))?;
 
@@ -200,7 +248,9 @@ pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String
     )
     .context("failed to iterate changed files in diff")?;
 
-    Ok(files.into_iter().collect())
+    let files = files.into_iter().collect::<Vec<_>>();
+    debug!(changed_files=files.len(), "git_refs: collected changed files");
+    Ok(files)
 }
 
 /// Resolves commit id referenced by a tag name.
@@ -209,7 +259,9 @@ pub fn commit_for_tag(repo_root: &Path, tag: &str) -> Result<String> {
         .with_context(|| format!("failed to open repository at {}", repo_root.display()))?;
     let commit = resolve_tag_to_commit(&repo, tag)
         .with_context(|| format!("failed to resolve commit for tag `{tag}`"))?;
-    Ok(commit.id().to_string())
+    let commit_id = commit.id().to_string();
+    debug!(tag=%tag, commit=%commit_id, "git_refs: resolved commit for tag");
+    Ok(commit_id)
 }
 
 #[derive(Debug, Clone, Copy)]

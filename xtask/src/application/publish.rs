@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tracing::info;
 
 use crate::adapters::release_plz::ReleasePlzAdapter;
 use crate::domain::types::{PublishContext, ReleaseReport};
@@ -8,6 +9,7 @@ pub async fn handle_publish(
     publisher: &ReleasePlzAdapter,
     ctx: PublishContext,
 ) -> Result<ReleaseReport> {
+    info!(mode=?ctx.common.mode, "publish: invoking release adapter");
     let publish_payload = publisher.publish(&ctx).await?;
     // release-plz may return `null` or `[]` when nothing was published.
     let published = !publish_payload.is_null()

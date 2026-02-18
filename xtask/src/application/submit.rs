@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tracing::{debug, info};
 
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_output::write_github_output;
@@ -29,6 +30,14 @@ pub async fn handle_submit(
         .branch_name_override
         .clone()
         .unwrap_or_else(|| make_release_branch_name(args.ctx.common.mode));
+    info!(
+        mode=?args.ctx.common.mode,
+        branch=%branch_name,
+        branch_override=args.branch_name_override.is_some(),
+        strategy_override=?args.update_strategy_override,
+        dry_run=args.dry_run,
+        "submit: resolved target branch and inputs"
+    );
     // Decide submit policy. Execute can pass through prepare's strategy; standalone submit recomputes it.
     let strategy = if let Some(strategy) = args.update_strategy_override {
         strategy
@@ -42,6 +51,7 @@ pub async fn handle_submit(
             UpdateStrategy::InPlaceForcePush
         }
     };
+    info!(branch=%branch_name, strategy=?strategy, "submit: selected strategy");
 
     // Use stable commit message pattern so generated release commits are recognizable.
     let commit_message = match args.ctx.common.mode {
@@ -49,6 +59,7 @@ pub async fn handle_submit(
         ReleaseMode::Final => "chore(release): prepare final release",
     }
     .to_string();
+    debug!(commit_message=%commit_message, "submit: prepared commit message");
 
     // Apply submit strategy: close/recreate PR flow or in-place force-push flow.
     let pr_url = match strategy {
@@ -60,6 +71,7 @@ pub async fn handle_submit(
             git.stage_all_and_commit(&commit_message, args.dry_run)?;
             // Fork current HEAD into a fresh release branch and push without force.
             let recreated_branch = make_release_branch_name(args.ctx.common.mode);
+            info!(old_branch=%branch_name, new_branch=%recreated_branch, "submit: recreating branch due to contributor-safe strategy");
             git.create_branch_from_current(&recreated_branch, args.dry_run)?;
             git.push_branch(&recreated_branch, false, args.dry_run)?;
             branch_name = recreated_branch;
@@ -76,6 +88,7 @@ pub async fn handle_submit(
         }
         _ => {
             // Normal flow: commit current branch changes and force-push update.
+            debug!(branch=%branch_name, "submit: committing and force-pushing existing branch");
             git.stage_all_and_commit(&commit_message, args.dry_run)?;
             git.push_branch(&branch_name, true, args.dry_run)?;
             pr_client
@@ -96,6 +109,7 @@ pub async fn handle_submit(
     if let Some(url) = &pr_url {
         write_github_output("release_pr_url", url)?;
     }
+    info!(branch=%branch_name, pushed=!args.dry_run, pr_url=?pr_url, "submit: completed");
 
     Ok(SubmitReport {
         mode: args.ctx.common.mode,

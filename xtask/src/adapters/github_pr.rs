@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use tracing::{debug, info};
 
 use crate::adapters::git_refs::remote_origin_url;
 use crate::domain::types::{AuthContext, PullRequestInfo, ReleaseMode};
@@ -38,10 +39,12 @@ impl GitHubPrClient {
             .clone()
             .or_else(|| auth.github_token.clone());
         let Some(token) = token else {
+            debug!("github_pr: no token available, skipping GitHub client init");
             return Ok(None);
         };
 
         let Some(repo_url) = self.remote_repo_url()? else {
+            debug!("github_pr: no origin repository URL available, skipping GitHub client init");
             return Ok(None);
         };
 
@@ -50,6 +53,7 @@ impl GitHubPrClient {
             release_plz_core::GitHub::new(repo_url.owner, repo_url.name, token.into()),
         ))
         .context("failed to build GitHub client")?;
+        debug!("github_pr: initialized GitHub client");
         Ok(Some(client))
     }
 
@@ -64,6 +68,7 @@ impl GitHubPrClient {
         auth: &AuthContext,
         branch_name: &str,
     ) -> Result<bool> {
+        debug!(branch=%branch_name, "github_pr: checking external contributors");
         // If auth or remote metadata is unavailable, treat as "no external contributors".
         let Some(client) = self.git_client(auth)? else {
             return Ok(false);
@@ -87,7 +92,14 @@ impl GitHubPrClient {
         contributors.sort();
         contributors.dedup();
 
-        Ok(!contributors.is_empty())
+        let has_external = !contributors.is_empty();
+        info!(
+            branch=%branch_name,
+            contributors=contributors.len(),
+            has_external_contributors=has_external,
+            "github_pr: external contributor check completed"
+        );
+        Ok(has_external)
     }
 
     /// Closes open release PR for branch unless `skip_pr` is enabled.
@@ -99,12 +111,14 @@ impl GitHubPrClient {
     ) -> Result<Option<PullRequestInfo>> {
         // Explicitly allow running full flow without PR operations.
         if skip_pr {
+            debug!(branch=%branch_name, "github_pr: skip_pr=true, skipping close");
             return Ok(None);
         }
         let Some(client) = self.git_client(auth)? else {
             return Ok(None);
         };
         let Some(pr) = self.find_open_release_pr(&client, branch_name).await? else {
+            debug!(branch=%branch_name, "github_pr: no open PR to close");
             return Ok(None);
         };
 
@@ -130,6 +144,7 @@ impl GitHubPrClient {
     ) -> Result<Option<PullRequestInfo>> {
         // Explicitly allow running full flow without PR operations.
         if skip_pr {
+            debug!(branch=%branch_name, "github_pr: skip_pr=true, skipping ensure PR");
             return Ok(None);
         }
         let Some(client) = self.git_client(auth)? else {
@@ -138,6 +153,7 @@ impl GitHubPrClient {
 
         // Reuse already open PR for branch when it exists.
         if let Some(existing) = self.find_open_release_pr(&client, branch_name).await? {
+            info!(branch=%branch_name, pr_number=existing.number, "github_pr: reusing existing open PR");
             return Ok(Some(PullRequestInfo {
                 number: existing.number,
                 url: existing.html_url.to_string(),
@@ -168,6 +184,12 @@ impl GitHubPrClient {
             .open_pr(&pr)
             .await
             .context("failed to open release PR")?;
+        info!(
+            branch=%branch_name,
+            pr_number=opened.number,
+            pr_url=%opened.html_url,
+            "github_pr: opened release PR"
+        );
 
         Ok(Some(PullRequestInfo {
             number: opened.number,

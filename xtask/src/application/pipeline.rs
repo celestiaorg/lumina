@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
+use tracing::{debug, info};
 
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_pr::GitHubPrClient;
@@ -33,6 +34,7 @@ pub struct ReleasePipeline {
 impl ReleasePipeline {
     /// Builds pipeline with concrete adapter implementations rooted at the selected workspace.
     pub fn new(workspace_root: PathBuf) -> Self {
+        debug!(workspace_root=%workspace_root.display(), "initializing release pipeline");
         let release_engine = ReleasePlzAdapter::new(workspace_root.clone());
         let publisher = ReleasePlzAdapter::new(workspace_root.clone());
         let git = Git2Repo::new(workspace_root.clone());
@@ -49,6 +51,12 @@ impl ReleasePipeline {
     /// Runs release version computation + strict duplicate simulation and returns a validation report.
     pub async fn check(&self, ctx: CheckContext) -> Result<CheckReport> {
         let mode = ctx.common.mode;
+        info!(
+            mode=?mode,
+            default_branch=%ctx.common.default_branch,
+            requested_current_commit=?ctx.current_commit,
+            "starting release check"
+        );
         // Compute mode-specific versions and reporting metadata from release-plz.
         let computation = self.release_engine.versions(&ctx).await?;
         // Convert simulation findings + RC transition checks into user-facing validation issues.
@@ -58,7 +66,7 @@ impl ReleasePipeline {
             &computation.duplicate_publishable_versions,
         );
 
-        Ok(CheckReport {
+        let report = CheckReport {
             mode,
             previous_commit: computation.previous_commit,
             latest_release_tag: computation.latest_release_tag,
@@ -73,11 +81,23 @@ impl ReleasePipeline {
                     .collect(),
             },
             validation_issues,
-        })
+        };
+        info!(
+            mode=?report.mode,
+            current_commit=%report.current_commit,
+            previous_commit=%report.previous_commit,
+            latest_release_tag=?report.latest_release_tag,
+            latest_non_rc_release_tag=?report.latest_non_rc_release_tag,
+            planned_versions=report.version_state.planned.len(),
+            validation_issues=report.validation_issues.len(),
+            "release check completed"
+        );
+        Ok(report)
     }
 
     /// Executes `check` against default-branch tip and regenerates branch artifacts when valid.
     pub async fn prepare(&self, ctx: PrepareContext) -> Result<PrepareReport> {
+        info!(mode=?ctx.common.mode, default_branch=%ctx.common.default_branch, "starting prepare");
         // Stop early if check reports any validation issues.
         let check = self.check(ctx.to_check_context()).await?;
         if !check.validation_issues.is_empty() {
@@ -87,17 +107,41 @@ impl ReleasePipeline {
             );
         }
 
-        handle_prepare(&self.git, &self.pr_client, &self.release_engine, ctx, check).await
+        let report = handle_prepare(&self.git, &self.pr_client, &self.release_engine, ctx, check).await?;
+        info!(
+            mode=?report.mode,
+            branch=%report.branch_name,
+            strategy=?report.update_strategy,
+            description_items=report.description.len(),
+            "prepare completed"
+        );
+        Ok(report)
     }
 
     /// Commits/pushes prepared changes and ensures PR behavior according to contributor safety rules.
     pub async fn submit(&self, args: SubmitArgs) -> Result<crate::domain::types::SubmitReport> {
-        handle_submit(&self.git, &self.pr_client, args).await
+        info!(mode=?args.ctx.common.mode, dry_run=args.dry_run, "starting submit");
+        let report = handle_submit(&self.git, &self.pr_client, args).await?;
+        info!(
+            mode=?report.mode,
+            branch=%report.branch_name,
+            strategy=?report.update_strategy,
+            pushed=report.pushed,
+            pr_url=?report.pr_url,
+            "submit completed"
+        );
+        Ok(report)
     }
 
     /// Full non-publishing flow: check -> prepare -> submit.
     /// Publishing is intentionally kept in a separate command.
     pub async fn execute(&self, args: ExecuteArgs) -> Result<ExecuteReport> {
+        info!(
+            mode=?args.ctx.common.mode,
+            default_branch=%args.ctx.common.default_branch,
+            dry_run=args.dry_run,
+            "starting execute"
+        );
         // Stage 1: validation/check.
         let check = self.check(args.ctx.to_check_context()).await?;
         if !check.validation_issues.is_empty() {
@@ -117,6 +161,7 @@ impl ReleasePipeline {
             check.clone(),
         )
         .await?;
+        debug!(branch=%prepare.branch_name, strategy=?prepare.update_strategy, "execute prepare stage completed");
 
         // Stage 3: commit/push/PR update.
         let submit_ctx = args.ctx.to_submit_context();
@@ -131,16 +176,22 @@ impl ReleasePipeline {
             },
         )
         .await?;
+        debug!(branch=%submit.branch_name, pushed=submit.pushed, pr_url=?submit.pr_url, "execute submit stage completed");
 
-        Ok(ExecuteReport {
+        let report = ExecuteReport {
             check,
             prepare,
             submit,
-        })
+        };
+        info!(branch=%report.submit.branch_name, pushed=report.submit.pushed, "execute completed");
+        Ok(report)
     }
 
     /// Runs registry/GitHub publishing only, using release-plz publish semantics.
     pub async fn publish(&self, ctx: PublishContext) -> Result<ReleaseReport> {
-        handle_publish(&self.publisher, ctx).await
+        info!(mode=?ctx.common.mode, default_branch=%ctx.common.default_branch, "starting publish");
+        let report = handle_publish(&self.publisher, ctx).await?;
+        info!(published=report.published, "publish completed");
+        Ok(report)
     }
 }

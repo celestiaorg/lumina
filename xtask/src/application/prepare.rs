@@ -1,5 +1,6 @@
 use anyhow::Result;
 use time::{OffsetDateTime, format_description::FormatItem, macros::format_description};
+use tracing::{debug, info};
 
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_pr::GitHubPrClient;
@@ -19,9 +20,20 @@ pub async fn handle_prepare(
 ) -> Result<PrepareReport> {
     // Release flows always use canonical generated branch names.
     let mut branch_name = make_release_branch_name(ctx.common.mode);
+    info!(
+        mode=?ctx.common.mode,
+        default_branch=%ctx.common.default_branch,
+        branch=%branch_name,
+        current_commit=%check.current_commit,
+        previous_commit=%check.previous_commit,
+        latest_release_tag=?check.latest_release_tag,
+        latest_non_rc_release_tag=?check.latest_non_rc_release_tag,
+        "prepare: resolved initial release branch and baseline"
+    );
 
     // Pick branch update strategy based on branch existence and PR contributor safety check.
     let branch_state = git.branch_state(&branch_name)?;
+    debug!(branch=%branch_name, state=?branch_state, "prepare: branch state detected");
     let update_strategy = match branch_state {
         // No branch yet: create from default branch and continue.
         BranchState::Missing => UpdateStrategy::RecreateBranch,
@@ -37,6 +49,7 @@ pub async fn handle_prepare(
             }
         }
     };
+    info!(branch=%branch_name, strategy=?update_strategy, "prepare: selected update strategy");
 
     // Apply chosen branch strategy and collect step descriptions.
     let mut descriptions = match update_strategy {
@@ -53,6 +66,7 @@ pub async fn handle_prepare(
             let recreated_branch = make_release_branch_name(ctx.common.mode);
             git.create_release_branch_from_default(&recreated_branch, &ctx.common.default_branch)?;
             branch_name = recreated_branch.clone();
+            info!(branch=%branch_name, "prepare: recreated branch for contributor-safe flow");
             vec![
                 format!("recreated release branch `{recreated_branch}`"),
                 "deferred PR close/recreate to submit stage".to_string(),
@@ -71,6 +85,11 @@ pub async fn handle_prepare(
                 check.latest_non_rc_release_tag.as_deref(),
             )
             .await?,
+    );
+    info!(
+        branch=%branch_name,
+        description_items=descriptions.len(),
+        "prepare: regenerated release artifacts"
     );
 
     Ok(PrepareReport {
@@ -95,5 +114,7 @@ pub(crate) fn make_release_branch_name(mode: ReleaseMode) -> String {
         ReleaseMode::Rc => "rc",
         ReleaseMode::Final => "final",
     };
-    format!("lumina/release-plz-{timestamp}-{suffix}")
+    let branch = format!("lumina/release-plz-{timestamp}-{suffix}");
+    debug!(mode=?mode, branch=%branch, "generated release branch name");
+    branch
 }
