@@ -80,6 +80,7 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 getrandom_02.workspace = true
+getrandom_03.workspace = true
 rust-embed = { workspace = true, features = [
   "debug-embed",
   "include-exclude",
