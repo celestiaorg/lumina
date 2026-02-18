@@ -9,7 +9,7 @@ use release_plz_core::update_request::UpdateRequest;
 use serde::Deserialize;
 
 use crate::domain::types::{
-    BaselinePolicy, ComparisonPackageVersionView, PackagePlan, ReleaseContext, ReleaseMode,
+    BaselinePolicy, ComparisonVersionView, Plan, ReleaseContext, ReleaseMode,
 };
 use crate::domain::versioning::{convert_release_version_to_rc, to_stable_if_prerelease};
 use crate::infra::git_refs::{
@@ -20,18 +20,18 @@ use crate::infra::git_refs::{
 use crate::infra::metadata::metadata_for_manifest;
 
 #[derive(Debug, Clone)]
-pub struct ReleaseComputation {
+pub struct PlanComputation {
     pub baseline_policy: BaselinePolicy,
     pub comparison_commit: String,
-    pub comparison_versions: Vec<ComparisonPackageVersionView>,
-    pub plans: Vec<PackagePlan>,
+    pub comparison_versions: Vec<ComparisonVersionView>,
+    pub plans: Vec<Plan>,
 }
 
 #[derive(Debug, Clone)]
-struct PlansFromContext {
+struct ContextPlan {
     comparison_commit: String,
-    comparison_versions: Vec<ComparisonPackageVersionView>,
-    plans: Vec<PackagePlan>,
+    comparison_versions: Vec<ComparisonVersionView>,
+    plans: Vec<Plan>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ impl ReleasePlzEngine {
         Self { workspace_root }
     }
 
-    pub async fn compute(&self, ctx: &ReleaseContext) -> Result<ReleaseComputation> {
+    pub async fn plan(&self, ctx: &ReleaseContext) -> Result<PlanComputation> {
         if matches!(ctx.mode, ReleaseMode::Final)
             && latest_non_rc_release_tag_on_branch(&self.workspace_root, &ctx.default_branch)?
                 .is_none()
@@ -52,9 +52,9 @@ impl ReleasePlzEngine {
             anyhow::bail!("final mode requires at least one non-RC release tag");
         }
 
-        let from_context = self.compute_plans_for_context(ctx).await?;
+        let from_context = self.plan_from_context(ctx).await?;
 
-        Ok(ReleaseComputation {
+        Ok(PlanComputation {
             baseline_policy: ctx.baseline_policy(),
             comparison_commit: from_context.comparison_commit,
             comparison_versions: from_context.comparison_versions,
@@ -62,7 +62,7 @@ impl ReleasePlzEngine {
         })
     }
 
-    async fn compute_plans_for_context(&self, ctx: &ReleaseContext) -> Result<PlansFromContext> {
+    async fn plan_from_context(&self, ctx: &ReleaseContext) -> Result<ContextPlan> {
         let comparison_commit = resolve_comparison_commit(
             &self.workspace_root,
             &ctx.default_branch,
@@ -97,23 +97,23 @@ impl ReleasePlzEngine {
         }
 
         let plans = self
-            .compute_plans_for_snapshot(&temp_metadata, temp_workspace_root, ctx)
+            .plan_from_snapshot(&temp_metadata, temp_workspace_root, ctx)
             .await?;
 
-        Ok(PlansFromContext {
+        Ok(ContextPlan {
             comparison_commit: reported_comparison_commit,
             comparison_versions: reported_comparison_versions,
             plans,
         })
     }
 
-    pub async fn compute_plans_for_snapshot(
+    pub async fn plan_from_snapshot(
         &self,
         metadata: &Metadata,
         snapshot_repo_root: &std::path::Path,
         ctx: &ReleaseContext,
-    ) -> Result<Vec<PackagePlan>> {
-        let mut plans = self.compute_plans_for_mode(metadata, ctx.mode).await?;
+    ) -> Result<Vec<Plan>> {
+        let mut plans = self.plan_for_mode(metadata, ctx.mode).await?;
 
         if matches!(ctx.mode, ReleaseMode::Final) {
             let baseline_tag = latest_non_rc_release_tag_on_branch(
@@ -134,11 +134,11 @@ impl ReleasePlzEngine {
         Ok(plans)
     }
 
-    pub async fn compute_plans_for_mode(
+    pub async fn plan_for_mode(
         &self,
         metadata: &Metadata,
         mode: ReleaseMode,
-    ) -> Result<Vec<PackagePlan>> {
+    ) -> Result<Vec<Plan>> {
         let update_request = UpdateRequest::new(metadata.clone())
             .context("failed to build release-plz update request")?
             .with_allow_dirty(true);
@@ -160,7 +160,7 @@ impl ReleasePlzEngine {
                     }
                 };
 
-                Ok(PackagePlan {
+                Ok(Plan {
                     package: package.name.to_string(),
                     current,
                     next_release,
@@ -178,7 +178,7 @@ impl ReleasePlzEngine {
         &self.workspace_root
     }
 
-    pub async fn regenerate_release_artifacts(&self, ctx: &ReleaseContext) -> Result<Vec<String>> {
+    pub async fn regenerate_artifacts(&self, ctx: &ReleaseContext) -> Result<Vec<String>> {
         let metadata = MetadataCommand::new()
             .current_dir(&self.workspace_root)
             .exec()
@@ -306,11 +306,11 @@ fn is_publishable(publish: &Option<Vec<String>>) -> bool {
     }
 }
 
-fn comparison_versions_from_metadata(metadata: &Metadata) -> Vec<ComparisonPackageVersionView> {
+fn comparison_versions_from_metadata(metadata: &Metadata) -> Vec<ComparisonVersionView> {
     let mut versions = metadata
         .workspace_packages()
         .iter()
-        .map(|package| ComparisonPackageVersionView {
+        .map(|package| ComparisonVersionView {
             package: package.name.to_string(),
             version: package.version.to_string(),
             publishable: is_publishable(&package.publish),

@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Check(args) => {
-            let report = orchestrator.release_check(to_context(args.common)).await?;
+            let report = orchestrator.check(to_context(args.common)).await?;
             output::maybe_print_json(args.json, &report)?;
         }
         Commands::Prepare(args) => {

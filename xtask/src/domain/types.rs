@@ -82,7 +82,7 @@ pub enum ExecutionStage {
 }
 
 #[derive(Debug, Clone)]
-pub struct PackagePlan {
+pub struct Plan {
     pub package: String,
     pub current: Version,
     pub next_release: Version,
@@ -91,7 +91,7 @@ pub struct PackagePlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackagePlanView {
+pub struct PlanView {
     pub package: String,
     pub current: String,
     pub next_effective: String,
@@ -99,15 +99,15 @@ pub struct PackagePlanView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComparisonPackageVersionView {
+pub struct ComparisonVersionView {
     pub package: String,
     pub version: String,
     pub publishable: bool,
 }
 
-impl PackagePlan {
-    pub fn as_view(&self) -> PackagePlanView {
-        PackagePlanView {
+impl Plan {
+    pub fn as_view(&self) -> PlanView {
+        PlanView {
             package: self.package.clone(),
             current: self.current.to_string(),
             next_effective: self.next_effective.to_string(),
@@ -180,14 +180,14 @@ impl AuthContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseCheckReport {
+pub struct CheckReport {
     pub mode: ReleaseMode,
     pub baseline_policy: BaselinePolicy,
     pub default_branch: String,
     pub base_commit: Option<String>,
     pub comparison_commit: String,
-    pub comparison_versions: Vec<ComparisonPackageVersionView>,
-    pub plans: Vec<PackagePlanView>,
+    pub comparison_versions: Vec<ComparisonVersionView>,
+    pub plans: Vec<PlanView>,
     pub strict_simulation_applied: bool,
     pub validation_issues: Vec<ValidationIssue>,
     pub stage: ExecutionStage,
@@ -200,8 +200,8 @@ pub struct PrepareReport {
     pub branch_state: BranchState,
     pub update_strategy: UpdateStrategy,
     pub comparison_commit: String,
-    pub comparison_versions: Vec<ComparisonPackageVersionView>,
-    pub plans: Vec<PackagePlanView>,
+    pub comparison_versions: Vec<ComparisonVersionView>,
+    pub plans: Vec<PlanView>,
     pub actions: Vec<String>,
     pub stage: ExecutionStage,
 }
@@ -227,7 +227,7 @@ pub struct ReleaseReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecuteReport {
-    pub check: ReleaseCheckReport,
+    pub check: CheckReport,
     pub prepare: PrepareReport,
     pub submit: SubmitReport,
     pub stage: ExecutionStage,

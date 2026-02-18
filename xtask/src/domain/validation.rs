@@ -1,9 +1,9 @@
-use crate::domain::types::{PackagePlan, ReleaseMode, ValidationIssue};
+use crate::domain::types::{Plan, ReleaseMode, ValidationIssue};
 use crate::domain::versioning::validate_rc_conversion;
 
 pub fn collect_validation_issues(
     mode: ReleaseMode,
-    plans: &[PackagePlan],
+    plans: &[Plan],
     duplicate_publishable_versions: &[(String, Vec<String>)],
 ) -> Vec<ValidationIssue> {
     let mut issues = duplicates_to_issues(duplicate_publishable_versions);
@@ -25,7 +25,7 @@ fn duplicates_to_issues(duplicates: &[(String, Vec<String>)]) -> Vec<ValidationI
         .collect()
 }
 
-fn find_invalid_rc_transitions(plans: &[PackagePlan]) -> Vec<ValidationIssue> {
+fn find_invalid_rc_transitions(plans: &[Plan]) -> Vec<ValidationIssue> {
     let mut invalid = Vec::new();
     for plan in plans.iter().filter(|plan| plan.publishable) {
         if validate_rc_conversion(&plan.next_release, &plan.next_effective).is_err() {

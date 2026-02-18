@@ -18,7 +18,7 @@ pub struct StrictSimulationResult {
     pub duplicate_publishable_versions: Vec<(String, Vec<String>)>,
 }
 
-pub async fn run_strict_release_simulation(
+pub async fn run_strict_simulation(
     workspace_root: &Path,
     release_engine: &ReleasePlzEngine,
     ctx: &ReleaseContext,
@@ -44,7 +44,7 @@ pub async fn run_strict_release_simulation(
 
     let temp_metadata = metadata_for_manifest(&temp_manifest)?;
     let plans = release_engine
-        .compute_plans_for_snapshot(&temp_metadata, temp_workspace_root, ctx)
+        .plan_from_snapshot(&temp_metadata, temp_workspace_root, ctx)
         .await?;
     let changes = version_changes_for_mode(&plans);
     if !changes.is_empty() {
@@ -61,7 +61,7 @@ pub async fn run_strict_release_simulation(
 }
 
 fn version_changes_for_mode(
-    plans: &[crate::domain::types::PackagePlan],
+    plans: &[crate::domain::types::Plan],
 ) -> BTreeMap<String, Version> {
     plans
         .iter()

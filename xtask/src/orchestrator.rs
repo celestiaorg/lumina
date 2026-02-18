@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use time::{OffsetDateTime, format_description::FormatItem, macros::format_description};
 
-use crate::app::checks::run_strict_release_simulation;
+use crate::app::checks::run_strict_simulation;
 use crate::domain::types::{
-    ExecuteReport, ExecutionStage, PrepareReport, ReleaseCheckReport, ReleaseContext,
-    ReleaseReport, SubmitReport, UpdateStrategy,
+    CheckReport, ExecuteReport, ExecutionStage, PrepareReport, ReleaseContext, ReleaseReport,
+    SubmitReport, UpdateStrategy,
 };
 use crate::domain::validation::collect_validation_issues;
 use crate::engine::release_plz::ReleasePlzEngine;
@@ -43,9 +43,9 @@ impl Orchestrator {
         })
     }
 
-    pub async fn release_check(&self, ctx: ReleaseContext) -> Result<ReleaseCheckReport> {
-        let computation = self.release_engine.compute(&ctx).await?;
-        let strict_simulation = run_strict_release_simulation(
+    pub async fn check(&self, ctx: ReleaseContext) -> Result<CheckReport> {
+        let computation = self.release_engine.plan(&ctx).await?;
+        let strict_simulation = run_strict_simulation(
             self.release_engine.workspace_root(),
             &self.release_engine,
             &ctx,
@@ -57,7 +57,7 @@ impl Orchestrator {
             &strict_simulation.duplicate_publishable_versions,
         );
 
-        Ok(ReleaseCheckReport {
+        Ok(CheckReport {
             mode: ctx.mode,
             baseline_policy: computation.baseline_policy,
             default_branch: ctx.default_branch,
@@ -78,25 +78,25 @@ impl Orchestrator {
     pub async fn prepare(&self, mut ctx: ReleaseContext) -> Result<PrepareReport> {
         // Prepare must always validate against tip of default branch.
         ctx.base_commit = None;
-        let check = self.release_check(ctx.clone()).await?;
+        let check = self.check(ctx.clone()).await?;
         if !check.validation_issues.is_empty() {
             bail!(
                 "release-check failed with {} validation issue(s)",
                 check.validation_issues.len()
             );
         }
-        self.prepare_after_check(ctx, check).await
+        self.prepare_from_check(ctx, check).await
     }
 
-    async fn prepare_after_check(
+    async fn prepare_from_check(
         &self,
         ctx: ReleaseContext,
-        check: ReleaseCheckReport,
+        check: CheckReport,
     ) -> Result<PrepareReport> {
         let mut branch_name = ctx
             .branch_name
             .clone()
-            .unwrap_or_else(|| generated_release_branch_name(ctx.mode));
+            .unwrap_or_else(|| make_release_branch_name(ctx.mode));
         if ctx.branch_name.is_some() {
             self.git
                 .validate_branch_name(ctx.mode, &branch_name, &ctx.rc_branch_prefix)?;
@@ -130,7 +130,7 @@ impl Orchestrator {
                     .github
                     .close_open_release_pr(&ctx, &branch_name)
                     .await?;
-                let recreated_branch = generated_release_branch_name(ctx.mode);
+                let recreated_branch = make_release_branch_name(ctx.mode);
                 self.git
                     .create_release_branch_from_default(&recreated_branch, &ctx.default_branch)?;
                 branch_name = recreated_branch.clone();
@@ -143,7 +143,7 @@ impl Orchestrator {
 
         actions.extend(
             self.release_engine
-                .regenerate_release_artifacts(&ctx)
+                .regenerate_artifacts(&ctx)
                 .await?,
         );
 
@@ -165,7 +165,7 @@ impl Orchestrator {
             .branch_name_override
             .clone()
             .or_else(|| args.ctx.branch_name.clone())
-            .unwrap_or_else(|| generated_release_branch_name(args.ctx.mode));
+            .unwrap_or_else(|| make_release_branch_name(args.ctx.mode));
         let external_contributors = self
             .github
             .has_external_contributors_on_open_release_pr(&args.ctx, &branch_name)
@@ -191,7 +191,7 @@ impl Orchestrator {
                     .await?;
                 self.git
                     .stage_all_and_commit(&commit_message, args.dry_run)?;
-                let recreated_branch = generated_release_branch_name(args.ctx.mode);
+                let recreated_branch = make_release_branch_name(args.ctx.mode);
                 self.git
                     .create_branch_from_current(&recreated_branch, args.dry_run)?;
                 self.git
@@ -231,7 +231,7 @@ impl Orchestrator {
 
     pub async fn execute(&self, args: ExecuteArgs) -> Result<ExecuteReport> {
         let (check, prepare, submit) = self
-            .run_pre_release_pipeline(args.ctx.clone(), args.dry_run)
+            .run_pipeline(args.ctx.clone(), args.dry_run)
             .await?;
 
         Ok(ExecuteReport {
@@ -242,19 +242,19 @@ impl Orchestrator {
         })
     }
 
-    async fn run_pre_release_pipeline(
+    async fn run_pipeline(
         &self,
         ctx: ReleaseContext,
         dry_run: bool,
-    ) -> Result<(ReleaseCheckReport, PrepareReport, SubmitReport)> {
-        let check = self.release_check(ctx.clone()).await?;
+    ) -> Result<(CheckReport, PrepareReport, SubmitReport)> {
+        let check = self.check(ctx.clone()).await?;
         if !check.validation_issues.is_empty() {
             bail!(
                 "release-check failed with {} validation issue(s)",
                 check.validation_issues.len()
             );
         }
-        let prepare = self.prepare_after_check(ctx.clone(), check.clone()).await?;
+        let prepare = self.prepare_from_check(ctx.clone(), check.clone()).await?;
         let submit = self
             .submit(SubmitArgs {
                 ctx,
@@ -280,7 +280,7 @@ impl Orchestrator {
     }
 }
 
-fn generated_release_branch_name(mode: crate::domain::types::ReleaseMode) -> String {
+fn make_release_branch_name(mode: crate::domain::types::ReleaseMode) -> String {
     static FORMAT: &[FormatItem<'static>] =
         format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]Z");
     let timestamp = OffsetDateTime::now_utc()
