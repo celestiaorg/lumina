@@ -13,7 +13,7 @@ CONFIG_DIR="$HOME/.celestia-$NODE_TYPE-$P2P_NETWORK"
 # directory and the files shared with the validator node
 CREDENTIALS_DIR="/credentials"
 # node credentials
-NODE_KEY_FILE="$CREDENTIALS_DIR/$NODE_NAME.key"
+NODE_KEY_FILE="$CREDENTIALS_DIR/$NODE_NAME.plaintext-key"
 NODE_JWT_FILE="$CREDENTIALS_DIR/$NODE_NAME.jwt"
 # directory where validator will write the genesis hash
 GENESIS_DIR="/genesis"
@@ -31,7 +31,7 @@ wait_for_provision() {
 
 # Import the test account key shared by the validator
 import_shared_key() {
-  echo "password" | cel-key import "$NODE_NAME" "$NODE_KEY_FILE" \
+  cel-key import-hex "$NODE_NAME" "$(cat "$NODE_KEY_FILE")" \
     --keyring-backend="test" \
     --p2p.network "$P2P_NETWORK" \
     --node.type "$NODE_TYPE"

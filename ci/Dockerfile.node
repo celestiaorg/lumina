@@ -6,8 +6,8 @@ FROM docker.io/alpine:3.20
 RUN apk update && apk add --no-cache bash jq dasel
 
 # Copy in the binary
-COPY --from=ghcr.io/celestiaorg/celestia-node:v0.29.0-arabica /bin/celestia /bin/celestia
-COPY --from=ghcr.io/celestiaorg/celestia-node:v0.29.0-arabica /bin/cel-key /bin/cel-key
+COPY --from=ghcr.io/celestiaorg/celestia-node:v0.29.1-mocha /bin/celestia /bin/celestia
+COPY --from=ghcr.io/celestiaorg/celestia-node:v0.29.1-mocha /bin/cel-key /bin/cel-key
 
 COPY ./run-node.sh /opt/entrypoint.sh
 
