@@ -26,8 +26,8 @@ pub struct CommonArgs {
     #[arg(value_enum)]
     pub mode: ReleaseModeArg,
 
-    #[arg(long)]
-    pub base_commit: Option<String>,
+    #[arg(long = "current-commit")]
+    pub current_commit: Option<String>,
 
     #[arg(long, default_value = "main")]
     pub default_branch: String,
@@ -106,6 +106,7 @@ pub enum ReleaseModeArg {
 }
 
 impl From<ReleaseModeArg> for ReleaseMode {
+    /// Maps clap enum values to internal domain mode used by the release pipeline.
     fn from(value: ReleaseModeArg) -> Self {
         match value {
             ReleaseModeArg::Rc => ReleaseMode::Rc,

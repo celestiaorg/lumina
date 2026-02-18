@@ -1,22 +1,23 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 
 use crate::adapters::git_refs::remote_origin_url;
-use crate::domain::ports::PrClient;
 use crate::domain::types::{PullRequestInfo, ReleaseContext, ReleaseMode};
 
 #[derive(Debug, Clone)]
 pub struct GitHubPrClient {
+    /// Workspace root used to resolve repository remote URL.
     workspace_root: PathBuf,
 }
 
 impl GitHubPrClient {
+    /// Builds PR client bound to repository at workspace root.
     pub fn new(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
     }
 
+    /// Finds currently open release PR for a branch, if present.
     async fn find_open_release_pr(
         &self,
         client: &release_plz_core::GitClient,
@@ -29,7 +30,9 @@ impl GitHubPrClient {
         Ok(prs.into_iter().find(|pr| pr.branch() == branch_name))
     }
 
+    /// Creates authenticated GitHub API client from available token + origin URL.
     fn git_client(&self, ctx: &ReleaseContext) -> Result<Option<release_plz_core::GitClient>> {
+        // Prefer dedicated release token, fallback to GitHub token.
         let token = ctx
             .auth
             .release_plz_token
@@ -43,6 +46,7 @@ impl GitHubPrClient {
             return Ok(None);
         };
 
+        // Build release-plz GitHub client bound to origin owner/repo.
         let client = release_plz_core::GitClient::new(release_plz_core::GitForge::Github(
             release_plz_core::GitHub::new(repo_url.owner, repo_url.name, token.into()),
         ))
@@ -50,18 +54,18 @@ impl GitHubPrClient {
         Ok(Some(client))
     }
 
+    /// Resolves repository owner/name from `origin` URL for API operations.
     fn remote_repo_url(&self) -> Result<Option<release_plz_core::RepoUrl>> {
         remote_repo_url(&self.workspace_root)
     }
-}
 
-#[async_trait(?Send)]
-impl PrClient for GitHubPrClient {
-    async fn has_external_contributors_on_open_release_pr(
+    /// Returns true when open release PR has non-bot contributors beyond initial author commit.
+    pub async fn has_external_contributors_on_open_release_pr(
         &self,
         ctx: &ReleaseContext,
         branch_name: &str,
     ) -> Result<bool> {
+        // If auth or remote metadata is unavailable, treat as "no external contributors".
         let Some(client) = self.git_client(ctx)? else {
             return Ok(false);
         };
@@ -87,11 +91,13 @@ impl PrClient for GitHubPrClient {
         Ok(!contributors.is_empty())
     }
 
-    async fn close_open_release_pr(
+    /// Closes open release PR for branch unless `skip_pr` is enabled.
+    pub async fn close_open_release_pr(
         &self,
         ctx: &ReleaseContext,
         branch_name: &str,
     ) -> Result<Option<PullRequestInfo>> {
+        // Explicitly allow running full flow without PR operations.
         if ctx.skip_pr {
             return Ok(None);
         }
@@ -113,11 +119,13 @@ impl PrClient for GitHubPrClient {
         }))
     }
 
-    async fn ensure_release_pr(
+    /// Ensures release PR exists for branch: reuses existing open PR or opens a new one.
+    pub async fn ensure_release_pr(
         &self,
         ctx: &ReleaseContext,
         branch_name: &str,
     ) -> Result<Option<PullRequestInfo>> {
+        // Explicitly allow running full flow without PR operations.
         if ctx.skip_pr {
             return Ok(None);
         }
@@ -125,6 +133,7 @@ impl PrClient for GitHubPrClient {
             return Ok(None);
         };
 
+        // Reuse already open PR for branch when it exists.
         if let Some(existing) = self.find_open_release_pr(&client, branch_name).await? {
             return Ok(Some(PullRequestInfo {
                 number: existing.number,
@@ -132,6 +141,7 @@ impl PrClient for GitHubPrClient {
             }));
         }
 
+        // Otherwise create mode-specific release PR.
         let (title, body) = match ctx.mode {
             ReleaseMode::Rc => (
                 "chore: prepare rc release",
@@ -163,6 +173,7 @@ impl PrClient for GitHubPrClient {
     }
 }
 
+/// Parses origin URL into release-plz repository URL model.
 fn remote_repo_url(workspace_root: &Path) -> Result<Option<release_plz_core::RepoUrl>> {
     let Some(remote) = remote_origin_url(workspace_root)? else {
         return Ok(None);

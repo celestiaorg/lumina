@@ -1,13 +1,15 @@
 use anyhow::Result;
 
-use crate::domain::ports::Publisher;
+use crate::adapters::release_plz::ReleasePlzAdapter;
 use crate::domain::types::{ExecutionStage, ReleaseContext, ReleaseReport};
 
+/// Executes publish-only stage through release-plz and converts result into report shape.
 pub async fn handle_publish(
-    publisher: &dyn Publisher,
+    publisher: &ReleasePlzAdapter,
     ctx: ReleaseContext,
 ) -> Result<ReleaseReport> {
     let publish_payload = publisher.publish(&ctx).await?;
+    // release-plz may return `null` or `[]` when nothing was published.
     let published = !publish_payload.is_null()
         && !publish_payload
             .as_array()

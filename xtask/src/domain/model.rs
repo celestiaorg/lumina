@@ -74,7 +74,7 @@ pub enum ExecutionStage {
 }
 
 #[derive(Debug, Clone)]
-pub struct Plan {
+pub struct VersionEntry {
     pub package: String,
     pub current: Version,
     pub next_release: Version,
@@ -83,7 +83,7 @@ pub struct Plan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanView {
+pub struct VersionEntryView {
     pub package: String,
     pub current: String,
     pub next_effective: String,
@@ -98,11 +98,11 @@ pub struct ComparisonVersionView {
 }
 
 #[derive(Debug, Clone)]
-pub struct PlanComputation {
-    pub baseline_commit: Option<String>,
-    pub comparison_commit: String,
-    pub comparison_versions: Vec<ComparisonVersionView>,
-    pub plans: Vec<Plan>,
+pub struct VersionComputation {
+    pub previous_commit: Option<String>,
+    pub current_commit: String,
+    pub current_versions: Vec<ComparisonVersionView>,
+    pub versions: Vec<VersionEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,9 +111,10 @@ pub struct PullRequestInfo {
     pub url: String,
 }
 
-impl Plan {
-    pub fn as_view(&self) -> PlanView {
-        PlanView {
+impl VersionEntry {
+    /// Converts internal version entry into a stable JSON-facing view.
+    pub fn as_view(&self) -> VersionEntryView {
+        VersionEntryView {
             package: self.package.clone(),
             current: self.current.to_string(),
             next_effective: self.next_effective.to_string(),

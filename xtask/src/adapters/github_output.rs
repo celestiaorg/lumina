@@ -3,6 +3,7 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 
+/// Appends key-value pair to GitHub Actions output file when running inside Actions.
 pub fn write_github_output(key: &str, value: &str) -> Result<()> {
     let Some(path) = std::env::var_os("GITHUB_OUTPUT") else {
         return Ok(());

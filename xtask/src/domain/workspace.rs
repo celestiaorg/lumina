@@ -9,14 +9,18 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Wraps cargo metadata with workspace-oriented helper queries used by validation.
     pub fn from_metadata(metadata: Metadata) -> Self {
         Self { metadata }
     }
 
+    /// Detects publishable workspace crates that appear with multiple versions simultaneously.
     pub fn duplicate_publishable_versions(&self) -> Vec<(String, Vec<String>)> {
+        // Restrict analysis to workspace members only.
         let workspace_members: HashSet<_> =
             self.metadata.workspace_members.iter().cloned().collect();
 
+        // Track publishable package names that belong to this workspace.
         let publishable_workspace_crates: HashSet<String> = self
             .metadata
             .packages
@@ -33,6 +37,7 @@ impl Workspace {
 
         let mut versions_by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for package in &self.metadata.packages {
+            // Aggregate all versions seen per publishable package name.
             if publishable_workspace_crates.contains(package.name.as_str()) {
                 versions_by_name
                     .entry(package.name.to_string())
@@ -54,12 +59,14 @@ impl Workspace {
     }
 
     #[allow(dead_code)]
+    /// Fails if any publishable package name resolves to more than one version.
     pub fn ensure_no_publishable_duplicates(&self, context: &str) -> Result<()> {
         let offenders = self.duplicate_publishable_versions();
         if offenders.is_empty() {
             return Ok(());
         }
 
+        // Build a readable error payload listing duplicate package versions.
         let details = offenders
             .into_iter()
             .map(|(name, versions)| format!("{name}: {}", versions.join(", ")))
@@ -72,6 +79,7 @@ impl Workspace {
     }
 
     #[allow(dead_code)]
+    /// Returns current workspace package versions keyed by package name.
     pub fn current_versions(&self) -> BTreeMap<String, Version> {
         self.metadata
             .workspace_packages()

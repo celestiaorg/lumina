@@ -7,10 +7,12 @@ use crate::domain::context::{AuthContext, ReleaseContext};
 use crate::interface::cli::{Cli, Commands};
 use crate::interface::json_output::maybe_print_json;
 
+/// Parses CLI args, dispatches command handlers, and prints optional JSON reports.
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let pipeline = ReleasePipeline::new(cli.workspace_root.clone());
 
+    // Dispatch each CLI command to the matching pipeline stage and optional JSON output.
     match cli.command {
         Commands::Check(args) => {
             let report = pipeline.check(to_context(args.common)).await?;
@@ -48,10 +50,12 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+/// Converts shared CLI flags into an internal release context used by pipeline stages.
 fn to_context(common: crate::interface::cli::CommonArgs) -> ReleaseContext {
+    // Auth is loaded from environment to keep CLI flags focused on flow configuration.
     ReleaseContext {
         mode: common.mode.into(),
-        base_commit: common.base_commit,
+        current_commit: common.current_commit,
         default_branch: common.default_branch,
         branch_name: common.branch_name,
         rc_branch_prefix: common.rc_branch_prefix,

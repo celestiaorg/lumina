@@ -8,7 +8,6 @@ use git2::{
     StashApplyOptions, StashFlags, StatusOptions,
 };
 
-use crate::domain::ports::GitRepo;
 use crate::domain::types::{BranchKind, BranchState, ReleaseMode};
 
 #[derive(Debug, Clone)]
@@ -17,16 +16,20 @@ pub struct Git2Repo {
 }
 
 impl Git2Repo {
+    /// Creates a git adapter bound to the target workspace repository.
     pub fn new(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
     }
 
+    /// Reports whether the release branch exists and whether local working tree is dirty.
     pub fn branch_state(&self, branch_name: &str) -> Result<BranchState> {
         let repo = self.repo()?;
+        // Missing branch is an explicit state used by prepare strategy selection.
         if !branch_exists(&repo, branch_name) {
             return Ok(BranchState::Missing);
         }
 
+        // Dirty workspace influences how branch refresh behaves.
         if has_local_changes(&repo)? {
             Ok(BranchState::ExistsDirtyLocal)
         } else {
@@ -34,6 +37,8 @@ impl Git2Repo {
         }
     }
 
+    /// Enforces branch naming policy:
+    /// RC branches must use RC prefix, final branches must not.
     pub fn validate_branch_name(
         &self,
         mode: ReleaseMode,
@@ -58,37 +63,46 @@ impl Git2Repo {
         }
     }
 
+    /// Ensures a local branch is checked out.
+    /// Resolution order: local branch -> tracked remote branch -> create from default branch tip.
     pub fn ensure_branch_exists(&self, branch_name: &str, default_branch: &str) -> Result<()> {
         let repo = self.repo()?;
 
+        // Fast path: local branch already exists.
         if local_branch_exists(&repo, branch_name) {
             checkout_local_branch(&repo, branch_name)?;
             return Ok(());
         }
 
+        // Next preference: materialize and checkout existing remote-tracking branch.
         if checkout_remote_branch_if_exists(&repo, branch_name)? {
             return Ok(());
         }
 
+        // Refresh refs before deciding branch truly does not exist remotely.
         if has_origin_remote(&repo) {
             fetch_origin_branch(&repo, default_branch)?;
         }
 
+        // Retry remote checkout after fetch.
         if checkout_remote_branch_if_exists(&repo, branch_name)? {
             return Ok(());
         }
 
+        // Last resort: create release branch from default branch tip.
         create_local_from_default_branch(&repo, branch_name, default_branch)?;
         checkout_local_branch(&repo, branch_name)?;
         Ok(())
     }
 
+    /// Creates (or resolves) release branch from latest default branch state and returns audit actions.
     pub fn create_release_branch_from_default(
         &self,
         branch_name: &str,
         default_branch: &str,
     ) -> Result<Vec<String>> {
         let repo = self.repo()?;
+        // Prefer remote default-branch tip when origin is available.
         let fetched_origin = if has_origin_remote(&repo) {
             fetch_origin_branch(&repo, default_branch)?;
             true
@@ -109,12 +123,15 @@ impl Git2Repo {
         Ok(actions)
     }
 
+    /// Applies release-plz style refresh for existing release branches:
+    /// stash, fetch, reset generated commits, rebase onto default branch, restore stash.
     pub fn refresh_existing_release_branch(
         &self,
         branch_name: &str,
         default_branch: &str,
     ) -> Result<Vec<String>> {
         let mut repo = self.repo()?;
+        // Preserve local uncommitted work across branch refresh.
         let had_changes = has_local_changes(&repo)?;
         let mut actions = Vec::new();
 
@@ -130,6 +147,7 @@ impl Git2Repo {
         }
 
         if has_origin_remote(&repo) {
+            // Refresh default-branch refs before rebasing.
             fetch_origin_branch(&repo, default_branch)?;
             actions.push("fetched origin".to_string());
         } else {
@@ -143,6 +161,7 @@ impl Git2Repo {
         let mut repo = self.repo()?;
         let generated_count = generated_release_commits_count(&repo, 25)?;
         if generated_count > 0 {
+            // Drop previously generated release commits so regeneration is deterministic.
             let target = repo
                 .revparse_single(&format!("HEAD~{generated_count}"))
                 .context("failed to resolve reset target for generated release commits")?;
@@ -158,6 +177,7 @@ impl Git2Repo {
         actions.push("rebased release branch onto latest default branch".to_string());
 
         if had_changes {
+            // Restore user local changes after rebase/reset flow.
             let mut apply_opts = StashApplyOptions::new();
             if repo.stash_pop(0, Some(&mut apply_opts)).is_ok() {
                 actions.push("restored stashed local changes".to_string());
@@ -167,6 +187,8 @@ impl Git2Repo {
         Ok(actions)
     }
 
+    /// Stages all workspace changes and creates a commit unless there are no content changes.
+    /// No-op when `dry_run` is enabled.
     pub fn stage_all_and_commit(&self, message: &str, dry_run: bool) -> Result<()> {
         if dry_run {
             return Ok(());
@@ -189,9 +211,11 @@ impl Git2Repo {
         let signature = signature_for_repo(&repo)?;
         match repo.head() {
             Ok(head_ref) => {
+                // Regular commit path with one parent.
                 let parent = head_ref
                     .peel_to_commit()
                     .context("failed to resolve HEAD commit")?;
+                // Skip empty commit when staged tree is unchanged.
                 if parent.tree_id() == tree_id {
                     return Ok(());
                 }
@@ -206,6 +230,7 @@ impl Git2Repo {
                 .context("failed to create commit")?;
             }
             Err(_) => {
+                // Initial-commit path when repository has no HEAD yet.
                 if tree.is_empty() {
                     return Ok(());
                 }
@@ -217,6 +242,8 @@ impl Git2Repo {
         Ok(())
     }
 
+    /// Pushes branch to `origin`, optionally as force push, and configures upstream tracking.
+    /// No-op when `dry_run` is enabled.
     pub fn push_branch(&self, branch_name: &str, force: bool, dry_run: bool) -> Result<()> {
         if dry_run {
             return Ok(());
@@ -244,10 +271,12 @@ impl Git2Repo {
             format!("refs/heads/{branch_name}:refs/heads/{branch_name}")
         };
 
+        // Push branch update and fail fast on any remote-side rejection.
         remote
             .push(&[refspec.as_str()], Some(&mut push_options))
             .with_context(|| format!("failed to push branch `{branch_name}` to origin"))?;
 
+        // Best-effort upstream tracking setup for future operations.
         if let Ok(mut local) = repo.find_branch(branch_name, BranchType::Local) {
             let _ = local.set_upstream(Some(&format!("origin/{branch_name}")));
         }
@@ -255,6 +284,8 @@ impl Git2Repo {
         Ok(())
     }
 
+    /// Creates a new local branch from current `HEAD` and checks it out.
+    /// No-op when `dry_run` is enabled.
     pub fn create_branch_from_current(&self, branch_name: &str, dry_run: bool) -> Result<()> {
         if dry_run {
             return Ok(());
@@ -274,6 +305,7 @@ impl Git2Repo {
         Ok(())
     }
 
+    /// Opens the git repository at configured workspace root.
     fn repo(&self) -> Result<Repository> {
         Repository::open(&self.workspace_root).with_context(|| {
             format!(
@@ -284,24 +316,30 @@ impl Git2Repo {
     }
 }
 
+/// True when local branch with given name exists.
 fn local_branch_exists(repo: &Repository, branch_name: &str) -> bool {
     repo.find_branch(branch_name, BranchType::Local).is_ok()
 }
 
+/// True when repository has `origin` remote configured.
 fn has_origin_remote(repo: &Repository) -> bool {
     repo.find_remote("origin").is_ok()
 }
 
+/// True when remote-tracking branch `origin/<name>` exists locally.
 fn remote_branch_exists(repo: &Repository, branch_name: &str) -> bool {
     repo.find_branch(&format!("origin/{branch_name}"), BranchType::Remote)
         .is_ok()
 }
 
+/// True when either local branch or remote-tracking branch exists.
 fn branch_exists(repo: &Repository, branch_name: &str) -> bool {
     local_branch_exists(repo, branch_name) || remote_branch_exists(repo, branch_name)
 }
 
+/// Checks out branch by first materializing local tracking branch from remote if needed.
 fn checkout_remote_branch_if_exists(repo: &Repository, branch_name: &str) -> Result<bool> {
+    // Only materialize local tracking branch when remote reference actually exists.
     if !remote_branch_exists(repo, branch_name) {
         return Ok(false);
     }
@@ -310,6 +348,7 @@ fn checkout_remote_branch_if_exists(repo: &Repository, branch_name: &str) -> Res
     Ok(true)
 }
 
+/// Performs hard checkout of an existing local branch and updates `HEAD`.
 fn checkout_local_branch(repo: &Repository, branch_name: &str) -> Result<()> {
     let local_ref = format!("refs/heads/{branch_name}");
     let object = repo
@@ -324,6 +363,7 @@ fn checkout_local_branch(repo: &Repository, branch_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Creates local branch from `origin/<branch>` (if missing) and sets upstream tracking.
 fn create_local_from_remote_tracking(repo: &Repository, branch_name: &str) -> Result<()> {
     let remote_name = format!("origin/{branch_name}");
     let remote_branch = repo
@@ -334,6 +374,7 @@ fn create_local_from_remote_tracking(repo: &Repository, branch_name: &str) -> Re
         .peel_to_commit()
         .with_context(|| format!("failed to peel remote branch `{remote_name}` to commit"))?;
 
+    // Create local branch once and keep it aligned to the remote-tracking reference.
     if repo.find_branch(branch_name, BranchType::Local).is_err() {
         repo.branch(branch_name, &commit, false)
             .with_context(|| format!("failed to create local branch `{branch_name}`"))?;
@@ -346,11 +387,13 @@ fn create_local_from_remote_tracking(repo: &Repository, branch_name: &str) -> Re
     Ok(())
 }
 
+/// Creates a new local branch from default branch, preferring remote tip when available.
 fn create_local_from_default_branch(
     repo: &Repository,
     branch_name: &str,
     default_branch: &str,
 ) -> Result<()> {
+    // Prefer remote default branch; fallback to local default branch reference.
     let start = repo
         .find_reference(&format!("refs/remotes/origin/{default_branch}"))
         .or_else(|_| repo.find_reference(&format!("refs/heads/{default_branch}")))
@@ -370,6 +413,7 @@ fn create_local_from_default_branch(
     Ok(())
 }
 
+/// Fetches a single branch from `origin` with authentication callbacks.
 fn fetch_origin_branch(repo: &Repository, branch: &str) -> Result<()> {
     let mut remote = repo
         .find_remote("origin")
@@ -390,6 +434,7 @@ fn fetch_origin_branch(repo: &Repository, branch: &str) -> Result<()> {
         .with_context(|| format!("failed to fetch `origin/{branch}`"))
 }
 
+/// Rebases currently checked-out branch onto the latest default-branch commit.
 fn rebase_current_branch_onto(repo: &Repository, default_branch: &str) -> Result<()> {
     let upstream_ref = format!("refs/remotes/origin/{default_branch}");
     let upstream_oid = repo
@@ -410,6 +455,7 @@ fn rebase_current_branch_onto(repo: &Repository, default_branch: &str) -> Result
     loop {
         match rebase.next() {
             Some(Ok(_)) => {
+                // Rebase each operation and surface conflicts explicitly.
                 let index = repo.index().context("failed to load index during rebase")?;
                 if index.has_conflicts() {
                     bail!("rebase stopped due to merge conflicts; resolve manually");
@@ -429,6 +475,7 @@ fn rebase_current_branch_onto(repo: &Repository, default_branch: &str) -> Result
                     anyhow::Error::new(err).context("failed while iterating rebase operations")
                 );
             }
+            // No more operations.
             None => break,
         }
     }
@@ -440,6 +487,7 @@ fn rebase_current_branch_onto(repo: &Repository, default_branch: &str) -> Result
     Ok(())
 }
 
+/// Returns true when working tree has tracked or untracked changes.
 fn has_local_changes(repo: &Repository) -> Result<bool> {
     let mut options = StatusOptions::new();
     options.include_untracked(true).recurse_untracked_dirs(true);
@@ -449,6 +497,7 @@ fn has_local_changes(repo: &Repository) -> Result<bool> {
     Ok(!statuses.is_empty())
 }
 
+/// Counts contiguous generated release commits at HEAD, up to `max_depth`.
 fn generated_release_commits_count(repo: &Repository, max_depth: usize) -> Result<usize> {
     let mut count = 0usize;
     let mut current = match repo.head() {
@@ -460,6 +509,7 @@ fn generated_release_commits_count(repo: &Repository, max_depth: usize) -> Resul
 
     for _ in 0..max_depth {
         let subject = current.summary().unwrap_or_default();
+        // Stop scan once first non-generated commit is encountered.
         let is_generated = subject.starts_with("chore(release):")
             || subject.starts_with("chore: prepare rc release")
             || subject.starts_with("chore: prepare final release")
@@ -480,6 +530,7 @@ fn generated_release_commits_count(repo: &Repository, max_depth: usize) -> Resul
     Ok(count)
 }
 
+/// Returns repository signature, falling back to deterministic local signature.
 fn signature_for_repo(repo: &Repository) -> Result<Signature<'static>> {
     match repo.signature() {
         Ok(signature) => Ok(signature),
@@ -488,6 +539,8 @@ fn signature_for_repo(repo: &Repository) -> Result<Signature<'static>> {
     }
 }
 
+/// Builds credential callback chain for fetch/push operations.
+/// Priority: token env vars -> git credential helper -> SSH agent -> libgit2 default.
 fn auth_callbacks(config: Option<Config>) -> RemoteCallbacks<'static> {
     let mut callbacks = RemoteCallbacks::new();
     callbacks.credentials(move |url, username_from_url, allowed| {
@@ -515,47 +568,4 @@ fn auth_callbacks(config: Option<Config>) -> RemoteCallbacks<'static> {
         Cred::default()
     });
     callbacks
-}
-
-impl GitRepo for Git2Repo {
-    fn branch_state(&self, branch_name: &str) -> Result<BranchState> {
-        Git2Repo::branch_state(self, branch_name)
-    }
-
-    fn validate_branch_name(
-        &self,
-        mode: ReleaseMode,
-        branch_name: &str,
-        rc_prefix: &str,
-    ) -> Result<BranchKind> {
-        Git2Repo::validate_branch_name(self, mode, branch_name, rc_prefix)
-    }
-
-    fn create_release_branch_from_default(
-        &self,
-        branch_name: &str,
-        default_branch: &str,
-    ) -> Result<Vec<String>> {
-        Git2Repo::create_release_branch_from_default(self, branch_name, default_branch)
-    }
-
-    fn refresh_existing_release_branch(
-        &self,
-        branch_name: &str,
-        default_branch: &str,
-    ) -> Result<Vec<String>> {
-        Git2Repo::refresh_existing_release_branch(self, branch_name, default_branch)
-    }
-
-    fn stage_all_and_commit(&self, message: &str, dry_run: bool) -> Result<()> {
-        Git2Repo::stage_all_and_commit(self, message, dry_run)
-    }
-
-    fn push_branch(&self, branch_name: &str, force: bool, dry_run: bool) -> Result<()> {
-        Git2Repo::push_branch(self, branch_name, force, dry_run)
-    }
-
-    fn create_branch_from_current(&self, branch_name: &str, dry_run: bool) -> Result<()> {
-        Git2Repo::create_branch_from_current(self, branch_name, dry_run)
-    }
 }

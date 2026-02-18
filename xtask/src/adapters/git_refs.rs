@@ -12,57 +12,72 @@ use tempfile::TempDir;
 
 #[derive(Debug)]
 pub struct RepoSnapshot {
+    /// Guard temp dir so worktree path exists for snapshot lifetime.
     pub temp_dir: TempDir,
+    /// Root path of the temporary snapshot worktree checkout.
     pub repo_root: PathBuf,
+    /// Original repository path where worktree/branch cleanup must happen.
     source_repo_root: PathBuf,
+    /// Name of temporary worktree registered in source repository.
     worktree_name: String,
+    /// Temporary local branch pinned to snapshot commit.
     snapshot_branch: String,
 }
 
 impl Drop for RepoSnapshot {
+    /// Best-effort cleanup of temporary worktree and temporary snapshot branch.
     fn drop(&mut self) {
+        // If source repo cannot be opened, there is nothing left we can safely clean up.
         let Ok(repo) = Repository::open(&self.source_repo_root) else {
             return;
         };
 
+        // Remove registered worktree first so branch cleanup is unblocked.
         if let Ok(worktree) = repo.find_worktree(&self.worktree_name) {
             let mut opts = WorktreePruneOptions::new();
             opts.valid(true).locked(true).working_tree(true);
             let _ = worktree.prune(Some(&mut opts));
         }
 
+        // Delete temporary local snapshot branch.
         if let Ok(mut branch) = repo.find_branch(&self.snapshot_branch, BranchType::Local) {
             let _ = branch.delete();
         }
     }
 }
 
-pub fn resolve_comparison_commit(
+/// Resolves the current commit used for release analysis:
+/// explicit `current_commit` when provided, else tip of default branch.
+pub fn resolve_current_commit(
     workspace_root: &Path,
     default_branch: &str,
-    base_commit: Option<&str>,
+    current_commit: Option<&str>,
 ) -> Result<String> {
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
 
-    if let Some(commit) = base_commit {
+    if let Some(commit) = current_commit {
+        // Explicit current commit wins and is normalized to a concrete commit OID.
         let object = repo
             .revparse_single(commit)
-            .with_context(|| format!("failed to resolve base commit `{commit}`"))?;
+            .with_context(|| format!("failed to resolve current commit `{commit}`"))?;
         let commit_oid = object
             .peel_to_commit()
-            .context("failed to peel base commit to a commit object")?
+            .context("failed to peel current commit to a commit object")?
             .id();
         return Ok(commit_oid.to_string());
     }
 
+    // Default path: compare against default-branch tip (prefer remote-tracking ref).
     if let Some(oid) = resolve_branch_tip_oid(&repo, default_branch) {
         return Ok(oid.to_string());
     }
 
-    bail!("failed to resolve comparison commit for default branch `{default_branch}`")
+    bail!("failed to resolve current commit for default branch `{default_branch}`")
 }
 
+/// Creates isolated temporary worktree pinned to a specific commit.
+/// Returns guard that cleans up both worktree and temporary branch on drop.
 pub fn snapshot_workspace_to_temp(
     workspace_root: &Path,
     commit: &str,
@@ -77,6 +92,7 @@ pub fn snapshot_workspace_to_temp(
         .peel_to_commit()
         .with_context(|| format!("failed to peel `{commit}` to commit"))?;
 
+    // Allocate unique branch/worktree names so concurrent checks do not collide.
     let snapshot_id = unique_snapshot_id();
     let worktree_name = format!("xtask-snapshot-{snapshot_id}");
     let snapshot_branch = worktree_name.clone();
@@ -84,6 +100,7 @@ pub fn snapshot_workspace_to_temp(
     repo.branch(&snapshot_branch, &target_commit, true)
         .with_context(|| format!("failed to create snapshot branch `{snapshot_branch}`"))?;
 
+    // Wire upstream tracking when remote default branch is available (best effort).
     let upstream = format!("origin/{default_branch}");
     if repo.find_branch(&upstream, BranchType::Remote).is_ok()
         && let Ok(mut local) = repo.find_branch(&snapshot_branch, BranchType::Local)
@@ -96,6 +113,7 @@ pub fn snapshot_workspace_to_temp(
     let mut opts = WorktreeAddOptions::new();
     opts.checkout_existing(true);
 
+    // Materialize detached snapshot as a linked worktree under temp dir.
     repo.worktree(&worktree_name, &repo_root, Some(&opts))
         .with_context(|| {
             format!(
@@ -115,6 +133,7 @@ pub fn snapshot_workspace_to_temp(
     })
 }
 
+/// Reads URL of `origin` remote when configured.
 pub fn remote_origin_url(workspace_root: &Path) -> Result<Option<String>> {
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
@@ -127,6 +146,7 @@ pub fn remote_origin_url(workspace_root: &Path) -> Result<Option<String>> {
     Ok(remote.url().map(|url| url.to_string()))
 }
 
+/// Finds latest release tag (RC or final) reachable from target branch release commits.
 pub fn latest_release_tag_on_branch(
     workspace_root: &Path,
     default_branch: &str,
@@ -134,6 +154,7 @@ pub fn latest_release_tag_on_branch(
     latest_release_tag_with_filter(workspace_root, default_branch, ReleaseTagFilter::AnyRelease)
 }
 
+/// Finds latest non-RC release tag reachable from target branch release commits.
 pub fn latest_non_rc_release_tag_on_branch(
     workspace_root: &Path,
     default_branch: &str,
@@ -141,6 +162,7 @@ pub fn latest_non_rc_release_tag_on_branch(
     latest_release_tag_with_filter(workspace_root, default_branch, ReleaseTagFilter::NonRcOnly)
 }
 
+/// Lists changed file paths between tag commit and current `HEAD`.
 pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String>> {
     let repo = Repository::open(repo_root)
         .with_context(|| format!("failed to open repository at {}", repo_root.display()))?;
@@ -163,6 +185,7 @@ pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String
         .diff_tree_to_tree(Some(&baseline_tree), Some(&head_tree), Some(&mut diff_opts))
         .context("failed to compute diff between baseline and HEAD")?;
 
+    // Return unique path list across adds/modifies/deletes.
     let mut files = BTreeSet::new();
     diff.foreach(
         &mut |delta, _| {
@@ -180,6 +203,7 @@ pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String
     Ok(files.into_iter().collect())
 }
 
+/// Resolves commit id referenced by a tag name.
 pub fn commit_for_tag(repo_root: &Path, tag: &str) -> Result<String> {
     let repo = Repository::open(repo_root)
         .with_context(|| format!("failed to open repository at {}", repo_root.display()))?;
@@ -194,15 +218,21 @@ enum ReleaseTagFilter {
     NonRcOnly,
 }
 
+/// Shared implementation for locating latest release tag with optional non-RC filtering.
 fn latest_release_tag_with_filter(
     workspace_root: &Path,
     default_branch: &str,
     filter: ReleaseTagFilter,
 ) -> Result<Option<String>> {
+    // Strategy:
+    // 1) Walk commits from default-branch tip backward.
+    // 2) Keep commits whose message includes "release".
+    // 3) Pick best semver tag on that commit (optionally non-RC only).
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
 
     let commit_tags = tags_by_commit(&repo)?;
+    // Seed history walk from default-branch tip, fallback to current HEAD if needed.
     let start_oid = resolve_branch_tip_oid(&repo, default_branch).or_else(|| {
         repo.head()
             .ok()
@@ -227,6 +257,7 @@ fn latest_release_tag_with_filter(
         let commit = repo
             .find_commit(oid)
             .context("failed to load commit while scanning release history")?;
+        // Keep the same release identification heuristic requested in spec discussion.
         let message = commit.message().unwrap_or_default().to_ascii_lowercase();
         if !message.contains("release") {
             continue;
@@ -241,11 +272,13 @@ fn latest_release_tag_with_filter(
 
         match filter {
             ReleaseTagFilter::AnyRelease => {
+                // Accept latest semver tag on this release commit (including rc).
                 if let Some(tag) = pick_best_semver_tag(tags, false) {
                     return Ok(Some(tag));
                 }
             }
             ReleaseTagFilter::NonRcOnly => {
+                // Skip commits with any RC tag to guarantee stable baseline.
                 if tags
                     .iter()
                     .any(|tag| tag.to_ascii_lowercase().contains("rc"))
@@ -253,6 +286,7 @@ fn latest_release_tag_with_filter(
                     continue;
                 }
 
+                // Pick best stable semver tag from remaining candidates.
                 if let Some(tag) = pick_best_semver_tag(tags, true) {
                     return Ok(Some(tag));
                 }
@@ -263,6 +297,7 @@ fn latest_release_tag_with_filter(
     Ok(None)
 }
 
+/// Builds map from commit OID to tag names that point to that commit.
 fn tags_by_commit(repo: &Repository) -> Result<HashMap<Oid, Vec<String>>> {
     let mut tags = HashMap::<Oid, Vec<String>>::new();
     let references = repo
@@ -286,6 +321,7 @@ fn tags_by_commit(repo: &Repository) -> Result<HashMap<Oid, Vec<String>>> {
     Ok(tags)
 }
 
+/// Resolves branch tip OID from remote-tracking branch first, then local branch.
 fn resolve_branch_tip_oid(repo: &Repository, default_branch: &str) -> Option<Oid> {
     [
         format!("refs/remotes/origin/{default_branch}"),
@@ -295,6 +331,7 @@ fn resolve_branch_tip_oid(repo: &Repository, default_branch: &str) -> Option<Oid
     .find_map(|reference| repo.refname_to_id(&reference).ok())
 }
 
+/// Resolves either lightweight or annotated tag reference to its target commit.
 fn resolve_tag_to_commit<'repo>(repo: &'repo Repository, tag: &str) -> Result<git2::Commit<'repo>> {
     let object = match repo.find_reference(&format!("refs/tags/{tag}")) {
         Ok(reference) => reference
@@ -310,6 +347,7 @@ fn resolve_tag_to_commit<'repo>(repo: &'repo Repository, tag: &str) -> Result<gi
         .with_context(|| format!("failed to resolve commit for tag `{tag}`"))
 }
 
+/// Chooses highest semver tag from candidates, optionally restricting to non-prerelease.
 fn pick_best_semver_tag(tags: &[String], require_non_rc: bool) -> Option<String> {
     let mut parsed = tags
         .iter()
@@ -321,11 +359,13 @@ fn pick_best_semver_tag(tags: &[String], require_non_rc: bool) -> Option<String>
     parsed.last().map(|(tag, _)| (*tag).clone())
 }
 
+/// Extracts semver by parsing suffix after the final `v` in a tag name.
 fn extract_semver_from_tag(tag: &str) -> Option<Version> {
     let idx = tag.rfind('v')?;
     Version::parse(&tag[idx + 1..]).ok()
 }
 
+/// Generates unique identifier for temporary snapshot branch/worktree names.
 fn unique_snapshot_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

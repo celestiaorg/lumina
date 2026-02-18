@@ -3,6 +3,7 @@ use cargo_metadata::semver::{Prerelease, Version};
 
 use crate::domain::types::RcTransformState;
 
+/// Classifies a version as plain/stable input or as an existing `rc.N` variant.
 pub fn rc_transform_state(version: &Version) -> Result<RcTransformState> {
     let pre = version.pre.as_str();
     if pre.is_empty() {
@@ -19,6 +20,8 @@ pub fn rc_transform_state(version: &Version) -> Result<RcTransformState> {
 }
 
 #[allow(dead_code)]
+/// Converts the *current* package version to the next RC candidate.
+/// This increments patch for stable inputs and increments rc index for RC inputs.
 pub fn convert_to_next_rc(version: &Version) -> Result<Version> {
     // Converts from current package version to next RC:
     // 0.5.0 -> 0.5.1-rc.1
@@ -38,6 +41,8 @@ pub fn convert_to_next_rc(version: &Version) -> Result<Version> {
     }
 }
 
+/// Converts release-plz computed next version into RC effective version.
+/// Stable `X.Y.Z` -> `X.Y.Z-rc.1`; existing `X.Y.Z-rc.N` -> `X.Y.Z-rc.(N+1)`.
 pub fn convert_release_version_to_rc(standard_release: &Version) -> Result<Version> {
     // Converts from a standard release-plz target version to RC:
     // 0.5.1 -> 0.5.1-rc.1
@@ -56,10 +61,12 @@ pub fn convert_release_version_to_rc(standard_release: &Version) -> Result<Versi
     }
 }
 
+/// Returns true when the version pre-release segment starts with `rc.`.
 pub fn is_rc(version: &Version) -> bool {
     version.pre.as_str().starts_with("rc.")
 }
 
+/// Strips prerelease/build metadata and returns stable variant when input is prerelease.
 pub fn to_stable_if_prerelease(version: &Version) -> Option<Version> {
     if version.pre.is_empty() {
         return None;
@@ -71,6 +78,7 @@ pub fn to_stable_if_prerelease(version: &Version) -> Option<Version> {
     Some(stable)
 }
 
+/// Ensures RC conversion is deterministic and matches `convert_release_version_to_rc`.
 pub fn validate_rc_conversion(next_release: &Version, next_effective: &Version) -> Result<()> {
     if !is_rc(next_effective) {
         bail!("next version must be an rc variant, got {next_effective}");
@@ -89,6 +97,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Stable input is promoted to next patch and first RC in current-version flow.
     fn plain_version_to_first_rc() {
         let current = Version::parse("0.5.0").unwrap();
         let next = convert_to_next_rc(&current).unwrap();
@@ -96,6 +105,7 @@ mod tests {
     }
 
     #[test]
+    /// Existing RC input increments only RC index in current-version flow.
     fn rc_version_to_next_rc() {
         let current = Version::parse("0.5.1-rc.1").unwrap();
         let next = convert_to_next_rc(&current).unwrap();
@@ -103,6 +113,7 @@ mod tests {
     }
 
     #[test]
+    /// release-plz target stable release maps to first RC in release-target flow.
     fn standard_release_to_first_rc() {
         let standard = Version::parse("0.5.1").unwrap();
         let next = convert_release_version_to_rc(&standard).unwrap();
