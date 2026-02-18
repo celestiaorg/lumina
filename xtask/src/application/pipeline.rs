@@ -107,7 +107,8 @@ impl ReleasePipeline {
             );
         }
 
-        let report = handle_prepare(&self.git, &self.pr_client, &self.release_engine, ctx, check).await?;
+        let report =
+            handle_prepare(&self.git, &self.pr_client, &self.release_engine, ctx, check).await?;
         info!(
             mode=?report.mode,
             branch=%report.branch_name,
@@ -191,7 +192,7 @@ impl ReleasePipeline {
     pub async fn publish(&self, ctx: PublishContext) -> Result<ReleaseReport> {
         info!(mode=?ctx.common.mode, default_branch=%ctx.common.default_branch, "starting publish");
         let report = handle_publish(&self.publisher, ctx).await?;
-        info!(published=report.published, "publish completed");
+        info!(published = report.published, "publish completed");
         Ok(report)
     }
 }

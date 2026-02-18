@@ -28,7 +28,7 @@ pub async fn handle_prepare(
         previous_commit=%check.previous_commit,
         latest_release_tag=?check.latest_release_tag,
         latest_non_rc_release_tag=?check.latest_non_rc_release_tag,
-        "prepare: resolved initial release branch and baseline"
+        "prepare: resolved initial release branch, previous commit, and current commit"
     );
 
     // Pick branch update strategy based on branch existence and PR contributor safety check.

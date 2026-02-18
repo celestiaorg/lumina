@@ -24,11 +24,11 @@ use crate::domain::workspace::Workspace;
 
 #[derive(Debug, Clone)]
 struct ContextVersions {
-    /// Previous release commit used as baseline anchor.
+    /// Previous release commit used as update anchor.
     previous_commit: String,
-    /// Latest release tag (RC or final) visible from comparison snapshot.
+    /// Latest release tag (RC or final) visible from current snapshot.
     latest_release_tag: Option<String>,
-    /// Latest non-RC release tag visible from comparison snapshot.
+    /// Latest non-RC release tag visible from current snapshot.
     latest_non_rc_release_tag: Option<String>,
     /// Commit used as current workspace snapshot root.
     current_commit: String,
@@ -59,7 +59,7 @@ impl ReleasePlzAdapter {
     }
 
     /// Computes release versions and reporting metadata for check/prepare stages.
-    /// Baseline previous commit must be resolvable for both rc and final modes.
+    /// Previous commit must be resolvable for both rc and final modes.
     pub async fn versions(&self, ctx: &CheckContext) -> Result<VersionComputation> {
         info!(
             mode=?ctx.common.mode,
@@ -109,7 +109,7 @@ impl ReleasePlzAdapter {
             temp_workspace_root,
             &ctx.common.default_branch,
         )?;
-        debug!(previous_commit=%previous_commit, "release_plz: resolved previous baseline commit");
+        debug!(previous_commit=%previous_commit, "release_plz: resolved previous commit");
         let latest_release_tag =
             latest_release_tag_on_branch(temp_workspace_root, &ctx.common.default_branch)?;
         let latest_non_rc_release_tag =
@@ -117,16 +117,16 @@ impl ReleasePlzAdapter {
         debug!(
             latest_release_tag=?latest_release_tag,
             latest_non_rc_release_tag=?latest_non_rc_release_tag,
-            "release_plz: resolved baseline tags"
+            "release_plz: resolved previous-release tags"
         );
-        // Load previous release snapshot so release-plz can use it as baseline.
+        // Load previous release snapshot so release-plz can use it as previous-state input.
         let previous_snapshot =
             self.load_previous_snapshot(&previous_commit, &ctx.common.default_branch)?;
         let previous_manifest_path = previous_snapshot.snapshot.repo_root.join("Cargo.toml");
         debug!(
             previous_snapshot_root=%previous_snapshot.snapshot.repo_root.display(),
             previous_manifest_path=%previous_manifest_path.display(),
-            "release_plz: prepared previous baseline snapshot"
+            "release_plz: prepared previous snapshot"
         );
 
         // Capture package versions before applying computed updates.
@@ -146,8 +146,8 @@ impl ReleasePlzAdapter {
             &versions,
         )?;
         debug!(
-            planned_versions=versions.len(),
-            duplicate_groups=duplicate_publishable_versions.len(),
+            planned_versions = versions.len(),
+            duplicate_groups = duplicate_publishable_versions.len(),
             "release_plz: finished context version computation"
         );
 
@@ -172,7 +172,7 @@ impl ReleasePlzAdapter {
         debug!(
             selected_commit=%commit,
             default_branch=%ctx.common.default_branch,
-            "release_plz: selected comparison commit"
+            "release_plz: selected current commit"
         );
         Ok(commit)
     }
@@ -197,7 +197,7 @@ impl ReleasePlzAdapter {
         Ok(SnapshotState { snapshot, metadata })
     }
 
-    /// Loads previous release snapshot for release-plz baseline input.
+    /// Loads previous release snapshot for release-plz previous-state input.
     fn load_previous_snapshot(
         &self,
         previous_commit: &str,
@@ -234,12 +234,12 @@ impl ReleasePlzAdapter {
             previous_tag=%previous_tag,
             previous_commit=%previous_commit,
             snapshot_repo_root=%snapshot_repo_root.display(),
-            "release_plz: resolved previous baseline"
+            "release_plz: resolved previous release point"
         );
         Ok(previous_commit)
     }
 
-    /// Computes package versions from snapshot metadata and applies final-mode baseline filtering.
+    /// Computes package versions from snapshot metadata and applies final-mode previous-tag filtering.
     pub async fn versions_from_snapshot(
         &self,
         metadata: &Metadata,
@@ -260,20 +260,20 @@ impl ReleasePlzAdapter {
             .await?;
 
         if matches!(mode, ReleaseMode::Final) {
-            // In final mode, include only publishable packages changed since latest stable baseline tag.
-            let baseline_tag =
+            // In final mode, include only publishable packages changed since latest stable previous tag.
+            let previous_tag =
                 latest_non_rc_release_tag_on_branch(snapshot_repo_root, default_branch)?.context(
-                    "final mode requires at least one non-RC release tag in comparison workspace",
+                    "final mode requires at least one non-RC release tag in current workspace",
                 )?;
             let changed_packages = changed_publishable_packages_since_tag(
                 snapshot_repo_root,
                 metadata,
-                &baseline_tag,
+                &previous_tag,
             )?;
             debug!(
-                baseline_tag=%baseline_tag,
+                previous_tag=%previous_tag,
                 changed_packages=changed_packages.len(),
-                "release_plz: filtered final-mode packages by baseline tag"
+                "release_plz: filtered final-mode packages by previous non-rc tag"
             );
             versions.retain(|version| changed_packages.contains(&version.package));
         }
@@ -311,7 +311,7 @@ impl ReleasePlzAdapter {
             .await
             .context("failed to compute next versions with release-plz")?;
         debug!(
-            updates=packages_to_update.updates().len(),
+            updates = packages_to_update.updates().len(),
             "release_plz: next_versions returned updates"
         );
 
@@ -343,7 +343,10 @@ impl ReleasePlzAdapter {
             .collect::<Result<Vec<_>>>()?;
 
         versions.sort_by(|a, b| a.package.cmp(&b.package));
-        debug!(planned_versions=versions.len(), "release_plz: projected mode-specific versions");
+        debug!(
+            planned_versions = versions.len(),
+            "release_plz: projected mode-specific versions"
+        );
         Ok(versions)
     }
 
@@ -377,7 +380,7 @@ impl ReleasePlzAdapter {
         debug!(
             previous_snapshot_root=%previous_snapshot.snapshot.repo_root.display(),
             previous_manifest_path=%previous_manifest_path.display(),
-            "release_plz: using previous manifest path for update baseline"
+            "release_plz: using previous manifest path for update context"
         );
         let previous_manifest_path =
             Utf8Path::from_path(&previous_manifest_path).with_context(|| {
@@ -394,7 +397,7 @@ impl ReleasePlzAdapter {
             .await
             .context("failed to regenerate release artifacts with release-plz update")?;
         debug!(
-            updates=packages_to_update.updates().len(),
+            updates = packages_to_update.updates().len(),
             "release_plz: update regenerated release artifacts"
         );
 
@@ -432,25 +435,28 @@ impl ReleasePlzAdapter {
         }
 
         if let Some(latest_release) = latest_release_tag {
-            // Report release-plz-style changelog comparison anchor.
+            // Report release-plz-style changelog previous-release point.
             descriptions.push(format!(
-                "changelog baseline: latest release tag `{latest_release}`"
+                "previous release tag for changelog: `{latest_release}`"
             ));
             descriptions.push(format!("includes changes since `{latest_release}`"));
         }
         if matches!(mode, ReleaseMode::Final)
             && let Some(latest_non_rc_release) = latest_non_rc_release_tag
         {
-            // Report stable baseline separately to remove RC/final ambiguity.
+            // Report stable previous tag separately to remove RC/final ambiguity.
             descriptions.push(format!(
-                "final baseline: latest non-RC release tag `{latest_non_rc_release}`"
+                "final previous non-RC release tag: `{latest_non_rc_release}`"
             ));
             descriptions.push(format!(
                 "includes changes since latest non-RC release `{latest_non_rc_release}`"
             ));
         }
 
-        info!(description_items=descriptions.len(), "release_plz: artifact regeneration completed");
+        info!(
+            description_items = descriptions.len(),
+            "release_plz: artifact regeneration completed"
+        );
         Ok(descriptions)
     }
 
@@ -519,7 +525,7 @@ impl ReleasePlzAdapter {
             None => serde_json::json!([]),
         };
         info!(
-            released_items=payload.as_array().map(|items| items.len()).unwrap_or(0),
+            released_items = payload.as_array().map(|items| items.len()).unwrap_or(0),
             "release_plz: publish completed"
         );
 
@@ -535,7 +541,7 @@ fn is_publishable(publish: &Option<Vec<String>>) -> bool {
     }
 }
 
-/// Extracts package versions visible at comparison workspace commit for JSON reporting.
+/// Extracts package versions visible at current workspace commit for JSON reporting.
 fn current_versions_from_metadata(metadata: &Metadata) -> Vec<ComparisonVersionView> {
     // Keep deterministic package order for stable JSON output.
     let mut versions = metadata
@@ -571,7 +577,10 @@ fn duplicate_versions(
     let simulated_metadata = metadata_for_manifest(&snapshot_manifest)?;
     let simulated_workspace = Workspace::from_metadata(simulated_metadata);
     let duplicates = simulated_workspace.duplicate_publishable_versions();
-    debug!(duplicate_groups=duplicates.len(), "release_plz: duplicate simulation completed");
+    debug!(
+        duplicate_groups = duplicates.len(),
+        "release_plz: duplicate simulation completed"
+    );
     Ok(duplicates)
 }
 
@@ -617,19 +626,19 @@ fn parse_remote_repo_url(
     Ok(Some(repo_url))
 }
 
-/// Computes publishable workspace package names changed since the provided baseline tag.
+/// Computes publishable workspace package names changed since the provided previous tag.
 fn changed_publishable_packages_since_tag(
     repo_root: &std::path::Path,
     metadata: &Metadata,
     tag: &str,
 ) -> Result<std::collections::HashSet<String>> {
-    // Use git diff against baseline tag to scope final-mode packages to actual changed crates.
+    // Use git diff against previous tag to scope final-mode packages to actual changed crates.
     let changed_files = changed_files_since_tag(repo_root, tag)?;
     debug!(
         repo_root=%repo_root.display(),
-        baseline_tag=%tag,
+        previous_tag=%tag,
         changed_files=changed_files.len(),
-        "release_plz: collected changed files since baseline tag"
+        "release_plz: collected changed files since previous tag"
     );
 
     let mut changed_packages = std::collections::HashSet::new();
@@ -663,6 +672,9 @@ fn changed_publishable_packages_since_tag(
         }
     }
 
-    debug!(changed_packages=changed_packages.len(), "release_plz: computed changed publishable packages");
+    debug!(
+        changed_packages = changed_packages.len(),
+        "release_plz: computed changed publishable packages"
+    );
     Ok(changed_packages)
 }

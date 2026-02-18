@@ -77,7 +77,7 @@ pub async fn run() -> Result<()> {
                 "running publish"
             );
             let report = pipeline.publish(to_publish_context(args.common)).await?;
-            info!(published=report.published, "publish completed");
+            info!(published = report.published, "publish completed");
             maybe_print_json(args.json, &report)?;
         }
         Commands::Execute(args) => {

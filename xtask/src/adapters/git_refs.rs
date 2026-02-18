@@ -175,8 +175,11 @@ pub fn latest_release_tag_on_branch(
     workspace_root: &Path,
     default_branch: &str,
 ) -> Result<Option<String>> {
-    let tag =
-        latest_release_tag_with_filter(workspace_root, default_branch, ReleaseTagFilter::AnyRelease)?;
+    let tag = latest_release_tag_with_filter(
+        workspace_root,
+        default_branch,
+        ReleaseTagFilter::AnyRelease,
+    )?;
     debug!(
         workspace_root=%workspace_root.display(),
         default_branch=%default_branch,
@@ -215,23 +218,23 @@ pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String
     let repo = Repository::open(repo_root)
         .with_context(|| format!("failed to open repository at {}", repo_root.display()))?;
 
-    let baseline_commit = resolve_tag_to_commit(&repo, tag)
-        .with_context(|| format!("failed to resolve baseline tag `{tag}`"))?;
+    let previous_commit = resolve_tag_to_commit(&repo, tag)
+        .with_context(|| format!("failed to resolve previous tag `{tag}`"))?;
     let head_commit = repo
         .head()
         .context("failed to resolve HEAD reference")?
         .peel_to_commit()
         .context("failed to peel HEAD to commit")?;
 
-    let baseline_tree = baseline_commit
+    let previous_tree = previous_commit
         .tree()
-        .context("failed to resolve baseline tree")?;
+        .context("failed to resolve previous tag tree")?;
     let head_tree = head_commit.tree().context("failed to resolve HEAD tree")?;
 
     let mut diff_opts = DiffOptions::new();
     let diff = repo
-        .diff_tree_to_tree(Some(&baseline_tree), Some(&head_tree), Some(&mut diff_opts))
-        .context("failed to compute diff between baseline and HEAD")?;
+        .diff_tree_to_tree(Some(&previous_tree), Some(&head_tree), Some(&mut diff_opts))
+        .context("failed to compute diff between previous tag and HEAD")?;
 
     // Return unique path list across adds/modifies/deletes.
     let mut files = BTreeSet::new();
@@ -249,7 +252,10 @@ pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String
     .context("failed to iterate changed files in diff")?;
 
     let files = files.into_iter().collect::<Vec<_>>();
-    debug!(changed_files=files.len(), "git_refs: collected changed files");
+    debug!(
+        changed_files = files.len(),
+        "git_refs: collected changed files"
+    );
     Ok(files)
 }
 
@@ -330,7 +336,7 @@ fn latest_release_tag_with_filter(
                 }
             }
             ReleaseTagFilter::NonRcOnly => {
-                // Skip commits with any RC tag to guarantee stable baseline.
+                // Skip commits with any RC tag to guarantee stable previous release point.
                 if tags
                     .iter()
                     .any(|tag| tag.to_ascii_lowercase().contains("rc"))

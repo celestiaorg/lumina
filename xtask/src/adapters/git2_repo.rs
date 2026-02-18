@@ -166,7 +166,10 @@ impl Git2Repo {
                 .context("failed to resolve reset target for generated release commits")?;
             repo.reset(&target, ResetType::Hard, None)
                 .context("failed to reset generated release commits")?;
-            debug!(generated_count, "git2_repo: reset generated release commits");
+            debug!(
+                generated_count,
+                "git2_repo: reset generated release commits"
+            );
             descriptions.push(format!(
                 "reset {} generated release commit(s)",
                 generated_count
