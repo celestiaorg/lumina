@@ -61,13 +61,9 @@ pub async fn handle_submit(
     .to_string();
     debug!(commit_message=%commit_message, "submit: prepared commit message");
 
-    // Apply submit strategy: close/recreate PR flow or in-place force-push flow.
-    let pr_url = match strategy {
+    // Apply submit strategy for git branch/commit/push behavior.
+    match strategy {
         UpdateStrategy::ClosePrAndRecreate => {
-            // Close old PR first so recreated branch can open a clean PR thread.
-            let _ = pr_client
-                .close_open_release_pr(&args.ctx.common.auth, args.ctx.branch.skip_pr, &branch_name)
-                .await?;
             git.stage_all_and_commit(&commit_message, args.dry_run)?;
             // Fork current HEAD into a fresh release branch and push without force.
             let recreated_branch = make_release_branch_name(args.ctx.common.mode);
@@ -75,34 +71,41 @@ pub async fn handle_submit(
             git.create_branch_from_current(&recreated_branch, args.dry_run)?;
             git.push_branch(&recreated_branch, false, args.dry_run)?;
             branch_name = recreated_branch;
-            pr_client
-                .ensure_release_pr(
-                    args.ctx.common.mode,
-                    &args.ctx.common.default_branch,
-                    &args.ctx.common.auth,
-                    args.ctx.branch.skip_pr,
-                    &branch_name,
-                )
-                .await?
-                .map(|pr| pr.url)
         }
         _ => {
             // Normal flow: commit current branch changes and force-push update.
             debug!(branch=%branch_name, "submit: committing and force-pushing existing branch");
             git.stage_all_and_commit(&commit_message, args.dry_run)?;
             git.push_branch(&branch_name, true, args.dry_run)?;
-            pr_client
-                .ensure_release_pr(
-                    args.ctx.common.mode,
-                    &args.ctx.common.default_branch,
-                    &args.ctx.common.auth,
-                    args.ctx.branch.skip_pr,
-                    &branch_name,
-                )
-                .await?
-                .map(|pr| pr.url)
         }
-    };
+    }
+
+    // Close stale release PRs (across rc/final) before opening/ensuring current one.
+    let closed_stale_prs = pr_client
+        .close_stale_open_release_prs(
+            &args.ctx.common.auth,
+            args.ctx.branch.skip_pr,
+            Some(&branch_name),
+        )
+        .await?;
+    if !closed_stale_prs.is_empty() {
+        info!(
+            branch=%branch_name,
+            closed_stale_prs=closed_stale_prs.len(),
+            "submit: closed stale release PRs before ensuring current PR"
+        );
+    }
+
+    let pr_url = pr_client
+        .ensure_release_pr(
+            args.ctx.common.mode,
+            &args.ctx.common.default_branch,
+            &args.ctx.common.auth,
+            args.ctx.branch.skip_pr,
+            &branch_name,
+        )
+        .await?
+        .map(|pr| pr.url);
 
     // Expose branch/PR data for GitHub Actions follow-up steps.
     write_github_output("release_branch", &branch_name)?;

@@ -31,6 +31,21 @@ impl GitHubPrClient {
         Ok(prs.into_iter().find(|pr| pr.branch() == branch_name))
     }
 
+    /// Lists open release PRs by title heuristic.
+    async fn open_release_prs(
+        &self,
+        client: &release_plz_core::GitClient,
+    ) -> Result<Vec<release_plz_core::GitPr>> {
+        let prs = client
+            .opened_prs("")
+            .await
+            .context("failed to list opened PRs")?;
+        Ok(prs
+            .into_iter()
+            .filter(|pr| is_release_pr_candidate(pr))
+            .collect())
+    }
+
     /// Creates authenticated GitHub API client from available token + origin URL.
     fn git_client(&self, auth: &AuthContext) -> Result<Option<release_plz_core::GitClient>> {
         // Prefer dedicated release token, fallback to GitHub token.
@@ -102,35 +117,46 @@ impl GitHubPrClient {
         Ok(has_external)
     }
 
-    /// Closes open release PR for branch unless `skip_pr` is enabled.
-    pub async fn close_open_release_pr(
+    /// Closes all open release PRs except optional branch to keep.
+    pub async fn close_stale_open_release_prs(
         &self,
         auth: &AuthContext,
         skip_pr: bool,
-        branch_name: &str,
-    ) -> Result<Option<PullRequestInfo>> {
-        // Explicitly allow running full flow without PR operations.
+        keep_branch: Option<&str>,
+    ) -> Result<Vec<PullRequestInfo>> {
         if skip_pr {
-            debug!(branch=%branch_name, "github_pr: skip_pr=true, skipping close");
-            return Ok(None);
+            debug!("github_pr: skip_pr=true, skipping stale release PR closing");
+            return Ok(vec![]);
         }
         let Some(client) = self.git_client(auth)? else {
-            return Ok(None);
-        };
-        let Some(pr) = self.find_open_release_pr(&client, branch_name).await? else {
-            debug!(branch=%branch_name, "github_pr: no open PR to close");
-            return Ok(None);
+            return Ok(vec![]);
         };
 
-        client
-            .close_pr(pr.number)
-            .await
-            .with_context(|| format!("failed to close PR #{}", pr.number))?;
+        let keep_branch = keep_branch.map(str::to_string);
+        let release_prs = self.open_release_prs(&client).await?;
+        let stale_prs = release_prs
+            .into_iter()
+            .filter(|pr| keep_branch.as_deref() != Some(pr.branch()))
+            .collect::<Vec<_>>();
 
-        Ok(Some(PullRequestInfo {
-            number: pr.number,
-            url: pr.html_url.to_string(),
-        }))
+        let mut closed = Vec::new();
+        for pr in stale_prs {
+            client
+                .close_pr(pr.number)
+                .await
+                .with_context(|| format!("failed to close stale release PR #{}", pr.number))?;
+            closed.push(PullRequestInfo {
+                number: pr.number,
+                url: pr.html_url.to_string(),
+            });
+        }
+        info!(
+            keep_branch=?keep_branch,
+            closed_prs=closed.len(),
+            "github_pr: stale release PR cleanup completed"
+        );
+
+        Ok(closed)
     }
 
     /// Ensures release PR exists for branch: reuses existing open PR or opens a new one.
@@ -196,6 +222,11 @@ impl GitHubPrClient {
             url: opened.html_url.to_string(),
         }))
     }
+}
+
+fn is_release_pr_candidate(pr: &release_plz_core::GitPr) -> bool {
+    let title = pr.title.to_ascii_lowercase();
+    title.contains("chore: release")
 }
 
 /// Parses origin URL into release-plz repository URL model.
