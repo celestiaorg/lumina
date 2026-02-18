@@ -8,7 +8,7 @@ use git2::{
     StashApplyOptions, StashFlags, StatusOptions,
 };
 
-use crate::domain::types::{BranchKind, BranchState, ReleaseMode};
+use crate::domain::types::BranchState;
 
 #[derive(Debug, Clone)]
 pub struct Git2Repo {
@@ -34,32 +34,6 @@ impl Git2Repo {
             Ok(BranchState::ExistsDirtyLocal)
         } else {
             Ok(BranchState::ExistsClean)
-        }
-    }
-
-    /// Enforces branch naming policy:
-    /// RC branches must use RC prefix, final branches must not.
-    pub fn validate_branch_name(
-        &self,
-        mode: ReleaseMode,
-        branch_name: &str,
-        rc_prefix: &str,
-    ) -> Result<BranchKind> {
-        match mode {
-            ReleaseMode::Rc => {
-                if !branch_name.starts_with(rc_prefix) {
-                    bail!("rc mode requires branch prefix '{rc_prefix}', got '{branch_name}'");
-                }
-                Ok(BranchKind::RcRelease)
-            }
-            ReleaseMode::Final => {
-                if branch_name.starts_with(rc_prefix) {
-                    bail!(
-                        "final mode cannot use rc branch prefix '{rc_prefix}', got '{branch_name}'"
-                    );
-                }
-                Ok(BranchKind::FinalRelease)
-            }
         }
     }
 
@@ -95,7 +69,7 @@ impl Git2Repo {
         Ok(())
     }
 
-    /// Creates (or resolves) release branch from latest default branch state and returns audit actions.
+    /// Creates (or resolves) release branch from latest default branch state and returns step descriptions.
     pub fn create_release_branch_from_default(
         &self,
         branch_name: &str,
@@ -112,15 +86,15 @@ impl Git2Repo {
         drop(repo);
 
         self.ensure_branch_exists(branch_name, default_branch)?;
-        let mut actions = Vec::new();
+        let mut descriptions = Vec::new();
         if fetched_origin {
-            actions.push("fetched origin".to_string());
-            actions.push("created release branch from latest default branch".to_string());
+            descriptions.push("fetched origin".to_string());
+            descriptions.push("created release branch from latest default branch".to_string());
         } else {
-            actions.push("origin remote missing; used local default branch refs".to_string());
-            actions.push("created release branch from local default branch".to_string());
+            descriptions.push("origin remote missing; used local default branch refs".to_string());
+            descriptions.push("created release branch from local default branch".to_string());
         }
-        Ok(actions)
+        Ok(descriptions)
     }
 
     /// Applies release-plz style refresh for existing release branches:
@@ -133,7 +107,7 @@ impl Git2Repo {
         let mut repo = self.repo()?;
         // Preserve local uncommitted work across branch refresh.
         let had_changes = has_local_changes(&repo)?;
-        let mut actions = Vec::new();
+        let mut descriptions = Vec::new();
 
         if had_changes {
             let signature = signature_for_repo(&repo)?;
@@ -143,20 +117,21 @@ impl Git2Repo {
                 Some(StashFlags::INCLUDE_UNTRACKED),
             )
             .context("failed to stash local changes")?;
-            actions.push("stashed local changes".to_string());
+            descriptions.push("stashed local changes".to_string());
         }
 
         if has_origin_remote(&repo) {
             // Refresh default-branch refs before rebasing.
             fetch_origin_branch(&repo, default_branch)?;
-            actions.push("fetched origin".to_string());
+            descriptions.push("fetched origin".to_string());
         } else {
-            actions.push("origin remote missing; skipped fetch and used local refs".to_string());
+            descriptions
+                .push("origin remote missing; skipped fetch and used local refs".to_string());
         }
         drop(repo);
 
         self.ensure_branch_exists(branch_name, default_branch)?;
-        actions.push("checked out release branch".to_string());
+        descriptions.push("checked out release branch".to_string());
 
         let mut repo = self.repo()?;
         let generated_count = generated_release_commits_count(&repo, 25)?;
@@ -167,24 +142,24 @@ impl Git2Repo {
                 .context("failed to resolve reset target for generated release commits")?;
             repo.reset(&target, ResetType::Hard, None)
                 .context("failed to reset generated release commits")?;
-            actions.push(format!(
+            descriptions.push(format!(
                 "reset {} generated release commit(s)",
                 generated_count
             ));
         }
 
         rebase_current_branch_onto(&repo, default_branch)?;
-        actions.push("rebased release branch onto latest default branch".to_string());
+        descriptions.push("rebased release branch onto latest default branch".to_string());
 
         if had_changes {
             // Restore user local changes after rebase/reset flow.
             let mut apply_opts = StashApplyOptions::new();
             if repo.stash_pop(0, Some(&mut apply_opts)).is_ok() {
-                actions.push("restored stashed local changes".to_string());
+                descriptions.push("restored stashed local changes".to_string());
             }
         }
 
-        Ok(actions)
+        Ok(descriptions)
     }
 
     /// Stages all workspace changes and creates a commit unless there are no content changes.

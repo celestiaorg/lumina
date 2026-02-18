@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -6,29 +7,36 @@ use release_plz_core::set_version::{
     SetVersionRequest, SetVersionSpec, VersionChange, set_version,
 };
 use release_plz_core::update_request::UpdateRequest;
-use serde::Deserialize;
 
-use crate::domain::types::{
-    ComparisonVersionView, ReleaseContext, ReleaseMode, VersionComputation, VersionEntry,
-};
-use crate::domain::versioning::{convert_release_version_to_rc, to_stable_if_prerelease};
 use crate::adapters::git_refs::{
     changed_files_since_tag, commit_for_tag, latest_non_rc_release_tag_on_branch,
     latest_release_tag_on_branch, remote_origin_url, resolve_current_commit,
     snapshot_workspace_to_temp,
 };
 use crate::adapters::metadata::metadata_for_manifest;
+use crate::domain::types::{
+    CheckContext, ComparisonVersionView, PublishContext, ReleaseMode, VersionComputation,
+    VersionEntry,
+};
+use crate::domain::versioning::{convert_release_version_to_rc, to_stable_if_prerelease};
+use crate::domain::workspace::Workspace;
 
 #[derive(Debug, Clone)]
 struct ContextVersions {
-    /// Previous release commit used as baseline anchor, if available/required for mode.
-    previous_commit: Option<String>,
+    /// Previous release commit used as baseline anchor.
+    previous_commit: String,
+    /// Latest release tag (RC or final) visible from comparison snapshot.
+    latest_release_tag: Option<String>,
+    /// Latest non-RC release tag visible from comparison snapshot.
+    latest_non_rc_release_tag: Option<String>,
     /// Commit used as current workspace snapshot root.
     current_commit: String,
     /// Versions observed at current commit before applying computed changes.
     current_versions: Vec<ComparisonVersionView>,
     /// Computed package version updates for selected mode.
     versions: Vec<VersionEntry>,
+    /// Duplicate publishable package versions after applying computed versions in snapshot.
+    duplicate_publishable_versions: Vec<(String, Vec<String>)>,
 }
 
 #[derive(Debug)]
@@ -50,47 +58,43 @@ impl ReleasePlzAdapter {
     }
 
     /// Computes release versions and reporting metadata for check/prepare stages.
-    /// Final mode requires at least one non-RC release tag.
-    pub async fn versions(&self, ctx: &ReleaseContext) -> Result<VersionComputation> {
-        // Final flow requires an existing stable release anchor for baseline semantics.
-        if matches!(ctx.mode, ReleaseMode::Final)
-            && latest_non_rc_release_tag_on_branch(&self.workspace_root, &ctx.default_branch)?
-                .is_none()
-        {
-            anyhow::bail!("final mode requires at least one non-RC release tag");
-        }
-
+    /// Baseline previous commit must be resolvable for both rc and final modes.
+    pub async fn versions(&self, ctx: &CheckContext) -> Result<VersionComputation> {
         let from_context = self.versions_from_context(ctx).await?;
 
         Ok(VersionComputation {
             previous_commit: from_context.previous_commit,
+            latest_release_tag: from_context.latest_release_tag,
+            latest_non_rc_release_tag: from_context.latest_non_rc_release_tag,
             current_commit: from_context.current_commit,
             current_versions: from_context.current_versions,
             versions: from_context.versions,
+            duplicate_publishable_versions: from_context.duplicate_publishable_versions,
         })
     }
 
     /// Computes versions from an isolated snapshot at current commit and gathers reporting context.
-    async fn versions_from_context(&self, ctx: &ReleaseContext) -> Result<ContextVersions> {
+    async fn versions_from_context(&self, ctx: &CheckContext) -> Result<ContextVersions> {
         // Resolve the current commit used as analysis input.
         let current_commit = self.resolve_current_for_context(ctx)?;
         // Load isolated snapshot + metadata at that commit.
-        let snapshot_state = self.load_snapshot_state(&current_commit, &ctx.default_branch)?;
+        let snapshot_state =
+            self.load_snapshot_state(&current_commit, &ctx.common.default_branch)?;
         let temp_workspace_root = snapshot_state.snapshot.repo_root.as_path();
         // Resolve previous release commit according to mode policy.
         let previous_commit = self.resolve_previous_for_mode(
-            ctx.mode,
+            ctx.common.mode,
             temp_workspace_root,
-            &ctx.default_branch,
+            &ctx.common.default_branch,
         )?;
+        let latest_release_tag =
+            latest_release_tag_on_branch(temp_workspace_root, &ctx.common.default_branch)?;
+        let latest_non_rc_release_tag =
+            latest_non_rc_release_tag_on_branch(temp_workspace_root, &ctx.common.default_branch)?;
         // Load previous release snapshot so release-plz can use it as baseline.
-        let previous_snapshot = self.load_previous_snapshot(
-            previous_commit.as_deref(),
-            &ctx.default_branch,
-        )?;
-        let previous_manifest_path = previous_snapshot
-            .as_ref()
-            .map(|state| state.snapshot.repo_root.join("Cargo.toml"));
+        let previous_snapshot =
+            self.load_previous_snapshot(&previous_commit, &ctx.common.default_branch)?;
+        let previous_manifest_path = previous_snapshot.snapshot.repo_root.join("Cargo.toml");
 
         // Capture package versions before applying computed updates.
         let reported_current_versions = current_versions_from_metadata(&snapshot_state.metadata);
@@ -98,24 +102,33 @@ impl ReleasePlzAdapter {
             .versions_from_snapshot(
                 &snapshot_state.metadata,
                 temp_workspace_root,
-                previous_manifest_path.as_deref(),
-                ctx,
+                &previous_manifest_path,
+                ctx.common.mode,
+                &ctx.common.default_branch,
             )
             .await?;
+        let duplicate_publishable_versions = duplicate_versions(
+            temp_workspace_root,
+            snapshot_state.metadata.clone(),
+            &versions,
+        )?;
 
         Ok(ContextVersions {
             previous_commit,
+            latest_release_tag,
+            latest_non_rc_release_tag,
             current_commit,
             current_versions: reported_current_versions,
             versions,
+            duplicate_publishable_versions,
         })
     }
 
     /// Resolves current commit for check/prepare computation.
-    fn resolve_current_for_context(&self, ctx: &ReleaseContext) -> Result<String> {
+    fn resolve_current_for_context(&self, ctx: &CheckContext) -> Result<String> {
         resolve_current_commit(
             &self.workspace_root,
-            &ctx.default_branch,
+            &ctx.common.default_branch,
             ctx.current_commit.as_deref(),
         )
     }
@@ -126,7 +139,9 @@ impl ReleasePlzAdapter {
         current_commit: &str,
         default_branch: &str,
     ) -> Result<SnapshotState> {
-        let snapshot = snapshot_workspace_to_temp(&self.workspace_root, current_commit, default_branch)?;
+        let snapshot =
+            snapshot_workspace_to_temp(&self.workspace_root, current_commit, default_branch)?;
+        let _keep_temp_dir_alive = &snapshot.temp_dir;
         let temp_manifest = snapshot.repo_root.join("Cargo.toml");
         let metadata = metadata_for_manifest(&temp_manifest)?;
         Ok(SnapshotState { snapshot, metadata })
@@ -135,14 +150,11 @@ impl ReleasePlzAdapter {
     /// Loads previous release snapshot for release-plz baseline input.
     fn load_previous_snapshot(
         &self,
-        previous_commit: Option<&str>,
+        previous_commit: &str,
         default_branch: &str,
-    ) -> Result<Option<SnapshotState>> {
-        let Some(previous_commit) = previous_commit else {
-            return Ok(None);
-        };
+    ) -> Result<SnapshotState> {
         let snapshot_state = self.load_snapshot_state(previous_commit, default_branch)?;
-        Ok(Some(snapshot_state))
+        Ok(snapshot_state)
     }
 
     /// Resolves previous release commit according to mode policy.
@@ -151,21 +163,18 @@ impl ReleasePlzAdapter {
         mode: ReleaseMode,
         snapshot_repo_root: &Path,
         default_branch: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<String> {
         let previous_tag = match mode {
-            ReleaseMode::Rc => latest_release_tag_on_branch(snapshot_repo_root, default_branch)?,
-            ReleaseMode::Final => Some(
-                latest_non_rc_release_tag_on_branch(snapshot_repo_root, default_branch)?
-                    .context(
-                        "final mode requires latest non-RC release tag for previous-commit reporting",
-                    )?,
-            ),
-        };
-        let Some(previous_tag) = previous_tag else {
-            return Ok(None);
+            ReleaseMode::Rc => latest_release_tag_on_branch(snapshot_repo_root, default_branch)?
+                .context("rc mode requires latest release tag for previous-commit reporting")?,
+            ReleaseMode::Final => {
+                latest_non_rc_release_tag_on_branch(snapshot_repo_root, default_branch)?.context(
+                    "final mode requires latest non-RC release tag for previous-commit reporting",
+                )?
+            }
         };
         let previous_commit = commit_for_tag(snapshot_repo_root, &previous_tag)?;
-        Ok(Some(previous_commit))
+        Ok(previous_commit)
     }
 
     /// Computes package versions from snapshot metadata and applies final-mode baseline filtering.
@@ -173,23 +182,21 @@ impl ReleasePlzAdapter {
         &self,
         metadata: &Metadata,
         snapshot_repo_root: &std::path::Path,
-        previous_manifest_path: Option<&std::path::Path>,
-        ctx: &ReleaseContext,
+        previous_manifest_path: &std::path::Path,
+        mode: ReleaseMode,
+        default_branch: &str,
     ) -> Result<Vec<VersionEntry>> {
         // First compute raw per-package next versions from release-plz rules.
         let mut versions = self
-            .versions_for_mode(metadata, ctx.mode, previous_manifest_path)
+            .versions_for_mode(metadata, mode, previous_manifest_path)
             .await?;
 
-        if matches!(ctx.mode, ReleaseMode::Final) {
+        if matches!(mode, ReleaseMode::Final) {
             // In final mode, include only publishable packages changed since latest stable baseline tag.
-            let baseline_tag = latest_non_rc_release_tag_on_branch(
-                snapshot_repo_root,
-                &ctx.default_branch,
-            )?
-            .context(
-                "final mode requires at least one non-RC release tag in comparison workspace",
-            )?;
+            let baseline_tag =
+                latest_non_rc_release_tag_on_branch(snapshot_repo_root, default_branch)?.context(
+                    "final mode requires at least one non-RC release tag in comparison workspace",
+                )?;
             let changed_packages = changed_publishable_packages_since_tag(
                 snapshot_repo_root,
                 metadata,
@@ -206,25 +213,22 @@ impl ReleasePlzAdapter {
         &self,
         metadata: &Metadata,
         mode: ReleaseMode,
-        previous_manifest_path: Option<&std::path::Path>,
+        previous_manifest_path: &std::path::Path,
     ) -> Result<Vec<VersionEntry>> {
         // Run release-plz next_versions once and reuse that as source of truth.
         let mut update_request = UpdateRequest::new(metadata.clone())
             .context("failed to build release-plz update request")?
             .with_allow_dirty(true);
-        if let Some(previous_manifest_path) = previous_manifest_path {
-            let previous_manifest_path = Utf8Path::from_path(previous_manifest_path).with_context(
-                || {
-                    format!(
-                        "previous manifest path is not valid UTF-8: {}",
-                        previous_manifest_path.display()
-                    )
-                },
-            )?;
-            update_request = update_request
-                .with_registry_manifest_path(previous_manifest_path)
-                .context("failed to set previous release manifest for mode-specific versions")?;
-        }
+        let previous_manifest_path =
+            Utf8Path::from_path(previous_manifest_path).with_context(|| {
+                format!(
+                    "previous manifest path is not valid UTF-8: {}",
+                    previous_manifest_path.display()
+                )
+            })?;
+        update_request = update_request
+            .with_registry_manifest_path(previous_manifest_path)
+            .context("failed to set previous release manifest for mode-specific versions")?;
         let (packages_to_update, _temp_repo) = release_plz_core::next_versions(&update_request)
             .await
             .context("failed to compute next versions with release-plz")?;
@@ -260,13 +264,15 @@ impl ReleasePlzAdapter {
         Ok(versions)
     }
 
-    /// Exposes workspace root for consumers that need snapshot/simulation coordination.
-    pub fn workspace_root(&self) -> &std::path::Path {
-        &self.workspace_root
-    }
-
     /// Regenerates release artifacts with release-plz update and applies mode-specific version rewrite.
-    pub async fn regenerate_artifacts(&self, ctx: &ReleaseContext) -> Result<Vec<String>> {
+    pub async fn regenerate_artifacts(
+        &self,
+        mode: ReleaseMode,
+        default_branch: &str,
+        previous_commit: &str,
+        latest_release_tag: Option<&str>,
+        latest_non_rc_release_tag: Option<&str>,
+    ) -> Result<Vec<String>> {
         // Re-run release-plz update in the active branch workspace to regenerate changelog + versions.
         let metadata = MetadataCommand::new()
             .current_dir(&self.workspace_root)
@@ -276,29 +282,24 @@ impl ReleasePlzAdapter {
         let mut update_request = UpdateRequest::new(metadata.clone())
             .context("failed to build update request for release artifact regeneration")?
             .with_allow_dirty(true);
-        let previous_commit =
-            self.resolve_previous_for_mode(ctx.mode, &self.workspace_root, &ctx.default_branch)?;
-        let previous_snapshot =
-            self.load_previous_snapshot(previous_commit.as_deref(), &ctx.default_branch)?;
-        if let Some(previous_state) = previous_snapshot.as_ref() {
-            let previous_manifest_path = previous_state.snapshot.repo_root.join("Cargo.toml");
-            let previous_manifest_path = Utf8Path::from_path(&previous_manifest_path)
-                .with_context(|| {
-                    format!(
-                        "previous manifest path is not valid UTF-8: {}",
-                        previous_manifest_path.display()
-                    )
-                })?;
-            update_request = update_request
-                .with_registry_manifest_path(previous_manifest_path)
-                .context("failed to set previous release manifest for regeneration")?;
-        }
+        let previous_snapshot = self.load_previous_snapshot(previous_commit, default_branch)?;
+        let previous_manifest_path = previous_snapshot.snapshot.repo_root.join("Cargo.toml");
+        let previous_manifest_path =
+            Utf8Path::from_path(&previous_manifest_path).with_context(|| {
+                format!(
+                    "previous manifest path is not valid UTF-8: {}",
+                    previous_manifest_path.display()
+                )
+            })?;
+        update_request = update_request
+            .with_registry_manifest_path(previous_manifest_path)
+            .context("failed to set previous release manifest for regeneration")?;
 
         let (packages_to_update, _temp_repo) = release_plz_core::update(&update_request)
             .await
             .context("failed to regenerate release artifacts with release-plz update")?;
 
-        let mut actions =
+        let mut descriptions =
             vec!["regenerated release versions/changelog with release-plz update".to_string()];
 
         // Re-apply mode-specific version projection after update() so artifacts match check semantics.
@@ -307,7 +308,7 @@ impl ReleasePlzAdapter {
             .iter()
             .filter(|(package, _)| is_publishable(&package.publish))
             .filter_map(|(package, update)| {
-                let next = match ctx.mode {
+                let next = match mode {
                     ReleaseMode::Rc => convert_release_version_to_rc(&update.version).ok(),
                     ReleaseMode::Final => Some(
                         to_stable_if_prerelease(&update.version).unwrap_or(update.version.clone()),
@@ -315,48 +316,45 @@ impl ReleasePlzAdapter {
                 }?;
                 Some((package.name.to_string(), next))
             })
-            .collect::<std::collections::BTreeMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
 
         if !mode_specific_changes.is_empty() {
             apply_version_changes_with_metadata(mode_specific_changes, metadata)?;
-            match ctx.mode {
-                ReleaseMode::Rc => actions.push(
+            match mode {
+                ReleaseMode::Rc => descriptions.push(
                     "converted release-plz versions to rc variants and updated workspace references"
                         .to_string(),
                 ),
                 ReleaseMode::Final => {
-                    actions.push("normalized prerelease versions to stable".to_string())
+                    descriptions.push("normalized prerelease versions to stable".to_string())
                 }
             }
         }
 
-        if let Some(latest_release) =
-            latest_release_tag_on_branch(&self.workspace_root, &ctx.default_branch)?
-        {
+        if let Some(latest_release) = latest_release_tag {
             // Report release-plz-style changelog comparison anchor.
-            actions.push(format!(
+            descriptions.push(format!(
                 "changelog baseline: latest release tag `{latest_release}`"
             ));
-            actions.push(format!("includes changes since `{latest_release}`"));
+            descriptions.push(format!("includes changes since `{latest_release}`"));
         }
-        if matches!(ctx.mode, ReleaseMode::Final)
-            && let Some(latest_non_rc_release) =
-                latest_non_rc_release_tag_on_branch(&self.workspace_root, &ctx.default_branch)?
+        if matches!(mode, ReleaseMode::Final)
+            && let Some(latest_non_rc_release) = latest_non_rc_release_tag
         {
             // Report stable baseline separately to remove RC/final ambiguity.
-            actions.push(format!(
+            descriptions.push(format!(
                 "final baseline: latest non-RC release tag `{latest_non_rc_release}`"
             ));
-            actions.push(format!(
+            descriptions.push(format!(
                 "includes changes since latest non-RC release `{latest_non_rc_release}`"
             ));
         }
 
-        Ok(actions)
+        Ok(descriptions)
     }
 
     /// Runs release-plz publish flow and returns machine-readable release payload.
-    pub async fn publish(&self, ctx: &ReleaseContext) -> Result<serde_json::Value> {
+    pub async fn publish(&self, ctx: &PublishContext) -> Result<serde_json::Value> {
         // Build release request from local metadata + release-plz workspace configuration.
         let metadata = MetadataCommand::new()
             .current_dir(&self.workspace_root)
@@ -364,8 +362,8 @@ impl ReleasePlzAdapter {
             .context("failed to load cargo metadata for publish")?;
 
         let mut request = release_plz_core::ReleaseRequest::new(metadata)
-            .with_release_always(read_release_always(&self.workspace_root)?)
-            .with_branch_prefix(Some(match ctx.mode {
+            .with_release_always(false)
+            .with_branch_prefix(Some(match ctx.common.mode {
                 ReleaseMode::Rc => ctx.rc_branch_prefix.clone(),
                 ReleaseMode::Final => ctx.final_branch_prefix.clone(),
             }));
@@ -376,10 +374,11 @@ impl ReleasePlzAdapter {
 
         // Enable GitHub release publishing when token + repo URL are available.
         if let Some(token) = ctx
+            .common
             .auth
             .release_plz_token
             .clone()
-            .or_else(|| ctx.auth.github_token.clone())
+            .or_else(|| ctx.common.auth.github_token.clone())
             && let Some(repo_url) = parse_remote_repo_url(&self.workspace_root)?
         {
             request = request.with_git_release(release_plz_core::GitRelease {
@@ -391,7 +390,7 @@ impl ReleasePlzAdapter {
             });
         }
 
-        if let Some(token) = &ctx.auth.cargo_registry_token {
+        if let Some(token) = &ctx.common.auth.cargo_registry_token {
             // Use cargo registry token for crates.io publish step.
             request = request.with_token(token.clone());
         }
@@ -438,9 +437,37 @@ fn current_versions_from_metadata(metadata: &Metadata) -> Vec<ComparisonVersionV
     versions
 }
 
+/// Applies computed versions in snapshot metadata and returns duplicate publishable versions.
+fn duplicate_versions(
+    snapshot_repo_root: &Path,
+    metadata: Metadata,
+    versions: &[VersionEntry],
+) -> Result<Vec<(String, Vec<String>)>> {
+    let changes = version_changes_for_versions(versions);
+    if !changes.is_empty() {
+        apply_version_changes_with_metadata(changes, metadata)?;
+    }
+
+    let snapshot_manifest = snapshot_repo_root.join("Cargo.toml");
+    let simulated_metadata = metadata_for_manifest(&snapshot_manifest)?;
+    let simulated_workspace = Workspace::from_metadata(simulated_metadata);
+    Ok(simulated_workspace.duplicate_publishable_versions())
+}
+
+/// Extracts effective version overrides for publishable version entries.
+fn version_changes_for_versions(
+    versions: &[VersionEntry],
+) -> BTreeMap<String, cargo_metadata::semver::Version> {
+    versions
+        .iter()
+        .filter(|version| version.publishable)
+        .map(|version| (version.package.clone(), version.next_effective.clone()))
+        .collect()
+}
+
 /// Applies deterministic version overrides across workspace metadata.
 fn apply_version_changes_with_metadata(
-    changes: std::collections::BTreeMap<String, cargo_metadata::semver::Version>,
+    changes: BTreeMap<String, cargo_metadata::semver::Version>,
     metadata: Metadata,
 ) -> Result<()> {
     if changes.is_empty() {
@@ -467,34 +494,6 @@ fn parse_remote_repo_url(
     let repo_url = release_plz_core::RepoUrl::new(&remote)
         .with_context(|| format!("failed to parse repository URL from `{remote}`"))?;
     Ok(Some(repo_url))
-}
-
-/// Reads `[workspace].release_always` from `release-plz.toml` if present.
-fn read_release_always(workspace_root: &std::path::Path) -> Result<bool> {
-    #[derive(Debug, Deserialize, Default)]
-    struct ReleasePlzConfig {
-        workspace: Option<WorkspaceSection>,
-    }
-
-    #[derive(Debug, Deserialize, Default)]
-    struct WorkspaceSection {
-        release_always: Option<bool>,
-    }
-
-    let config_path = workspace_root.join("release-plz.toml");
-    if !config_path.exists() {
-        // Missing config means default release-plz behavior.
-        return Ok(false);
-    }
-
-    let body = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let parsed: ReleasePlzConfig = toml::from_str(&body)
-        .with_context(|| format!("failed to parse {}", config_path.display()))?;
-    Ok(parsed
-        .workspace
-        .and_then(|workspace| workspace.release_always)
-        .unwrap_or(false))
 }
 
 /// Computes publishable workspace package names changed since the provided baseline tag.

@@ -1,41 +1,74 @@
-use crate::domain::model::{BranchKind, ReleaseMode};
+use crate::domain::model::ReleaseMode;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ReleaseContext {
+pub struct CommonContext {
     pub mode: ReleaseMode,
-    pub current_commit: Option<String>,
     pub default_branch: String,
-    pub branch_name: Option<String>,
-    pub rc_branch_prefix: String,
-    pub final_branch_prefix: String,
-    pub skip_pr: bool,
     pub auth: AuthContext,
 }
 
-impl ReleaseContext {
-    /// Returns the expected release-branch kind derived from the chosen release mode.
-    #[allow(dead_code)]
-    pub fn branch_kind(&self) -> BranchKind {
-        match self.mode {
-            ReleaseMode::Rc => BranchKind::RcRelease,
-            ReleaseMode::Final => BranchKind::FinalRelease,
+#[derive(Debug, Clone)]
+pub struct BranchContext {
+    pub skip_pr: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckContext {
+    pub common: CommonContext,
+    pub current_commit: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrepareContext {
+    pub common: CommonContext,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmitContext {
+    pub common: CommonContext,
+    pub branch: BranchContext,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishContext {
+    pub common: CommonContext,
+    pub rc_branch_prefix: String,
+    pub final_branch_prefix: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecuteContext {
+    pub common: CommonContext,
+    pub branch: BranchContext,
+}
+
+impl PrepareContext {
+    pub fn to_check_context(&self) -> CheckContext {
+        CheckContext {
+            common: self.common.clone(),
+            current_commit: None,
+        }
+    }
+}
+
+impl ExecuteContext {
+    pub fn to_check_context(&self) -> CheckContext {
+        CheckContext {
+            common: self.common.clone(),
+            current_commit: None,
         }
     }
 
-    /// Resolves the branch name used by prepare/submit flows.
-    /// Priority: explicit `--branch-name`, otherwise mode-specific prefix + default branch.
-    #[allow(dead_code)]
-    pub fn resolved_branch_name(&self) -> String {
-        // Respect explicit branch override when provided.
-        if let Some(name) = &self.branch_name {
-            return name.clone();
+    pub fn to_prepare_context(&self) -> PrepareContext {
+        PrepareContext {
+            common: self.common.clone(),
         }
+    }
 
-        // Otherwise derive branch name from mode-specific prefix and default branch name.
-        match self.mode {
-            ReleaseMode::Rc => format!("{}/{}", self.rc_branch_prefix, self.default_branch),
-            ReleaseMode::Final => format!("{}/{}", self.final_branch_prefix, self.default_branch),
+    pub fn to_submit_context(&self) -> SubmitContext {
+        SubmitContext {
+            common: self.common.clone(),
+            branch: self.branch.clone(),
         }
     }
 }

@@ -1,12 +1,12 @@
 use anyhow::Result;
 
 use crate::adapters::release_plz::ReleasePlzAdapter;
-use crate::domain::types::{ExecutionStage, ReleaseContext, ReleaseReport};
+use crate::domain::types::{PublishContext, ReleaseReport};
 
 /// Executes publish-only stage through release-plz and converts result into report shape.
 pub async fn handle_publish(
     publisher: &ReleasePlzAdapter,
-    ctx: ReleaseContext,
+    ctx: PublishContext,
 ) -> Result<ReleaseReport> {
     let publish_payload = publisher.publish(&ctx).await?;
     // release-plz may return `null` or `[]` when nothing was published.
@@ -16,9 +16,8 @@ pub async fn handle_publish(
             .is_some_and(|releases| releases.is_empty());
 
     Ok(ReleaseReport {
-        mode: ctx.mode,
+        mode: ctx.common.mode,
         published,
         payload: publish_payload,
-        stage: ExecutionStage::Released,
     })
 }

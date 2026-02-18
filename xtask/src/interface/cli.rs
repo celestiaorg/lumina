@@ -32,9 +32,6 @@ pub struct CommonArgs {
     #[arg(long, default_value = "main")]
     pub default_branch: String,
 
-    #[arg(long)]
-    pub branch_name: Option<String>,
-
     #[arg(long, default_value = "release/rc")]
     pub rc_branch_prefix: String,
 

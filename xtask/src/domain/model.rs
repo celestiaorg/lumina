@@ -21,13 +21,6 @@ pub enum CommandKind {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BranchKind {
-    RcRelease,
-    FinalRelease,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum BranchState {
     Missing,
     ExistsClean,
@@ -63,16 +56,6 @@ pub enum ValidationIssue {
     },
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionStage {
-    Checked,
-    Prepared,
-    Submitted,
-    Released,
-    Executed,
-}
-
 #[derive(Debug, Clone)]
 pub struct VersionEntry {
     pub package: String,
@@ -99,10 +82,13 @@ pub struct ComparisonVersionView {
 
 #[derive(Debug, Clone)]
 pub struct VersionComputation {
-    pub previous_commit: Option<String>,
+    pub previous_commit: String,
+    pub latest_release_tag: Option<String>,
+    pub latest_non_rc_release_tag: Option<String>,
     pub current_commit: String,
     pub current_versions: Vec<ComparisonVersionView>,
     pub versions: Vec<VersionEntry>,
+    pub duplicate_publishable_versions: Vec<(String, Vec<String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
