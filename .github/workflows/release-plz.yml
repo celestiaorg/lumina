@@ -6,19 +6,23 @@ permissions:
 
 on:
   push:
-    branches:
-      - main
+    branches: [ mcrakhman/release-test-rc ]
+  workflow_dispatch:
 
 jobs:
   release-plz:
     name: Release-plz
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
 
     outputs:
-      pr: ${{ steps.release-plz.outputs.pr }}
-      prs_created: ${{ steps.release-plz.outputs.prs_created }}
-      releases: ${{ steps.release-plz.outputs.releases }}
-      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      pr: ${{ steps.release.outputs.pr }}
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      releases: ${{ steps.release.outputs.releases }}
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      node_rc_prefix: ${{ steps.release.outputs.node_rc_prefix }}
 
     steps:
       - name: Checkout repository
@@ -30,20 +34,37 @@ jobs:
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Run release-plz
-        uses: MarcoIeni/release-plz-action@v0.5
-        id: release-plz
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run release driver (classify + execute/publish + contract)
+        id: release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RUST_LOG: debug
+        run: |
+          set -euo pipefail
+
+          cargo xtask gha release-plz \
+            --gha-output \
+            --json-out xtask_release_contract.json \
+            --compare-branch "mcrakhman/release-test-rc" \
+            --dry-run
+
+      - name: Upload release contract artifact
+        if: always() && hashFiles('xtask_release_contract.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-contract
+          path: xtask_release_contract.json
 
   release-plz-pr-npm-update:
     name: Update release PR for npm
     runs-on: ubuntu-latest
-
-    needs:
-    - release-plz
-
+    needs: [ release-plz ]
+    permissions:
+      contents: write
     if: success() && needs.release-plz.outputs.prs_created == 'true'
 
     steps:
@@ -57,108 +78,34 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
-          # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
           rustflags: ""
 
-      - name: Install dependencies
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.13.1
 
-      - name: Bump lumina-node npm version
+      - name: Update npm bits on release PR branch
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          PR_JSON: ${{ needs.release-plz.outputs.pr }}
+          NODE_RC_PREFIX: ${{ needs.release-plz.outputs.node_rc_prefix }}
+          RUST_LOG: debug
         run: |
-          set -xeuo pipefail
-
-          pr_branch_name="${{ fromJSON(needs.release-plz.outputs.pr).head_branch }}"
-
-          # switch to the branch created by release-plz
-          git fetch
-          git checkout "$pr_branch_name"
-
-          node_wasm_version="$(cargo pkgid --manifest-path=node-wasm/Cargo.toml | cut -d@ -f 2)"
-          cd node-wasm/js
-
-          # Update lumina-node version
-          if ! npm version $node_wasm_version >/dev/null; then
-            echo "Version up to date"
-            exit
-          fi
-
-          wasm-pack build ..
-
-          # Update lockfile with new node-wasm version
-          npm install --save ../pkg
-          npm clean-install
-
-          # Update the types definition for lumina-node
-          npm run tsc
-          # Update the readme for lumina-node
-          npm run update-readme
-
-          # push a commit to release-plz's pr
-          # prepare graphql query
-          branch_sha="$(git rev-parse "$pr_branch_name")"
-          package_json="$(base64 --wrap 0 package.json)"
-          package_lock_json="$(base64 --wrap 0 package-lock.json)"
-          readme="$(base64 --wrap 0 README.md)"
-          types_definitions="$(base64 --wrap 0 index.d.ts)"
-          query='{"query": "mutation {
-            createCommitOnBranch(input: {
-              branch: {
-                repositoryNameWithOwner: \"celestiaorg/lumina\",
-                branchName: \"'"$pr_branch_name"'\"
-              },
-              message: {
-                headline: \"update lumina-node npm package\"
-              },
-              expectedHeadOid: \"'"$branch_sha"'\",
-              fileChanges: {
-                additions: [
-                  {
-                    path: \"node-wasm/js/package.json\",
-                    contents: \"'"$package_json"'\"
-                  },
-                  {
-                    path: \"node-wasm/js/package-lock.json\",
-                    contents: \"'"$package_lock_json"'\"
-                  },
-                  {
-                    path: \"node-wasm/js/README.md\",
-                    contents: \"'"$readme"'\"
-                  },
-                  {
-                    path: \"node-wasm/js/index.d.ts\",
-                    contents: \"'"$types_definitions"'\"
-                  }
-                ]
-              }
-            })
-            { commit { commitUrl } }
-          }"}'
-          # create new commit with changes
-          result=$(echo "$query" | tr -d '\n' |
-            curl -sS https://api.github.com/graphql \
-              -H "Accept: application/vnd.github+json" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              --data @-)
-
-          if echo "$result" | jq -e '.errors | length != 0' >/dev/null; then
-            echo "Commit failed: $(echo "$result" | jq '.errors')" >&2
-            exit 1
-          else
-            echo "Version updated: ${node_wasm_version}"
-          fi
+          set -euo pipefail
+          cargo xtask gha npm-update-pr \
+            --pr-json "$PR_JSON" \
+            --node-rc-prefix "$NODE_RC_PREFIX"
 
   release-npm:
     name: Release-npm
     runs-on: ubuntu-latest
-
-    needs:
-    - release-plz
-
+    needs: [ release-plz ]
+    permissions:
+      contents: read
     if: success() && needs.release-plz.outputs.releases_created == 'true'
 
     steps:
@@ -172,45 +119,30 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
-          # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
           rustflags: ""
 
-      - name: Install dependencies
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.13.1
 
-      - name: Release to npm
+      - name: Publish to npm
         env:
           NPM_REGISTRY_TOKEN: ${{ secrets.NPM_REGISTRY_TOKEN }}
+          RUST_LOG: debug
         run: |
-          set -xeuo pipefail
-
-          published_version=$(npm show lumina-node-wasm version)
-          local_version="$(cargo pkgid --manifest-path=node-wasm/Cargo.toml | cut -d@ -f 2)"
-
-          if [ "$published_version" == "$local_version" ] ; then
-            echo Latest version already in npm, exiting
-            exit
-          fi
-
-          # publish lumina-node-wasm
-          wasm-pack build node-wasm
-          wasm-pack publish --access public node-wasm
-
-          # publish lumina-node
-          cd node-wasm/js
-          # replace dependency on node-wasm from path based to version in npm
-          npm pkg set "dependencies[lumina-node-wasm]=$local_version"
-          npm publish --access public
+          set -euo pipefail
+          cargo xtask gha npm-publish --dry-run
 
   release-uniffi:
     name: Release-uniffi
     runs-on: macos-latest
-
-    needs:
-    - release-plz
-
+    needs: [ release-plz ]
+    permissions:
+      contents: write
     if: >-
       ${{
         success()
@@ -223,6 +155,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -235,32 +170,34 @@ jobs:
             x86_64-linux-android,\
             i686-linux-android"
 
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-ndk
         uses: taiki-e/cache-cargo-install-action@v2
         with:
           tool: cargo-ndk@3.5
 
-      - name: Build node-uniffi for ios
-        run: |
-          set -xeuo pipefail
-          ./node-uniffi/build-ios.sh
-          tar -cvzf lumina-node-uniffi-ios.tar.gz -C node-uniffi ios
-
-      - name: Build node-uniffi for android
-        run: |
-          set -xeuo pipefail
-          ./node-uniffi/build-android.sh
-          tar -cvzf lumina-node-uniffi-android.tar.gz -C node-uniffi app
-
-      - name: Publish artifacts to release
+      - name: Build uniffi artifacts
+        id: uniffi
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          RELEASES: ${{ needs.release-plz.outputs.releases }}
+          RELEASES_JSON: ${{ needs.release-plz.outputs.releases }}
+          RUST_LOG: debug
         run: |
-          set -xeuo pipefail
+          set -euo pipefail
+          cargo xtask gha uniffi-release \
+            --releases-json "$RELEASES_JSON" \
+            --gha-output \
+            --dry-run
 
-          tag="$(echo "$RELEASES" | jq -r '.[] | select(.package_name == "lumina-node-uniffi").tag')"
-
-          brew install coreutils
-          sha256sum lumina-node-uniffi-* > lumina-node-uniffi-sha256-checksums.txt
-          gh release upload "$tag" lumina-node-uniffi-*
+      - name: Upload uniffi artifacts to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.uniffi.outputs.uniffi_tag }}
+          files: |
+            lumina-node-uniffi-ios.tar.gz
+            lumina-node-uniffi-android.tar.gz
+            lumina-node-uniffi-sha256-checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
