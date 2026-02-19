@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 mod adapters;
 mod application;
 mod domain;

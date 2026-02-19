@@ -41,10 +41,7 @@ impl GitHubPrClient {
             .opened_prs("")
             .await
             .context("failed to list opened PRs")?;
-        Ok(prs
-            .into_iter()
-            .filter(|pr| is_release_pr_candidate(pr))
-            .collect())
+        Ok(prs.into_iter().filter(is_release_pr_candidate).collect())
     }
 
     /// Creates authenticated GitHub API client from available token + origin URL.
