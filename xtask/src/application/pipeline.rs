@@ -10,8 +10,8 @@ use crate::application::prepare::handle_prepare;
 use crate::application::publish::handle_publish;
 use crate::application::submit::{SubmitArgs, handle_submit};
 use crate::domain::types::{
-    CheckContext, CheckReport, ExecuteContext, ExecuteReport, PrepareContext, PrepareReport,
-    PublishContext, ReleaseReport, VersionStateReport,
+    CheckContext, CheckReport, ExecuteContext, ExecuteReport, PublishContext, ReleaseReport,
+    VersionStateReport,
 };
 use crate::domain::validation::collect_validation_issues;
 
@@ -91,45 +91,6 @@ impl ReleasePipeline {
             planned_versions=report.version_state.planned.len(),
             validation_issues=report.validation_issues.len(),
             "release check completed"
-        );
-        Ok(report)
-    }
-
-    /// Executes `check` against default-branch tip and regenerates branch artifacts when valid.
-    pub async fn prepare(&self, ctx: PrepareContext) -> Result<PrepareReport> {
-        info!(mode=?ctx.common.mode, default_branch=%ctx.common.default_branch, "starting prepare");
-        // Stop early if check reports any validation issues.
-        let check = self.check(ctx.to_check_context()).await?;
-        if !check.validation_issues.is_empty() {
-            bail!(
-                "release-check failed with {} validation issue(s)",
-                check.validation_issues.len()
-            );
-        }
-
-        let report =
-            handle_prepare(&self.git, &self.pr_client, &self.release_engine, ctx, check).await?;
-        info!(
-            mode=?report.mode,
-            branch=%report.branch_name,
-            strategy=?report.update_strategy,
-            description_items=report.description.len(),
-            "prepare completed"
-        );
-        Ok(report)
-    }
-
-    /// Commits/pushes prepared changes and ensures PR behavior according to contributor safety rules.
-    pub async fn submit(&self, args: SubmitArgs) -> Result<crate::domain::types::SubmitReport> {
-        info!(mode=?args.ctx.common.mode, dry_run=args.dry_run, "starting submit");
-        let report = handle_submit(&self.git, &self.pr_client, args).await?;
-        info!(
-            mode=?report.mode,
-            branch=%report.branch_name,
-            strategy=?report.update_strategy,
-            pushed=report.pushed,
-            pr_url=?report.pr_url,
-            "submit completed"
         );
         Ok(report)
     }

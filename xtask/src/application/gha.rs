@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
+use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_output::{write_github_output, write_github_output_multiline};
 use crate::application::pipeline::{ExecuteArgs, ReleasePipeline};
 use crate::domain::types::{
@@ -32,6 +33,7 @@ pub struct GhaNpmUpdatePrArgs {
 #[derive(Debug, Clone)]
 pub struct GhaUniffiReleaseArgs {
     pub releases_json: String,
+    pub gha_output: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,8 +126,9 @@ pub fn handle_gha_npm_update_pr(args: GhaNpmUpdatePrArgs) -> Result<()> {
         bail!("--pr-json payload does not include non-empty `head_branch`");
     }
 
-    run_checked("git", &["fetch", "origin", &pr_payload.head_branch], None)?;
-    run_checked("git", &["checkout", &pr_payload.head_branch], None)?;
+    let git =
+        Git2Repo::new(std::env::current_dir().context("failed to resolve current workspace root")?);
+    git.checkout_branch_from_origin(&pr_payload.head_branch)?;
 
     let node_wasm_version = cargo_manifest_version("node-wasm/Cargo.toml")?;
     let target_node_version = if args.node_rc_prefix.trim().is_empty() {
@@ -168,26 +171,18 @@ pub fn handle_gha_npm_update_pr(args: GhaNpmUpdatePrArgs) -> Result<()> {
         "node-wasm/js/README.md",
         "node-wasm/js/index.d.ts",
     ];
-    if !paths_have_changes(&tracked_paths)? {
+    if !git.paths_have_changes(&tracked_paths)? {
         info!("gha/npm-update-pr: no tracked npm output changes detected");
         return Ok(());
     }
 
-    let mut add_args = vec!["add"];
-    add_args.extend(tracked_paths.iter().copied());
-    run_checked("git", &add_args, None)?;
-
-    if !has_staged_changes()? {
+    let committed = git.stage_paths_and_commit(&tracked_paths, "update lumina-node npm package")?;
+    if !committed {
         info!("gha/npm-update-pr: nothing staged, skipping commit");
         return Ok(());
     }
 
-    run_checked(
-        "git",
-        &["commit", "-m", "update lumina-node npm package"],
-        None,
-    )?;
-    run_checked("git", &["push", "origin", &pr_payload.head_branch], None)?;
+    git.push_branch(&pr_payload.head_branch, false, false)?;
     Ok(())
 }
 
@@ -250,6 +245,11 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
         serde_json::from_str(&args.releases_json).context("failed to parse --releases-json")?;
     let tag = find_uniffi_tag(&releases)
         .context("failed to find `lumina-node-uniffi` release tag in --releases-json payload")?;
+    let files = vec![
+        "lumina-node-uniffi-ios.tar.gz".to_string(),
+        "lumina-node-uniffi-android.tar.gz".to_string(),
+        "lumina-node-uniffi-sha256-checksums.txt".to_string(),
+    ];
 
     run_checked("./node-uniffi/build-ios.sh", &[], None)?;
     run_checked(
@@ -292,19 +292,13 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
     )
     .context("failed to write uniffi checksum file")?;
 
-    run_checked(
-        "gh",
-        &[
-            "release",
-            "upload",
-            &tag,
-            "lumina-node-uniffi-ios.tar.gz",
-            "lumina-node-uniffi-android.tar.gz",
-            "lumina-node-uniffi-sha256-checksums.txt",
-            "--clobber",
-        ],
-        None,
-    )?;
+    if args.gha_output {
+        write_github_output("uniffi_tag", &tag)?;
+        write_github_output_multiline(
+            "uniffi_files",
+            &serde_json::to_string(&files).context("failed to serialize uniffi file list")?,
+        )?;
+    }
 
     Ok(())
 }
@@ -498,33 +492,6 @@ fn npm_version_exists(package: &str, version: &str) -> Result<bool> {
         .status()
         .context("failed to execute `npm view`")?;
     Ok(status.success())
-}
-
-fn paths_have_changes(paths: &[&str]) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain", "--"])
-        .args(paths)
-        .output()
-        .context("failed to check git status for tracked paths")?;
-    if !output.status.success() {
-        bail!(
-            "git status failed while checking path changes: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
-}
-
-fn has_staged_changes() -> Result<bool> {
-    let status = Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .status()
-        .context("failed to check staged diff status")?;
-    match status.code() {
-        Some(0) => Ok(false),
-        Some(1) => Ok(true),
-        _ => bail!("unexpected exit code from `git diff --cached --quiet`"),
-    }
 }
 
 fn run_checked(program: &str, args: &[&str], current_dir: Option<&Path>) -> Result<String> {

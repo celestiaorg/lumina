@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use git2::build::CheckoutBuilder;
@@ -81,6 +81,28 @@ impl Git2Repo {
         checkout_local_branch(&repo, branch_name)?;
         info!(branch=%branch_name, "git2_repo: created and checked out branch from default branch");
         Ok(())
+    }
+
+    /// Checks out an existing branch, preferring local first, then `origin/<branch>`.
+    /// Returns an error when neither local nor remote branch can be resolved.
+    pub fn checkout_branch_from_origin(&self, branch_name: &str) -> Result<()> {
+        info!(branch=%branch_name, "git2_repo: checking out branch from local/origin");
+        let repo = self.repo()?;
+
+        if local_branch_exists(&repo, branch_name) {
+            checkout_local_branch(&repo, branch_name)?;
+            return Ok(());
+        }
+
+        if has_origin_remote(&repo) {
+            fetch_origin_branch(&repo, branch_name)?;
+        }
+
+        if checkout_remote_branch_if_exists(&repo, branch_name)? {
+            return Ok(());
+        }
+
+        bail!("failed to resolve branch `{branch_name}` from local refs or origin remote");
     }
 
     /// Creates (or resolves) release branch from latest default branch state and returns step descriptions.
@@ -245,6 +267,85 @@ impl Git2Repo {
         }
 
         Ok(())
+    }
+
+    /// Returns true when any of the provided paths has local changes in working tree or index.
+    pub fn paths_have_changes(&self, paths: &[&str]) -> Result<bool> {
+        let repo = self.repo()?;
+        let mut options = StatusOptions::new();
+        options.include_untracked(true).recurse_untracked_dirs(true);
+        for path in paths {
+            options.pathspec(*path);
+        }
+        let statuses = repo
+            .statuses(Some(&mut options))
+            .context("failed to inspect path-scoped local changes")?;
+        Ok(!statuses.is_empty())
+    }
+
+    /// Stages only provided paths and creates a commit when staged tree differs from HEAD.
+    /// Returns `true` when a commit was created.
+    pub fn stage_paths_and_commit(&self, paths: &[&str], message: &str) -> Result<bool> {
+        debug!(paths=?paths, commit_message=%message, "git2_repo: staging selected paths");
+        let repo = self.repo()?;
+        let mut index = repo.index().context("failed to open git index")?;
+
+        for path in paths {
+            let relative = Path::new(path);
+            let absolute = self.workspace_root.join(relative);
+            if absolute.exists() {
+                index
+                    .add_path(relative)
+                    .with_context(|| format!("failed to stage path `{path}`"))?;
+            } else {
+                match index.remove_path(relative) {
+                    Ok(_) => {}
+                    Err(err) if err.code() == ErrorCode::NotFound => {}
+                    Err(err) => {
+                        return Err(anyhow::Error::new(err)
+                            .context(format!("failed to remove path `{path}` from index")));
+                    }
+                }
+            }
+        }
+        index.write().context("failed to write git index")?;
+
+        let tree_id = index
+            .write_tree()
+            .context("failed to write git tree from index")?;
+        let tree = repo
+            .find_tree(tree_id)
+            .context("failed to find staged tree")?;
+
+        let signature = signature_for_repo(&repo)?;
+        match repo.head() {
+            Ok(head_ref) => {
+                let parent = head_ref
+                    .peel_to_commit()
+                    .context("failed to resolve HEAD commit")?;
+                if parent.tree_id() == tree_id {
+                    return Ok(false);
+                }
+                repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &[&parent],
+                )
+                .context("failed to create commit")?;
+                Ok(true)
+            }
+            Err(_) => {
+                if tree.is_empty() {
+                    return Ok(false);
+                }
+                repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[])
+                    .context("failed to create initial commit")?;
+                Ok(true)
+            }
+        }
     }
 
     /// Pushes branch to `origin`, optionally as force push, and configures upstream tracking.

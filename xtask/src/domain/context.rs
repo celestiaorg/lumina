@@ -42,15 +42,6 @@ pub struct ExecuteContext {
     pub branch: BranchContext,
 }
 
-impl PrepareContext {
-    pub fn to_check_context(&self) -> CheckContext {
-        CheckContext {
-            common: self.common.clone(),
-            current_commit: None,
-        }
-    }
-}
-
 impl ExecuteContext {
     pub fn to_check_context(&self) -> CheckContext {
         CheckContext {

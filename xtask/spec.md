@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document defines the `xtask` release workflow as the source of truth for:
+This document defines the `xtask gha` workflow as the source of truth for:
 
 1. release planning and validation,
 2. release branch preparation,
@@ -13,30 +13,20 @@ All release behavior must be implemented in Rust under `xtask` and exposed throu
 
 ## Commands
 
-`xtask` provides these commands:
+Public CLI surface is GHA-only:
 
-1. `check <rc|final>`
-2. `prepare <rc|final>`
-3. `submit <rc|final>`
-4. `execute <rc|final>`
-5. `publish <rc|final>`
+1. `gha release-plz`
+2. `gha npm-update-pr`
+3. `gha npm-publish`
+4. `gha uniffi-release`
 
-`execute` orchestrates only `check + prepare + submit`.
-`publish` is the only command allowed to perform registry/GitHub release publishing.
+`gha release-plz` is the CI driver command that classifies trigger context, runs
+the internal release pipeline stages, and emits a normalized workflow contract.
 
-## Common CLI Arguments
+## Internal Pipeline
 
-All commands accept shared options:
-
-1. `--base-commit <sha>`: optional comparison commit override.
-2. `--default-branch <name>`: default `main`.
-3. `--branch-name <name>`: optional explicit release branch name.
-4. `--rc-branch-prefix <prefix>`: default `release/rc`.
-5. `--final-branch-prefix <prefix>`: default `release`.
-6. `--skip-pr`: run flow but skip open/close PR operations.
-7. `--json`: print machine-readable report.
-
-`submit` and `execute` also support `--dry-run`.
+Internally, `gha release-plz` still orchestrates check/prepare/submit/execute/publish
+logic through Rust modules, but these are not exposed as first-class CLI commands.
 
 ## Mode Semantics
 
@@ -131,9 +121,8 @@ It must not perform publish actions.
 
 Recommended CI split:
 
-1. automatic flow runs `execute rc` to prepare/update RC release PRs,
-2. publishing runs only through explicit `publish <mode>` step,
-3. npm publish uses:
+1. automatic flow runs `gha release-plz` to classify and execute the proper path,
+2. npm publish uses:
    - RC mode: `--tag rc`,
    - final mode: default `latest` tag behavior.
 
@@ -148,13 +137,19 @@ Recommended CI split:
 5. branch/PR metadata for `prepare` and `submit`,
 6. publish payload for `publish`.
 
+`gha release-plz` normalized contract fields:
+
+1. `pr` (object payload with `head_branch` + optional `html_url`),
+2. `prs_created` (boolean),
+3. `releases` (array payload),
+4. `releases_created` (boolean),
+5. `node_rc_prefix` (empty string or `-rc.N` suffix).
+
 ## Local Usage
 
 With cargo alias:
 
-1. `cargo xtask check rc --json`
-2. `cargo xtask check final --json`
-3. `cargo xtask prepare rc --json`
-4. `cargo xtask submit rc --json`
-5. `cargo xtask execute rc --json`
-6. `cargo xtask publish final --json`
+1. `cargo xtask gha release-plz --help`
+2. `cargo xtask gha npm-update-pr --help`
+3. `cargo xtask gha npm-publish --help`
+4. `cargo xtask gha uniffi-release --help`
