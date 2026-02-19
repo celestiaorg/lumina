@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_output::write_github_output;
@@ -59,7 +59,6 @@ pub async fn handle_submit(
         ReleaseMode::Final => "chore(release): prepare final release",
     }
     .to_string();
-    debug!(commit_message=%commit_message, "submit: prepared commit message");
 
     // Apply submit strategy for git branch/commit/push behavior.
     match strategy {
@@ -74,7 +73,6 @@ pub async fn handle_submit(
         }
         _ => {
             // Normal flow: commit current branch changes and force-push update.
-            debug!(branch=%branch_name, "submit: committing and force-pushing existing branch");
             git.stage_all_and_commit(&commit_message, args.dry_run)?;
             git.push_branch(&branch_name, true, args.dry_run)?;
         }

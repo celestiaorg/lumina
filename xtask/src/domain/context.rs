@@ -13,7 +13,7 @@ pub struct BranchContext {
 }
 
 #[derive(Debug, Clone)]
-pub struct CheckContext {
+pub struct ComputeVersionsContext {
     pub common: CommonContext,
     pub current_commit: Option<String>,
 }
@@ -43,8 +43,8 @@ pub struct ExecuteContext {
 }
 
 impl ExecuteContext {
-    pub fn to_check_context(&self) -> CheckContext {
-        CheckContext {
+    pub fn to_compute_versions_context(&self) -> ComputeVersionsContext {
+        ComputeVersionsContext {
             common: self.common.clone(),
             current_commit: None,
         }

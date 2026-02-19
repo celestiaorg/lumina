@@ -1,49 +1,40 @@
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use cargo_metadata::{Metadata, MetadataCommand, camino::Utf8Path};
+use cargo_metadata::{
+    DependencyKind, Metadata, MetadataCommand, camino::Utf8Path, semver::Prerelease,
+};
 use release_plz_core::set_version::{
     SetVersionRequest, SetVersionSpec, VersionChange, set_version,
 };
 use release_plz_core::update_request::UpdateRequest;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::adapters::git_refs::{
-    changed_files_since_tag, commit_for_tag, latest_non_rc_release_tag_on_branch,
-    latest_release_tag_on_branch, remote_origin_url, resolve_current_commit,
-    snapshot_workspace_to_temp,
+    commit_for_tag, latest_non_rc_release_tag_on_branch, latest_release_tag_on_branch,
+    remote_origin_url, resolve_current_commit, snapshot_workspace_to_temp,
 };
 use crate::adapters::metadata::metadata_for_manifest;
 use crate::domain::types::{
-    CheckContext, ComparisonVersionView, PublishContext, ReleaseMode, VersionComputation,
-    VersionEntry,
+    ComputeVersionsContext, PlannedVersion, PublishContext, ReleaseMode, VersionsReport,
 };
-use crate::domain::versioning::{convert_release_version_to_rc, to_stable_if_prerelease};
-use crate::domain::workspace::Workspace;
-
-#[derive(Debug, Clone)]
-struct ContextVersions {
-    /// Previous release commit used as update anchor.
-    previous_commit: String,
-    /// Latest release tag (RC or final) visible from current snapshot.
-    latest_release_tag: Option<String>,
-    /// Latest non-RC release tag visible from current snapshot.
-    latest_non_rc_release_tag: Option<String>,
-    /// Commit used as current workspace snapshot root.
-    current_commit: String,
-    /// Versions observed at current commit before applying computed changes.
-    current_versions: Vec<ComparisonVersionView>,
-    /// Computed package version updates for selected mode.
-    versions: Vec<VersionEntry>,
-    /// Duplicate publishable package versions after applying computed versions in snapshot.
-    duplicate_publishable_versions: Vec<(String, Vec<String>)>,
-}
+use crate::domain::versioning::{
+    convert_release_version_to_rc, to_stable_if_prerelease, validate_rc_conversion,
+};
 
 #[derive(Debug)]
 struct SnapshotState {
     snapshot: crate::adapters::git_refs::RepoSnapshot,
     metadata: Metadata,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+enum VersionBumpKind {
+    None,
+    Patch,
+    Minor,
+    Major,
 }
 
 #[derive(Debug, Clone)]
@@ -60,120 +51,80 @@ impl ReleasePlzAdapter {
 
     /// Computes release versions and reporting metadata for check/prepare stages.
     /// Previous commit must be resolvable for both rc and final modes.
-    pub async fn versions(&self, ctx: &CheckContext) -> Result<VersionComputation> {
+    pub async fn versions(&self, ctx: &ComputeVersionsContext) -> Result<VersionsReport> {
+        let report = self.versions_from_context(ctx).await?;
         info!(
-            mode=?ctx.common.mode,
-            default_branch=%ctx.common.default_branch,
-            requested_current_commit=?ctx.current_commit,
-            workspace_root=%self.workspace_root.display(),
-            "release_plz: computing versions"
-        );
-        let from_context = self.versions_from_context(ctx).await?;
-        info!(
-            current_commit=%from_context.current_commit,
-            previous_commit=%from_context.previous_commit,
-            latest_release_tag=?from_context.latest_release_tag,
-            latest_non_rc_release_tag=?from_context.latest_non_rc_release_tag,
-            planned_versions=from_context.versions.len(),
-            duplicates=from_context.duplicate_publishable_versions.len(),
+            current_commit=%report.current_commit,
+            previous_commit=%report.previous_commit,
+            latest_release_tag=?report.latest_release_tag,
+            latest_non_rc_release_tag=?report.latest_non_rc_release_tag,
+            planned_versions=report.planned_versions.len(),
             "release_plz: versions computed"
         );
 
-        Ok(VersionComputation {
-            previous_commit: from_context.previous_commit,
-            latest_release_tag: from_context.latest_release_tag,
-            latest_non_rc_release_tag: from_context.latest_non_rc_release_tag,
-            current_commit: from_context.current_commit,
-            current_versions: from_context.current_versions,
-            versions: from_context.versions,
-            duplicate_publishable_versions: from_context.duplicate_publishable_versions,
-        })
+        Ok(report)
     }
 
     /// Computes versions from an isolated snapshot at current commit and gathers reporting context.
-    async fn versions_from_context(&self, ctx: &CheckContext) -> Result<ContextVersions> {
+    async fn versions_from_context(&self, ctx: &ComputeVersionsContext) -> Result<VersionsReport> {
         // Resolve the current commit used as analysis input.
         let current_commit = self.resolve_current_for_context(ctx)?;
-        debug!(current_commit=%current_commit, "release_plz: resolved current commit");
         // Load isolated snapshot + metadata at that commit.
         let snapshot_state =
             self.load_snapshot_state(&current_commit, &ctx.common.default_branch)?;
         let temp_workspace_root = snapshot_state.snapshot.repo_root.as_path();
-        debug!(
-            temp_workspace_root=%temp_workspace_root.display(),
-            "release_plz: created current snapshot worktree"
-        );
-        // Resolve previous release commit according to mode policy.
-        let previous_commit = self.resolve_previous_for_mode(
-            ctx.common.mode,
-            temp_workspace_root,
-            &ctx.common.default_branch,
-        )?;
-        debug!(previous_commit=%previous_commit, "release_plz: resolved previous commit");
         let latest_release_tag =
             latest_release_tag_on_branch(temp_workspace_root, &ctx.common.default_branch)?;
         let latest_non_rc_release_tag =
             latest_non_rc_release_tag_on_branch(temp_workspace_root, &ctx.common.default_branch)?;
-        debug!(
-            latest_release_tag=?latest_release_tag,
-            latest_non_rc_release_tag=?latest_non_rc_release_tag,
-            "release_plz: resolved previous-release tags"
+        // Resolve previous release point from already-fetched tags so final mode is always anchored
+        // to the latest non-RC release.
+        let previous_tag = match ctx.common.mode {
+            ReleaseMode::Rc => latest_release_tag
+                .as_deref()
+                .context("rc mode requires latest release tag for previous-commit reporting")?,
+            ReleaseMode::Final => latest_non_rc_release_tag.as_deref().context(
+                "final mode requires latest non-RC release tag for previous-commit reporting",
+            )?,
+        };
+        let previous_commit = commit_for_tag(temp_workspace_root, previous_tag)?;
+        info!(
+            mode=?ctx.common.mode,
+            previous_tag=%previous_tag,
+            previous_commit=%previous_commit,
+            snapshot_repo_root=%temp_workspace_root.display(),
+            "release_plz: resolved previous release point"
         );
         // Load previous release snapshot so release-plz can use it as previous-state input.
         let previous_snapshot =
-            self.load_previous_snapshot(&previous_commit, &ctx.common.default_branch)?;
+            self.load_snapshot_state(&previous_commit, &ctx.common.default_branch)?;
         let previous_manifest_path = previous_snapshot.snapshot.repo_root.join("Cargo.toml");
-        debug!(
-            previous_snapshot_root=%previous_snapshot.snapshot.repo_root.display(),
-            previous_manifest_path=%previous_manifest_path.display(),
-            "release_plz: prepared previous snapshot"
-        );
 
-        // Capture package versions before applying computed updates.
-        let reported_current_versions = current_versions_from_metadata(&snapshot_state.metadata);
-        let versions = self
-            .versions_from_snapshot(
+        let planned_versions = self
+            .compute_snapshot_versions(
                 &snapshot_state.metadata,
-                temp_workspace_root,
                 &previous_manifest_path,
                 ctx.common.mode,
-                &ctx.common.default_branch,
             )
             .await?;
-        let duplicate_publishable_versions = duplicate_versions(
-            temp_workspace_root,
-            snapshot_state.metadata.clone(),
-            &versions,
-        )?;
-        debug!(
-            planned_versions = versions.len(),
-            duplicate_groups = duplicate_publishable_versions.len(),
-            "release_plz: finished context version computation"
-        );
 
-        Ok(ContextVersions {
+        Ok(VersionsReport {
+            mode: ctx.common.mode,
             previous_commit,
             latest_release_tag,
             latest_non_rc_release_tag,
             current_commit,
-            current_versions: reported_current_versions,
-            versions,
-            duplicate_publishable_versions,
+            planned_versions,
         })
     }
 
     /// Resolves current commit for check/prepare computation.
-    fn resolve_current_for_context(&self, ctx: &CheckContext) -> Result<String> {
+    fn resolve_current_for_context(&self, ctx: &ComputeVersionsContext) -> Result<String> {
         let commit = resolve_current_commit(
             &self.workspace_root,
             &ctx.common.default_branch,
             ctx.current_commit.as_deref(),
         )?;
-        debug!(
-            selected_commit=%commit,
-            default_branch=%ctx.common.default_branch,
-            "release_plz: selected current commit"
-        );
         Ok(commit)
     }
 
@@ -188,95 +139,20 @@ impl ReleasePlzAdapter {
         let _keep_temp_dir_alive = &snapshot.temp_dir;
         let temp_manifest = snapshot.repo_root.join("Cargo.toml");
         let metadata = metadata_for_manifest(&temp_manifest)?;
-        debug!(
-            source_workspace_root=%self.workspace_root.display(),
-            snapshot_root=%snapshot.repo_root.display(),
-            temp_manifest=%temp_manifest.display(),
-            "release_plz: loaded snapshot metadata"
-        );
         Ok(SnapshotState { snapshot, metadata })
     }
 
-    /// Loads previous release snapshot for release-plz previous-state input.
-    fn load_previous_snapshot(
-        &self,
-        previous_commit: &str,
-        default_branch: &str,
-    ) -> Result<SnapshotState> {
-        let snapshot_state = self.load_snapshot_state(previous_commit, default_branch)?;
-        debug!(
-            previous_commit=%previous_commit,
-            previous_snapshot_root=%snapshot_state.snapshot.repo_root.display(),
-            "release_plz: loaded previous snapshot"
-        );
-        Ok(snapshot_state)
-    }
-
-    /// Resolves previous release commit according to mode policy.
-    fn resolve_previous_for_mode(
-        &self,
-        mode: ReleaseMode,
-        snapshot_repo_root: &Path,
-        default_branch: &str,
-    ) -> Result<String> {
-        let previous_tag = match mode {
-            ReleaseMode::Rc => latest_release_tag_on_branch(snapshot_repo_root, default_branch)?
-                .context("rc mode requires latest release tag for previous-commit reporting")?,
-            ReleaseMode::Final => {
-                latest_non_rc_release_tag_on_branch(snapshot_repo_root, default_branch)?.context(
-                    "final mode requires latest non-RC release tag for previous-commit reporting",
-                )?
-            }
-        };
-        let previous_commit = commit_for_tag(snapshot_repo_root, &previous_tag)?;
-        info!(
-            mode=?mode,
-            previous_tag=%previous_tag,
-            previous_commit=%previous_commit,
-            snapshot_repo_root=%snapshot_repo_root.display(),
-            "release_plz: resolved previous release point"
-        );
-        Ok(previous_commit)
-    }
-
-    /// Computes package versions from snapshot metadata and applies final-mode previous-tag filtering.
-    pub async fn versions_from_snapshot(
+    /// Computes package versions from snapshot metadata and applies transitive bump policy.
+    pub async fn compute_snapshot_versions(
         &self,
         metadata: &Metadata,
-        snapshot_repo_root: &std::path::Path,
         previous_manifest_path: &std::path::Path,
         mode: ReleaseMode,
-        default_branch: &str,
-    ) -> Result<Vec<VersionEntry>> {
-        debug!(
-            mode=?mode,
-            snapshot_repo_root=%snapshot_repo_root.display(),
-            previous_manifest_path=%previous_manifest_path.display(),
-            "release_plz: computing versions from snapshot"
-        );
-        // First compute raw per-package next versions from release-plz rules.
-        let mut versions = self
+    ) -> Result<Vec<PlannedVersion>> {
+        // Compute versions from release-plz output + transitive bump policy.
+        let versions = self
             .versions_for_mode(metadata, mode, previous_manifest_path)
             .await?;
-
-        if matches!(mode, ReleaseMode::Final) {
-            // In final mode, include only publishable packages changed since latest stable previous tag.
-            let previous_tag =
-                latest_non_rc_release_tag_on_branch(snapshot_repo_root, default_branch)?.context(
-                    "final mode requires at least one non-RC release tag in current workspace",
-                )?;
-            let changed_packages = changed_publishable_packages_since_tag(
-                snapshot_repo_root,
-                metadata,
-                &previous_tag,
-            )?;
-            debug!(
-                previous_tag=%previous_tag,
-                changed_packages=changed_packages.len(),
-                "release_plz: filtered final-mode packages by previous non-rc tag"
-            );
-            versions.retain(|version| changed_packages.contains(&version.package));
-        }
 
         Ok(versions)
     }
@@ -287,12 +163,7 @@ impl ReleasePlzAdapter {
         metadata: &Metadata,
         mode: ReleaseMode,
         previous_manifest_path: &std::path::Path,
-    ) -> Result<Vec<VersionEntry>> {
-        debug!(
-            mode=?mode,
-            previous_manifest_path=%previous_manifest_path.display(),
-            "release_plz: invoking next_versions"
-        );
+    ) -> Result<Vec<PlannedVersion>> {
         // Run release-plz next_versions once and reuse that as source of truth.
         let mut update_request = UpdateRequest::new(metadata.clone())
             .context("failed to build release-plz update request")?
@@ -310,18 +181,30 @@ impl ReleasePlzAdapter {
         let (packages_to_update, _temp_repo) = release_plz_core::next_versions(&update_request)
             .await
             .context("failed to compute next versions with release-plz")?;
-        debug!(
-            updates = packages_to_update.updates().len(),
-            "release_plz: next_versions returned updates"
+
+        let current_versions = publishable_workspace_current_versions(metadata);
+        let mut planned_release_versions = collect_planned_release_versions(
+            &current_versions,
+            packages_to_update
+                .updates()
+                .iter()
+                .filter(|(package, _)| is_publishable(&package.publish))
+                .map(|(package, update)| (package.name.to_string(), update.version.clone())),
+        );
+        apply_and_log_transitive_bump_policy(
+            metadata,
+            &current_versions,
+            &mut planned_release_versions,
+            "release_plz: applied transitive dependency bump policy",
         );
 
-        let mut versions = packages_to_update
-            .updates()
-            .iter()
-            .filter(|(package, _)| is_publishable(&package.publish))
-            .map(|(package, update)| {
-                let current = package.version.clone();
-                let next_release = update.version.clone();
+        let mut versions = planned_release_versions
+            .into_iter()
+            .filter_map(|(package, next_release)| {
+                let current = current_versions.get(&package)?.clone();
+                Some((package, current, next_release))
+            })
+            .map(|(package, current, next_release)| {
                 // Mode-specific projection:
                 // RC => convert release-plz next version into rc.N variant.
                 // Final => normalize prerelease to stable if needed.
@@ -331,22 +214,22 @@ impl ReleasePlzAdapter {
                         to_stable_if_prerelease(&next_release).unwrap_or(next_release.clone())
                     }
                 };
+                if matches!(mode, ReleaseMode::Rc) {
+                    validate_rc_conversion(&next_release, &next_effective).with_context(|| {
+                        format!("invalid rc transition computed for package `{package}`")
+                    })?;
+                }
 
-                Ok(VersionEntry {
-                    package: package.name.to_string(),
-                    current,
-                    next_release,
-                    next_effective,
+                Ok(PlannedVersion {
+                    package,
+                    current: current.to_string(),
+                    next_effective: next_effective.to_string(),
                     publishable: true,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
 
         versions.sort_by(|a, b| a.package.cmp(&b.package));
-        debug!(
-            planned_versions = versions.len(),
-            "release_plz: projected mode-specific versions"
-        );
         Ok(versions)
     }
 
@@ -358,6 +241,7 @@ impl ReleasePlzAdapter {
         previous_commit: &str,
         latest_release_tag: Option<&str>,
         latest_non_rc_release_tag: Option<&str>,
+        planned_versions: &[PlannedVersion],
     ) -> Result<Vec<String>> {
         info!(
             mode=?mode,
@@ -375,13 +259,8 @@ impl ReleasePlzAdapter {
         let mut update_request = UpdateRequest::new(metadata.clone())
             .context("failed to build update request for release artifact regeneration")?
             .with_allow_dirty(true);
-        let previous_snapshot = self.load_previous_snapshot(previous_commit, default_branch)?;
+        let previous_snapshot = self.load_snapshot_state(previous_commit, default_branch)?;
         let previous_manifest_path = previous_snapshot.snapshot.repo_root.join("Cargo.toml");
-        debug!(
-            previous_snapshot_root=%previous_snapshot.snapshot.repo_root.display(),
-            previous_manifest_path=%previous_manifest_path.display(),
-            "release_plz: using previous manifest path for update context"
-        );
         let previous_manifest_path =
             Utf8Path::from_path(&previous_manifest_path).with_context(|| {
                 format!(
@@ -393,45 +272,33 @@ impl ReleasePlzAdapter {
             .with_registry_manifest_path(previous_manifest_path)
             .context("failed to set previous release manifest for regeneration")?;
 
-        let (packages_to_update, _temp_repo) = release_plz_core::update(&update_request)
+        let (_packages_to_update, _temp_repo) = release_plz_core::update(&update_request)
             .await
             .context("failed to regenerate release artifacts with release-plz update")?;
-        debug!(
-            updates = packages_to_update.updates().len(),
-            "release_plz: update regenerated release artifacts"
-        );
 
         let mut descriptions =
             vec!["regenerated release versions/changelog with release-plz update".to_string()];
 
-        // Re-apply mode-specific version projection after update() so artifacts match check semantics.
-        let mode_specific_changes = packages_to_update
-            .updates()
+        // Reuse already computed effective versions to keep compute/apply logic single-sourced.
+        let mode_specific_changes = planned_versions
             .iter()
-            .filter(|(package, _)| is_publishable(&package.publish))
-            .filter_map(|(package, update)| {
-                let next = match mode {
-                    ReleaseMode::Rc => convert_release_version_to_rc(&update.version).ok(),
-                    ReleaseMode::Final => Some(
-                        to_stable_if_prerelease(&update.version).unwrap_or(update.version.clone()),
-                    ),
-                }?;
-                Some((package.name.to_string(), next))
+            .filter(|version| version.publishable)
+            .map(|version| {
+                let parsed = cargo_metadata::semver::Version::parse(&version.next_effective)
+                    .with_context(|| {
+                        format!(
+                            "failed to parse planned effective version `{}` for package `{}`",
+                            version.next_effective, version.package
+                        )
+                    })?;
+                Ok((version.package.clone(), parsed))
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Result<BTreeMap<_, _>>>()?;
 
         if !mode_specific_changes.is_empty() {
             apply_version_changes_with_metadata(mode_specific_changes, metadata)?;
-            debug!("release_plz: applied mode-specific version overrides");
-            match mode {
-                ReleaseMode::Rc => descriptions.push(
-                    "converted release-plz versions to rc variants and updated workspace references"
-                        .to_string(),
-                ),
-                ReleaseMode::Final => {
-                    descriptions.push("normalized prerelease versions to stable".to_string())
-                }
-            }
+            descriptions
+                .push("applied computed release versions to workspace references".to_string());
         }
 
         if let Some(latest_release) = latest_release_tag {
@@ -541,60 +408,6 @@ fn is_publishable(publish: &Option<Vec<String>>) -> bool {
     }
 }
 
-/// Extracts package versions visible at current workspace commit for JSON reporting.
-fn current_versions_from_metadata(metadata: &Metadata) -> Vec<ComparisonVersionView> {
-    // Keep deterministic package order for stable JSON output.
-    let mut versions = metadata
-        .workspace_packages()
-        .iter()
-        .map(|package| ComparisonVersionView {
-            package: package.name.to_string(),
-            version: package.version.to_string(),
-            publishable: is_publishable(&package.publish),
-        })
-        .collect::<Vec<_>>();
-    versions.sort_by(|a, b| a.package.cmp(&b.package));
-    versions
-}
-
-/// Applies computed versions in snapshot metadata and returns duplicate publishable versions.
-fn duplicate_versions(
-    snapshot_repo_root: &Path,
-    metadata: Metadata,
-    versions: &[VersionEntry],
-) -> Result<Vec<(String, Vec<String>)>> {
-    debug!(
-        snapshot_repo_root=%snapshot_repo_root.display(),
-        planned_versions=versions.len(),
-        "release_plz: running duplicate version simulation"
-    );
-    let changes = version_changes_for_versions(versions);
-    if !changes.is_empty() {
-        apply_version_changes_with_metadata(changes, metadata)?;
-    }
-
-    let snapshot_manifest = snapshot_repo_root.join("Cargo.toml");
-    let simulated_metadata = metadata_for_manifest(&snapshot_manifest)?;
-    let simulated_workspace = Workspace::from_metadata(simulated_metadata);
-    let duplicates = simulated_workspace.duplicate_publishable_versions();
-    debug!(
-        duplicate_groups = duplicates.len(),
-        "release_plz: duplicate simulation completed"
-    );
-    Ok(duplicates)
-}
-
-/// Extracts effective version overrides for publishable version entries.
-fn version_changes_for_versions(
-    versions: &[VersionEntry],
-) -> BTreeMap<String, cargo_metadata::semver::Version> {
-    versions
-        .iter()
-        .filter(|version| version.publishable)
-        .map(|version| (version.package.clone(), version.next_effective.clone()))
-        .collect()
-}
-
 /// Applies deterministic version overrides across workspace metadata.
 fn apply_version_changes_with_metadata(
     changes: BTreeMap<String, cargo_metadata::semver::Version>,
@@ -614,6 +427,196 @@ fn apply_version_changes_with_metadata(
     set_version(&request).context("failed to apply mode-specific version overrides")
 }
 
+/// Captures current versions for publishable workspace members.
+fn publishable_workspace_current_versions(
+    metadata: &Metadata,
+) -> BTreeMap<String, cargo_metadata::semver::Version> {
+    metadata
+        .workspace_packages()
+        .iter()
+        .filter(|package| is_publishable(&package.publish))
+        .map(|package| (package.name.to_string(), package.version.clone()))
+        .collect()
+}
+
+/// Collects release-plz proposed next versions for publishable workspace members.
+fn collect_planned_release_versions<I>(
+    current_versions: &BTreeMap<String, cargo_metadata::semver::Version>,
+    updates: I,
+) -> BTreeMap<String, cargo_metadata::semver::Version>
+where
+    I: IntoIterator<Item = (String, cargo_metadata::semver::Version)>,
+{
+    updates
+        .into_iter()
+        .filter(|(package, _)| current_versions.contains_key(package.as_str()))
+        .collect()
+}
+
+/// Applies and logs transitive bump propagation over planned release versions.
+fn apply_and_log_transitive_bump_policy(
+    metadata: &Metadata,
+    current_versions: &BTreeMap<String, cargo_metadata::semver::Version>,
+    planned_release_versions: &mut BTreeMap<String, cargo_metadata::semver::Version>,
+    phase: &str,
+) {
+    let dependency_graph = workspace_publishable_dependencies(metadata);
+    let transitive_bumps = apply_transitive_bump_policy(
+        current_versions,
+        &dependency_graph,
+        planned_release_versions,
+    );
+    if transitive_bumps > 0 {
+        info!(
+            count = transitive_bumps,
+            phase, "release_plz: applied transitive bump policy"
+        );
+    }
+}
+
+/// Returns workspace dependency graph restricted to publishable workspace members.
+/// Edges are `dependent -> dependency`.
+fn workspace_publishable_dependencies(metadata: &Metadata) -> BTreeMap<String, Vec<String>> {
+    let publishable_names = metadata
+        .workspace_packages()
+        .iter()
+        .filter(|package| is_publishable(&package.publish))
+        .map(|package| package.name.to_string())
+        .collect::<HashSet<_>>();
+
+    metadata
+        .workspace_packages()
+        .iter()
+        .filter(|package| publishable_names.contains(package.name.as_str()))
+        .map(|package| {
+            let dependencies = package
+                .dependencies
+                .iter()
+                // Dev dependencies do not affect published API compatibility.
+                .filter(|dependency| dependency.kind != DependencyKind::Development)
+                .filter_map(|dependency| {
+                    publishable_names
+                        .contains(dependency.name.as_str())
+                        .then(|| dependency.name.clone())
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            (package.name.to_string(), dependencies)
+        })
+        .collect()
+}
+
+/// Applies transitive bump policy:
+/// if dependency gets patch/minor/major bump, dependent is bumped at least at same level.
+fn apply_transitive_bump_policy(
+    current_versions: &BTreeMap<String, cargo_metadata::semver::Version>,
+    dependencies: &BTreeMap<String, Vec<String>>,
+    planned_next_versions: &mut BTreeMap<String, cargo_metadata::semver::Version>,
+) -> usize {
+    let mut forced_bump_count = 0usize;
+
+    loop {
+        let mut changed = false;
+        for (package, dependency_list) in dependencies {
+            let Some(current) = current_versions.get(package) else {
+                continue;
+            };
+
+            let required = dependency_list
+                .iter()
+                .filter_map(|dependency| {
+                    let dependency_current = current_versions.get(dependency)?;
+                    let dependency_next = planned_next_versions
+                        .get(dependency)
+                        .unwrap_or(dependency_current);
+                    Some(classify_version_bump(dependency_current, dependency_next))
+                })
+                .max()
+                .unwrap_or(VersionBumpKind::None);
+
+            let planned = planned_next_versions
+                .get(package)
+                .cloned()
+                .unwrap_or_else(|| current.clone());
+            if required == VersionBumpKind::None
+                || classify_version_bump(current, &planned) >= required
+            {
+                continue;
+            }
+
+            let next_planned = bump_version(current, required);
+            if next_planned == planned {
+                continue;
+            }
+
+            planned_next_versions.insert(package.clone(), next_planned.clone());
+            forced_bump_count = forced_bump_count.saturating_add(1);
+            changed = true;
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    forced_bump_count
+}
+
+/// Classifies semantic bump level based on major/minor/patch transition.
+fn classify_version_bump(
+    current: &cargo_metadata::semver::Version,
+    next: &cargo_metadata::semver::Version,
+) -> VersionBumpKind {
+    let current = stable_version(current);
+    let next = stable_version(next);
+
+    if next.major > current.major {
+        VersionBumpKind::Major
+    } else if next.major == current.major && next.minor > current.minor {
+        VersionBumpKind::Minor
+    } else if next.major == current.major
+        && next.minor == current.minor
+        && next.patch > current.patch
+    {
+        VersionBumpKind::Patch
+    } else {
+        VersionBumpKind::None
+    }
+}
+
+/// Returns a version bumped from current by the requested semantic level.
+fn bump_version(
+    current: &cargo_metadata::semver::Version,
+    bump: VersionBumpKind,
+) -> cargo_metadata::semver::Version {
+    let mut next = stable_version(current);
+    match bump {
+        VersionBumpKind::None => {}
+        VersionBumpKind::Patch => {
+            next.patch = next.patch.saturating_add(1);
+        }
+        VersionBumpKind::Minor => {
+            next.minor = next.minor.saturating_add(1);
+            next.patch = 0;
+        }
+        VersionBumpKind::Major => {
+            next.major = next.major.saturating_add(1);
+            next.minor = 0;
+            next.patch = 0;
+        }
+    }
+    next
+}
+
+/// Removes prerelease/build metadata for stable bump comparisons.
+fn stable_version(version: &cargo_metadata::semver::Version) -> cargo_metadata::semver::Version {
+    let mut stable = version.clone();
+    stable.pre = Prerelease::EMPTY;
+    stable.build = Default::default();
+    stable
+}
+
 /// Parses origin remote into release-plz repository URL model.
 fn parse_remote_repo_url(
     workspace_root: &std::path::Path,
@@ -626,55 +629,90 @@ fn parse_remote_repo_url(
     Ok(Some(repo_url))
 }
 
-/// Computes publishable workspace package names changed since the provided previous tag.
-fn changed_publishable_packages_since_tag(
-    repo_root: &std::path::Path,
-    metadata: &Metadata,
-    tag: &str,
-) -> Result<std::collections::HashSet<String>> {
-    // Use git diff against previous tag to scope final-mode packages to actual changed crates.
-    let changed_files = changed_files_since_tag(repo_root, tag)?;
-    debug!(
-        repo_root=%repo_root.display(),
-        previous_tag=%tag,
-        changed_files=changed_files.len(),
-        "release_plz: collected changed files since previous tag"
-    );
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
 
-    let mut changed_packages = std::collections::HashSet::new();
-    // Workspace-level files are treated as impacting all publishable packages.
-    let workspace_wide_change = changed_files.iter().any(|path| {
-        path == "Cargo.toml"
-            || path == "Cargo.lock"
-            || path == "release-plz.toml"
-            || path.starts_with(".github/workflows/")
-    });
+    use cargo_metadata::semver::Version;
 
-    for package in metadata.workspace_packages() {
-        if !is_publishable(&package.publish) {
-            continue;
-        }
-        if workspace_wide_change {
-            changed_packages.insert(package.name.to_string());
-            continue;
-        }
+    use super::{
+        VersionBumpKind, apply_transitive_bump_policy, bump_version, classify_version_bump,
+    };
 
-        let Some(package_dir) = package.manifest_path.parent() else {
-            continue;
-        };
-        // Map changed file paths to package roots to determine touched publishable packages.
-        if changed_files
-            .iter()
-            .map(|file| repo_root.join(file))
-            .any(|file_path| file_path.starts_with(package_dir.as_std_path()))
-        {
-            changed_packages.insert(package.name.to_string());
-        }
+    #[test]
+    fn direct_minor_bump_propagates_to_dependent() {
+        let current = BTreeMap::from([
+            ("a".to_string(), Version::parse("1.0.0").unwrap()),
+            ("b".to_string(), Version::parse("2.0.0").unwrap()),
+        ]);
+        let dependencies = BTreeMap::from([("b".to_string(), vec!["a".to_string()])]);
+        let mut planned = BTreeMap::from([("a".to_string(), Version::parse("1.1.0").unwrap())]);
+
+        let forced = apply_transitive_bump_policy(&current, &dependencies, &mut planned);
+
+        assert_eq!(forced, 1);
+        assert_eq!(
+            planned.get("b").unwrap().to_string(),
+            Version::parse("2.1.0").unwrap().to_string()
+        );
     }
 
-    debug!(
-        changed_packages = changed_packages.len(),
-        "release_plz: computed changed publishable packages"
-    );
-    Ok(changed_packages)
+    #[test]
+    fn transitive_major_bump_propagates_across_chain() {
+        let current = BTreeMap::from([
+            ("a".to_string(), Version::parse("1.0.0").unwrap()),
+            ("b".to_string(), Version::parse("1.2.0").unwrap()),
+            ("c".to_string(), Version::parse("3.4.5").unwrap()),
+        ]);
+        let dependencies = BTreeMap::from([
+            ("b".to_string(), vec!["a".to_string()]),
+            ("c".to_string(), vec!["b".to_string()]),
+        ]);
+        let mut planned = BTreeMap::from([("a".to_string(), Version::parse("2.0.0").unwrap())]);
+
+        let forced = apply_transitive_bump_policy(&current, &dependencies, &mut planned);
+
+        assert_eq!(forced, 2);
+        assert_eq!(planned.get("b").unwrap().to_string(), "2.0.0");
+        assert_eq!(planned.get("c").unwrap().to_string(), "4.0.0");
+    }
+
+    #[test]
+    fn existing_higher_bump_is_not_downgraded() {
+        let current = BTreeMap::from([
+            ("a".to_string(), Version::parse("1.0.0").unwrap()),
+            ("b".to_string(), Version::parse("1.0.0").unwrap()),
+        ]);
+        let dependencies = BTreeMap::from([("b".to_string(), vec!["a".to_string()])]);
+        let mut planned = BTreeMap::from([
+            ("a".to_string(), Version::parse("1.0.1").unwrap()),
+            ("b".to_string(), Version::parse("2.0.0").unwrap()),
+        ]);
+
+        let forced = apply_transitive_bump_policy(&current, &dependencies, &mut planned);
+
+        assert_eq!(forced, 0);
+        assert_eq!(planned.get("b").unwrap().to_string(), "2.0.0");
+    }
+
+    #[test]
+    fn bump_classifier_ignores_prerelease_for_comparison() {
+        let current = Version::parse("1.2.3-rc.4").unwrap();
+        let next = Version::parse("1.2.4-rc.1").unwrap();
+        let kind = classify_version_bump(&current, &next);
+        assert_eq!(kind, VersionBumpKind::Patch);
+    }
+
+    #[test]
+    fn bump_version_resets_components() {
+        let current = Version::parse("4.5.6-rc.3").unwrap();
+        assert_eq!(
+            bump_version(&current, VersionBumpKind::Minor).to_string(),
+            "4.6.0"
+        );
+        assert_eq!(
+            bump_version(&current, VersionBumpKind::Major).to_string(),
+            "5.0.0"
+        );
+    }
 }

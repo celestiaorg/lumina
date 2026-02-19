@@ -411,10 +411,10 @@ jobs:
         tool: cargo-hack,cargo-minimal-versions
 
     - name: Check minimal versions
-      run: cargo minimal-versions check --direct --all-features
+      run: cargo minimal-versions check --ignore-private --direct --all-features
 
     - name: Check minimal versions on wasm
-      run: cargo minimal-versions check --direct --all-features --target wasm32-unknown-unknown
+      run: cargo minimal-versions check --ignore-private --direct --all-features --target wasm32-unknown-unknown
 
 
   msrv:
