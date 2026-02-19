@@ -19,6 +19,54 @@ pub enum Commands {
     Submit(SubmitArgs),
     Publish(PublishArgs),
     Execute(ExecuteArgs),
+    Gha(GhaArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GhaArgs {
+    #[command(subcommand)]
+    pub command: GhaCommands,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum GhaCommands {
+    ReleasePlz(GhaReleasePlzArgs),
+    NpmUpdatePr(GhaNpmUpdatePrArgs),
+    NpmPublish,
+    UniffiRelease(GhaUniffiReleaseArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GhaReleasePlzArgs {
+    #[arg(long, default_value = "main")]
+    pub default_branch: String,
+
+    #[arg(long, default_value = "release/rc")]
+    pub rc_branch_prefix: String,
+
+    #[arg(long, default_value = "release")]
+    pub final_branch_prefix: String,
+
+    #[arg(long, help = "Write normalized contract fields to GITHUB_OUTPUT")]
+    pub gha_output: bool,
+
+    #[arg(long, help = "Write full normalized contract as JSON file")]
+    pub json_out: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GhaNpmUpdatePrArgs {
+    #[arg(long, help = "Release PR payload JSON from previous job output")]
+    pub pr_json: String,
+
+    #[arg(long, default_value = "", help = "Optional `-rc.N` suffix override")]
+    pub node_rc_prefix: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GhaUniffiReleaseArgs {
+    #[arg(long, help = "Release payload JSON from previous job output")]
+    pub releases_json: String,
 }
 
 #[derive(Debug, Clone, Args)]

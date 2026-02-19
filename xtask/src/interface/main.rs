@@ -2,13 +2,18 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::{debug, info};
 
+use crate::application::gha::{
+    GhaNpmUpdatePrArgs as AppGhaNpmUpdatePrArgs, GhaReleasePlzArgs as AppGhaReleasePlzArgs,
+    GhaUniffiReleaseArgs as AppGhaUniffiReleaseArgs, handle_gha_npm_publish,
+    handle_gha_npm_update_pr, handle_gha_release_plz, handle_gha_uniffi_release,
+};
 use crate::application::pipeline::{ExecuteArgs, ReleasePipeline};
 use crate::application::submit::SubmitArgs;
 use crate::domain::context::{
     AuthContext, BranchContext, CheckContext, CommonContext, ExecuteContext, PrepareContext,
     PublishContext, SubmitContext,
 };
-use crate::interface::cli::{Cli, Commands, CommonArgs};
+use crate::interface::cli::{Cli, Commands, CommonArgs, GhaCommands};
 use crate::interface::json_output::maybe_print_json;
 
 /// Parses CLI args, dispatches command handlers, and prints optional JSON reports.
@@ -103,6 +108,47 @@ pub async fn run() -> Result<()> {
             );
             maybe_print_json(args.json, &report)?;
         }
+        Commands::Gha(args) => match args.command {
+            GhaCommands::ReleasePlz(cmd) => {
+                info!(
+                    default_branch=%cmd.default_branch,
+                    rc_branch_prefix=%cmd.rc_branch_prefix,
+                    final_branch_prefix=%cmd.final_branch_prefix,
+                    gha_output=cmd.gha_output,
+                    json_out=?cmd.json_out,
+                    "running gha release-plz driver"
+                );
+                let contract = handle_gha_release_plz(
+                    &pipeline,
+                    AppGhaReleasePlzArgs {
+                        default_branch: cmd.default_branch,
+                        rc_branch_prefix: cmd.rc_branch_prefix,
+                        final_branch_prefix: cmd.final_branch_prefix,
+                        gha_output: cmd.gha_output,
+                        json_out: cmd.json_out,
+                    },
+                )
+                .await?;
+                maybe_print_json(true, &contract)?;
+            }
+            GhaCommands::NpmUpdatePr(cmd) => {
+                info!("running gha npm-update-pr");
+                handle_gha_npm_update_pr(AppGhaNpmUpdatePrArgs {
+                    pr_json: cmd.pr_json,
+                    node_rc_prefix: cmd.node_rc_prefix,
+                })?;
+            }
+            GhaCommands::NpmPublish => {
+                info!("running gha npm-publish");
+                handle_gha_npm_publish()?;
+            }
+            GhaCommands::UniffiRelease(cmd) => {
+                info!("running gha uniffi-release");
+                handle_gha_uniffi_release(AppGhaUniffiReleaseArgs {
+                    releases_json: cmd.releases_json,
+                })?;
+            }
+        },
     }
 
     Ok(())
