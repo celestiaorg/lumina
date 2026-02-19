@@ -6,7 +6,7 @@ permissions:
 
 on:
   push:
-    branches: [ release-rc-test ]
+    branches: [ mcrakhman/release-test-rc ]
   workflow_dispatch:
 
 jobs:
@@ -49,7 +49,7 @@ jobs:
           cargo xtask gha release-plz \
             --gha-output \
             --json-out xtask_release_contract.json \
-            --compare-branch "release-rc-test" \
+            --compare-branch "mcrakhman/release-test-rc" \
             --dry-run
 
       - name: Upload release contract artifact
