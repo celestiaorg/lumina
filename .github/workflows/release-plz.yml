@@ -6,7 +6,7 @@ permissions:
 
 on:
   push:
-    branches: [ mcrakhman/release-test-rc ]
+    branches: [ release-process-rc ]
   workflow_dispatch:
 
 jobs:
