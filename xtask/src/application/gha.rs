@@ -108,7 +108,6 @@ pub async fn handle_gha_release_plz(
                         },
                         branch: BranchContext { skip_pr: false },
                     },
-                    dry_run: false,
                 })
                 .await?;
             contract_from_execute(&report)

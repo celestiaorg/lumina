@@ -18,8 +18,6 @@ use crate::domain::types::{
 pub struct ExecuteArgs {
     /// Context shared across check/prepare/submit stages.
     pub ctx: ExecuteContext,
-    /// When true, submit stage skips creating commits/pushes while still reporting intended steps.
-    pub dry_run: bool,
 }
 
 /// Top-level orchestrator that wires concrete adapters into command-level flows.
@@ -87,7 +85,6 @@ impl ReleasePipeline {
             &self.pr_client,
             SubmitArgs {
                 ctx: submit_ctx,
-                dry_run: args.dry_run,
                 branch_name_override: Some(prepare.branch_name.clone()),
                 update_strategy_override: Some(prepare.update_strategy),
             },

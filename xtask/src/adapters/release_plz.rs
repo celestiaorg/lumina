@@ -494,11 +494,8 @@ fn workspace_publishable_dependencies(metadata: &Metadata) -> BTreeMap<String, V
                 .iter()
                 // Dev dependencies do not affect published API compatibility.
                 .filter(|dependency| dependency.kind != DependencyKind::Development)
-                .filter_map(|dependency| {
-                    publishable_names
-                        .contains(dependency.name.as_str())
-                        .then(|| dependency.name.clone())
-                })
+                .filter(|dependency| publishable_names.contains(dependency.name.as_str()))
+                .map(|dependency| dependency.name.clone())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
