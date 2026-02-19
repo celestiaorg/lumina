@@ -48,20 +48,29 @@ pub async fn run() -> Result<()> {
                 maybe_print_json(true, &contract)?;
             }
             GhaCommands::NpmUpdatePr(cmd) => {
-                info!("running gha npm-update-pr");
+                info!(
+                    pr_json_len=cmd.pr_json.len(),
+                    node_rc_prefix=%cmd.node_rc_prefix,
+                    "running gha npm-update-pr"
+                );
                 handle_gha_npm_update_pr(AppGhaNpmUpdatePrArgs {
                     pr_json: cmd.pr_json,
                     node_rc_prefix: cmd.node_rc_prefix,
                 })?;
             }
             GhaCommands::NpmPublish(cmd) => {
-                info!("running gha npm-publish");
+                info!(dry_run=cmd.dry_run, "running gha npm-publish");
                 handle_gha_npm_publish(AppGhaNpmPublishArgs {
                     dry_run: cmd.dry_run,
                 })?;
             }
             GhaCommands::UniffiRelease(cmd) => {
-                info!("running gha uniffi-release");
+                info!(
+                    releases_json_len=cmd.releases_json.len(),
+                    gha_output=cmd.gha_output,
+                    dry_run=cmd.dry_run,
+                    "running gha uniffi-release"
+                );
                 handle_gha_uniffi_release(AppGhaUniffiReleaseArgs {
                     releases_json: cmd.releases_json,
                     gha_output: cmd.gha_output,

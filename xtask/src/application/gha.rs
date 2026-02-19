@@ -12,8 +12,8 @@ use crate::adapters::github_output::{write_github_output, write_github_output_mu
 use crate::application::pipeline::{ExecuteArgs, ReleasePipeline};
 use crate::domain::model::{RELEASE_PR_TITLE_PREFIX, RELEASE_PR_TITLE_RC};
 use crate::domain::types::{
-    AuthContext, BranchContext, CommonContext, ExecuteContext, ExecuteReport, PublishContext,
-    ReleaseMode, ReleaseReport,
+    AuthContext, BranchContext, CommonContext, ComputeVersionsContext, ExecuteContext,
+    ExecuteReport, PublishContext, ReleaseMode, ReleaseReport,
 };
 
 #[derive(Debug, Clone)]
@@ -52,6 +52,7 @@ pub struct ReleaseContract {
     pub releases: Value,
     pub releases_created: bool,
     pub node_rc_prefix: String,
+    pub dry_run: bool,
 }
 
 impl Default for ReleaseContract {
@@ -62,6 +63,7 @@ impl Default for ReleaseContract {
             releases: json!([]),
             releases_created: false,
             node_rc_prefix: String::new(),
+            dry_run: false,
         }
     }
 }
@@ -81,22 +83,14 @@ pub async fn handle_gha_release_plz(
     pipeline: &ReleasePipeline,
     args: GhaReleasePlzArgs,
 ) -> Result<ReleaseContract> {
-    let classified = classify_release_decision()?;
-    let decision = if args.dry_run {
-        match classified {
-            ReleaseDriverDecision::Publish(mode) => ReleaseDriverDecision::Execute(mode),
-            other => other,
-        }
-    } else {
-        classified
-    };
+    let decision = classify_release_decision()?;
     info!(decision=?decision, dry_run=args.dry_run, "gha/release-plz: selected flow");
     let compare_branch = args
         .compare_branch
         .clone()
         .unwrap_or_else(|| args.default_branch.clone());
 
-    let contract = match decision {
+    let mut contract = match decision {
         ReleaseDriverDecision::Execute(mode) => {
             let report = pipeline
                 .execute(ExecuteArgs {
@@ -113,20 +107,63 @@ pub async fn handle_gha_release_plz(
             contract_from_execute(&report)
         }
         ReleaseDriverDecision::Publish(mode) => {
-            let report = pipeline
+            let common = CommonContext {
+                mode,
+                default_branch: compare_branch.clone(),
+                auth: AuthContext::from_env(),
+            };
+            let publish_result = pipeline
                 .publish(PublishContext {
-                    common: CommonContext {
-                        mode,
-                        default_branch: compare_branch.clone(),
-                        auth: AuthContext::from_env(),
-                    },
+                    common: common.clone(),
                     rc_branch_prefix: args.rc_branch_prefix.clone(),
                     final_branch_prefix: args.final_branch_prefix.clone(),
+                    dry_run: args.dry_run,
                 })
-                .await?;
-            contract_from_publish(&report)
+                .await;
+            let mut contract = match publish_result {
+                Ok(report) => contract_from_publish(&report),
+                Err(error) if args.dry_run => {
+                    warn!(
+                        error=?error,
+                        "gha/release-plz: dry-run publish failed, falling back to synthetic release payload"
+                    );
+                    ReleaseContract::default()
+                }
+                Err(error) => return Err(error),
+            };
+            if args.dry_run && !contract.releases_created {
+                let synthetic = synthesize_dry_run_release_payload(pipeline, common)
+                    .await
+                    .unwrap_or_else(|error| {
+                        warn!(
+                            error=?error,
+                            "gha/release-plz: failed to compute dry-run synthetic release payload"
+                        );
+                        vec![]
+                    });
+                let synthetic = if synthetic.is_empty() {
+                    vec![json!({
+                        "package_name": "dry-run-placeholder",
+                        "tag": "dry-run",
+                    })]
+                } else {
+                    synthetic
+                };
+                contract.releases = Value::Array(synthetic);
+                contract.releases_created = true;
+                info!(
+                    release_items = contract
+                        .releases
+                        .as_array()
+                        .map(|items| items.len())
+                        .unwrap_or(0),
+                    "gha/release-plz: synthesized dry-run release payload for downstream jobs"
+                );
+            }
+            contract
         }
     };
+    contract.dry_run = args.dry_run;
 
     if args.gha_output {
         write_contract_to_gha_output(&contract)?;
@@ -137,6 +174,31 @@ pub async fn handle_gha_release_plz(
     }
 
     Ok(contract)
+}
+
+async fn synthesize_dry_run_release_payload(
+    pipeline: &ReleasePipeline,
+    common: CommonContext,
+) -> Result<Vec<Value>> {
+    let versions = pipeline
+        .compute_versions(ComputeVersionsContext {
+            common,
+            current_commit: None,
+        })
+        .await?;
+    let releases = versions
+        .planned_versions
+        .iter()
+        // Keep uniffi publish stage disabled in dry-run mode.
+        .filter(|plan| plan.package != "lumina-node-uniffi")
+        .map(|plan| {
+            json!({
+                "package_name": plan.package,
+                "tag": format!("{}-v{}", plan.package, plan.next_effective),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(releases)
 }
 
 pub fn handle_gha_npm_update_pr(args: GhaNpmUpdatePrArgs) -> Result<()> {
@@ -216,11 +278,6 @@ pub fn handle_gha_npm_update_pr(args: GhaNpmUpdatePrArgs) -> Result<()> {
 }
 
 pub fn handle_gha_npm_publish(args: GhaNpmPublishArgs) -> Result<()> {
-    if args.dry_run {
-        info!("gha/npm-publish: dry-run enabled, skipping npm publish");
-        return Ok(());
-    }
-
     let local_version = cargo_manifest_version("node-wasm/Cargo.toml")?;
     let npm_node_version = package_json_version(Path::new("node-wasm/js/package.json"))?;
     if npm_version_exists("lumina-node-wasm", &local_version)? {
@@ -237,6 +294,11 @@ pub fn handle_gha_npm_publish(args: GhaNpmPublishArgs) -> Result<()> {
         rc_channel = is_rc,
         "gha/npm-publish: running wasm-pack build"
     );
+    if args.dry_run {
+        info!("gha/npm-publish: dry-run enabled, skipping npm publish");
+        return Ok(());
+    }
+
     run_checked("wasm-pack", &["build", "node-wasm"], None)?;
 
     if is_rc {

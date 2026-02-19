@@ -54,7 +54,7 @@ pub struct GhaReleasePlzArgs {
 
     #[arg(
         long,
-        help = "Dry-run: never execute crates publish path; force prepare/PR flow only"
+        help = "Dry-run: keep release flow decision, but run publish path in no-op mode"
     )]
     pub dry_run: bool,
 }
