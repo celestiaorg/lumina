@@ -80,6 +80,12 @@ pub struct BlobsAtHeight {
     pub blobs: Vec<Blob>,
 }
 
+/// Test struct for testing
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TestStruct {
+    pub some: String,
+}
+
 impl Blob {
     /// Create a new blob with the given data within the [`Namespace`], with optional signer.
     ///
