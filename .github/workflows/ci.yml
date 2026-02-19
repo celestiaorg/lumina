@@ -358,10 +358,10 @@ jobs:
         rustflags: ""
 
     - name: Missing docs for native
-      run: cargo clippy --workspace --all-features -- -D missing-docs
+      run: cargo clippy --workspace --all-features --exclude xtask -- -D missing-docs
 
     - name: Missing docs for wasm32
-      run: cargo clippy --workspace --all-features --target=wasm32-unknown-unknown -- -D missing-docs
+      run: cargo clippy --workspace --all-features --exclude xtask --target=wasm32-unknown-unknown -- -D missing-docs
 
     - name: Run rustdoc check
       env:
