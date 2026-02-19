@@ -16,6 +16,7 @@ use crate::custom_client_error;
 mod rpc {
     use super::*;
 
+    /// Blobstream RPC methods.
     #[rpc(client, server, namespace = "blobstream", namespace_separator = ".")]
     pub trait Blobstream {
         /// Collects the data roots over a provided ordered range of blocks, and then
@@ -93,6 +94,7 @@ pub trait BlobstreamClient: ClientT {
     }
 }
 
+/// Server trait for Blobstream RPC endpoints.
 pub trait BlobstreamServer: rpc::BlobstreamServer {}
 
 impl<T> BlobstreamClient for T where T: ClientT {}

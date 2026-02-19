@@ -18,14 +18,18 @@ mod rpc {
 
     use super::*;
 
+    /// Fraud proof RPC methods.
     #[rpc(client, server, namespace = "fraud", namespace_separator = ".")]
     pub trait Fraud {
+        /// See [`crate::FraudClient::fraud_get`].
         #[method(name = "Get")]
         async fn fraud_get(&self, proof_type: ProofType) -> RpcResult<Vec<Proof>>;
     }
 
+    /// Fraud proof subscription RPC methods.
     #[rpc(client, server, namespace = "fraud", namespace_separator = ".")]
     pub trait FraudSubscription {
+        /// See [`crate::FraudClient::fraud_subscribe`].
         #[subscription(name = "Subscribe", unsubscribe = "Unsubscribe", item = Proof)]
         async fn fraud_subscribe(&self, proof_type: ProofType) -> SubscriptionResult;
     }
@@ -103,6 +107,7 @@ pub trait FraudClient: ClientT {
 
 impl<T> FraudClient for T where T: ClientT {}
 
+/// Server trait for Fraud RPC endpoints.
 pub trait FraudServer: rpc::FraudServer + rpc::FraudSubscriptionServer {}
 
 impl<T> FraudServer for T where T: rpc::FraudServer + rpc::FraudSubscriptionServer {}

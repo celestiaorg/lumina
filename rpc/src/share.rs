@@ -79,11 +79,14 @@ mod rpc {
         pub(crate) side: RowSide,
     }
 
+    /// Share RPC methods.
     #[rpc(client, server, namespace = "share", namespace_separator = ".")]
     trait Share {
+        /// See [`crate::ShareClient::share_get_eds`].
         #[method(name = "GetEDS")]
         async fn share_get_eds(&self, height: u64) -> RpcResult<RawExtendedDataSquare>;
 
+        /// See [`crate::ShareClient::share_get_range`].
         #[method(name = "GetRange")]
         async fn share_get_range(
             &self,
@@ -92,6 +95,7 @@ mod rpc {
             end: u64,
         ) -> RpcResult<GetRangeResponse>; // was Result<_, Error>
 
+        /// See [`crate::ShareClient::share_get_samples`].
         #[method(name = "GetSamples")]
         async fn share_get_samples(
             &self,
@@ -99,12 +103,15 @@ mod rpc {
             indices: Vec<SampleCoordinates>, // was &[SampleCoordinates]
         ) -> RpcResult<Vec<RawSample>>; // was Result<_, Error>
 
+        /// See [`crate::ShareClient::share_get_row`].
         #[method(name = "GetRow")]
         async fn share_get_row(&self, height: u64, row: u16) -> RpcResult<RawGetRowResponse>;
 
+        /// See [`crate::ShareClient::share_get_share`].
         #[method(name = "GetShare")]
         async fn share_get_share(&self, height: u64, row: u16, col: u16) -> RpcResult<RawShare>;
 
+        /// See [`crate::ShareClient::share_get_namespace_data`].
         #[method(name = "GetNamespaceData")]
         async fn share_get_namespace_data(
             &self,
@@ -112,6 +119,7 @@ mod rpc {
             namespace: Namespace,
         ) -> RpcResult<NamespaceData>;
 
+        /// See [`crate::ShareClient::share_shares_available`].
         #[method(name = "SharesAvailable")]
         async fn share_shares_available(&self, height: u64) -> RpcResult<()>;
     }
@@ -345,6 +353,7 @@ fn is_ods_square(row: u16, column: u16, square_width: u16) -> bool {
     row < ods_width && column < ods_width
 }
 
+/// Server trait for Share RPC endpoints.
 pub trait ShareServer: rpc::ShareServer {}
 
 impl<T> ShareServer for T where T: rpc::ShareServer {}

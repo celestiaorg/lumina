@@ -17,14 +17,18 @@ mod rpc {
 
     use super::*;
 
+    /// Header RPC methods.
     #[rpc(client, server, namespace = "header", namespace_separator = ".")]
     pub trait Header {
+        /// See [`crate::HeaderClient::header_get_by_hash`].
         #[method(name = "GetByHash")]
         async fn header_get_by_hash(&self, hash: Hash) -> RpcResult<ExtendedHeader>;
 
+        /// See [`crate::HeaderClient::header_get_by_height`].
         #[method(name = "GetByHeight")]
         async fn header_get_by_height(&self, height: u64) -> RpcResult<ExtendedHeader>;
 
+        /// See [`crate::HeaderClient::header_get_range_by_height`].
         #[method(name = "GetRangeByHeight")]
         async fn header_get_range_by_height(
             &self,
@@ -32,24 +36,31 @@ mod rpc {
             to: u64,
         ) -> RpcResult<Vec<ExtendedHeader>>;
 
+        /// See [`crate::HeaderClient::header_local_head`].
         #[method(name = "LocalHead")]
         async fn header_local_head(&self) -> RpcResult<ExtendedHeader>;
 
+        /// See [`crate::HeaderClient::header_network_head`].
         #[method(name = "NetworkHead")]
         async fn header_network_head(&self) -> RpcResult<ExtendedHeader>;
 
+        /// See [`crate::HeaderClient::header_sync_state`].
         #[method(name = "SyncState")]
         async fn header_sync_state(&self) -> RpcResult<SyncState>;
 
+        /// See [`crate::HeaderClient::header_sync_wait`].
         #[method(name = "SyncWait")]
         async fn header_sync_wait(&self) -> RpcResult<()>;
 
+        /// See [`crate::HeaderClient::header_wait_for_height`].
         #[method(name = "WaitForHeight")]
         async fn header_wait_for_height(&self, height: u64) -> RpcResult<ExtendedHeader>;
     }
 
+    /// Header subscription RPC methods.
     #[rpc(client, server, namespace = "header", namespace_separator = ".")]
     pub trait HeaderSubscription {
+        /// See [`crate::HeaderClient::header_subscribe`].
         #[subscription(name = "Subscribe", unsubscribe = "Unsubscribe", item = ExtendedHeader)]
         async fn header_subscribe(&self) -> SubscriptionResult;
     }
@@ -193,6 +204,7 @@ pub trait HeaderClient: ClientT {
 
 impl<T> HeaderClient for T where T: ClientT {}
 
+/// Server trait for Header RPC endpoints.
 pub trait HeaderServer: rpc::HeaderServer + rpc::HeaderSubscriptionServer {}
 
 impl<T> HeaderServer for T where T: rpc::HeaderServer + rpc::HeaderSubscriptionServer {}

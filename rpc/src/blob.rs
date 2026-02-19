@@ -28,8 +28,10 @@ pub struct BlobsAtHeight {
 mod rpc {
     use super::*;
 
+    /// Blob RPC methods.
     #[rpc(client, server, namespace = "blob", namespace_separator = ".")]
     pub trait Blob {
+        /// See [`crate::BlobClient::blob_get`].
         #[method(name = "Get")]
         async fn blob_get(
             &self,
@@ -38,6 +40,7 @@ mod rpc {
             commitment: Commitment,
         ) -> RpcResult<Blob>;
 
+        /// See [`crate::BlobClient::blob_get_all`].
         #[method(name = "GetAll")]
         async fn blob_get_all(
             &self,
@@ -45,6 +48,7 @@ mod rpc {
             namespaces: Vec<Namespace>,
         ) -> RpcResult<Option<Vec<Blob>>>;
 
+        /// See [`crate::BlobClient::blob_get_proof`].
         #[method(name = "GetProof")]
         async fn blob_get_proof(
             &self,
@@ -53,6 +57,7 @@ mod rpc {
             commitment: Commitment,
         ) -> RpcResult<Vec<NamespaceProof>>;
 
+        /// See [`crate::BlobClient::blob_included`].
         #[method(name = "Included")]
         async fn blob_included(
             &self,
@@ -62,12 +67,15 @@ mod rpc {
             commitment: Commitment,
         ) -> RpcResult<bool>;
 
+        /// See [`crate::BlobClient::blob_submit`].
         #[method(name = "Submit")]
         async fn blob_submit(&self, blobs: Vec<Blob>, opts: TxConfig) -> RpcResult<u64>;
     }
 
+    /// Blob subscription RPC methods.
     #[rpc(client, server, namespace = "blob", namespace_separator = ".")]
     pub trait BlobSubscription {
+        /// See [`crate::BlobClient::blob_subscribe`].
         #[subscription(name = "Subscribe", unsubscribe = "Unsubscribe", item = BlobsAtHeight)]
         async fn blob_subscribe(&self, namespace: Namespace) -> SubscriptionResult;
     }
@@ -204,6 +212,7 @@ pub trait BlobClient: ClientT {
     }
 }
 
+/// Server trait for Blob RPC endpoints.
 pub trait BlobServer: rpc::BlobServer + rpc::BlobSubscriptionServer {}
 
 impl<T> BlobServer for T where T: rpc::BlobServer + rpc::BlobSubscriptionServer {}

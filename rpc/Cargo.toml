@@ -51,6 +51,7 @@ gloo-net = { version = "0.6", default-features = false, features = [
   "json",
 ] }
 gloo-timers.workspace = true
+getrandom_03.workspace = true
 send_wrapper.workspace = true
 serde_json.workspace = true
 web-sys = { workspace = true, features = [
