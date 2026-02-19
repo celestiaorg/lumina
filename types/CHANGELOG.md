@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-02-19
+
+### Added
+
+- *(types)* [**breaking**] update struct
+- add javascript in browser test suite (#882)
+- tx client v2 (#873)
+
+### Other
+
+- add test struct
+
 ## [0.20.0](https://github.com/celestiaorg/lumina/compare/celestia-types-v0.19.0...celestia-types-v0.20.0) - 2026-01-27
 
 ### Fixed
