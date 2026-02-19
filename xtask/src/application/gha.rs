@@ -174,15 +174,24 @@ pub fn handle_gha_npm_update_pr(args: GhaNpmUpdatePrArgs) -> Result<()> {
     }
 
     let npm_js_dir = Path::new("node-wasm/js");
+    info!(
+        target_version = %target_node_version,
+        "gha/npm-update-pr: running npm version without git tag"
+    );
     run_checked(
         "npm",
         &["version", &target_node_version, "--no-git-tag-version"],
         Some(npm_js_dir),
     )?;
+    info!("gha/npm-update-pr: running wasm-pack build for node-wasm/js");
     run_checked("wasm-pack", &["build", ".."], Some(npm_js_dir))?;
+    info!("gha/npm-update-pr: installing generated wasm package in node-wasm/js");
     run_checked("npm", &["install", "--save", "../pkg"], Some(npm_js_dir))?;
+    info!("gha/npm-update-pr: running npm clean-install in node-wasm/js");
     run_checked("npm", &["clean-install"], Some(npm_js_dir))?;
+    info!("gha/npm-update-pr: running TypeScript build (npm run tsc)");
     run_checked("npm", &["run", "tsc"], Some(npm_js_dir))?;
+    info!("gha/npm-update-pr: updating npm README output");
     run_checked("npm", &["run", "update-readme"], Some(npm_js_dir))?;
 
     let tracked_paths = [
@@ -223,15 +232,22 @@ pub fn handle_gha_npm_publish(args: GhaNpmPublishArgs) -> Result<()> {
     }
 
     let is_rc = extract_rc_suffix(&npm_node_version).is_some();
+    info!(
+        version = %local_version,
+        rc_channel = is_rc,
+        "gha/npm-publish: running wasm-pack build"
+    );
     run_checked("wasm-pack", &["build", "node-wasm"], None)?;
 
     if is_rc {
+        info!("gha/npm-publish: publishing wasm package with rc tag");
         run_checked(
             "wasm-pack",
             &["publish", "--access", "public", "--tag", "rc", "node-wasm"],
             None,
         )?;
     } else {
+        info!("gha/npm-publish: publishing wasm package with stable tag");
         run_checked(
             "wasm-pack",
             &["publish", "--access", "public", "node-wasm"],
@@ -239,6 +255,10 @@ pub fn handle_gha_npm_publish(args: GhaNpmPublishArgs) -> Result<()> {
         )?;
     }
 
+    info!(
+        version = %local_version,
+        "gha/npm-publish: setting js package dependency on lumina-node-wasm"
+    );
     run_checked(
         "npm",
         &[
@@ -249,12 +269,14 @@ pub fn handle_gha_npm_publish(args: GhaNpmPublishArgs) -> Result<()> {
         Some(Path::new("node-wasm/js")),
     )?;
     if is_rc {
+        info!("gha/npm-publish: publishing js package with rc tag");
         run_checked(
             "npm",
             &["publish", "--access", "public", "--tag", "rc"],
             Some(Path::new("node-wasm/js")),
         )?;
     } else {
+        info!("gha/npm-publish: publishing js package with stable tag");
         run_checked(
             "npm",
             &["publish", "--access", "public"],
