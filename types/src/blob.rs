@@ -84,6 +84,7 @@ pub struct BlobsAtHeight {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct TestStruct {
     pub some: String,
+    pub other: String,
 }
 
 impl Blob {
