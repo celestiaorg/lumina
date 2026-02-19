@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-rc.2] - 2026-02-19
+
+### Added
+
+- tx client v2 (#873)
+- *(grpc)* [**breaking**] add per-endpoint configuration for metadata and timeouts (#875)
+- *(rpc,grpc,client)* [**breaking**] Add request, connection timeouts for gRPC, jRPC, celestia-client (#819)
+- *(proto,types,node)* [**breaking**] Implement shrex data availability protocol (#857)
+- *(client,rpc)* [**breaking**] don't require headers for share rpc calls (#848)
+- *(types,grpc)* [**breaking**] switch from Height to u64, infallible app_version() (#846)
+- *(grpc)* use multiple endpoints, fallback in case of errors (#836)
+- *(client,rpc)* [**breaking**] support auth in wasm rpc client (#780)
+- *(client,grpc)* [**breaking**] expose more tls config options, error if tls is not supported (#796)
+- *(grpc)* resigning and resubmission of transactions (#768)
+- *(grpc)* [**breaking**] Add support for attaching metadata to requests (#748)
+- [**breaking**] unify and upgrade dependencies, add explicit msrv (#742)
+- *(grpc,client)* Allow creating celestia-client with read-only grpc (#755)
+- *(grpc)* [**breaking**] Merge TxClient and GrpcClient, add builder (#712)
+- *(types)* [**breaking**] singular `Blob::new` constructor (#719)
+- *(client,grpc)* make sure all returned futures are Send (#729)
+- *(proto,types,rpc)* [**breaking**] upgrade to celestia-node v0.25 (#720)
+- [**breaking**] Implement `celestia-client` crate (#682)
+
+### Fixed
+
+- update npm repo (#880)
+- *(client)* Fix CI errors, adding all possible error codes (#866)
+- *(client)* [**breaking**] use AsyncGrpcCall also in BlobApi::submit (#760)
+
+### Other
+
+- test release rc (#901)
+- release (#879)
+- release (#871)
+- release (#861)
+- adds AppVersion()::latest() in doc-comments (#855)
+- release (#815)
+- [**breaking**] Migrate to Rust 2024 (#773)
+- release (#757)
+- release (#739)
+- *(client,grpc,types)* Make all the celestia-client types types Serialisable (#734)
+- release (#725)
+- release (#722)
+
 ## [0.5.1] - 2026-02-19
 
 ### Added

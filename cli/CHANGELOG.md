@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0-rc.2] - 2026-02-19
+
+### Added
+
+- add javascript in browser test suite (#882)
+- *(grpc)* [**breaking**] add per-endpoint configuration for metadata and timeouts (#875)
+- *(rpc,grpc,client)* [**breaking**] Add request, connection timeouts for gRPC, jRPC, celestia-client (#819)
+- *(proto,types,node)* [**breaking**] Implement shrex data availability protocol (#857)
+- *(node,node-wasm,node-uniffi)* Add header, blob, and namespace subscriptions (#772)
+- *(client,rpc)* [**breaking**] support auth in wasm rpc client (#780)
+- [**breaking**] unify and upgrade dependencies, add explicit msrv (#742)
+- *(grpc)* [**breaking**] Merge TxClient and GrpcClient, add builder (#712)
+- *(node)* [**breaking**] enforce 7 days sampling window - CIP-36 (#698)
+- *(grpc)* [**breaking**] Add support for Gas Estimation Service (#680)
+- *(grpc,types,node)* [**breaking**] Wasm grpc client (#654)
+- *(grpc)* Streamline TxClient creation API, add docs with example (#673)
+- *(node)* [**breaking**] Implement adaptive backward syncing/sampling (#606)
+- *(grpc)* [**breaking**] add memo field to TxConfig (#659)
+- *(node-wasm)* Multiplex message channel connection to worker (#563)
+- *(ci)* allow other node types than bridge (#562)
+- *(grpc,node-wasm)* add javascript bindings for tx client (#510)
+- Add remaining node types for wasm (#476)
+- *(cli)* Add `in-memory-store` and `pruning-delay` parameters (#490)
+- *(node)* [**breaking**] Implement `NodeBuilder` and remove `NodeConfig` (#472)
+- *(grpc, types, proto)* [**breaking**] Add tonic gRPC (#454)
+- *(node,node-wasm)* [**breaking**] Allow customising syncing window size (#442)
+- setup local demo page with webpack (#388)
+- *(node,node-wasm)* [**breaking**] Integrate graceful shutdown in WASM (#396)
+- feat!(node): make syncer batch sizes configurable (#327)
+- add support for dnsaddr resolving in browser (#319)
+- *(node)* Generate syncing related events (#312)
+- *(wasm)* Run Lumina in a Shared Worker (#265)
+- *(node/syncer)* [**breaking**] Implement backwards header sync (#279)
+- *(node)* Generate events for data sampling that can be used by front-end (#276)
+- *(cli)* [**breaking**] Replace sled stores with redb stores (#267)
+- feat!(node): use generic blockstore in node (#218)
+
+### Fixed
+
+- update npm repo (#880)
+- *(doc)* Fix incorrectly concatenated changelogs (#713)
+- *(cli)* align with dah javascript breaking changes (#501)
+- *(node-wasm)* require serving and providing worker script (#313)
+- *(ci)* Fix release for lumina (cli) (#190)
+
+### Other
+
+- test release rc (#901)
+- try fix caches
+- release (#879)
+- release (#871)
+- release (#861)
+- release (#815)
+- *(node)* [**breaking**] Upgrade MSRV for `lumina-node` to 1.88 (#814)
+- [**breaking**] Migrate to Rust 2024 (#773)
+- release (#757)
+- release (#739)
+- release (#725)
+- release (#722)
+- release (#706)
+- release (#676)
+- release (#661)
+- release (#652)
+- release (#630)
+- release (#587)
+- release (#537)
+- release (#529)
+- *(ci)* migrate toolchain action, parallelize (#503)
+- *(node,node-wasm)* [**breaking**] Rename `syncing_window` to `sampling_window` (#477)
+- release (#466)
+- *(node-wasm)* Add integration tests for node-wasm (#420)
+- release (#461)
+- release (#456)
+- release (#419)
+- release (#413)
+- release (#372)
+- release (#364)
+- remove genesis hash from node configuration (#316)
+- [**breaking**] Upgrade dependencies but exclude the ones that are patched by risc0 (#292)
+- release (#189)
+- Add note about WebTransport requiring Secure Context (#211)
+- *(lumina-cli)* skip trying to publish lumina-cli until it's fixed (#188)
+- add authors and homepage (#180)
+- release (#177)
+- add missing metadata to the toml files (#170)
+- document public api (#161)
+- error message for missing token and cleanups (#168)
+- rename the node implementation to Lumina (#156)
+
 ## [0.13.1] - 2026-02-19
 
 ### Added
