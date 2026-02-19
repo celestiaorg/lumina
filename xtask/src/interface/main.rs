@@ -3,9 +3,10 @@ use clap::Parser;
 use tracing::info;
 
 use crate::application::gha::{
-    GhaNpmUpdatePrArgs as AppGhaNpmUpdatePrArgs, GhaReleasePlzArgs as AppGhaReleasePlzArgs,
-    GhaUniffiReleaseArgs as AppGhaUniffiReleaseArgs, handle_gha_npm_publish,
-    handle_gha_npm_update_pr, handle_gha_release_plz, handle_gha_uniffi_release,
+    GhaNpmPublishArgs as AppGhaNpmPublishArgs, GhaNpmUpdatePrArgs as AppGhaNpmUpdatePrArgs,
+    GhaReleasePlzArgs as AppGhaReleasePlzArgs, GhaUniffiReleaseArgs as AppGhaUniffiReleaseArgs,
+    handle_gha_npm_publish, handle_gha_npm_update_pr, handle_gha_release_plz,
+    handle_gha_uniffi_release,
 };
 use crate::application::pipeline::ReleasePipeline;
 use crate::interface::cli::{Cli, Commands, GhaCommands};
@@ -22,21 +23,25 @@ pub async fn run() -> Result<()> {
         Commands::Gha(args) => match args.command {
             GhaCommands::ReleasePlz(cmd) => {
                 info!(
+                    compare_branch=?cmd.compare_branch,
                     default_branch=%cmd.default_branch,
                     rc_branch_prefix=%cmd.rc_branch_prefix,
                     final_branch_prefix=%cmd.final_branch_prefix,
                     gha_output=cmd.gha_output,
                     json_out=?cmd.json_out,
+                    dry_run=cmd.dry_run,
                     "running gha release-plz driver"
                 );
                 let contract = handle_gha_release_plz(
                     &pipeline,
                     AppGhaReleasePlzArgs {
+                        compare_branch: cmd.compare_branch,
                         default_branch: cmd.default_branch,
                         rc_branch_prefix: cmd.rc_branch_prefix,
                         final_branch_prefix: cmd.final_branch_prefix,
                         gha_output: cmd.gha_output,
                         json_out: cmd.json_out,
+                        dry_run: cmd.dry_run,
                     },
                 )
                 .await?;
@@ -49,15 +54,18 @@ pub async fn run() -> Result<()> {
                     node_rc_prefix: cmd.node_rc_prefix,
                 })?;
             }
-            GhaCommands::NpmPublish => {
+            GhaCommands::NpmPublish(cmd) => {
                 info!("running gha npm-publish");
-                handle_gha_npm_publish()?;
+                handle_gha_npm_publish(AppGhaNpmPublishArgs {
+                    dry_run: cmd.dry_run,
+                })?;
             }
             GhaCommands::UniffiRelease(cmd) => {
                 info!("running gha uniffi-release");
                 handle_gha_uniffi_release(AppGhaUniffiReleaseArgs {
                     releases_json: cmd.releases_json,
                     gha_output: cmd.gha_output,
+                    dry_run: cmd.dry_run,
                 })?;
             }
         },

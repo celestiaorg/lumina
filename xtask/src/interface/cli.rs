@@ -25,12 +25,18 @@ pub struct GhaArgs {
 pub enum GhaCommands {
     ReleasePlz(GhaReleasePlzArgs),
     NpmUpdatePr(GhaNpmUpdatePrArgs),
-    NpmPublish,
+    NpmPublish(GhaNpmPublishArgs),
     UniffiRelease(GhaUniffiReleaseArgs),
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct GhaReleasePlzArgs {
+    #[arg(
+        long,
+        help = "Branch to compare against for release planning and as target branch for release PRs"
+    )]
+    pub compare_branch: Option<String>,
+
     #[arg(long, default_value = "main")]
     pub default_branch: String,
 
@@ -45,6 +51,12 @@ pub struct GhaReleasePlzArgs {
 
     #[arg(long, help = "Write full normalized contract as JSON file")]
     pub json_out: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        help = "Dry-run: never execute crates publish path; force prepare/PR flow only"
+    )]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -57,10 +69,22 @@ pub struct GhaNpmUpdatePrArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct GhaNpmPublishArgs {
+    #[arg(long, help = "Dry-run: do not publish npm artifacts")]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct GhaUniffiReleaseArgs {
     #[arg(long, help = "Release payload JSON from previous job output")]
     pub releases_json: String,
 
     #[arg(long, help = "Write uniffi tag/files outputs to GITHUB_OUTPUT")]
     pub gha_output: bool,
+
+    #[arg(
+        long,
+        help = "Dry-run: skip uniffi build and release upload preparation"
+    )]
+    pub dry_run: bool,
 }

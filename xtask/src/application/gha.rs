@@ -17,11 +17,13 @@ use crate::domain::types::{
 
 #[derive(Debug, Clone)]
 pub struct GhaReleasePlzArgs {
+    pub compare_branch: Option<String>,
     pub default_branch: String,
     pub rc_branch_prefix: String,
     pub final_branch_prefix: String,
     pub gha_output: bool,
     pub json_out: Option<PathBuf>,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -31,9 +33,15 @@ pub struct GhaNpmUpdatePrArgs {
 }
 
 #[derive(Debug, Clone)]
+pub struct GhaNpmPublishArgs {
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct GhaUniffiReleaseArgs {
     pub releases_json: String,
     pub gha_output: bool,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,17 +80,46 @@ pub async fn handle_gha_release_plz(
     pipeline: &ReleasePipeline,
     args: GhaReleasePlzArgs,
 ) -> Result<ReleaseContract> {
-    let decision = classify_release_decision()?;
-    info!(decision=?decision, "gha/release-plz: selected flow");
+    let classified = classify_release_decision()?;
+    let decision = if args.dry_run {
+        match classified {
+            ReleaseDriverDecision::Publish(mode) => {
+                debug!(
+                    mode=?mode,
+                    "gha/release-plz: dry-run enabled, skipping publish path by using execute path"
+                );
+                ReleaseDriverDecision::Execute(mode)
+            }
+            other => other,
+        }
+    } else {
+        classified
+    };
+    info!(decision=?decision, dry_run=args.dry_run, "gha/release-plz: selected flow");
+    let compare_branch = args
+        .compare_branch
+        .clone()
+        .unwrap_or_else(|| args.default_branch.clone());
+    debug!(
+        compare_branch=%compare_branch,
+        default_branch=%args.default_branch,
+        rc_branch_prefix=%args.rc_branch_prefix,
+        final_branch_prefix=%args.final_branch_prefix,
+        gha_output=args.gha_output,
+        json_out=?args.json_out,
+        dry_run=args.dry_run,
+        "gha/release-plz: resolved command arguments"
+    );
 
     let contract = match decision {
         ReleaseDriverDecision::Execute(mode) => {
+            debug!(mode=?mode, "gha/release-plz: entering execute path");
             let report = pipeline
                 .execute(ExecuteArgs {
                     ctx: ExecuteContext {
                         common: CommonContext {
                             mode,
-                            default_branch: args.default_branch.clone(),
+                            default_branch: compare_branch.clone(),
                             auth: AuthContext::from_env(),
                         },
                         branch: BranchContext { skip_pr: false },
@@ -90,29 +127,51 @@ pub async fn handle_gha_release_plz(
                     dry_run: false,
                 })
                 .await?;
+            debug!(
+                branch=%report.submit.branch_name,
+                pr_url=?report.submit.pr_url,
+                planned_versions=report.check.version_state.planned.len(),
+                "gha/release-plz: execute path completed"
+            );
             contract_from_execute(&report)
         }
         ReleaseDriverDecision::Publish(mode) => {
+            debug!(mode=?mode, "gha/release-plz: entering publish path");
             let report = pipeline
                 .publish(PublishContext {
                     common: CommonContext {
                         mode,
-                        default_branch: args.default_branch.clone(),
+                        default_branch: compare_branch.clone(),
                         auth: AuthContext::from_env(),
                     },
                     rc_branch_prefix: args.rc_branch_prefix.clone(),
                     final_branch_prefix: args.final_branch_prefix.clone(),
                 })
                 .await?;
+            debug!(
+                mode=?mode,
+                published=report.published,
+                payload_is_array=report.payload.is_array(),
+                payload_len=report.payload.as_array().map(|items| items.len()).unwrap_or(0),
+                "gha/release-plz: publish path completed"
+            );
             contract_from_publish(&report)
         }
     };
+    debug!(
+        prs_created=contract.prs_created,
+        releases_created=contract.releases_created,
+        node_rc_prefix=%contract.node_rc_prefix,
+        "gha/release-plz: normalized contract generated"
+    );
 
     if args.gha_output {
+        debug!("gha/release-plz: writing normalized outputs to GITHUB_OUTPUT");
         write_contract_to_gha_output(&contract)?;
     }
 
     if let Some(path) = args.json_out {
+        debug!(path=%path.display(), "gha/release-plz: writing contract JSON artifact");
         write_json_file(&path, &contract)?;
     }
 
@@ -125,10 +184,19 @@ pub fn handle_gha_npm_update_pr(args: GhaNpmUpdatePrArgs) -> Result<()> {
     if pr_payload.head_branch.trim().is_empty() {
         bail!("--pr-json payload does not include non-empty `head_branch`");
     }
+    debug!(
+        head_branch=%pr_payload.head_branch,
+        node_rc_prefix=%args.node_rc_prefix,
+        "gha/npm-update-pr: parsed command payload"
+    );
 
     let git =
         Git2Repo::new(std::env::current_dir().context("failed to resolve current workspace root")?);
     git.checkout_branch_from_origin(&pr_payload.head_branch)?;
+    debug!(
+        head_branch=%pr_payload.head_branch,
+        "gha/npm-update-pr: checked out target PR branch"
+    );
 
     let node_wasm_version = cargo_manifest_version("node-wasm/Cargo.toml")?;
     let target_node_version = if args.node_rc_prefix.trim().is_empty() {
@@ -144,6 +212,12 @@ pub fn handle_gha_npm_update_pr(args: GhaNpmUpdatePrArgs) -> Result<()> {
         )
     };
     let current_node_version = package_json_version(Path::new("node-wasm/js/package.json"))?;
+    debug!(
+        node_wasm_version=%node_wasm_version,
+        current_node_version=%current_node_version,
+        target_node_version=%target_node_version,
+        "gha/npm-update-pr: resolved npm version targets"
+    );
 
     if current_node_version == target_node_version {
         info!(
@@ -171,24 +245,40 @@ pub fn handle_gha_npm_update_pr(args: GhaNpmUpdatePrArgs) -> Result<()> {
         "node-wasm/js/README.md",
         "node-wasm/js/index.d.ts",
     ];
+    debug!(paths=?tracked_paths, "gha/npm-update-pr: checking tracked artifact changes");
     if !git.paths_have_changes(&tracked_paths)? {
         info!("gha/npm-update-pr: no tracked npm output changes detected");
         return Ok(());
     }
 
     let committed = git.stage_paths_and_commit(&tracked_paths, "update lumina-node npm package")?;
+    debug!(committed, "gha/npm-update-pr: stage/commit result");
     if !committed {
         info!("gha/npm-update-pr: nothing staged, skipping commit");
         return Ok(());
     }
 
     git.push_branch(&pr_payload.head_branch, false, false)?;
+    debug!(
+        head_branch=%pr_payload.head_branch,
+        "gha/npm-update-pr: pushed commit to PR branch"
+    );
     Ok(())
 }
 
-pub fn handle_gha_npm_publish() -> Result<()> {
+pub fn handle_gha_npm_publish(args: GhaNpmPublishArgs) -> Result<()> {
+    if args.dry_run {
+        info!("gha/npm-publish: dry-run enabled, skipping npm publish");
+        return Ok(());
+    }
+
     let local_version = cargo_manifest_version("node-wasm/Cargo.toml")?;
     let npm_node_version = package_json_version(Path::new("node-wasm/js/package.json"))?;
+    debug!(
+        local_version=%local_version,
+        npm_node_version=%npm_node_version,
+        "gha/npm-publish: resolved local versions"
+    );
     if npm_version_exists("lumina-node-wasm", &local_version)? {
         info!(
             version = %local_version,
@@ -198,6 +288,7 @@ pub fn handle_gha_npm_publish() -> Result<()> {
     }
 
     let is_rc = extract_rc_suffix(&npm_node_version).is_some();
+    debug!(is_rc, "gha/npm-publish: publish channel decision");
     run_checked("wasm-pack", &["build", "node-wasm"], None)?;
 
     if is_rc {
@@ -236,11 +327,20 @@ pub fn handle_gha_npm_publish() -> Result<()> {
             Some(Path::new("node-wasm/js")),
         )?;
     }
+    debug!(
+        is_rc,
+        "gha/npm-publish: completed wasm and npm publish sequence"
+    );
 
     Ok(())
 }
 
 pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
+    if args.dry_run {
+        info!("gha/uniffi-release: dry-run enabled, skipping uniffi build/release preparation");
+        return Ok(());
+    }
+
     let releases: Value =
         serde_json::from_str(&args.releases_json).context("failed to parse --releases-json")?;
     let tag = find_uniffi_tag(&releases)
@@ -250,6 +350,12 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
         "lumina-node-uniffi-android.tar.gz".to_string(),
         "lumina-node-uniffi-sha256-checksums.txt".to_string(),
     ];
+    debug!(
+        tag=%tag,
+        files=?files,
+        gha_output=args.gha_output,
+        "gha/uniffi-release: resolved release upload metadata"
+    );
 
     run_checked("./node-uniffi/build-ios.sh", &[], None)?;
     run_checked(
@@ -291,6 +397,10 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
         format!("{checksums}\n"),
     )
     .context("failed to write uniffi checksum file")?;
+    debug!(
+        checksum_lines = checksums.lines().count(),
+        "gha/uniffi-release: wrote checksum artifact"
+    );
 
     if args.gha_output {
         write_github_output("uniffi_tag", &tag)?;
@@ -298,6 +408,7 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
             "uniffi_files",
             &serde_json::to_string(&files).context("failed to serialize uniffi file list")?,
         )?;
+        debug!("gha/uniffi-release: wrote uniffi outputs to GITHUB_OUTPUT");
     }
 
     Ok(())
@@ -305,6 +416,7 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
 
 fn classify_release_decision() -> Result<ReleaseDriverDecision> {
     let event_name = std::env::var("GITHUB_EVENT_NAME").unwrap_or_else(|_| "push".to_string());
+    debug!(event_name=%event_name, "gha/release-plz: classifying event");
     if event_name == "workflow_dispatch" {
         return Ok(ReleaseDriverDecision::Execute(ReleaseMode::Final));
     }
@@ -318,6 +430,10 @@ fn classify_release_decision() -> Result<ReleaseDriverDecision> {
 
     let commit_message = push_head_commit_message().unwrap_or_default();
     let commit_message_lc = commit_message.to_ascii_lowercase();
+    debug!(
+        commit_message_first_line=%commit_message.lines().next().unwrap_or_default(),
+        "gha/release-plz: classified push by head commit message"
+    );
     if !commit_message_lc.contains("chore: release") {
         return Ok(ReleaseDriverDecision::Execute(ReleaseMode::Rc));
     }
@@ -383,6 +499,11 @@ fn contract_from_execute(report: &ExecuteReport) -> ReleaseContract {
     {
         contract.node_rc_prefix = rc_suffix.to_string();
     }
+    debug!(
+        prs_created=contract.prs_created,
+        node_rc_prefix=%contract.node_rc_prefix,
+        "gha/release-plz: built contract from execute report"
+    );
 
     contract
 }
@@ -392,6 +513,15 @@ fn contract_from_publish(report: &ReleaseReport) -> ReleaseContract {
     let releases = report.payload.as_array().cloned().unwrap_or_else(Vec::new);
     contract.releases_created = !releases.is_empty();
     contract.releases = Value::Array(releases);
+    debug!(
+        releases_created = contract.releases_created,
+        release_items = contract
+            .releases
+            .as_array()
+            .map(|items| items.len())
+            .unwrap_or(0),
+        "gha/release-plz: built contract from publish report"
+    );
     contract
 }
 
@@ -418,6 +548,11 @@ fn write_contract_to_gha_output(contract: &ReleaseContract) -> Result<()> {
         },
     )?;
     write_github_output("node_rc_prefix", &contract.node_rc_prefix)?;
+    debug!(
+        pr_json_len = pr_json.len(),
+        releases_json_len = releases_json.len(),
+        "gha/release-plz: wrote all contract outputs"
+    );
     Ok(())
 }
 
@@ -437,6 +572,7 @@ fn write_json_file(path: &Path, payload: &ReleaseContract) -> Result<()> {
         serde_json::to_vec_pretty(payload).context("failed to serialize release contract")?,
     )
     .with_context(|| format!("failed to write release contract JSON: {}", path.display()))?;
+    debug!(path=%path.display(), "gha/release-plz: contract JSON file persisted");
     Ok(())
 }
 
@@ -513,7 +649,14 @@ fn run_checked(program: &str, args: &[&str], current_dir: Option<&Path>) -> Resu
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    debug!(
+        program,
+        stdout_len = stdout.len(),
+        stderr_len = output.stderr.len(),
+        "command completed successfully"
+    );
+    Ok(stdout)
 }
 
 fn command_display(program: &str, args: &[&str]) -> String {
