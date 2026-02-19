@@ -81,15 +81,7 @@ pub async fn handle_gha_release_plz(
     pipeline: &ReleasePipeline,
     args: GhaReleasePlzArgs,
 ) -> Result<ReleaseContract> {
-    let classified = classify_release_decision()?;
-    let decision = if args.dry_run {
-        match classified {
-            ReleaseDriverDecision::Publish(mode) => ReleaseDriverDecision::Execute(mode),
-            other => other,
-        }
-    } else {
-        classified
-    };
+    let decision = classify_release_decision()?;
     info!(decision=?decision, dry_run=args.dry_run, "gha/release-plz: selected flow");
     let compare_branch = args
         .compare_branch
@@ -122,6 +114,7 @@ pub async fn handle_gha_release_plz(
                     },
                     rc_branch_prefix: args.rc_branch_prefix.clone(),
                     final_branch_prefix: args.final_branch_prefix.clone(),
+                    dry_run: args.dry_run,
                 })
                 .await?;
             contract_from_publish(&report)
