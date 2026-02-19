@@ -1,17 +1,17 @@
+#![allow(missing_docs)]
+
 mod adapters;
 mod application;
 mod domain;
 mod interface;
 
 use anyhow::Result;
-use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 /// Entrypoint: delegates to interface layer so `main` stays thin and testable.
 async fn main() -> Result<()> {
     init_tracing();
-    debug!("xtask tracing initialized");
     interface::main::run().await
 }
 
