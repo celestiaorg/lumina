@@ -36,6 +36,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz
 
       - name: Run release driver (classify + execute/publish + contract)
         id: release
@@ -82,6 +84,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz
 
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2
@@ -98,7 +102,7 @@ jobs:
           set -euo pipefail
           cargo xtask gha npm-update-pr \
             --pr-json "$PR_JSON" \
-            --node-rc-prefix "$NODE_RC_PREFIX"
+            --node-rc-prefix="$NODE_RC_PREFIX"
 
   release-npm:
     name: Release-npm
@@ -123,6 +127,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz
 
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2
@@ -172,6 +178,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz
 
       - name: Install cargo-ndk
         uses: taiki-e/cache-cargo-install-action@v2

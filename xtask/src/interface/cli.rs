@@ -64,7 +64,12 @@ pub struct GhaNpmUpdatePrArgs {
     #[arg(long, help = "Release PR payload JSON from previous job output")]
     pub pr_json: String,
 
-    #[arg(long, default_value = "", help = "Optional `-rc.N` suffix override")]
+    #[arg(
+        long,
+        default_value = "",
+        allow_hyphen_values = true,
+        help = "Optional `-rc.N` suffix override"
+    )]
     pub node_rc_prefix: String,
 }
 
