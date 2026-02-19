@@ -48,12 +48,6 @@ impl ReleasePipeline {
 
     /// Computes release versions and returns a report.
     pub async fn compute_versions(&self, ctx: ComputeVersionsContext) -> Result<VersionsReport> {
-        info!(
-            mode=?ctx.common.mode,
-            default_branch=%ctx.common.default_branch,
-            requested_current_commit=?ctx.current_commit,
-            "starting version computation"
-        );
         let report = self.release_engine.versions(&ctx).await?;
         info!(
             mode=?report.mode,
@@ -70,12 +64,6 @@ impl ReleasePipeline {
     /// Full non-publishing flow: compute versions -> prepare -> submit.
     /// Publishing is intentionally kept in a separate command.
     pub async fn execute(&self, args: ExecuteArgs) -> Result<ExecuteReport> {
-        info!(
-            mode=?args.ctx.common.mode,
-            default_branch=%args.ctx.common.default_branch,
-            dry_run=args.dry_run,
-            "starting execute"
-        );
         // Stage 1: compute versions.
         let versions = self
             .compute_versions(args.ctx.to_compute_versions_context())
@@ -117,7 +105,6 @@ impl ReleasePipeline {
 
     /// Runs registry/GitHub publishing only, using release-plz publish semantics.
     pub async fn publish(&self, ctx: PublishContext) -> Result<ReleaseReport> {
-        info!(mode=?ctx.common.mode, default_branch=%ctx.common.default_branch, "starting publish");
         let report = handle_publish(&self.publisher, ctx).await?;
         info!(published = report.published, "publish completed");
         Ok(report)
