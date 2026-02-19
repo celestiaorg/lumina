@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-02-19
+
+### Added
+
+- *(node,node-wasm,node-uniffi)* Add header, blob, and namespace subscriptions (#772)
+- [**breaking**] unify and upgrade dependencies, add explicit msrv (#742)
+- *(grpc)* [**breaking**] Merge TxClient and GrpcClient, add builder (#712)
+- *(node)* [**breaking**] enforce 7 days sampling window - CIP-36 (#698)
+- *(node)* [**breaking**] Implement adaptive backward syncing/sampling (#606)
+- *(node-uniffi)* Add grpc types and client for uniffi (#627)
+- *(node-uniffi)* [**breaking**] Use in-memory stores if base path is not set (#530)
+- adding uniffi bindings to support android and ios (#473)
+
+### Fixed
+
+- update npm repo (#880)
+- *(node-uniffi)* [**breaking**] Serialize correctly ExtendedHeader to json (#531)
+
+### Other
+
+- test release rc (#901)
+- release (#879)
+- release (#871)
+- release (#861)
+- release (#815)
+- *(node)* [**breaking**] Upgrade MSRV for `lumina-node` to 1.88 (#814)
+- *(uniffi)* build only lib for ios simulators (#812)
+- *(node-uniffi)* fix simulator hanging and optimize ios build, workflow (#790)
+- [**breaking**] Migrate to Rust 2024 (#773)
+- release (#757)
+- release (#739)
+- release (#725)
+- release (#722)
+- release (#706)
+- release (#676)
+- Fix uninlined-format-args clippy (#671)
+- release (#661)
+- release (#652)
+- release (#630)
+- release (#587)
+- *(node-uniffi)* Add minimal test case in Kotlin and Swift (#535)
+- release (#537)
+- *(ci)* add releasing for node-uniffi (#545)
+
 ## [0.5.4] - 2026-02-19
 
 ### Other

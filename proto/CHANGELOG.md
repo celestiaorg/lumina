@@ -12,6 +12,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - tx client v2 (#873)
+- *(proto,types,node)* [**breaking**] Implement shrex data availability protocol (#857)
+- [**breaking**] unify and upgrade dependencies, add explicit msrv (#742)
+- *(grpc)* [**breaking**] Merge TxClient and GrpcClient, add builder (#712)
+- *(proto,types,rpc)* [**breaking**] upgrade to celestia-node v0.25 (#720)
+- *(proto,types)* [**breaking**] Update protos and switch to tendermint v0.38 (#707)
+- [**breaking**] Implement `celestia-client` crate (#682)
+- *(grpc)* [**breaking**] Add support for Gas Estimation Service (#680)
+- *(grpc)* [**breaking**] Trustless balance queries (#677)
+- *(grpc,types,node)* [**breaking**] Wasm grpc client (#654)
+- *(node-uniffi)* Add grpc types and client for uniffi (#627)
+- *(grpc,node-wasm)* add javascript bindings for tx client (#510)
+- *(grpc)* [**breaking**] add wasm support and transaction client (#474)
+- *(proto,types,rpc)* [**breaking**] celestia node v0.20.4 upgrade (#469)
+- *(grpc, types, proto)* [**breaking**] Add tonic gRPC (#454)
+- *(proto)* [**breaking**] update celestia-app and node proto definitios (#459)
+- *(types,rpc,node)* [**breaking**] refactor Share to work for parity and data (#443)
+- [**breaking**] shwap protocol updates (#369)
+- feat!(types): Align with Shwap spec (#232)
+- feat!(node): Implement DASer (#223)
+- *(node)* Add shwap data types (#169)
+- *(node)* Implement persistent header storage in browser using IndexedDB (#102)
+- Improve verification and implement verification in Exchange client (#85)
+- *(proto)* add cosmos Tx and celestia MsgPayForBlobs (#75)
+- Implement initial architecture of node crate (#42)
+- *(fraud)* Add fraud proof trait and byzantine encoding fraud (#32)
+- Add State RPC and types (#31)
+- align namespaced shares deserialization with latest celestia  (#20)
+- *(rpc)* Create celestia-rpc crate and add integration tests (#17)
+- *(proto)* add `empty_as_none` serializer (#18)
+- add NamespacedShares type (#7)
+- *(proto)* vendor protobuf definitions
+
+### Fixed
+
+- update npm repo (#880)
+- *(proto,types)* fix binary serialization of maybe_quoted (#724)
+- *(proto,docs)* Sanitise google.api comments from protobuf before passing them to rustdoc (#717)
+- *(doc)* Fix incorrectly concatenated changelogs (#713)
+- *(proto)* handle nulls due to changes in TxResponse (#421)
+- *(types)* [**breaking**] Align byzantine fraud proofs with Go's implementation (#338)
+- temporary backward compatibility for json proofs (#96)
+
+### Other
+
+- test release rc (#901)
+- release (#879)
+- release (#861)
+- release (#815)
+- [**breaking**] Migrate to Rust 2024 (#773)
+- release (#757)
+- release (#725)
+- release (#722)
+- release (#706)
+- release (#652)
+- release (#630)
+- release (#529)
+- *(ci)* migrate toolchain action, parallelize (#503)
+- [**breaking**] Add notes about Celestia's Tendermint modifications (#471)
+- release (#466)
+- *(proto,types,node,grpc)* [**breaking**] Use `tendermint-rs` instead of `celestia-tendermint-rs` fork (#463)
+- release (#456)
+- release (#419)
+- *(types)* Use protox instead of requiring protoc when building (#402)
+- release (#413)
+- release (#372)
+- release (#364)
+- [**breaking**] Upgrade dependencies but exclude the ones that are patched by risc0 (#292)
+- release (#189)
+- release (#183)
+- add authors and homepage (#180)
+- release (#177)
+- *(deps)* switch to the released celestia-tendermint crates (#176)
+- add missing metadata to the toml files (#170)
+- document public api (#161)
+- Pin celestia-app version to 1.4 when updating protobuf, update protobufs (#175)
+- update celestia node to 0.11.0-rc15 (#101)
+- Update protobuf definitions (#40)
+- align to celestia node v0.11-rc (#65)
+- fix format (#34)
+- vendor cosmos protobuf definitions (#30)
+- *(license)* Set Apache 2.0 license (#6)
+- Implement Celestia types
+- initial commit
+
+## [0.12.2] - 2026-02-19
+
+### Added
+
+- tx client v2 (#873)
 
 ## [0.12.1](https://github.com/celestiaorg/lumina/compare/celestia-proto-v0.12.0...celestia-proto-v0.12.1) - 2026-01-27
 

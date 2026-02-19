@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-02-19
+
+### Added
+
+- add javascript in browser test suite (#882)
+- tx client v2 (#873)
+- *(grpc)* [**breaking**] add per-endpoint configuration for metadata and timeouts (#875)
+- implement custom confirm interval (#865)
+- *(rpc,grpc,client)* [**breaking**] Add request, connection timeouts for gRPC, jRPC, celestia-client (#819)
+- *(types,grpc)* [**breaking**] switch from Height to u64, infallible app_version() (#846)
+- *(grpc)* Split submission and confirmation (#843)
+- *(grpc)* AsyncGrpcCall: Send (#844)
+- *(grpc)* use multiple endpoints, fallback in case of errors (#836)
+- *(client,rpc)* [**breaking**] support auth in wasm rpc client (#780)
+- *(utils)* [**breaking**] Make `Interval::new` sync constructor (#799)
+- *(client,grpc)* [**breaking**] expose more tls config options, error if tls is not supported (#796)
+- *(grpc)* resigning and resubmission of transactions (#768)
+- *(grpc)* [**breaking**] Add support for attaching metadata to requests (#748)
+- [**breaking**] unify and upgrade dependencies, add explicit msrv (#742)
+- *(grpc,client)* Allow creating celestia-client with read-only grpc (#755)
+- *(grpc)* [**breaking**] Merge TxClient and GrpcClient, add builder (#712)
+- *(types)* [**breaking**] singular `Blob::new` constructor (#719)
+- *(types)* [**breaking**] Add support for app v6 (#733)
+- *(grpc)* remove retries on insufficient fee and gas multiplier (#731)
+- *(grpc)* [**breaking**] expose whole node config instead just gas price (#732)
+- *(client,grpc)* make sure all returned futures are Send (#729)
+- *(proto,types,rpc)* [**breaking**] upgrade to celestia-node v0.25 (#720)
+- *(proto,types)* [**breaking**] Update protos and switch to tendermint v0.38 (#707)
+- [**breaking**] Implement `celestia-client` crate (#682)
+- *(grpc)* [**breaking**] Expose entire GrpcClient API plus required type changes  (#655)
+- *(grpc)* [**breaking**] Add support for Gas Estimation Service (#680)
+- *(grpc)* [**breaking**] Trustless balance queries (#677)
+- *(grpc,types,node)* [**breaking**] Wasm grpc client (#654)
+- *(grpc)* Streamline TxClient creation API, add docs with example (#673)
+- *(grpc)* [**breaking**] add memo field to TxConfig (#659)
+- *(node-uniffi)* Add grpc types and client for uniffi (#627)
+- *(grpc)* expose DocSigner and IntoAny (#604)
+- lumina-utils crate (#564)
+- *(grpc)* increase max message size to handle big celestia blocks (#559)
+- *(ci)* allow other node types than bridge (#562)
+- *(grpc,node-wasm)* add javascript bindings for tx client (#510)
+- *(grpc)* [**breaking**] add wasm support and transaction client (#474)
+- *(proto,types,rpc)* [**breaking**] celestia node v0.20.4 upgrade (#469)
+- *(grpc, types, proto)* [**breaking**] Add tonic gRPC (#454)
+
+### Fixed
+
+- update npm repo (#880)
+- *(client)* Fix CI errors, adding all possible error codes (#866)
+- *(types,grpc)* [**breaking**] Address::from_account_verifying_key spelling #764
+- *(celestia-grpc-macros)* Fix standalone build for celestia-grpc-macros, add CI (#470)
+
+### Other
+
+- test release rc (#901)
+- release (#879)
+- release (#871)
+- release (#861)
+- adds AppVersion()::latest() in doc-comments (#855)
+- *(grpc)* fix flaky submit_and_get_tx test (#822)
+- bump celestia-node to 0.28.2; celestia-app to 6.2.5 (#808)
+- release (#815)
+- [**breaking**] Migrate to Rust 2024 (#773)
+- release (#757)
+- *(grpc)* remove patch version of dyn-clone (#749)
+- release (#739)
+- *(client,grpc,types)* Make all the celestia-client types types Serialisable (#734)
+- release (#725)
+- release (#722)
+- release (#706)
+- release (#676)
+- release (#661)
+- release (#652)
+- release (#630)
+- *(rpc,node)* [**breaking**] Fix clippy issues (#626)
+- release (#587)
+- release (#537)
+- release (#529)
+- *(ci)* migrate toolchain action, parallelize (#503)
+- *(grpc)* Increase sleep before blob submission validation to reduce test flakyness (#481)
+- release (#466)
+- *(proto,types,node,grpc)* [**breaking**] Use `tendermint-rs` instead of `celestia-tendermint-rs` fork (#463)
+
 ## [0.12.1] - 2026-02-19
 
 ### Added
