@@ -36,6 +36,7 @@ anyhow = "1.0.40"
 async-stream = "0.3.5"
 async-trait = "0.1.80"
 base64 = "0.22.1"
+clap = "4.5"
 bytes = { version = "1.6", default-features = false }
 cid = { version = "0.11", default-features = false }
 dotenvy = "0.15"
