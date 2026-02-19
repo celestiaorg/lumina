@@ -1,15 +1,14 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::semver::Version;
 use git2::{
-    BranchType, DiffOptions, ObjectType, Oid, Repository, Sort, WorktreeAddOptions,
-    WorktreePruneOptions,
+    BranchType, ObjectType, Oid, Repository, Sort, WorktreeAddOptions, WorktreePruneOptions,
 };
 use tempfile::TempDir;
-use tracing::{debug, info};
+use tracing::info;
 
 #[derive(Debug)]
 pub struct RepoSnapshot {
@@ -54,12 +53,6 @@ pub fn resolve_current_commit(
     default_branch: &str,
     current_commit: Option<&str>,
 ) -> Result<String> {
-    debug!(
-        workspace_root=%workspace_root.display(),
-        default_branch=%default_branch,
-        requested_current_commit=?current_commit,
-        "git_refs: resolving current commit"
-    );
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
 
@@ -94,12 +87,6 @@ pub fn snapshot_workspace_to_temp(
     commit: &str,
     default_branch: &str,
 ) -> Result<RepoSnapshot> {
-    debug!(
-        workspace_root=%workspace_root.display(),
-        commit=%commit,
-        default_branch=%default_branch,
-        "git_refs: creating snapshot worktree"
-    );
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
     let object = repo
@@ -180,12 +167,6 @@ pub fn latest_release_tag_on_branch(
         default_branch,
         ReleaseTagFilter::AnyRelease,
     )?;
-    debug!(
-        workspace_root=%workspace_root.display(),
-        default_branch=%default_branch,
-        latest_release_tag=?tag,
-        "git_refs: resolved latest release tag"
-    );
     Ok(tag)
 }
 
@@ -199,64 +180,7 @@ pub fn latest_non_rc_release_tag_on_branch(
         default_branch,
         ReleaseTagFilter::NonRcOnly,
     )?;
-    debug!(
-        workspace_root=%workspace_root.display(),
-        default_branch=%default_branch,
-        latest_non_rc_release_tag=?tag,
-        "git_refs: resolved latest non-rc release tag"
-    );
     Ok(tag)
-}
-
-/// Lists changed file paths between tag commit and current `HEAD`.
-pub fn changed_files_since_tag(repo_root: &Path, tag: &str) -> Result<Vec<String>> {
-    debug!(
-        repo_root=%repo_root.display(),
-        tag=%tag,
-        "git_refs: collecting changed files since tag"
-    );
-    let repo = Repository::open(repo_root)
-        .with_context(|| format!("failed to open repository at {}", repo_root.display()))?;
-
-    let previous_commit = resolve_tag_to_commit(&repo, tag)
-        .with_context(|| format!("failed to resolve previous tag `{tag}`"))?;
-    let head_commit = repo
-        .head()
-        .context("failed to resolve HEAD reference")?
-        .peel_to_commit()
-        .context("failed to peel HEAD to commit")?;
-
-    let previous_tree = previous_commit
-        .tree()
-        .context("failed to resolve previous tag tree")?;
-    let head_tree = head_commit.tree().context("failed to resolve HEAD tree")?;
-
-    let mut diff_opts = DiffOptions::new();
-    let diff = repo
-        .diff_tree_to_tree(Some(&previous_tree), Some(&head_tree), Some(&mut diff_opts))
-        .context("failed to compute diff between previous tag and HEAD")?;
-
-    // Return unique path list across adds/modifies/deletes.
-    let mut files = BTreeSet::new();
-    diff.foreach(
-        &mut |delta, _| {
-            if let Some(path) = delta.new_file().path().or(delta.old_file().path()) {
-                files.insert(path.to_string_lossy().to_string());
-            }
-            true
-        },
-        None,
-        None,
-        None,
-    )
-    .context("failed to iterate changed files in diff")?;
-
-    let files = files.into_iter().collect::<Vec<_>>();
-    debug!(
-        changed_files = files.len(),
-        "git_refs: collected changed files"
-    );
-    Ok(files)
 }
 
 /// Resolves commit id referenced by a tag name.
@@ -266,7 +190,6 @@ pub fn commit_for_tag(repo_root: &Path, tag: &str) -> Result<String> {
     let commit = resolve_tag_to_commit(&repo, tag)
         .with_context(|| format!("failed to resolve commit for tag `{tag}`"))?;
     let commit_id = commit.id().to_string();
-    debug!(tag=%tag, commit=%commit_id, "git_refs: resolved commit for tag");
     Ok(commit_id)
 }
 

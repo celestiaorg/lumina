@@ -36,7 +36,7 @@ jobs:
         with:
           cache-key: release-plz
 
-      - name: Run release driver (classify + execute/publish + contract)
+      - name: Run release driver
         id: release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

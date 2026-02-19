@@ -1,25 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::model::{
-    BranchState, ComparisonVersionView, ReleaseMode, UpdateStrategy, ValidationIssue,
-    VersionEntryView,
-};
+use crate::domain::model::{BranchState, PlannedVersion, ReleaseMode, UpdateStrategy};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionStateReport {
-    pub current: Vec<ComparisonVersionView>,
-    pub planned: Vec<VersionEntryView>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckReport {
+pub struct VersionsReport {
     pub mode: ReleaseMode,
     pub previous_commit: String,
     pub latest_release_tag: Option<String>,
     pub latest_non_rc_release_tag: Option<String>,
     pub current_commit: String,
-    pub version_state: VersionStateReport,
-    pub validation_issues: Vec<ValidationIssue>,
+    pub planned_versions: Vec<PlannedVersion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,8 +18,6 @@ pub struct PrepareReport {
     pub branch_name: String,
     pub branch_state: BranchState,
     pub update_strategy: UpdateStrategy,
-    pub current_commit: String,
-    pub version_state: VersionStateReport,
     pub description: Vec<String>,
 }
 
@@ -52,7 +40,7 @@ pub struct ReleaseReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecuteReport {
-    pub check: CheckReport,
+    pub versions: VersionsReport,
     pub prepare: PrepareReport,
     pub submit: SubmitReport,
 }

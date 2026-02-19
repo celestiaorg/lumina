@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::adapters::git_refs::remote_origin_url;
 use crate::domain::model::{RELEASE_PR_TITLE_FINAL, RELEASE_PR_TITLE_PREFIX, RELEASE_PR_TITLE_RC};
@@ -52,12 +52,10 @@ impl GitHubPrClient {
             .clone()
             .or_else(|| auth.github_token.clone());
         let Some(token) = token else {
-            debug!("github_pr: no token available, skipping GitHub client init");
             return Ok(None);
         };
 
         let Some(repo_url) = self.remote_repo_url()? else {
-            debug!("github_pr: no origin repository URL available, skipping GitHub client init");
             return Ok(None);
         };
 
@@ -66,7 +64,6 @@ impl GitHubPrClient {
             release_plz_core::GitHub::new(repo_url.owner, repo_url.name, token.into()),
         ))
         .context("failed to build GitHub client")?;
-        debug!("github_pr: initialized GitHub client");
         Ok(Some(client))
     }
 
@@ -81,7 +78,6 @@ impl GitHubPrClient {
         auth: &AuthContext,
         branch_name: &str,
     ) -> Result<bool> {
-        debug!(branch=%branch_name, "github_pr: checking external contributors");
         // If auth or remote metadata is unavailable, treat as "no external contributors".
         let Some(client) = self.git_client(auth)? else {
             return Ok(false);
@@ -123,7 +119,6 @@ impl GitHubPrClient {
         keep_branch: Option<&str>,
     ) -> Result<Vec<PullRequestInfo>> {
         if skip_pr {
-            debug!("github_pr: skip_pr=true, skipping stale release PR closing");
             return Ok(vec![]);
         }
         let Some(client) = self.git_client(auth)? else {
@@ -168,7 +163,6 @@ impl GitHubPrClient {
     ) -> Result<Option<PullRequestInfo>> {
         // Explicitly allow running full flow without PR operations.
         if skip_pr {
-            debug!(branch=%branch_name, "github_pr: skip_pr=true, skipping ensure PR");
             return Ok(None);
         }
         let Some(client) = self.git_client(auth)? else {

@@ -1,13 +1,13 @@
 use anyhow::Result;
 use time::{OffsetDateTime, format_description::FormatItem, macros::format_description};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_pr::GitHubPrClient;
 use crate::adapters::release_plz::ReleasePlzAdapter;
 use crate::domain::model::RELEASE_PR_BRANCH_PREFIX;
 use crate::domain::types::{
-    BranchState, CheckReport, PrepareContext, PrepareReport, ReleaseMode, UpdateStrategy,
+    BranchState, PrepareContext, PrepareReport, ReleaseMode, UpdateStrategy, VersionsReport,
 };
 
 /// Prepares release artifacts and branch state for RC/final flow.
@@ -17,7 +17,7 @@ pub async fn handle_prepare(
     pr_client: &GitHubPrClient,
     release_engine: &ReleasePlzAdapter,
     ctx: PrepareContext,
-    check: CheckReport,
+    versions: &VersionsReport,
 ) -> Result<PrepareReport> {
     // Release flows always use canonical generated branch names.
     let mut branch_name = make_release_branch_name(ctx.common.mode);
@@ -25,16 +25,15 @@ pub async fn handle_prepare(
         mode=?ctx.common.mode,
         default_branch=%ctx.common.default_branch,
         branch=%branch_name,
-        current_commit=%check.current_commit,
-        previous_commit=%check.previous_commit,
-        latest_release_tag=?check.latest_release_tag,
-        latest_non_rc_release_tag=?check.latest_non_rc_release_tag,
+        current_commit=%versions.current_commit,
+        previous_commit=%versions.previous_commit,
+        latest_release_tag=?versions.latest_release_tag,
+        latest_non_rc_release_tag=?versions.latest_non_rc_release_tag,
         "prepare: resolved initial release branch, previous commit, and current commit"
     );
 
     // Pick branch update strategy based on branch existence and PR contributor safety check.
     let branch_state = git.branch_state(&branch_name)?;
-    debug!(branch=%branch_name, state=?branch_state, "prepare: branch state detected");
     let update_strategy = match branch_state {
         // No branch yet: create from default branch and continue.
         BranchState::Missing => UpdateStrategy::RecreateBranch,
@@ -81,9 +80,10 @@ pub async fn handle_prepare(
             .regenerate_artifacts(
                 ctx.common.mode,
                 &ctx.common.default_branch,
-                &check.previous_commit,
-                check.latest_release_tag.as_deref(),
-                check.latest_non_rc_release_tag.as_deref(),
+                &versions.previous_commit,
+                versions.latest_release_tag.as_deref(),
+                versions.latest_non_rc_release_tag.as_deref(),
+                &versions.planned_versions,
             )
             .await?,
     );
@@ -98,8 +98,6 @@ pub async fn handle_prepare(
         branch_name,
         branch_state,
         update_strategy,
-        current_commit: check.current_commit,
-        version_state: check.version_state,
         description: descriptions,
     })
 }
@@ -116,6 +114,5 @@ pub(crate) fn make_release_branch_name(mode: ReleaseMode) -> String {
         ReleaseMode::Final => "final",
     };
     let branch = format!("{RELEASE_PR_BRANCH_PREFIX}-{timestamp}-{suffix}");
-    debug!(mode=?mode, branch=%branch, "generated release branch name");
     branch
 }
