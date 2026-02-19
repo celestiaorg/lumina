@@ -69,14 +69,8 @@ impl ReleasePipeline {
 
         // Stage 2: branch/artifact preparation.
         let prepare_ctx = args.ctx.to_prepare_context();
-        let prepare = handle_prepare(
-            &self.git,
-            &self.pr_client,
-            &self.release_engine,
-            prepare_ctx,
-            &versions,
-        )
-        .await?;
+        let prepare =
+            handle_prepare(&self.git, &self.release_engine, prepare_ctx, &versions).await?;
 
         // Stage 3: commit/push/PR update.
         let submit_ctx = args.ctx.to_submit_context();
@@ -86,7 +80,6 @@ impl ReleasePipeline {
             SubmitArgs {
                 ctx: submit_ctx,
                 branch_name_override: Some(prepare.branch_name.clone()),
-                update_strategy_override: Some(prepare.update_strategy),
             },
         )
         .await?;

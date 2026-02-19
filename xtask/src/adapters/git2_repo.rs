@@ -1,15 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use crate::domain::types::BranchState;
 use anyhow::{Context, Result, bail};
 use git2::build::CheckoutBuilder;
 use git2::{
     AutotagOption, BranchType, Config, Cred, CredentialType, ErrorCode, FetchOptions,
-    IndexAddOption, PushOptions, RemoteCallbacks, Repository, ResetType, Signature,
-    StashApplyOptions, StashFlags, StatusOptions,
+    IndexAddOption, PushOptions, RemoteCallbacks, Repository, Signature, StatusOptions,
 };
-use tracing::info;
-
-use crate::domain::types::BranchState;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct Git2Repo {
@@ -33,10 +31,10 @@ impl Git2Repo {
 
         // Dirty workspace influences how branch refresh behaves.
         if has_local_changes(&repo)? {
-            info!(branch=%branch_name, "git2_repo: branch exists with dirty workspace");
+            warn!(branch=%branch_name, "git2_repo: branch exists with dirty workspace");
             Ok(BranchState::ExistsDirtyLocal)
         } else {
-            info!(branch=%branch_name, "git2_repo: branch exists and workspace clean");
+            warn!(branch=%branch_name, "git2_repo: branch exists and workspace clean");
             Ok(BranchState::ExistsClean)
         }
     }
@@ -131,76 +129,6 @@ impl Git2Repo {
             descriptions.push("origin remote missing; used local default branch refs".to_string());
             descriptions.push("created release branch from local default branch".to_string());
         }
-        Ok(descriptions)
-    }
-
-    /// Applies release-plz style refresh for existing release branches:
-    /// stash, fetch, reset generated commits, rebase onto default branch, restore stash.
-    pub fn refresh_existing_release_branch(
-        &self,
-        branch_name: &str,
-        default_branch: &str,
-    ) -> Result<Vec<String>> {
-        info!(
-            branch=%branch_name,
-            default_branch=%default_branch,
-            "git2_repo: refreshing existing release branch"
-        );
-        let mut repo = self.repo()?;
-        // Preserve local uncommitted work across branch refresh.
-        let had_changes = has_local_changes(&repo)?;
-        let mut descriptions = Vec::new();
-
-        if had_changes {
-            let signature = signature_for_repo(&repo)?;
-            repo.stash_save(
-                &signature,
-                "xtask release prepare stash",
-                Some(StashFlags::INCLUDE_UNTRACKED),
-            )
-            .context("failed to stash local changes")?;
-            descriptions.push("stashed local changes".to_string());
-        }
-
-        if has_origin_remote(&repo) {
-            // Refresh default-branch refs before rebasing.
-            fetch_origin_branch(&repo, default_branch)?;
-            descriptions.push("fetched origin".to_string());
-        } else {
-            descriptions
-                .push("origin remote missing; skipped fetch and used local refs".to_string());
-        }
-        drop(repo);
-
-        self.ensure_branch_exists(branch_name, default_branch)?;
-        descriptions.push("checked out release branch".to_string());
-
-        let mut repo = self.repo()?;
-        let generated_count = generated_release_commits_count(&repo, 25)?;
-        if generated_count > 0 {
-            // Drop previously generated release commits so regeneration is deterministic.
-            let target = repo
-                .revparse_single(&format!("HEAD~{generated_count}"))
-                .context("failed to resolve reset target for generated release commits")?;
-            repo.reset(&target, ResetType::Hard, None)
-                .context("failed to reset generated release commits")?;
-            descriptions.push(format!(
-                "reset {} generated release commit(s)",
-                generated_count
-            ));
-        }
-
-        rebase_current_branch_onto(&repo, default_branch)?;
-        descriptions.push("rebased release branch onto latest default branch".to_string());
-
-        if had_changes {
-            // Restore user local changes after rebase/reset flow.
-            let mut apply_opts = StashApplyOptions::new();
-            if repo.stash_pop(0, Some(&mut apply_opts)).is_ok() {
-                descriptions.push("restored stashed local changes".to_string());
-            }
-        }
-
         Ok(descriptions)
     }
 
@@ -380,28 +308,6 @@ impl Git2Repo {
         Ok(())
     }
 
-    /// Creates a new local branch from current `HEAD` and checks it out.
-    /// No-op when `dry_run` is enabled.
-    pub fn create_branch_from_current(&self, branch_name: &str, dry_run: bool) -> Result<()> {
-        info!(branch=%branch_name, dry_run, "git2_repo: creating branch from current HEAD");
-        if dry_run {
-            return Ok(());
-        }
-
-        let repo = self.repo()?;
-        let head_commit = repo
-            .head()
-            .context("failed to resolve HEAD")?
-            .peel_to_commit()
-            .context("failed to resolve HEAD commit")?;
-
-        repo.branch(branch_name, &head_commit, false)
-            .with_context(|| format!("failed to create branch `{branch_name}`"))?;
-        checkout_local_branch(&repo, branch_name)?;
-
-        Ok(())
-    }
-
     /// Opens the git repository at configured workspace root.
     fn repo(&self) -> Result<Repository> {
         Repository::open(&self.workspace_root).with_context(|| {
@@ -531,59 +437,6 @@ fn fetch_origin_branch(repo: &Repository, branch: &str) -> Result<()> {
         .with_context(|| format!("failed to fetch `origin/{branch}`"))
 }
 
-/// Rebases currently checked-out branch onto the latest default-branch commit.
-fn rebase_current_branch_onto(repo: &Repository, default_branch: &str) -> Result<()> {
-    let upstream_ref = format!("refs/remotes/origin/{default_branch}");
-    let upstream_oid = repo
-        .refname_to_id(&upstream_ref)
-        .or_else(|_| repo.refname_to_id(&format!("refs/heads/{default_branch}")))
-        .with_context(|| {
-            format!("failed to resolve upstream branch `{default_branch}` for rebase")
-        })?;
-    let upstream = repo
-        .find_annotated_commit(upstream_oid)
-        .context("failed to resolve upstream annotated commit for rebase")?;
-
-    let mut rebase = repo
-        .rebase(None, Some(&upstream), None, None)
-        .context("failed to start rebase")?;
-
-    let signature = signature_for_repo(repo)?;
-    loop {
-        match rebase.next() {
-            Some(Ok(_)) => {
-                // Rebase each operation and surface conflicts explicitly.
-                let index = repo.index().context("failed to load index during rebase")?;
-                if index.has_conflicts() {
-                    bail!("rebase stopped due to merge conflicts; resolve manually");
-                }
-                match rebase.commit(None, &signature, None) {
-                    Ok(_) => {}
-                    Err(err) if err.code() == ErrorCode::Applied => {}
-                    Err(err) => {
-                        return Err(
-                            anyhow::Error::new(err).context("failed to apply rebase operation")
-                        );
-                    }
-                }
-            }
-            Some(Err(err)) => {
-                return Err(
-                    anyhow::Error::new(err).context("failed while iterating rebase operations")
-                );
-            }
-            // No more operations.
-            None => break,
-        }
-    }
-
-    rebase
-        .finish(Some(&signature))
-        .context("failed to finish rebase")?;
-
-    Ok(())
-}
-
 /// Returns true when working tree has tracked or untracked changes.
 fn has_local_changes(repo: &Repository) -> Result<bool> {
     let mut options = StatusOptions::new();
@@ -592,39 +445,6 @@ fn has_local_changes(repo: &Repository) -> Result<bool> {
         .statuses(Some(&mut options))
         .context("failed to inspect local changes")?;
     Ok(!statuses.is_empty())
-}
-
-/// Counts contiguous generated release commits at HEAD, up to `max_depth`.
-fn generated_release_commits_count(repo: &Repository, max_depth: usize) -> Result<usize> {
-    let mut count = 0usize;
-    let mut current = match repo.head() {
-        Ok(head) => head
-            .peel_to_commit()
-            .context("failed to resolve HEAD commit while scanning generated commits")?,
-        Err(_) => return Ok(0),
-    };
-
-    for _ in 0..max_depth {
-        let subject = current.summary().unwrap_or_default();
-        // Stop scan once first non-generated commit is encountered.
-        let is_generated = subject.starts_with("chore(release):")
-            || subject.starts_with("chore: prepare rc release")
-            || subject.starts_with("chore: prepare final release")
-            || subject.starts_with("chore: finalize release");
-        if !is_generated {
-            break;
-        }
-
-        count += 1;
-        if current.parent_count() == 0 {
-            break;
-        }
-        current = current
-            .parent(0)
-            .context("failed to walk parent commit while scanning generated commits")?;
-    }
-
-    Ok(count)
 }
 
 /// Returns repository signature, falling back to deterministic local signature.

@@ -81,21 +81,21 @@ pub async fn handle_gha_release_plz(
     pipeline: &ReleasePipeline,
     args: GhaReleasePlzArgs,
 ) -> Result<ReleaseContract> {
-    let decision = classify_release_decision()?;
-    info!(decision=?decision, dry_run=args.dry_run, "gha/release-plz: selected flow");
-    let compare_branch = args
+    let event_name = std::env::var("GITHUB_EVENT_NAME").unwrap_or_else(|_| "push".to_string());
+    let cmd = release_command(&event_name)?;
+    let branch = args
         .compare_branch
         .clone()
         .unwrap_or_else(|| args.default_branch.clone());
 
-    let contract = match decision {
+    let contract = match cmd {
         ReleaseDriverDecision::Execute(mode) => {
             let report = pipeline
                 .execute(ExecuteArgs {
                     ctx: ExecuteContext {
                         common: CommonContext {
                             mode,
-                            default_branch: compare_branch.clone(),
+                            default_branch: branch.clone(),
                             auth: AuthContext::from_env(),
                         },
                         branch: BranchContext { skip_pr: false },
@@ -109,7 +109,7 @@ pub async fn handle_gha_release_plz(
                 .publish(PublishContext {
                     common: CommonContext {
                         mode,
-                        default_branch: compare_branch.clone(),
+                        default_branch: branch.clone(),
                         auth: AuthContext::from_env(),
                     },
                     rc_branch_prefix: args.rc_branch_prefix.clone(),
@@ -348,8 +348,7 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
     Ok(())
 }
 
-fn classify_release_decision() -> Result<ReleaseDriverDecision> {
-    let event_name = std::env::var("GITHUB_EVENT_NAME").unwrap_or_else(|_| "push".to_string());
+fn release_command(event_name: &str) -> Result<ReleaseDriverDecision> {
     if event_name == "workflow_dispatch" {
         return Ok(ReleaseDriverDecision::Execute(ReleaseMode::Final));
     }

@@ -23,7 +23,7 @@ pub struct GhaArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum GhaCommands {
-    ReleasePlz(GhaReleasePlzArgs),
+    Release(GhaReleasePlzArgs),
     NpmUpdatePr(GhaNpmUpdatePrArgs),
     NpmPublish(GhaNpmPublishArgs),
     UniffiRelease(GhaUniffiReleaseArgs),

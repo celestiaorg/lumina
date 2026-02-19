@@ -15,13 +15,12 @@ use crate::interface::json_output::maybe_print_json;
 /// Parses CLI args, dispatches command handlers, and prints optional JSON reports.
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
-    info!(workspace_root=%cli.workspace_root.display(), "starting xtask");
     let pipeline = ReleasePipeline::new(cli.workspace_root.clone());
 
     // Only GHA commands are exposed through interface CLI.
     match cli.command {
         Commands::Gha(args) => match args.command {
-            GhaCommands::ReleasePlz(cmd) => {
+            GhaCommands::Release(cmd) => {
                 info!(
                     compare_branch=?cmd.compare_branch,
                     default_branch=%cmd.default_branch,

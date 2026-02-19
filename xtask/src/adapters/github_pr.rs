@@ -72,45 +72,6 @@ impl GitHubPrClient {
         remote_repo_url(&self.workspace_root)
     }
 
-    /// Returns true when open release PR has non-bot contributors beyond initial author commit.
-    pub async fn has_external_contributors_on_open_release_pr(
-        &self,
-        auth: &AuthContext,
-        branch_name: &str,
-    ) -> Result<bool> {
-        // If auth or remote metadata is unavailable, treat as "no external contributors".
-        let Some(client) = self.git_client(auth)? else {
-            return Ok(false);
-        };
-        let Some(pr) = self.find_open_release_pr(&client, branch_name).await? else {
-            return Ok(false);
-        };
-
-        let commits = client
-            .pr_commits(pr.number)
-            .await
-            .with_context(|| format!("failed to load commits for PR #{}", pr.number))?;
-
-        // Skip PR author commit and bots, then deduplicate.
-        let mut contributors = commits
-            .into_iter()
-            .skip(1)
-            .filter_map(|commit| commit.author.map(|author| author.login))
-            .filter(|login| !login.ends_with("[bot]"))
-            .collect::<Vec<_>>();
-        contributors.sort();
-        contributors.dedup();
-
-        let has_external = !contributors.is_empty();
-        info!(
-            branch=%branch_name,
-            contributors=contributors.len(),
-            has_external_contributors=has_external,
-            "github_pr: external contributor check completed"
-        );
-        Ok(has_external)
-    }
-
     /// Closes all open release PRs except optional branch to keep.
     pub async fn close_stale_open_release_prs(
         &self,
