@@ -85,7 +85,7 @@ pub fn resolve_current_commit(
 pub fn snapshot_workspace_to_temp(
     workspace_root: &Path,
     commit: &str,
-    default_branch: &str,
+    _default_branch: &str,
 ) -> Result<RepoSnapshot> {
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
@@ -104,13 +104,12 @@ pub fn snapshot_workspace_to_temp(
     repo.branch(&snapshot_branch, &target_commit, true)
         .with_context(|| format!("failed to create snapshot branch `{snapshot_branch}`"))?;
 
-    // Wire upstream tracking when remote default branch is available (best effort).
-    let upstream = format!("origin/{default_branch}");
-    if repo.find_branch(&upstream, BranchType::Remote).is_ok()
-        && let Ok(mut local) = repo.find_branch(&snapshot_branch, BranchType::Local)
-    {
-        let _ = local.set_upstream(Some(&upstream));
-    }
+    // Do not configure upstream for snapshot branches.
+    // release-plz/git_cmd derives its "original branch" from `@{upstream}` and may
+    // later `git checkout` that branch name while diffing. If we set upstream to
+    // the compare branch (e.g. `origin/mcrakhman/release-test-rc`), checkout can
+    // fail with "already used by worktree" in CI. Keeping snapshots without upstream
+    // makes release-plz stay on the local temporary branch.
 
     let temp_dir = tempfile::tempdir().context("failed to create temporary directory")?;
     let repo_root = temp_dir.path().join("worktree");
