@@ -119,4 +119,36 @@ mod tests {
         let next = convert_release_version_to_rc(&standard).unwrap();
         assert_eq!(next.to_string(), "0.5.1-rc.1");
     }
+
+    #[test]
+    /// release-plz target RC increments RC index instead of resetting.
+    fn release_target_rc_increments_rc_index() {
+        let standard = Version::parse("0.5.1-rc.3").unwrap();
+        let next = convert_release_version_to_rc(&standard).unwrap();
+        assert_eq!(next.to_string(), "0.5.1-rc.4");
+    }
+
+    #[test]
+    /// Validation accepts deterministic mapping from next_release -> next_effective.
+    fn validate_rc_conversion_accepts_expected_mapping() {
+        let next_release = Version::parse("1.2.3").unwrap();
+        let next_effective = Version::parse("1.2.3-rc.1").unwrap();
+        validate_rc_conversion(&next_release, &next_effective).unwrap();
+    }
+
+    #[test]
+    /// Validation rejects non-RC effective versions.
+    fn validate_rc_conversion_rejects_non_rc_effective() {
+        let next_release = Version::parse("1.2.3").unwrap();
+        let next_effective = Version::parse("1.2.3").unwrap();
+        assert!(validate_rc_conversion(&next_release, &next_effective).is_err());
+    }
+
+    #[test]
+    /// Validation rejects RC values that do not match conversion policy.
+    fn validate_rc_conversion_rejects_wrong_rc_value() {
+        let next_release = Version::parse("1.2.3").unwrap();
+        let next_effective = Version::parse("1.2.3-rc.2").unwrap();
+        assert!(validate_rc_conversion(&next_release, &next_effective).is_err());
+    }
 }

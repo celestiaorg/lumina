@@ -15,6 +15,5 @@ release_plz_core = "0.36.11"
 git2 = "0.20.2"
 tempfile = "3.23.0"
 time = { workspace = true, features = ["formatting", "macros", "std"] }
-toml = "0.8"
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
