@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_output::{write_github_output, write_github_output_multiline};
 use crate::application::pipeline::{ExecuteArgs, ReleasePipeline};
+use crate::domain::model::{RELEASE_PR_TITLE_PREFIX, RELEASE_PR_TITLE_RC};
 use crate::domain::types::{
     AuthContext, BranchContext, CommonContext, ExecuteContext, ExecuteReport, PublishContext,
     ReleaseMode, ReleaseReport,
@@ -434,10 +435,10 @@ fn classify_release_decision() -> Result<ReleaseDriverDecision> {
         commit_message_first_line=%commit_message.lines().next().unwrap_or_default(),
         "gha/release-plz: classified push by head commit message"
     );
-    if !commit_message_lc.contains("chore: release") {
+    if !commit_message_lc.contains(RELEASE_PR_TITLE_PREFIX) {
         return Ok(ReleaseDriverDecision::Execute(ReleaseMode::Rc));
     }
-    if commit_message_lc.contains("chore: release rc") {
+    if commit_message_lc.contains(RELEASE_PR_TITLE_RC) {
         return Ok(ReleaseDriverDecision::Publish(ReleaseMode::Rc));
     }
     Ok(ReleaseDriverDecision::Publish(ReleaseMode::Final))

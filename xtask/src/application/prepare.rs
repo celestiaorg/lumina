@@ -5,6 +5,7 @@ use tracing::{debug, info};
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_pr::GitHubPrClient;
 use crate::adapters::release_plz::ReleasePlzAdapter;
+use crate::domain::model::RELEASE_PR_BRANCH_PREFIX;
 use crate::domain::types::{
     BranchState, CheckReport, PrepareContext, PrepareReport, ReleaseMode, UpdateStrategy,
 };
@@ -114,7 +115,7 @@ pub(crate) fn make_release_branch_name(mode: ReleaseMode) -> String {
         ReleaseMode::Rc => "rc",
         ReleaseMode::Final => "final",
     };
-    let branch = format!("lumina/release-plz-{timestamp}-{suffix}");
+    let branch = format!("{RELEASE_PR_BRANCH_PREFIX}-{timestamp}-{suffix}");
     debug!(mode=?mode, branch=%branch, "generated release branch name");
     branch
 }

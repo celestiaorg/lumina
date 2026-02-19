@@ -1,6 +1,11 @@
 use cargo_metadata::semver::Version;
 use serde::{Deserialize, Serialize};
 
+pub const RELEASE_PR_TITLE_PREFIX: &str = "chore: test release";
+pub const RELEASE_PR_TITLE_RC: &str = "chore: test release rc";
+pub const RELEASE_PR_TITLE_FINAL: &str = "chore: test release final";
+pub const RELEASE_PR_BRANCH_PREFIX: &str = "lumina/release-plz";
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseMode {
