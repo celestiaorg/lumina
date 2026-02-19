@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-02-19
+
+### Other
+
+- updated the following local packages: celestia-proto, celestia-types, celestia-types, celestia-types, celestia-rpc, celestia-rpc
+
 ## [0.18.2](https://github.com/celestiaorg/lumina/compare/lumina-node-v0.18.1...lumina-node-v0.18.2) - 2026-01-27
 
 ### Fixed
