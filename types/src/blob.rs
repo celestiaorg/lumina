@@ -83,7 +83,9 @@ pub struct BlobsAtHeight {
 /// Test struct for testing
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct TestStruct {
+    /// Some variable
     pub some: String,
+    /// Other variable
     pub other: String,
 }
 
