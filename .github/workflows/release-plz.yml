@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cargo xtask gha release-plz \
+          cargo xtask gha release \
             --mode "$INPUT_MODE" \
             --gha-output \
             --compare-branch "mcrakhman/release-test-rc" \
