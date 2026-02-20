@@ -15,7 +15,6 @@ pub struct BranchContext {
 #[derive(Debug, Clone)]
 pub struct ComputeVersionsContext {
     pub common: CommonContext,
-    pub current_commit: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +33,7 @@ pub struct PublishContext {
     pub common: CommonContext,
     pub rc_branch_prefix: String,
     pub final_branch_prefix: String,
+    pub no_artifacts: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +46,6 @@ impl ExecuteContext {
     pub fn to_compute_versions_context(&self) -> ComputeVersionsContext {
         ComputeVersionsContext {
             common: self.common.clone(),
-            current_commit: None,
         }
     }
 

@@ -9,43 +9,48 @@ use crate::application::gha::{
     handle_gha_uniffi_release,
 };
 use crate::application::pipeline::ReleasePipeline;
-use crate::interface::cli::{Cli, Commands, GhaCommands};
-use crate::interface::json_output::maybe_print_json;
+use crate::domain::types::ReleaseMode;
+use crate::interface::cli::{Cli, CliReleaseMode, Commands, GhaCommands};
 
 /// Parses CLI args, dispatches command handlers, and prints optional JSON reports.
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
-    info!(workspace_root=%cli.workspace_root.display(), "starting xtask");
     let pipeline = ReleasePipeline::new(cli.workspace_root.clone());
 
     // Only GHA commands are exposed through interface CLI.
     match cli.command {
         Commands::Gha(args) => match args.command {
-            GhaCommands::ReleasePlz(cmd) => {
+            GhaCommands::Release(cmd) => {
                 info!(
                     compare_branch=?cmd.compare_branch,
                     default_branch=%cmd.default_branch,
                     rc_branch_prefix=%cmd.rc_branch_prefix,
                     final_branch_prefix=%cmd.final_branch_prefix,
                     gha_output=cmd.gha_output,
-                    json_out=?cmd.json_out,
-                    dry_run=cmd.dry_run,
+                    no_artifacts=cmd.no_artifacts,
                     "running gha release-plz driver"
                 );
                 let contract = handle_gha_release_plz(
                     &pipeline,
                     AppGhaReleasePlzArgs {
+                        mode: match cmd.mode {
+                            CliReleaseMode::Rc => ReleaseMode::Rc,
+                            CliReleaseMode::Final => ReleaseMode::Final,
+                        },
                         compare_branch: cmd.compare_branch,
                         default_branch: cmd.default_branch,
                         rc_branch_prefix: cmd.rc_branch_prefix,
                         final_branch_prefix: cmd.final_branch_prefix,
                         gha_output: cmd.gha_output,
-                        json_out: cmd.json_out,
-                        dry_run: cmd.dry_run,
+                        no_artifacts: cmd.no_artifacts,
                     },
                 )
                 .await?;
-                maybe_print_json(true, &contract)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&contract)
+                        .unwrap_or_else(|_| format!("{contract:?}"))
+                );
             }
             GhaCommands::NpmUpdatePr(cmd) => {
                 info!("running gha npm-update-pr");
@@ -57,7 +62,7 @@ pub async fn run() -> Result<()> {
             GhaCommands::NpmPublish(cmd) => {
                 info!("running gha npm-publish");
                 handle_gha_npm_publish(AppGhaNpmPublishArgs {
-                    dry_run: cmd.dry_run,
+                    no_artifacts: cmd.no_artifacts,
                 })?;
             }
             GhaCommands::UniffiRelease(cmd) => {
@@ -65,7 +70,7 @@ pub async fn run() -> Result<()> {
                 handle_gha_uniffi_release(AppGhaUniffiReleaseArgs {
                     releases_json: cmd.releases_json,
                     gha_output: cmd.gha_output,
-                    dry_run: cmd.dry_run,
+                    no_artifacts: cmd.no_artifacts,
                 })?;
             }
         },

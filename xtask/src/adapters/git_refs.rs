@@ -13,7 +13,7 @@ use tracing::info;
 #[derive(Debug)]
 pub struct RepoSnapshot {
     /// Guard temp dir so worktree path exists for snapshot lifetime.
-    pub temp_dir: TempDir,
+    pub _temp_dir: TempDir,
     /// Root path of the temporary snapshot worktree checkout.
     pub repo_root: PathBuf,
     /// Original repository path where worktree/branch cleanup must happen.
@@ -48,29 +48,10 @@ impl Drop for RepoSnapshot {
 
 /// Resolves the current commit used for release analysis:
 /// explicit `current_commit` when provided, else tip of default branch.
-pub fn resolve_current_commit(
-    workspace_root: &Path,
-    default_branch: &str,
-    current_commit: Option<&str>,
-) -> Result<String> {
+pub fn resolve_current_commit(workspace_root: &Path, default_branch: &str) -> Result<String> {
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
 
-    if let Some(commit) = current_commit {
-        // Explicit current commit wins and is normalized to a concrete commit OID.
-        let object = repo
-            .revparse_single(commit)
-            .with_context(|| format!("failed to resolve current commit `{commit}`"))?;
-        let commit_oid = object
-            .peel_to_commit()
-            .context("failed to peel current commit to a commit object")?
-            .id();
-        let selected = commit_oid.to_string();
-        info!(selected_commit=%selected, "git_refs: selected explicit current commit");
-        return Ok(selected);
-    }
-
-    // Default path: compare against default-branch tip (prefer remote-tracking ref).
     if let Some(oid) = resolve_branch_tip_oid(&repo, default_branch) {
         let selected = oid.to_string();
         info!(selected_commit=%selected, "git_refs: selected default branch tip commit");
@@ -104,13 +85,6 @@ pub fn snapshot_workspace_to_temp(
     repo.branch(&snapshot_branch, &target_commit, true)
         .with_context(|| format!("failed to create snapshot branch `{snapshot_branch}`"))?;
 
-    // Do not configure upstream for snapshot branches.
-    // release-plz/git_cmd derives its "original branch" from `@{upstream}` and may
-    // later `git checkout` that branch name while diffing. If we set upstream to
-    // the compare branch (e.g. `origin/mcrakhman/release-test-rc`), checkout can
-    // fail with "already used by worktree" in CI. Keeping snapshots without upstream
-    // makes release-plz stay on the local temporary branch.
-
     let temp_dir = tempfile::tempdir().context("failed to create temporary directory")?;
     let repo_root = temp_dir.path().join("worktree");
     let mut opts = WorktreeAddOptions::new();
@@ -135,7 +109,7 @@ pub fn snapshot_workspace_to_temp(
     );
 
     Ok(RepoSnapshot {
-        temp_dir,
+        _temp_dir: temp_dir,
         repo_root,
         source_repo_root: workspace_root.to_path_buf(),
         worktree_name,

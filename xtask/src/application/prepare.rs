@@ -1,26 +1,23 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use time::{OffsetDateTime, format_description::FormatItem, macros::format_description};
 use tracing::info;
 
-use crate::adapters::git2_repo::Git2Repo;
-use crate::adapters::github_pr::GitHubPrClient;
-use crate::adapters::release_plz::ReleasePlzAdapter;
+use crate::application::pipeline_ops::{GitRepo, ReleaseEngine};
 use crate::domain::model::RELEASE_PR_BRANCH_PREFIX;
 use crate::domain::types::{
-    BranchState, PrepareContext, PrepareReport, ReleaseMode, UpdateStrategy, VersionsReport,
+    BranchState, PrepareContext, PrepareReport, ReleaseMode, VersionsReport,
 };
 
 /// Prepares release artifacts and branch state for RC/final flow.
 /// This does not create commits or push; submit handles that stage.
 pub async fn handle_prepare(
-    git: &Git2Repo,
-    pr_client: &GitHubPrClient,
-    release_engine: &ReleasePlzAdapter,
+    git: &impl GitRepo,
+    release_engine: &impl ReleaseEngine,
     ctx: PrepareContext,
     versions: &VersionsReport,
 ) -> Result<PrepareReport> {
     // Release flows always use canonical generated branch names.
-    let mut branch_name = make_release_branch_name(ctx.common.mode);
+    let branch_name = make_release_branch_name(ctx.common.mode);
     info!(
         mode=?ctx.common.mode,
         default_branch=%ctx.common.default_branch,
@@ -32,47 +29,16 @@ pub async fn handle_prepare(
         "prepare: resolved initial release branch, previous commit, and current commit"
     );
 
-    // Pick branch update strategy based on branch existence and PR contributor safety check.
+    // Only allow creating a fresh release branch. Existing release branches are treated as errors.
     let branch_state = git.branch_state(&branch_name)?;
-    let update_strategy = match branch_state {
-        // No branch yet: create from default branch and continue.
-        BranchState::Missing => UpdateStrategy::RecreateBranch,
-        _ => {
-            // Existing branch: force-push only if PR has no external contributors.
-            let has_external_contributors = pr_client
-                .has_external_contributors_on_open_release_pr(&ctx.common.auth, &branch_name)
-                .await?;
-            if has_external_contributors {
-                UpdateStrategy::ClosePrAndRecreate
-            } else {
-                UpdateStrategy::InPlaceForcePush
-            }
-        }
-    };
-    info!(branch=%branch_name, strategy=?update_strategy, "prepare: selected update strategy");
+    if !matches!(branch_state, BranchState::Missing) {
+        bail!(
+            "prepare: release branch `{branch_name}` already exists with state `{branch_state:?}`; expected missing branch"
+        );
+    }
 
-    // Apply chosen branch strategy and collect step descriptions.
-    let mut descriptions = match update_strategy {
-        UpdateStrategy::RecreateBranch => {
-            git.create_release_branch_from_default(&branch_name, &ctx.common.default_branch)?
-        }
-        UpdateStrategy::InPlaceForcePush => {
-            // Keep same branch and refresh it release-plz style.
-            git.refresh_existing_release_branch(&branch_name, &ctx.common.default_branch)?
-        }
-        UpdateStrategy::ClosePrAndRecreate => {
-            // Contributor-safe flow: mint a fresh branch and continue there.
-            // PR close/recreate is deferred to submit stage.
-            let recreated_branch = make_release_branch_name(ctx.common.mode);
-            git.create_release_branch_from_default(&recreated_branch, &ctx.common.default_branch)?;
-            branch_name = recreated_branch.clone();
-            info!(branch=%branch_name, "prepare: recreated branch for contributor-safe flow");
-            vec![
-                format!("recreated release branch `{recreated_branch}`"),
-                "deferred PR close/recreate to submit stage".to_string(),
-            ]
-        }
-    };
+    let mut descriptions =
+        git.create_release_branch_from_default(&branch_name, &ctx.common.default_branch)?;
 
     // Regenerate versions/changelog using release-plz-backed adapter logic.
     descriptions.extend(
@@ -97,7 +63,6 @@ pub async fn handle_prepare(
         mode: ctx.common.mode,
         branch_name,
         branch_state,
-        update_strategy,
         description: descriptions,
     })
 }
@@ -116,3 +81,7 @@ pub(crate) fn make_release_branch_name(mode: ReleaseMode) -> String {
     let branch = format!("{RELEASE_PR_BRANCH_PREFIX}-{timestamp}-{suffix}");
     branch
 }
+
+#[cfg(test)]
+#[path = "prepare_tests.rs"]
+mod tests;

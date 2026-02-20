@@ -8,6 +8,15 @@ on:
   push:
     branches: [ mcrakhman/release-test-rc ]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Release mode"
+        required: true
+        default: "rc"
+        type: choice
+        options:
+          - rc
+          - final
 
 jobs:
   release-plz:
@@ -42,21 +51,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           RUST_LOG: info
+          INPUT_MODE: ${{ inputs.mode || 'rc' }}
         run: |
           set -euo pipefail
 
           cargo xtask gha release-plz \
+            --mode "$INPUT_MODE" \
             --gha-output \
-            --json-out xtask_release_contract.json \
             --compare-branch "mcrakhman/release-test-rc" \
-            --dry-run
-
-      - name: Upload release contract artifact
-        if: always() && hashFiles('xtask_release_contract.json') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-contract
-          path: xtask_release_contract.json
+            --no-artifacts
 
   release-plz-pr-npm-update:
     name: Update release PR for npm
@@ -130,7 +133,7 @@ jobs:
           RUST_LOG: info
         run: |
           set -euo pipefail
-          cargo xtask gha npm-publish --dry-run
+          cargo xtask gha npm-publish --no-artifacts
 
   release-uniffi:
     name: Release-uniffi
@@ -182,7 +185,7 @@ jobs:
           cargo xtask gha uniffi-release \
             --releases-json "$RELEASES_JSON" \
             --gha-output \
-            --dry-run
+            --no-artifacts
 
       - name: Upload uniffi artifacts to GitHub release
         uses: softprops/action-gh-release@v2

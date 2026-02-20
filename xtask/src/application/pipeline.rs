@@ -6,6 +6,7 @@ use tracing::info;
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_pr::GitHubPrClient;
 use crate::adapters::release_plz::ReleasePlzAdapter;
+use crate::application::pipeline_ops::ReleaseEngine as _;
 use crate::application::prepare::handle_prepare;
 use crate::application::publish::handle_publish;
 use crate::application::submit::{SubmitArgs, handle_submit};
@@ -46,7 +47,7 @@ impl ReleasePipeline {
 
     /// Computes release versions and returns a report.
     pub async fn compute_versions(&self, ctx: ComputeVersionsContext) -> Result<VersionsReport> {
-        let report = self.release_engine.versions(&ctx).await?;
+        let report = self.release_engine.compute_versions(&ctx).await?;
         info!(
             mode=?report.mode,
             current_commit=%report.current_commit,
@@ -69,14 +70,8 @@ impl ReleasePipeline {
 
         // Stage 2: branch/artifact preparation.
         let prepare_ctx = args.ctx.to_prepare_context();
-        let prepare = handle_prepare(
-            &self.git,
-            &self.pr_client,
-            &self.release_engine,
-            prepare_ctx,
-            &versions,
-        )
-        .await?;
+        let prepare =
+            handle_prepare(&self.git, &self.release_engine, prepare_ctx, &versions).await?;
 
         // Stage 3: commit/push/PR update.
         let submit_ctx = args.ctx.to_submit_context();
@@ -86,7 +81,6 @@ impl ReleasePipeline {
             SubmitArgs {
                 ctx: submit_ctx,
                 branch_name_override: Some(prepare.branch_name.clone()),
-                update_strategy_override: Some(prepare.update_strategy),
             },
         )
         .await?;

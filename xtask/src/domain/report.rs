@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::model::{BranchState, PlannedVersion, ReleaseMode, UpdateStrategy};
+use crate::domain::model::{BranchState, PlannedVersion, ReleaseMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionsReport {
@@ -17,7 +17,6 @@ pub struct PrepareReport {
     pub mode: ReleaseMode,
     pub branch_name: String,
     pub branch_state: BranchState,
-    pub update_strategy: UpdateStrategy,
     pub description: Vec<String>,
 }
 
@@ -25,7 +24,6 @@ pub struct PrepareReport {
 pub struct SubmitReport {
     pub mode: ReleaseMode,
     pub branch_name: String,
-    pub update_strategy: UpdateStrategy,
     pub commit_message: String,
     pub pushed: bool,
     pub pr_url: Option<String>,
