@@ -285,7 +285,9 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
 
 fn handle_gha_uniffi_release_impl(args: GhaUniffiReleaseArgs, ops: &dyn Ops) -> Result<()> {
     if args.no_artifacts {
-        info!("gha/uniffi-release: --no-artifacts enabled, skipping uniffi build/release preparation");
+        info!(
+            "gha/uniffi-release: --no-artifacts enabled, skipping uniffi build/release preparation"
+        );
         return Ok(());
     }
 
@@ -1048,7 +1050,9 @@ mod tests {
             .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
             .on_cmd_success("npm view", true);
 
-        let args = GhaNpmPublishArgs { no_artifacts: false };
+        let args = GhaNpmPublishArgs {
+            no_artifacts: false,
+        };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
         // Early return after npm view confirms version exists
@@ -1066,7 +1070,9 @@ mod tests {
             .on_cmd("npm pkg set", "")
             .on_cmd("npm publish", "");
 
-        let args = GhaNpmPublishArgs { no_artifacts: false };
+        let args = GhaNpmPublishArgs {
+            no_artifacts: false,
+        };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
         ops.assert_sequence(&[
@@ -1117,7 +1123,9 @@ mod tests {
             .on_cmd("npm pkg set", "")
             .on_cmd("npm publish", "");
 
-        let args = GhaNpmPublishArgs { no_artifacts: false };
+        let args = GhaNpmPublishArgs {
+            no_artifacts: false,
+        };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
         ops.assert_sequence(&[
@@ -1173,7 +1181,9 @@ mod tests {
             .on_cmd("npm pkg set", "")
             .on_cmd("npm publish", "");
 
-        let args = GhaNpmPublishArgs { no_artifacts: false };
+        let args = GhaNpmPublishArgs {
+            no_artifacts: false,
+        };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
         ops.assert_sequence(&[
