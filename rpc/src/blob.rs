@@ -9,6 +9,7 @@ use celestia_types::nmt::{Namespace, NamespaceProof};
 use celestia_types::{Blob, Commitment};
 use futures_util::{Stream, StreamExt};
 use jsonrpsee::core::client::{ClientT, Error, SubscriptionClientT};
+use jsonrpsee::core::{RpcResult, SubscriptionResult};
 use jsonrpsee::proc_macros::rpc;
 use serde::{Deserialize, Serialize};
 
@@ -27,46 +28,54 @@ pub struct BlobsAtHeight {
 mod rpc {
     use super::*;
 
-    #[rpc(client, namespace = "blob", namespace_separator = ".")]
+    /// Blob RPC methods.
+    #[rpc(client, server, namespace = "blob", namespace_separator = ".")]
     pub trait Blob {
+        /// See [`crate::BlobClient::blob_get`].
         #[method(name = "Get")]
         async fn blob_get(
             &self,
             height: u64,
             namespace: Namespace,
             commitment: Commitment,
-        ) -> Result<Blob, Error>;
+        ) -> RpcResult<Blob>;
 
+        /// See [`crate::BlobClient::blob_get_all`].
         #[method(name = "GetAll")]
         async fn blob_get_all(
             &self,
             height: u64,
-            namespaces: &[Namespace],
-        ) -> Result<Option<Vec<Blob>>, Error>;
+            namespaces: Vec<Namespace>,
+        ) -> RpcResult<Option<Vec<Blob>>>;
 
+        /// See [`crate::BlobClient::blob_get_proof`].
         #[method(name = "GetProof")]
         async fn blob_get_proof(
             &self,
             height: u64,
             namespace: Namespace,
             commitment: Commitment,
-        ) -> Result<Vec<NamespaceProof>, Error>;
+        ) -> RpcResult<Vec<NamespaceProof>>;
 
+        /// See [`crate::BlobClient::blob_included`].
         #[method(name = "Included")]
         async fn blob_included(
             &self,
             height: u64,
             namespace: Namespace,
-            proof: &NamespaceProof,
+            proof: NamespaceProof,
             commitment: Commitment,
-        ) -> Result<bool, Error>;
+        ) -> RpcResult<bool>;
 
+        /// See [`crate::BlobClient::blob_submit`].
         #[method(name = "Submit")]
-        async fn blob_submit(&self, blobs: &[Blob], opts: TxConfig) -> Result<u64, Error>;
+        async fn blob_submit(&self, blobs: Vec<Blob>, opts: TxConfig) -> RpcResult<u64>;
     }
 
-    #[rpc(client, namespace = "blob", namespace_separator = ".")]
+    /// Blob subscription RPC methods.
+    #[rpc(client, server, namespace = "blob", namespace_separator = ".")]
     pub trait BlobSubscription {
+        /// See [`crate::BlobClient::blob_subscribe`].
         #[subscription(name = "Subscribe", unsubscribe = "Unsubscribe", item = BlobsAtHeight)]
         async fn blob_subscribe(&self, namespace: Namespace) -> SubscriptionResult;
     }
@@ -99,7 +108,7 @@ pub trait BlobClient: ClientT {
         'b: 'fut,
         Self: Sized + Sync + 'fut,
     {
-        rpc::BlobClient::blob_get_all(self, height, namespaces)
+        rpc::BlobClient::blob_get_all(self, height, namespaces.to_vec())
     }
 
     /// GetProof retrieves proofs in the given namespaces at the given height by commitment.
@@ -129,7 +138,7 @@ pub trait BlobClient: ClientT {
         'b: 'fut,
         Self: Sized + Sync + 'fut,
     {
-        rpc::BlobClient::blob_included(self, height, namespace, proof, commitment)
+        rpc::BlobClient::blob_included(self, height, namespace, proof.clone(), commitment)
     }
 
     /// Submit sends Blobs and reports the height in which they were included. Allows sending multiple Blobs atomically synchronously. Uses default wallet registered on the Node.
@@ -143,7 +152,7 @@ pub trait BlobClient: ClientT {
         'b: 'fut,
         Self: Sized + Sync + 'fut,
     {
-        rpc::BlobClient::blob_submit(self, blobs, opts)
+        rpc::BlobClient::blob_submit(self, blobs.to_vec(), opts)
     }
 
     /// Subscribe to published blobs from the given namespace as they are included.
@@ -190,7 +199,7 @@ pub trait BlobClient: ClientT {
                         .await
                         .ok_or_else(|| custom_client_error("unexpected end of stream"))??;
                     let height = header.height();
-                    let blobs = rpc::BlobClient::blob_get_all(self, height, &[namespace]).await?;
+                    let blobs = rpc::BlobClient::blob_get_all(self, height, vec![namespace]).await?;
 
                     BlobsAtHeight {
                         blobs,
@@ -203,4 +212,12 @@ pub trait BlobClient: ClientT {
     }
 }
 
+/// Server trait for Blob RPC endpoints.
+pub trait BlobServer: rpc::BlobServer + rpc::BlobSubscriptionServer {}
+
+impl<T> BlobServer for T where T: rpc::BlobServer + rpc::BlobSubscriptionServer {}
+
 impl<T> BlobClient for T where T: ClientT {}
+
+pub use rpc::BlobServer as BlobRpcServer;
+pub use rpc::BlobSubscriptionServer as BlobSubscriptionRpcServer;

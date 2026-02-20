@@ -79,11 +79,7 @@ impl StateApi {
             let grpc = match inner.grpc() {
                 Ok(grpc) => grpc,
                 Err(_) => {
-                    return Ok(inner
-                        .rpc
-                        .state_balance_for_address(&address)
-                        .await?
-                        .amount());
+                    return Ok(inner.rpc.state_balance_for_address(address).await?.amount());
                 }
             };
 
