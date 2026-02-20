@@ -1,9 +1,8 @@
 use anyhow::Result;
 use tracing::info;
 
-use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_output::write_github_output;
-use crate::adapters::github_pr::GitHubPrClient;
+use crate::application::pipeline_ops::{GitRepo, PrClient};
 use crate::application::prepare::make_release_branch_name;
 use crate::domain::model::{RELEASE_COMMIT_MESSAGE_FINAL, RELEASE_COMMIT_MESSAGE_RC};
 use crate::domain::types::{ReleaseMode, SubmitContext, SubmitReport};
@@ -18,8 +17,8 @@ pub struct SubmitArgs {
 
 /// Commits generated release artifacts, pushes branch, and ensures an open release PR exists.
 pub async fn handle_submit(
-    git: &Git2Repo,
-    pr_client: &GitHubPrClient,
+    git: &impl GitRepo,
+    pr_client: &impl PrClient,
     args: SubmitArgs,
 ) -> Result<SubmitReport> {
     // Use prepared branch when provided by execute, otherwise generate canonical name.
@@ -87,3 +86,7 @@ pub async fn handle_submit(
         pr_url,
     })
 }
+
+#[cfg(test)]
+#[path = "submit_tests.rs"]
+mod tests;

@@ -2,8 +2,7 @@ use anyhow::{Result, bail};
 use time::{OffsetDateTime, format_description::FormatItem, macros::format_description};
 use tracing::info;
 
-use crate::adapters::git2_repo::Git2Repo;
-use crate::adapters::release_plz::ReleasePlzAdapter;
+use crate::application::pipeline_ops::{GitRepo, ReleaseEngine};
 use crate::domain::model::RELEASE_PR_BRANCH_PREFIX;
 use crate::domain::types::{
     BranchState, PrepareContext, PrepareReport, ReleaseMode, VersionsReport,
@@ -12,8 +11,8 @@ use crate::domain::types::{
 /// Prepares release artifacts and branch state for RC/final flow.
 /// This does not create commits or push; submit handles that stage.
 pub async fn handle_prepare(
-    git: &Git2Repo,
-    release_engine: &ReleasePlzAdapter,
+    git: &impl GitRepo,
+    release_engine: &impl ReleaseEngine,
     ctx: PrepareContext,
     versions: &VersionsReport,
 ) -> Result<PrepareReport> {
@@ -82,3 +81,7 @@ pub(crate) fn make_release_branch_name(mode: ReleaseMode) -> String {
     let branch = format!("{RELEASE_PR_BRANCH_PREFIX}-{timestamp}-{suffix}");
     branch
 }
+
+#[cfg(test)]
+#[path = "prepare_tests.rs"]
+mod tests;

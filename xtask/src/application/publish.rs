@@ -1,12 +1,12 @@
 use anyhow::Result;
 use tracing::info;
 
-use crate::adapters::release_plz::ReleasePlzAdapter;
+use crate::application::pipeline_ops::ReleaseEngine;
 use crate::domain::types::{PublishContext, ReleaseReport};
 
 /// Executes publish-only stage through release-plz and converts result into report shape.
 pub async fn handle_publish(
-    publisher: &ReleasePlzAdapter,
+    publisher: &impl ReleaseEngine,
     ctx: PublishContext,
 ) -> Result<ReleaseReport> {
     info!(mode=?ctx.common.mode, "publish: invoking release adapter");
@@ -23,3 +23,7 @@ pub async fn handle_publish(
         payload: publish_payload,
     })
 }
+
+#[cfg(test)]
+#[path = "publish_tests.rs"]
+mod tests;

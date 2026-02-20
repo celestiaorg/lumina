@@ -167,39 +167,7 @@ impl ReleasePlzAdapter {
             "release_plz: applied transitive dependency bump policy",
         );
 
-        let mut versions = planned_release_versions
-            .into_iter()
-            .filter_map(|(package, next_release)| {
-                let current = current_versions.get(&package)?.clone();
-                Some((package, current, next_release))
-            })
-            .map(|(package, current, next_release)| {
-                // Mode-specific projection:
-                // RC => convert release-plz next version into rc.N variant.
-                // Final => normalize prerelease to stable if needed.
-                let next_effective = match mode {
-                    ReleaseMode::Rc => convert_release_version_to_rc(&next_release)?,
-                    ReleaseMode::Final => {
-                        to_stable_if_prerelease(&next_release).unwrap_or(next_release.clone())
-                    }
-                };
-                if matches!(mode, ReleaseMode::Rc) {
-                    validate_rc_conversion(&next_release, &next_effective).with_context(|| {
-                        format!("invalid rc transition computed for package `{package}`")
-                    })?;
-                }
-
-                Ok(PlannedVersion {
-                    package,
-                    current: current.to_string(),
-                    next_effective: next_effective.to_string(),
-                    publishable: true,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        versions.sort_by(|a, b| a.package.cmp(&b.package));
-        Ok(versions)
+        compute_effective_versions(&current_versions, planned_release_versions, mode)
     }
 
     /// Regenerates release artifacts with release-plz update and applies mode-specific version rewrite.
@@ -390,6 +358,54 @@ fn is_publishable(publish: &Option<Vec<String>>) -> bool {
         None => true,
         Some(registries) => !registries.is_empty(),
     }
+}
+
+/// Pure function that converts release-plz planned versions into effective versions
+/// by applying mode-specific projection (RC or Final).
+///
+/// This is the core version computation logic extracted from `compute_snapshot_versions`
+/// for testability. The inputs simulate comparing "two repos":
+/// - `current_versions`: package versions in the current workspace
+/// - `planned_release_versions`: release-plz computed next versions (from diffing current vs previous)
+/// - `mode`: RC adds `-rc.N` suffix, Final strips prerelease
+pub(crate) fn compute_effective_versions(
+    current_versions: &BTreeMap<String, cargo_metadata::semver::Version>,
+    planned_release_versions: BTreeMap<String, cargo_metadata::semver::Version>,
+    mode: ReleaseMode,
+) -> Result<Vec<PlannedVersion>> {
+    let mut versions = planned_release_versions
+        .into_iter()
+        .filter_map(|(package, next_release)| {
+            let current = current_versions.get(&package)?.clone();
+            Some((package, current, next_release))
+        })
+        .map(|(package, current, next_release)| {
+            // Mode-specific projection:
+            // RC => convert release-plz next version into rc.N variant.
+            // Final => normalize prerelease to stable if needed.
+            let next_effective = match mode {
+                ReleaseMode::Rc => convert_release_version_to_rc(&next_release)?,
+                ReleaseMode::Final => {
+                    to_stable_if_prerelease(&next_release).unwrap_or(next_release.clone())
+                }
+            };
+            if matches!(mode, ReleaseMode::Rc) {
+                validate_rc_conversion(&next_release, &next_effective).with_context(|| {
+                    format!("invalid rc transition computed for package `{package}`")
+                })?;
+            }
+
+            Ok(PlannedVersion {
+                package,
+                current: current.to_string(),
+                next_effective: next_effective.to_string(),
+                publishable: true,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    versions.sort_by(|a, b| a.package.cmp(&b.package));
+    Ok(versions)
 }
 
 /// Applies deterministic version overrides across workspace metadata.
@@ -662,89 +678,5 @@ fn parse_remote_repo_url(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use cargo_metadata::semver::Version;
-
-    use super::{
-        VersionBumpKind, apply_transitive_bump_policy, bump_version, classify_version_bump,
-    };
-
-    #[test]
-    fn direct_minor_bump_propagates_to_dependent() {
-        let current = BTreeMap::from([
-            ("a".to_string(), Version::parse("1.0.0").unwrap()),
-            ("b".to_string(), Version::parse("2.0.0").unwrap()),
-        ]);
-        let dependencies = BTreeMap::from([("b".to_string(), vec!["a".to_string()])]);
-        let mut planned = BTreeMap::from([("a".to_string(), Version::parse("1.1.0").unwrap())]);
-
-        let forced = apply_transitive_bump_policy(&current, &dependencies, &mut planned);
-
-        assert_eq!(forced, 1);
-        assert_eq!(
-            planned.get("b").unwrap().to_string(),
-            Version::parse("2.1.0").unwrap().to_string()
-        );
-    }
-
-    #[test]
-    fn transitive_major_bump_propagates_across_chain() {
-        let current = BTreeMap::from([
-            ("a".to_string(), Version::parse("1.0.0").unwrap()),
-            ("b".to_string(), Version::parse("1.2.0").unwrap()),
-            ("c".to_string(), Version::parse("3.4.5").unwrap()),
-        ]);
-        let dependencies = BTreeMap::from([
-            ("b".to_string(), vec!["a".to_string()]),
-            ("c".to_string(), vec!["b".to_string()]),
-        ]);
-        let mut planned = BTreeMap::from([("a".to_string(), Version::parse("2.0.0").unwrap())]);
-
-        let forced = apply_transitive_bump_policy(&current, &dependencies, &mut planned);
-
-        assert_eq!(forced, 2);
-        assert_eq!(planned.get("b").unwrap().to_string(), "2.0.0");
-        assert_eq!(planned.get("c").unwrap().to_string(), "4.0.0");
-    }
-
-    #[test]
-    fn existing_higher_bump_is_not_downgraded() {
-        let current = BTreeMap::from([
-            ("a".to_string(), Version::parse("1.0.0").unwrap()),
-            ("b".to_string(), Version::parse("1.0.0").unwrap()),
-        ]);
-        let dependencies = BTreeMap::from([("b".to_string(), vec!["a".to_string()])]);
-        let mut planned = BTreeMap::from([
-            ("a".to_string(), Version::parse("1.0.1").unwrap()),
-            ("b".to_string(), Version::parse("2.0.0").unwrap()),
-        ]);
-
-        let forced = apply_transitive_bump_policy(&current, &dependencies, &mut planned);
-
-        assert_eq!(forced, 0);
-        assert_eq!(planned.get("b").unwrap().to_string(), "2.0.0");
-    }
-
-    #[test]
-    fn bump_classifier_ignores_prerelease_for_comparison() {
-        let current = Version::parse("1.2.3-rc.4").unwrap();
-        let next = Version::parse("1.2.4-rc.1").unwrap();
-        let kind = classify_version_bump(&current, &next);
-        assert_eq!(kind, VersionBumpKind::Patch);
-    }
-
-    #[test]
-    fn bump_version_resets_components() {
-        let current = Version::parse("4.5.6-rc.3").unwrap();
-        assert_eq!(
-            bump_version(&current, VersionBumpKind::Minor).to_string(),
-            "4.6.0"
-        );
-        assert_eq!(
-            bump_version(&current, VersionBumpKind::Major).to_string(),
-            "5.0.0"
-        );
-    }
-}
+#[path = "release_plz_tests.rs"]
+mod tests;

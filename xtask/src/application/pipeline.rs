@@ -6,6 +6,7 @@ use tracing::info;
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_pr::GitHubPrClient;
 use crate::adapters::release_plz::ReleasePlzAdapter;
+use crate::application::pipeline_ops::ReleaseEngine as _;
 use crate::application::prepare::handle_prepare;
 use crate::application::publish::handle_publish;
 use crate::application::submit::{SubmitArgs, handle_submit};
@@ -46,7 +47,7 @@ impl ReleasePipeline {
 
     /// Computes release versions and returns a report.
     pub async fn compute_versions(&self, ctx: ComputeVersionsContext) -> Result<VersionsReport> {
-        let report = self.release_engine.versions(&ctx).await?;
+        let report = self.release_engine.compute_versions(&ctx).await?;
         info!(
             mode=?report.mode,
             current_commit=%report.current_commit,
