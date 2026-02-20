@@ -3,7 +3,7 @@ use crate::domain::types::{AuthContext, CommonContext, PublishContext, ReleaseMo
 
 use super::*;
 
-fn test_publish_ctx(mode: ReleaseMode, dry_run: bool) -> PublishContext {
+fn test_publish_ctx(mode: ReleaseMode, no_artifacts: bool) -> PublishContext {
     PublishContext {
         common: CommonContext {
             mode,
@@ -16,7 +16,7 @@ fn test_publish_ctx(mode: ReleaseMode, dry_run: bool) -> PublishContext {
         },
         rc_branch_prefix: "lumina/release-plz-rc".to_string(),
         final_branch_prefix: "lumina/release-plz-final".to_string(),
-        dry_run,
+        no_artifacts,
     }
 }
 
@@ -40,7 +40,7 @@ async fn publish_rc_with_releases_reports_published() {
         engine_calls[0],
         EngineCall::Publish {
             mode: ReleaseMode::Rc,
-            dry_run: false,
+            no_artifacts: false,
         }
     );
 }
@@ -69,7 +69,7 @@ async fn publish_null_payload_reports_not_published() {
 }
 
 #[tokio::test]
-async fn publish_dry_run_passes_dry_run_flag() {
+async fn publish_no_artifacts_passes_flag() {
     let engine = MockReleaseEngine::new().with_publish_payload(serde_json::json!([]));
 
     handle_publish(&engine, test_publish_ctx(ReleaseMode::Rc, true))
@@ -81,7 +81,7 @@ async fn publish_dry_run_passes_dry_run_flag() {
         engine_calls[0],
         EngineCall::Publish {
             mode: ReleaseMode::Rc,
-            dry_run: true,
+            no_artifacts: true,
         }
     );
 }

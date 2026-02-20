@@ -282,7 +282,7 @@ impl ReleasePlzAdapter {
         info!(
             mode=?ctx.common.mode,
             default_branch=%ctx.common.default_branch,
-            dry_run=ctx.dry_run,
+            no_artifacts=ctx.no_artifacts,
             workspace_root=%self.workspace_root.display(),
             has_release_plz_token=ctx.common.auth.release_plz_token.is_some(),
             has_github_token=ctx.common.auth.github_token.is_some(),
@@ -297,7 +297,7 @@ impl ReleasePlzAdapter {
 
         let mut request = release_plz_core::ReleaseRequest::new(metadata)
             .with_release_always(false)
-            .with_dry_run(ctx.dry_run)
+            .with_dry_run(ctx.no_artifacts)
             .with_branch_prefix(Some(match ctx.common.mode {
                 ReleaseMode::Rc => ctx.rc_branch_prefix.clone(),
                 ReleaseMode::Final => ctx.final_branch_prefix.clone(),

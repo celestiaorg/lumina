@@ -33,7 +33,7 @@ pub struct PublishContext {
     pub common: CommonContext,
     pub rc_branch_prefix: String,
     pub final_branch_prefix: String,
-    pub dry_run: bool,
+    pub no_artifacts: bool,
 }
 
 #[derive(Debug, Clone)]

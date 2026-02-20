@@ -59,7 +59,7 @@ pub(crate) enum EngineCall {
     },
     Publish {
         mode: ReleaseMode,
-        dry_run: bool,
+        no_artifacts: bool,
     },
 }
 
@@ -328,7 +328,7 @@ impl ReleaseEngine for MockReleaseEngine {
     async fn publish(&self, ctx: &PublishContext) -> Result<serde_json::Value> {
         self.calls.borrow_mut().push(EngineCall::Publish {
             mode: ctx.common.mode,
-            dry_run: ctx.dry_run,
+            no_artifacts: ctx.no_artifacts,
         });
         Ok(self
             .publish_results

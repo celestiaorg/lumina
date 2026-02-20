@@ -58,14 +58,8 @@ pub struct GhaReleasePlzArgs {
     #[arg(long, help = "Write normalized contract fields to GITHUB_OUTPUT")]
     pub gha_output: bool,
 
-    #[arg(long, help = "Write full normalized contract as JSON file")]
-    pub json_out: Option<std::path::PathBuf>,
-
-    #[arg(
-        long,
-        help = "Dry-run: keep release flow decision, but run publish path in no-op mode"
-    )]
-    pub dry_run: bool,
+    #[arg(long, help = "Skip publishing artifacts (crates, GitHub releases)")]
+    pub no_artifacts: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -84,8 +78,8 @@ pub struct GhaNpmUpdatePrArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct GhaNpmPublishArgs {
-    #[arg(long, help = "Dry-run: do not publish npm artifacts")]
-    pub dry_run: bool,
+    #[arg(long, help = "Skip publishing npm artifacts")]
+    pub no_artifacts: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -96,9 +90,6 @@ pub struct GhaUniffiReleaseArgs {
     #[arg(long, help = "Write uniffi tag/files outputs to GITHUB_OUTPUT")]
     pub gha_output: bool,
 
-    #[arg(
-        long,
-        help = "Dry-run: skip uniffi build and release upload preparation"
-    )]
-    pub dry_run: bool,
+    #[arg(long, help = "Skip uniffi build and release upload preparation")]
+    pub no_artifacts: bool,
 }

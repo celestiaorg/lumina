@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -24,8 +24,7 @@ pub struct GhaReleasePlzArgs {
     pub rc_branch_prefix: String,
     pub final_branch_prefix: String,
     pub gha_output: bool,
-    pub json_out: Option<PathBuf>,
-    pub dry_run: bool,
+    pub no_artifacts: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -36,14 +35,14 @@ pub struct GhaNpmUpdatePrArgs {
 
 #[derive(Debug, Clone)]
 pub struct GhaNpmPublishArgs {
-    pub dry_run: bool,
+    pub no_artifacts: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct GhaUniffiReleaseArgs {
     pub releases_json: String,
     pub gha_output: bool,
-    pub dry_run: bool,
+    pub no_artifacts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +114,7 @@ pub async fn handle_gha_release_plz(
                     },
                     rc_branch_prefix: args.rc_branch_prefix.clone(),
                     final_branch_prefix: args.final_branch_prefix.clone(),
-                    dry_run: args.dry_run,
+                    no_artifacts: args.no_artifacts,
                 })
                 .await?;
             contract_from_publish(&report)
@@ -124,10 +123,6 @@ pub async fn handle_gha_release_plz(
 
     if args.gha_output {
         write_contract_to_gha_output(&contract)?;
-    }
-
-    if let Some(path) = args.json_out {
-        write_json_file(&path, &contract)?;
     }
 
     Ok(contract)
@@ -216,8 +211,8 @@ pub fn handle_gha_npm_publish(args: GhaNpmPublishArgs) -> Result<()> {
 }
 
 fn handle_gha_npm_publish_impl(args: GhaNpmPublishArgs, ops: &dyn Ops) -> Result<()> {
-    if args.dry_run {
-        info!("gha/npm-publish: dry-run enabled, skipping npm publish");
+    if args.no_artifacts {
+        info!("gha/npm-publish: --no-artifacts enabled, skipping npm publish");
         return Ok(());
     }
 
@@ -289,8 +284,8 @@ pub fn handle_gha_uniffi_release(args: GhaUniffiReleaseArgs) -> Result<()> {
 }
 
 fn handle_gha_uniffi_release_impl(args: GhaUniffiReleaseArgs, ops: &dyn Ops) -> Result<()> {
-    if args.dry_run {
-        info!("gha/uniffi-release: dry-run enabled, skipping uniffi build/release preparation");
+    if args.no_artifacts {
+        info!("gha/uniffi-release: --no-artifacts enabled, skipping uniffi build/release preparation");
         return Ok(());
     }
 
@@ -472,25 +467,6 @@ fn write_contract_to_gha_output(contract: &ReleaseContract) -> Result<()> {
     Ok(())
 }
 
-fn write_json_file(path: &Path, payload: &ReleaseContract) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create output directory for release contract: {}",
-                parent.display()
-            )
-        })?;
-    }
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(payload).context("failed to serialize release contract")?,
-    )
-    .with_context(|| format!("failed to write release contract JSON: {}", path.display()))?;
-    Ok(())
-}
-
 fn extract_rc_suffix(version: &str) -> Option<&str> {
     let idx = version.rfind("-rc.")?;
     let suffix = &version[idx..];
@@ -576,12 +552,14 @@ fn command_display(program: &str, args: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
     use super::*;
     use crate::application::gha_mock::{Call, MockOps};
     use crate::domain::types::{
         BranchState, PlannedVersion, PrepareReport, SubmitReport, VersionsReport,
     };
-    use std::sync::Mutex;
 
     // ── Pure function tests ──────────────────────────────────────────────
 
@@ -1056,9 +1034,9 @@ mod tests {
     // ── npm-publish handler tests ────────────────────────────────────────
 
     #[test]
-    fn npm_publish_dry_run() {
+    fn npm_publish_no_artifacts() {
         let ops = MockOps::new();
-        let args = GhaNpmPublishArgs { dry_run: true };
+        let args = GhaNpmPublishArgs { no_artifacts: true };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
         ops.assert_sequence(&[]);
     }
@@ -1070,7 +1048,7 @@ mod tests {
             .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
             .on_cmd_success("npm view", true);
 
-        let args = GhaNpmPublishArgs { dry_run: false };
+        let args = GhaNpmPublishArgs { no_artifacts: false };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
         // Early return after npm view confirms version exists
@@ -1088,7 +1066,7 @@ mod tests {
             .on_cmd("npm pkg set", "")
             .on_cmd("npm publish", "");
 
-        let args = GhaNpmPublishArgs { dry_run: false };
+        let args = GhaNpmPublishArgs { no_artifacts: false };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
         ops.assert_sequence(&[
@@ -1139,7 +1117,7 @@ mod tests {
             .on_cmd("npm pkg set", "")
             .on_cmd("npm publish", "");
 
-        let args = GhaNpmPublishArgs { dry_run: false };
+        let args = GhaNpmPublishArgs { no_artifacts: false };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
         ops.assert_sequence(&[
@@ -1195,7 +1173,7 @@ mod tests {
             .on_cmd("npm pkg set", "")
             .on_cmd("npm publish", "");
 
-        let args = GhaNpmPublishArgs { dry_run: false };
+        let args = GhaNpmPublishArgs { no_artifacts: false };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
         ops.assert_sequence(&[
@@ -1235,12 +1213,12 @@ mod tests {
     }
 
     #[test]
-    fn uniffi_release_dry_run() {
+    fn uniffi_release_no_artifacts() {
         let ops = MockOps::new();
         let args = GhaUniffiReleaseArgs {
             releases_json: "[]".to_string(),
             gha_output: false,
-            dry_run: true,
+            no_artifacts: true,
         };
         handle_gha_uniffi_release_impl(args, &ops).unwrap();
         ops.assert_sequence(&[]);
@@ -1258,7 +1236,7 @@ mod tests {
         let args = GhaUniffiReleaseArgs {
             releases_json: uniffi_releases_json(),
             gha_output: true,
-            dry_run: false,
+            no_artifacts: false,
         };
         handle_gha_uniffi_release_impl(args, &ops).unwrap();
 
@@ -1294,7 +1272,7 @@ mod tests {
         let args = GhaUniffiReleaseArgs {
             releases_json: uniffi_releases_json(),
             gha_output: false,
-            dry_run: false,
+            no_artifacts: false,
         };
         handle_gha_uniffi_release_impl(args, &ops).unwrap();
 
@@ -1315,7 +1293,7 @@ mod tests {
         let args = GhaUniffiReleaseArgs {
             releases_json: r#"[{"package_name":"lumina-node","tag":"v1.0.0"}]"#.to_string(),
             gha_output: false,
-            dry_run: false,
+            no_artifacts: false,
         };
         assert!(handle_gha_uniffi_release_impl(args, &ops).is_err());
     }
@@ -1326,7 +1304,7 @@ mod tests {
         let args = GhaUniffiReleaseArgs {
             releases_json: "not json".to_string(),
             gha_output: false,
-            dry_run: false,
+            no_artifacts: false,
         };
         assert!(handle_gha_uniffi_release_impl(args, &ops).is_err());
     }
