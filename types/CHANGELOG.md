@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0](https://github.com/celestiaorg/lumina/compare/celestia-types-v0.20.0...celestia-types-v0.21.0) - 2026-02-20
+
+### Added
+
+- *(rpc)* [**breaking**] add server trait to rpc crate ([#890](https://github.com/celestiaorg/lumina/pull/890))
+- add javascript in browser test suite ([#882](https://github.com/celestiaorg/lumina/pull/882))
+- tx client v2 ([#873](https://github.com/celestiaorg/lumina/pull/873))
+
 ## [0.20.0](https://github.com/celestiaorg/lumina/compare/celestia-types-v0.19.0...celestia-types-v0.20.0) - 2026-01-27
 
 ### Fixed
