@@ -9,7 +9,8 @@ use crate::application::gha::{
     handle_gha_uniffi_release,
 };
 use crate::application::pipeline::ReleasePipeline;
-use crate::interface::cli::{Cli, Commands, GhaCommands};
+use crate::domain::types::ReleaseMode;
+use crate::interface::cli::{Cli, CliReleaseMode, Commands, GhaCommands};
 use crate::interface::json_output::maybe_print_json;
 
 /// Parses CLI args, dispatches command handlers, and prints optional JSON reports.
@@ -34,6 +35,10 @@ pub async fn run() -> Result<()> {
                 let contract = handle_gha_release_plz(
                     &pipeline,
                     AppGhaReleasePlzArgs {
+                        mode: match cmd.mode {
+                            CliReleaseMode::Rc => ReleaseMode::Rc,
+                            CliReleaseMode::Final => ReleaseMode::Final,
+                        },
                         compare_branch: cmd.compare_branch,
                         default_branch: cmd.default_branch,
                         rc_branch_prefix: cmd.rc_branch_prefix,

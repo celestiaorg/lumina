@@ -29,8 +29,17 @@ pub enum GhaCommands {
     UniffiRelease(GhaUniffiReleaseArgs),
 }
 
+#[derive(Debug, Clone, clap::ValueEnum, Copy)]
+pub enum CliReleaseMode {
+    Rc,
+    Final,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct GhaReleasePlzArgs {
+    #[arg(long, default_value = "rc", help = "Release mode (rc or final)")]
+    pub mode: CliReleaseMode,
+
     #[arg(
         long,
         help = "Branch to compare against for release planning and as target branch for release PRs"

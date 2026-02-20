@@ -18,6 +18,7 @@ use crate::domain::types::{
 
 #[derive(Debug, Clone)]
 pub struct GhaReleasePlzArgs {
+    pub mode: ReleaseMode,
     pub compare_branch: Option<String>,
     pub default_branch: String,
     pub rc_branch_prefix: String,
@@ -82,7 +83,7 @@ pub async fn handle_gha_release_plz(
     args: GhaReleasePlzArgs,
 ) -> Result<ReleaseContract> {
     let event_name = std::env::var("GITHUB_EVENT_NAME").unwrap_or_else(|_| "push".to_string());
-    let cmd = release_command(&event_name)?;
+    let cmd = release_command(&event_name, args.mode)?;
     let branch = args
         .compare_branch
         .clone()
@@ -354,9 +355,9 @@ fn handle_gha_uniffi_release_impl(args: GhaUniffiReleaseArgs, ops: &dyn Ops) -> 
     Ok(())
 }
 
-fn release_command(event_name: &str) -> Result<ReleaseDriverDecision> {
+fn release_command(event_name: &str, mode: ReleaseMode) -> Result<ReleaseDriverDecision> {
     if event_name == "workflow_dispatch" {
-        return Ok(ReleaseDriverDecision::Execute(ReleaseMode::Final));
+        return Ok(ReleaseDriverDecision::Execute(mode));
     }
     if event_name != "push" {
         warn!(
@@ -366,6 +367,7 @@ fn release_command(event_name: &str) -> Result<ReleaseDriverDecision> {
         return Ok(ReleaseDriverDecision::Execute(ReleaseMode::Rc));
     }
 
+    // Push events: execute RC or publish (based on commit message).
     let commit_message = push_head_commit_message().unwrap_or_default();
     let commit_message_lc = commit_message.to_ascii_lowercase();
     if !commit_message_lc.contains(RELEASE_PR_TITLE_PREFIX) {
@@ -667,8 +669,17 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn release_command_workflow_dispatch() {
-        let result = release_command("workflow_dispatch").unwrap();
+    fn release_command_workflow_dispatch_rc() {
+        let result = release_command("workflow_dispatch", ReleaseMode::Rc).unwrap();
+        assert!(matches!(
+            result,
+            ReleaseDriverDecision::Execute(ReleaseMode::Rc)
+        ));
+    }
+
+    #[test]
+    fn release_command_workflow_dispatch_final() {
+        let result = release_command("workflow_dispatch", ReleaseMode::Final).unwrap();
         assert!(matches!(
             result,
             ReleaseDriverDecision::Execute(ReleaseMode::Final)
@@ -677,7 +688,7 @@ mod tests {
 
     #[test]
     fn release_command_unknown_event() {
-        let result = release_command("pull_request").unwrap();
+        let result = release_command("pull_request", ReleaseMode::Rc).unwrap();
         assert!(matches!(
             result,
             ReleaseDriverDecision::Execute(ReleaseMode::Rc)
@@ -692,7 +703,7 @@ mod tests {
             std::env::remove_var("GITHUB_HEAD_COMMIT_MESSAGE");
             std::env::remove_var("GITHUB_EVENT_PATH");
         }
-        let result = release_command("push").unwrap();
+        let result = release_command("push", ReleaseMode::Rc).unwrap();
         assert!(matches!(
             result,
             ReleaseDriverDecision::Execute(ReleaseMode::Rc)
@@ -706,7 +717,7 @@ mod tests {
         unsafe {
             std::env::set_var("GITHUB_HEAD_COMMIT_MESSAGE", RELEASE_PR_TITLE_RC);
         }
-        let result = release_command("push").unwrap();
+        let result = release_command("push", ReleaseMode::Rc).unwrap();
         unsafe {
             std::env::remove_var("GITHUB_HEAD_COMMIT_MESSAGE");
         }
@@ -723,7 +734,7 @@ mod tests {
         unsafe {
             std::env::set_var("GITHUB_HEAD_COMMIT_MESSAGE", "chore: test release final");
         }
-        let result = release_command("push").unwrap();
+        let result = release_command("push", ReleaseMode::Rc).unwrap();
         unsafe {
             std::env::remove_var("GITHUB_HEAD_COMMIT_MESSAGE");
         }

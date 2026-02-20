@@ -8,6 +8,15 @@ on:
   push:
     branches: [ mcrakhman/release-test-rc ]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Release mode"
+        required: true
+        default: "rc"
+        type: choice
+        options:
+          - rc
+          - final
 
 jobs:
   release-plz:
@@ -42,10 +51,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           RUST_LOG: info
+          INPUT_MODE: ${{ inputs.mode || 'rc' }}
         run: |
           set -euo pipefail
 
           cargo xtask gha release-plz \
+            --mode "$INPUT_MODE" \
             --gha-output \
             --json-out xtask_release_contract.json \
             --compare-branch "mcrakhman/release-test-rc" \
