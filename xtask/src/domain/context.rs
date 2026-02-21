@@ -12,15 +12,8 @@ pub struct BranchContext {
     pub skip_pr: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct ComputeVersionsContext {
-    pub common: CommonContext,
-}
-
-#[derive(Debug, Clone)]
-pub struct PrepareContext {
-    pub common: CommonContext,
-}
+/// Alias for prepare stage (uses CommonContext directly).
+pub type PrepareContext = CommonContext;
 
 #[derive(Debug, Clone)]
 pub struct SubmitContext {
@@ -43,16 +36,8 @@ pub struct ExecuteContext {
 }
 
 impl ExecuteContext {
-    pub fn to_compute_versions_context(&self) -> ComputeVersionsContext {
-        ComputeVersionsContext {
-            common: self.common.clone(),
-        }
-    }
-
     pub fn to_prepare_context(&self) -> PrepareContext {
-        PrepareContext {
-            common: self.common.clone(),
-        }
+        self.common.clone()
     }
 
     pub fn to_submit_context(&self) -> SubmitContext {
@@ -64,7 +49,6 @@ impl ExecuteContext {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AuthContext {
     pub release_plz_token: Option<String>,
     pub github_token: Option<String>,

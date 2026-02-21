@@ -1,7 +1,6 @@
 use anyhow::Result;
 use tracing::info;
 
-use crate::adapters::github_output::write_github_output;
 use crate::application::pipeline_ops::{GitRepo, PrClient};
 use crate::application::prepare::make_release_branch_name;
 use crate::domain::model::{RELEASE_COMMIT_MESSAGE_FINAL, RELEASE_COMMIT_MESSAGE_RC};
@@ -71,11 +70,6 @@ pub async fn handle_submit(
         .await?
         .map(|pr| pr.url);
 
-    // Expose branch/PR data for GitHub Actions follow-up steps.
-    write_github_output("release_branch", &branch_name)?;
-    if let Some(url) = &pr_url {
-        write_github_output("release_pr_url", url)?;
-    }
     info!(branch=%branch_name, pushed=true, pr_url=?pr_url, "submit: completed");
 
     Ok(SubmitReport {

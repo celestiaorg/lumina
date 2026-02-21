@@ -281,7 +281,9 @@ impl Git2Repo {
         let mut callbacks = auth_callbacks(repo.config().ok());
         callbacks.push_update_reference(|reference, status| {
             if let Some(err) = status {
-                eprintln!("push reference {reference} failed: {err}");
+                return Err(git2::Error::from_str(&format!(
+                    "remote rejected push for reference {reference}: {err}"
+                )));
             }
             Ok(())
         });
