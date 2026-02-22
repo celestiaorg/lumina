@@ -1,6 +1,6 @@
 [package]
 name = "lumina-node-uniffi"
-version = "0.5.3"
+version = "0.5.4-rc.1"
 edition.workspace = true
 license = "Apache-2.0"
 description = "Mobile bindings for Lumina node"
