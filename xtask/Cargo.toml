@@ -11,7 +11,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-release_plz_core = { git = "https://github.com/mcrakhman/release-plz", branch = "mcrakhman/release-plz-rc", commit = "a6386259b1f8ad108f79256652dff9f2536836b6" }
+release_plz_core = { git = "https://github.com/mcrakhman/release-plz", branch = "mcrakhman/release-plz-rc", commit = "8373b7960b7d51c27cc4b2e3c917c7fbf087bc34" }
 git2 = "0.20.2"
 time = { workspace = true, features = ["formatting", "macros", "std"] }
 tracing.workspace = true
