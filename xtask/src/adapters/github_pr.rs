@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use tracing::info;
 
-use crate::adapters::git_refs::remote_origin_url;
+use crate::adapters::git_refs::parse_remote_repo_url;
 use crate::domain::model::{RELEASE_PR_TITLE_FINAL, RELEASE_PR_TITLE_PREFIX, RELEASE_PR_TITLE_RC};
 use crate::domain::types::{AuthContext, PullRequestInfo, ReleaseMode};
 
@@ -69,7 +69,7 @@ impl GitHubPrClient {
 
     /// Resolves repository owner/name from `origin` URL for API operations.
     fn remote_repo_url(&self) -> Result<Option<release_plz_core::RepoUrl>> {
-        remote_repo_url(&self.workspace_root)
+        parse_remote_repo_url(&self.workspace_root)
     }
 
     /// Closes all open release PRs except optional branch to keep.
@@ -180,15 +180,4 @@ impl GitHubPrClient {
 fn is_release_pr_candidate(pr: &release_plz_core::GitPr) -> bool {
     let title = pr.title.to_ascii_lowercase();
     title.contains(RELEASE_PR_TITLE_PREFIX)
-}
-
-/// Parses origin URL into release-plz repository URL model.
-fn remote_repo_url(workspace_root: &Path) -> Result<Option<release_plz_core::RepoUrl>> {
-    let Some(remote) = remote_origin_url(workspace_root)? else {
-        return Ok(None);
-    };
-
-    let repo_url = release_plz_core::RepoUrl::new(&remote)
-        .with_context(|| format!("failed to parse repository URL from `{remote}`"))?;
-    Ok(Some(repo_url))
 }

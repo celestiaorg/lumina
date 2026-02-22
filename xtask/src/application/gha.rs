@@ -1,24 +1,31 @@
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::adapters::github_output::{write_github_output, write_github_output_multiline};
 use crate::application::gha_ops::{Ops, RealOps};
 use crate::application::pipeline::{ExecuteArgs, ReleasePipeline};
-use crate::domain::model::{RELEASE_PR_TITLE_PREFIX, RELEASE_PR_TITLE_RC};
+use crate::domain::model::{RELEASE_PR_TITLE_FINAL, RELEASE_PR_TITLE_RC};
 use crate::domain::types::{
     AuthContext, BranchContext, CommonContext, ExecuteContext, ExecuteReport, PublishContext,
     ReleaseMode, ReleaseReport,
 };
 
 #[derive(Debug, Clone)]
-pub struct GhaReleasePlzArgs {
+pub struct GhaPrArgs {
     pub mode: ReleaseMode,
+    pub compare_branch: Option<String>,
+    pub default_branch: String,
+    pub gha_output: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GhaPublishArgs {
+    pub commit_msg: String,
     pub compare_branch: Option<String>,
     pub default_branch: String,
     pub rc_branch_prefix: String,
@@ -46,30 +53,35 @@ pub struct GhaUniffiReleaseArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReleaseContract {
+pub struct PrContract {
     pub pr: Value,
     pub prs_created: bool,
-    pub releases: Value,
-    pub releases_created: bool,
     pub node_rc_prefix: String,
 }
 
-impl Default for ReleaseContract {
+impl Default for PrContract {
     fn default() -> Self {
         Self {
             pr: json!({}),
             prs_created: false,
-            releases: json!([]),
-            releases_created: false,
             node_rc_prefix: String::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ReleaseDriverDecision {
-    Execute(ReleaseMode),
-    Publish(ReleaseMode),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishContract {
+    pub releases: Value,
+    pub releases_created: bool,
+}
+
+impl Default for PublishContract {
+    fn default() -> Self {
+        Self {
+            releases: json!([]),
+            releases_created: false,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,52 +89,61 @@ struct PullRequestPayload {
     head_branch: String,
 }
 
-pub async fn handle_gha_release_plz(
-    pipeline: &ReleasePipeline,
-    args: GhaReleasePlzArgs,
-) -> Result<ReleaseContract> {
-    let event_name = std::env::var("GITHUB_EVENT_NAME").unwrap_or_else(|_| "push".to_string());
-    let cmd = release_command(&event_name, args.mode)?;
+pub async fn handle_gha_pr(pipeline: &ReleasePipeline, args: GhaPrArgs) -> Result<PrContract> {
     let branch = args
         .compare_branch
         .clone()
         .unwrap_or_else(|| args.default_branch.clone());
 
-    let contract = match cmd {
-        ReleaseDriverDecision::Execute(mode) => {
-            let report = pipeline
-                .execute(ExecuteArgs {
-                    ctx: ExecuteContext {
-                        common: CommonContext {
-                            mode,
-                            default_branch: branch.clone(),
-                            auth: AuthContext::from_env(),
-                        },
-                        branch: BranchContext { skip_pr: false },
-                    },
-                })
-                .await?;
-            contract_from_execute(&report)
-        }
-        ReleaseDriverDecision::Publish(mode) => {
-            let report = pipeline
-                .publish(PublishContext {
-                    common: CommonContext {
-                        mode,
-                        default_branch: branch.clone(),
-                        auth: AuthContext::from_env(),
-                    },
-                    rc_branch_prefix: args.rc_branch_prefix.clone(),
-                    final_branch_prefix: args.final_branch_prefix.clone(),
-                    no_artifacts: args.no_artifacts,
-                })
-                .await?;
-            contract_from_publish(&report)
-        }
-    };
+    let report = pipeline
+        .execute(ExecuteArgs {
+            ctx: ExecuteContext {
+                common: CommonContext {
+                    mode: args.mode,
+                    default_branch: branch,
+                    auth: AuthContext::from_env(),
+                },
+                branch: BranchContext { skip_pr: false },
+            },
+        })
+        .await?;
+
+    let contract = contract_from_execute(&report);
 
     if args.gha_output {
-        write_contract_to_gha_output(&contract)?;
+        write_pr_contract_to_gha_output(&contract)?;
+    }
+
+    Ok(contract)
+}
+
+pub async fn handle_gha_publish(
+    pipeline: &ReleasePipeline,
+    args: GhaPublishArgs,
+) -> Result<PublishContract> {
+    let mode = parse_release_mode_from_commit(&args.commit_msg)?;
+    let branch = args
+        .compare_branch
+        .clone()
+        .unwrap_or_else(|| args.default_branch.clone());
+
+    let report = pipeline
+        .publish(PublishContext {
+            common: CommonContext {
+                mode,
+                default_branch: branch,
+                auth: AuthContext::from_env(),
+            },
+            rc_branch_prefix: args.rc_branch_prefix,
+            final_branch_prefix: args.final_branch_prefix,
+            no_artifacts: args.no_artifacts,
+        })
+        .await?;
+
+    let contract = contract_from_release(&report);
+
+    if args.gha_output {
+        write_publish_contract_to_gha_output(&contract)?;
     }
 
     Ok(contract)
@@ -141,7 +162,7 @@ fn handle_gha_npm_update_pr_impl(args: GhaNpmUpdatePrArgs, ops: &dyn Ops) -> Res
 
     ops.git_checkout(&pr_payload.head_branch)?;
 
-    let node_wasm_version = cargo_manifest_version(ops, "node-wasm/Cargo.toml")?;
+    let node_wasm_version = cargo_manifest_version(ops, Path::new("node-wasm/Cargo.toml"))?;
     let target_node_version = if args.node_rc_prefix.trim().is_empty() {
         node_wasm_version.clone()
     } else {
@@ -216,7 +237,7 @@ fn handle_gha_npm_publish_impl(args: GhaNpmPublishArgs, ops: &dyn Ops) -> Result
         return Ok(());
     }
 
-    let local_version = cargo_manifest_version(ops, "node-wasm/Cargo.toml")?;
+    let local_version = cargo_manifest_version(ops, Path::new("node-wasm/Cargo.toml"))?;
     let npm_node_version = package_json_version(ops, Path::new("node-wasm/js/package.json"))?;
     if npm_version_exists(ops, "lumina-node-wasm", &local_version)? {
         info!(
@@ -226,6 +247,10 @@ fn handle_gha_npm_publish_impl(args: GhaNpmPublishArgs, ops: &dyn Ops) -> Result
         return Ok(());
     }
 
+    // Determine RC channel from package.json version (which reflects the npm-update-pr step).
+    // The Cargo.toml version (local_version) is used for the npm existence check above, but
+    // package.json is the authoritative source for npm publishing since npm-update-pr may
+    // apply an RC suffix independently of the Cargo version.
     let is_rc = extract_rc_suffix(&npm_node_version).is_some();
     info!(
         version = %local_version,
@@ -352,82 +377,25 @@ fn handle_gha_uniffi_release_impl(args: GhaUniffiReleaseArgs, ops: &dyn Ops) -> 
     Ok(())
 }
 
-fn release_command(event_name: &str, mode: ReleaseMode) -> Result<ReleaseDriverDecision> {
-    if event_name == "workflow_dispatch" {
-        return Ok(ReleaseDriverDecision::Execute(mode));
-    }
-    if event_name != "push" {
-        warn!(
-            event = %event_name,
-            "gha/release-plz: unsupported event type, defaulting to execute rc"
-        );
-        return Ok(ReleaseDriverDecision::Execute(ReleaseMode::Rc));
-    }
-
-    // Push events: execute RC or publish (based on commit message).
-    let commit_message = push_head_commit_message().unwrap_or_default();
-    let commit_message_lc = commit_message.to_ascii_lowercase();
-    if !commit_message_lc.contains(RELEASE_PR_TITLE_PREFIX) {
-        return Ok(ReleaseDriverDecision::Execute(ReleaseMode::Rc));
-    }
-    if commit_message_lc.contains(RELEASE_PR_TITLE_RC) {
-        return Ok(ReleaseDriverDecision::Publish(ReleaseMode::Rc));
-    }
-    Ok(ReleaseDriverDecision::Publish(ReleaseMode::Final))
-}
-
-fn push_head_commit_message() -> Result<String> {
-    if let Ok(value) = std::env::var("GITHUB_HEAD_COMMIT_MESSAGE") {
-        return Ok(value);
-    }
-
-    let event_path = std::env::var("GITHUB_EVENT_PATH")
-        .context("missing GITHUB_EVENT_PATH for push event classification")?;
-    let event_payload: Value = serde_json::from_str(
-        &fs::read_to_string(&event_path)
-            .with_context(|| format!("failed reading GitHub event payload: {event_path}"))?,
-    )
-    .with_context(|| format!("failed parsing GitHub event payload JSON: {event_path}"))?;
-
-    if let Some(message) = event_payload
-        .get("head_commit")
-        .and_then(|head_commit| head_commit.get("message"))
-        .and_then(Value::as_str)
-    {
-        return Ok(message.to_string());
-    }
-
-    if let Some(message) = event_payload
-        .get("commits")
-        .and_then(Value::as_array)
-        .and_then(|commits| commits.last())
-        .and_then(|commit| commit.get("message"))
-        .and_then(Value::as_str)
-    {
-        return Ok(message.to_string());
-    }
-
-    Ok(String::new())
-}
-
-fn contract_from_execute(report: &ExecuteReport) -> ReleaseContract {
-    let mut contract = ReleaseContract::default();
+fn contract_from_execute(report: &ExecuteReport) -> PrContract {
+    let mut contract = PrContract::default();
     if !report.submit.branch_name.trim().is_empty() {
-        contract.prs_created = true;
         contract.pr = json!({
             "head_branch": report.submit.branch_name,
             "html_url": report.submit.pr_url.clone().unwrap_or_default(),
         });
+        contract.prs_created = report.submit.pr_url.is_some();
     }
 
-    let node_next_effective = report
-        .versions
-        .planned_versions
+    // Extract RC suffix from lumina-node's updated version if present.
+    let node_version = report
+        .prepare
+        .updated_packages
         .iter()
-        .find(|plan| plan.package == "lumina-node")
-        .map(|plan| plan.next_effective.as_str());
-    if let Some(next_effective) = node_next_effective
-        && let Some(rc_suffix) = extract_rc_suffix(next_effective)
+        .find(|pkg| pkg.package == "lumina-node")
+        .map(|pkg| pkg.version.as_str());
+    if let Some(version) = node_version
+        && let Some(rc_suffix) = extract_rc_suffix(version)
     {
         contract.node_rc_prefix = rc_suffix.to_string();
     }
@@ -435,18 +403,16 @@ fn contract_from_execute(report: &ExecuteReport) -> ReleaseContract {
     contract
 }
 
-fn contract_from_publish(report: &ReleaseReport) -> ReleaseContract {
-    let mut contract = ReleaseContract::default();
-    let releases = report.payload.as_array().cloned().unwrap_or_else(Vec::new);
+fn contract_from_release(report: &ReleaseReport) -> PublishContract {
+    let mut contract = PublishContract::default();
+    let releases = report.payload.as_array().cloned().unwrap_or_default();
     contract.releases_created = !releases.is_empty();
     contract.releases = Value::Array(releases);
     contract
 }
 
-fn write_contract_to_gha_output(contract: &ReleaseContract) -> Result<()> {
+fn write_pr_contract_to_gha_output(contract: &PrContract) -> Result<()> {
     let pr_json = serde_json::to_string(&contract.pr).context("failed to serialize `pr` output")?;
-    let releases_json = serde_json::to_string(&contract.releases)
-        .context("failed to serialize `releases` output")?;
     write_github_output_multiline("pr", &pr_json)?;
     write_github_output(
         "prs_created",
@@ -456,6 +422,13 @@ fn write_contract_to_gha_output(contract: &ReleaseContract) -> Result<()> {
             "false"
         },
     )?;
+    write_github_output("node_rc_prefix", &contract.node_rc_prefix)?;
+    Ok(())
+}
+
+fn write_publish_contract_to_gha_output(contract: &PublishContract) -> Result<()> {
+    let releases_json = serde_json::to_string(&contract.releases)
+        .context("failed to serialize `releases` output")?;
     write_github_output_multiline("releases", &releases_json)?;
     write_github_output(
         "releases_created",
@@ -465,8 +438,21 @@ fn write_contract_to_gha_output(contract: &ReleaseContract) -> Result<()> {
             "false"
         },
     )?;
-    write_github_output("node_rc_prefix", &contract.node_rc_prefix)?;
     Ok(())
+}
+
+fn parse_release_mode_from_commit(msg: &str) -> Result<ReleaseMode> {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains(&RELEASE_PR_TITLE_RC.to_ascii_lowercase()) {
+        Ok(ReleaseMode::Rc)
+    } else if lower.contains(&RELEASE_PR_TITLE_FINAL.to_ascii_lowercase()) {
+        Ok(ReleaseMode::Final)
+    } else {
+        bail!(
+            "could not determine release mode from commit message: {:?}",
+            msg
+        )
+    }
 }
 
 fn extract_rc_suffix(version: &str) -> Option<&str> {
@@ -504,8 +490,11 @@ fn package_json_version(ops: &dyn Ops, path: &Path) -> Result<String> {
     Ok(version.to_string())
 }
 
-fn cargo_manifest_version(ops: &dyn Ops, manifest_path: &str) -> Result<String> {
-    let output = ops.run_cmd("cargo", &["pkgid", "--manifest-path", manifest_path], None)?;
+fn cargo_manifest_version(ops: &dyn Ops, manifest_path: &Path) -> Result<String> {
+    let manifest_str = manifest_path
+        .to_str()
+        .context("manifest path is not valid UTF-8")?;
+    let output = ops.run_cmd("cargo", &["pkgid", "--manifest-path", manifest_str], None)?;
     output
         .trim()
         .rsplit('@')
@@ -555,13 +544,10 @@ fn command_display(program: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     use super::*;
     use crate::application::gha_mock::{Call, MockOps};
-    use crate::domain::types::{
-        BranchState, PlannedVersion, PrepareReport, SubmitReport, VersionsReport,
-    };
+    use crate::domain::types::{BranchState, PrepareReport, SubmitReport, UpdatedPackage};
 
     // ── Pure function tests ──────────────────────────────────────────────
 
@@ -644,109 +630,51 @@ mod tests {
         );
     }
 
-    // ── release_command tests ────────────────────────────────────────────
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // ── parse_release_mode_from_commit tests ───────────────────────────
 
     #[test]
-    fn release_command_workflow_dispatch_rc() {
-        let result = release_command("workflow_dispatch", ReleaseMode::Rc).unwrap();
-        assert!(matches!(
-            result,
-            ReleaseDriverDecision::Execute(ReleaseMode::Rc)
-        ));
+    fn parse_mode_rc_commit() {
+        let mode = parse_release_mode_from_commit("chore: release rc").unwrap();
+        assert_eq!(mode, ReleaseMode::Rc);
     }
 
     #[test]
-    fn release_command_workflow_dispatch_final() {
-        let result = release_command("workflow_dispatch", ReleaseMode::Final).unwrap();
-        assert!(matches!(
-            result,
-            ReleaseDriverDecision::Execute(ReleaseMode::Final)
-        ));
+    fn parse_mode_final_commit() {
+        let mode = parse_release_mode_from_commit("chore: release final").unwrap();
+        assert_eq!(mode, ReleaseMode::Final);
     }
 
     #[test]
-    fn release_command_unknown_event() {
-        let result = release_command("pull_request", ReleaseMode::Rc).unwrap();
-        assert!(matches!(
-            result,
-            ReleaseDriverDecision::Execute(ReleaseMode::Rc)
-        ));
+    fn parse_mode_case_insensitive() {
+        let mode = parse_release_mode_from_commit("Chore: Release RC").unwrap();
+        assert_eq!(mode, ReleaseMode::Rc);
     }
 
     #[test]
-    fn release_command_push_without_release_title() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        // SAFETY: test-only env manipulation, serialized via ENV_LOCK.
-        unsafe {
-            std::env::remove_var("GITHUB_HEAD_COMMIT_MESSAGE");
-            std::env::remove_var("GITHUB_EVENT_PATH");
-        }
-        let result = release_command("push", ReleaseMode::Rc).unwrap();
-        assert!(matches!(
-            result,
-            ReleaseDriverDecision::Execute(ReleaseMode::Rc)
-        ));
+    fn parse_mode_with_extra_text() {
+        let mode = parse_release_mode_from_commit("chore: release rc (#123)\n\nsome body").unwrap();
+        assert_eq!(mode, ReleaseMode::Rc);
     }
 
     #[test]
-    fn release_command_push_with_rc_title() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        // SAFETY: test-only env manipulation, serialized via ENV_LOCK.
-        unsafe {
-            std::env::set_var("GITHUB_HEAD_COMMIT_MESSAGE", RELEASE_PR_TITLE_RC);
-        }
-        let result = release_command("push", ReleaseMode::Rc).unwrap();
-        unsafe {
-            std::env::remove_var("GITHUB_HEAD_COMMIT_MESSAGE");
-        }
-        assert!(matches!(
-            result,
-            ReleaseDriverDecision::Publish(ReleaseMode::Rc)
-        ));
-    }
-
-    #[test]
-    fn release_command_push_with_final_title() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        // SAFETY: test-only env manipulation, serialized via ENV_LOCK.
-        unsafe {
-            std::env::set_var("GITHUB_HEAD_COMMIT_MESSAGE", "chore: test release final");
-        }
-        let result = release_command("push", ReleaseMode::Rc).unwrap();
-        unsafe {
-            std::env::remove_var("GITHUB_HEAD_COMMIT_MESSAGE");
-        }
-        assert!(matches!(
-            result,
-            ReleaseDriverDecision::Publish(ReleaseMode::Final)
-        ));
+    fn parse_mode_unknown_commit() {
+        let result = parse_release_mode_from_commit("feat: add something");
+        assert!(result.is_err());
     }
 
     // ── contract_from_execute tests ──────────────────────────────────────
 
     #[test]
-    fn contract_from_execute_with_pr_and_planned_node_version() {
+    fn contract_from_execute_with_pr_and_rc_version() {
         let report = ExecuteReport {
-            versions: VersionsReport {
-                mode: ReleaseMode::Rc,
-                previous_commit: "abc".to_string(),
-                latest_release_tag: None,
-                latest_non_rc_release_tag: None,
-                current_commit: "def".to_string(),
-                planned_versions: vec![PlannedVersion {
-                    package: "lumina-node".to_string(),
-                    current: "1.0.0".to_string(),
-                    next_effective: "1.1.0-rc.1".to_string(),
-                    publishable: true,
-                }],
-            },
             prepare: PrepareReport {
                 mode: ReleaseMode::Rc,
                 branch_name: "release/rc".to_string(),
                 branch_state: BranchState::Missing,
-                description: vec![],
+                updated_packages: vec![UpdatedPackage {
+                    package: "lumina-node".to_string(),
+                    version: "1.1.0-rc.1".to_string(),
+                }],
             },
             submit: SubmitReport {
                 mode: ReleaseMode::Rc,
@@ -769,19 +697,11 @@ mod tests {
     #[test]
     fn contract_from_execute_empty_report() {
         let report = ExecuteReport {
-            versions: VersionsReport {
-                mode: ReleaseMode::Final,
-                previous_commit: String::new(),
-                latest_release_tag: None,
-                latest_non_rc_release_tag: None,
-                current_commit: String::new(),
-                planned_versions: vec![],
-            },
             prepare: PrepareReport {
                 mode: ReleaseMode::Final,
                 branch_name: String::new(),
                 branch_state: BranchState::Missing,
-                description: vec![],
+                updated_packages: vec![],
             },
             submit: SubmitReport {
                 mode: ReleaseMode::Final,
@@ -796,10 +716,10 @@ mod tests {
         assert_eq!(contract.node_rc_prefix, "");
     }
 
-    // ── contract_from_publish tests ──────────────────────────────────────
+    // ── contract_from_release tests ──────────────────────────────────────
 
     #[test]
-    fn contract_from_publish_with_releases() {
+    fn contract_from_release_with_releases() {
         let report = ReleaseReport {
             mode: ReleaseMode::Rc,
             published: true,
@@ -807,19 +727,19 @@ mod tests {
                 {"package_name": "lumina-node", "tag": "lumina-node-v1.0.0-rc.1"}
             ]),
         };
-        let contract = contract_from_publish(&report);
+        let contract = contract_from_release(&report);
         assert!(contract.releases_created);
         assert_eq!(contract.releases.as_array().unwrap().len(), 1);
     }
 
     #[test]
-    fn contract_from_publish_empty_releases() {
+    fn contract_from_release_empty_releases() {
         let report = ReleaseReport {
             mode: ReleaseMode::Final,
             published: false,
             payload: json!([]),
         };
-        let contract = contract_from_publish(&report);
+        let contract = contract_from_release(&report);
         assert!(!contract.releases_created);
         assert_eq!(contract.releases.as_array().unwrap().len(), 0);
     }

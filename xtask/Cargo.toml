@@ -11,9 +11,8 @@ clap = { workspace = true, features = ["derive", "env"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-release_plz_core = "0.36.11"
+release_plz_core = { git = "https://github.com/mcrakhman/release-plz", branch = "mcrakhman/release-plz-rc" }
 git2 = "0.20.2"
-tempfile = "3.23.0"
 time = { workspace = true, features = ["formatting", "macros", "std"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

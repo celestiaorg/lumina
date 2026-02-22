@@ -4,32 +4,25 @@ use tracing::info;
 
 use crate::application::pipeline_ops::{GitRepo, ReleaseEngine};
 use crate::domain::model::RELEASE_PR_BRANCH_PREFIX;
-use crate::domain::types::{
-    BranchState, PrepareContext, PrepareReport, ReleaseMode, VersionsReport,
-};
+use crate::domain::types::{BranchState, PrepareContext, PrepareReport, ReleaseMode};
 
 /// Prepares release artifacts and branch state for RC/final flow.
+/// Creates a release branch, runs release-plz update, and returns the report.
 /// This does not create commits or push; submit handles that stage.
 pub async fn handle_prepare(
     git: &impl GitRepo,
     release_engine: &impl ReleaseEngine,
     ctx: PrepareContext,
-    versions: &VersionsReport,
 ) -> Result<PrepareReport> {
-    // Release flows always use canonical generated branch names.
-    let branch_name = make_release_branch_name(ctx.common.mode);
+    let branch_name = make_release_branch_name(ctx.mode);
     info!(
-        mode=?ctx.common.mode,
-        default_branch=%ctx.common.default_branch,
+        mode=?ctx.mode,
+        default_branch=%ctx.default_branch,
         branch=%branch_name,
-        current_commit=%versions.current_commit,
-        previous_commit=%versions.previous_commit,
-        latest_release_tag=?versions.latest_release_tag,
-        latest_non_rc_release_tag=?versions.latest_non_rc_release_tag,
-        "prepare: resolved initial release branch, previous commit, and current commit"
+        "prepare: creating release branch and running update"
     );
 
-    // Only allow creating a fresh release branch. Existing release branches are treated as errors.
+    // Only allow creating a fresh release branch.
     let branch_state = git.branch_state(&branch_name)?;
     if !matches!(branch_state, BranchState::Missing) {
         bail!(
@@ -37,33 +30,22 @@ pub async fn handle_prepare(
         );
     }
 
-    let mut descriptions =
-        git.create_release_branch_from_default(&branch_name, &ctx.common.default_branch)?;
+    git.create_release_branch_from_default(&branch_name, &ctx.default_branch)?;
 
-    // Regenerate versions/changelog using release-plz-backed adapter logic.
-    descriptions.extend(
-        release_engine
-            .regenerate_artifacts(
-                ctx.common.mode,
-                &ctx.common.default_branch,
-                &versions.previous_commit,
-                versions.latest_release_tag.as_deref(),
-                versions.latest_non_rc_release_tag.as_deref(),
-                &versions.planned_versions,
-            )
-            .await?,
-    );
+    // Run release-plz update — writes all artifacts (versions, changelogs, lockfile) to disk.
+    let updated_packages = release_engine.update(ctx.mode).await?;
+
     info!(
         branch=%branch_name,
-        description_items=descriptions.len(),
-        "prepare: regenerated release artifacts"
+        updated_count=updated_packages.len(),
+        "prepare: release artifacts generated"
     );
 
     Ok(PrepareReport {
-        mode: ctx.common.mode,
+        mode: ctx.mode,
         branch_name,
         branch_state,
-        description: descriptions,
+        updated_packages,
     })
 }
 
@@ -78,8 +60,7 @@ pub(crate) fn make_release_branch_name(mode: ReleaseMode) -> String {
         ReleaseMode::Rc => "rc",
         ReleaseMode::Final => "final",
     };
-    let branch = format!("{RELEASE_PR_BRANCH_PREFIX}-{timestamp}-{suffix}");
-    branch
+    format!("{RELEASE_PR_BRANCH_PREFIX}-{timestamp}-{suffix}")
 }
 
 #[cfg(test)]

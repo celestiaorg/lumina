@@ -1,8 +1,7 @@
 use anyhow::Result;
 
 use crate::domain::types::{
-    AuthContext, BranchState, ComputeVersionsContext, PlannedVersion, PublishContext,
-    PullRequestInfo, ReleaseMode, VersionsReport,
+    AuthContext, BranchState, PublishContext, PullRequestInfo, ReleaseMode, UpdatedPackage,
 };
 
 /// Trait abstracting git repository operations used by the prepare/submit pipeline stages.
@@ -36,20 +35,9 @@ pub(crate) trait PrClient {
     ) -> Result<Option<PullRequestInfo>>;
 }
 
-/// Trait abstracting release engine operations (version computation, artifact generation, publishing).
+/// Trait abstracting release engine operations (update artifacts, publishing).
 pub(crate) trait ReleaseEngine {
-    async fn compute_versions(&self, ctx: &ComputeVersionsContext) -> Result<VersionsReport>;
-
-    async fn regenerate_artifacts(
-        &self,
-        mode: ReleaseMode,
-        default_branch: &str,
-        previous_commit: &str,
-        latest_release_tag: Option<&str>,
-        latest_non_rc_release_tag: Option<&str>,
-        planned_versions: &[PlannedVersion],
-    ) -> Result<Vec<String>>;
-
+    async fn update(&self, mode: ReleaseMode) -> Result<Vec<UpdatedPackage>>;
     async fn publish(&self, ctx: &PublishContext) -> Result<serde_json::Value>;
 }
 
@@ -106,28 +94,8 @@ impl PrClient for GitHubPrClient {
 }
 
 impl ReleaseEngine for ReleasePlzAdapter {
-    async fn compute_versions(&self, ctx: &ComputeVersionsContext) -> Result<VersionsReport> {
-        self.versions(ctx).await
-    }
-
-    async fn regenerate_artifacts(
-        &self,
-        mode: ReleaseMode,
-        default_branch: &str,
-        previous_commit: &str,
-        latest_release_tag: Option<&str>,
-        latest_non_rc_release_tag: Option<&str>,
-        planned_versions: &[PlannedVersion],
-    ) -> Result<Vec<String>> {
-        self.regenerate_artifacts(
-            mode,
-            default_branch,
-            previous_commit,
-            latest_release_tag,
-            latest_non_rc_release_tag,
-            planned_versions,
-        )
-        .await
+    async fn update(&self, mode: ReleaseMode) -> Result<Vec<UpdatedPackage>> {
+        self.update(mode).await
     }
 
     async fn publish(&self, ctx: &PublishContext) -> Result<serde_json::Value> {

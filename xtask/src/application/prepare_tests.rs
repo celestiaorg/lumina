@@ -1,7 +1,6 @@
 use crate::application::pipeline_mock::{EngineCall, GitCall, MockGitRepo, MockReleaseEngine};
 use crate::domain::types::{
-    AuthContext, BranchState, CommonContext, PlannedVersion, PrepareContext, ReleaseMode,
-    VersionsReport,
+    AuthContext, BranchState, CommonContext, PrepareContext, ReleaseMode, UpdatedPackage,
 };
 
 use super::*;
@@ -14,30 +13,19 @@ fn test_auth() -> AuthContext {
     }
 }
 
-fn test_versions_report(mode: ReleaseMode) -> VersionsReport {
-    VersionsReport {
+fn test_prepare_ctx(mode: ReleaseMode) -> PrepareContext {
+    CommonContext {
         mode,
-        previous_commit: "abc123".to_string(),
-        latest_release_tag: Some("pkg-v1.0.0".to_string()),
-        latest_non_rc_release_tag: Some("pkg-v0.9.0".to_string()),
-        current_commit: "def456".to_string(),
-        planned_versions: vec![PlannedVersion {
-            package: "pkg".to_string(),
-            current: "1.0.0".to_string(),
-            next_effective: "1.0.1-rc.1".to_string(),
-            publishable: true,
-        }],
+        default_branch: "main".to_string(),
+        auth: test_auth(),
     }
 }
 
-fn test_prepare_ctx(mode: ReleaseMode) -> PrepareContext {
-    PrepareContext {
-        common: CommonContext {
-            mode,
-            default_branch: "main".to_string(),
-            auth: test_auth(),
-        },
-    }
+fn test_updated_packages() -> Vec<UpdatedPackage> {
+    vec![UpdatedPackage {
+        package: "pkg".to_string(),
+        version: "1.0.1-rc.1".to_string(),
+    }]
 }
 
 #[test]
@@ -55,15 +43,13 @@ fn branch_name_has_final_suffix_for_final_mode() {
 }
 
 #[tokio::test]
-async fn prepare_rc_checks_branch_then_creates_then_regenerates() {
+async fn prepare_rc_checks_branch_then_creates_then_updates() {
     let git = MockGitRepo::new()
         .with_branch_state(BranchState::Missing)
         .with_create_branch_descriptions(vec!["fetched origin", "created branch"]);
-    let engine =
-        MockReleaseEngine::new().with_regenerate_descriptions(vec!["regenerated artifacts"]);
-    let versions = test_versions_report(ReleaseMode::Rc);
+    let engine = MockReleaseEngine::new().with_update_result(test_updated_packages());
 
-    let report = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc), &versions)
+    let report = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc))
         .await
         .unwrap();
 
@@ -81,39 +67,32 @@ async fn prepare_rc_checks_branch_then_creates_then_regenerates() {
     assert_eq!(engine_calls.len(), 1);
     assert!(matches!(
         &engine_calls[0],
-        EngineCall::RegenerateArtifacts {
+        EngineCall::Update {
             mode: ReleaseMode::Rc,
-            previous_commit,
-            latest_release_tag: Some(tag),
-            ..
-        } if previous_commit == "abc123" && tag == "pkg-v1.0.0"
+        }
     ));
 
     assert_eq!(report.mode, ReleaseMode::Rc);
     assert!(report.branch_name.ends_with("-rc"));
     assert_eq!(report.branch_state, BranchState::Missing);
-    assert_eq!(
-        report.description,
-        vec!["fetched origin", "created branch", "regenerated artifacts"]
-    );
+    assert_eq!(report.updated_packages.len(), 1);
+    assert_eq!(report.updated_packages[0].package, "pkg");
+    assert_eq!(report.updated_packages[0].version, "1.0.1-rc.1");
 }
 
 #[tokio::test]
-async fn prepare_final_passes_correct_mode_and_tags() {
+async fn prepare_final_passes_correct_mode() {
     let git = MockGitRepo::new()
         .with_branch_state(BranchState::Missing)
         .with_create_branch_descriptions(vec!["created branch"]);
-    let engine = MockReleaseEngine::new().with_regenerate_descriptions(vec!["updated changelogs"]);
-    let versions = test_versions_report(ReleaseMode::Final);
+    let engine = MockReleaseEngine::new().with_update_result(vec![UpdatedPackage {
+        package: "pkg".to_string(),
+        version: "1.1.0".to_string(),
+    }]);
 
-    let report = handle_prepare(
-        &git,
-        &engine,
-        test_prepare_ctx(ReleaseMode::Final),
-        &versions,
-    )
-    .await
-    .unwrap();
+    let report = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Final))
+        .await
+        .unwrap();
 
     assert_eq!(report.mode, ReleaseMode::Final);
     assert!(report.branch_name.ends_with("-final"));
@@ -121,11 +100,9 @@ async fn prepare_final_passes_correct_mode_and_tags() {
     let engine_calls = engine.calls();
     assert!(matches!(
         &engine_calls[0],
-        EngineCall::RegenerateArtifacts {
+        EngineCall::Update {
             mode: ReleaseMode::Final,
-            latest_non_rc_release_tag: Some(tag),
-            ..
-        } if tag == "pkg-v0.9.0"
+        }
     ));
 }
 
@@ -133,9 +110,8 @@ async fn prepare_final_passes_correct_mode_and_tags() {
 async fn prepare_fails_if_branch_already_exists_clean() {
     let git = MockGitRepo::new().with_branch_state(BranchState::ExistsClean);
     let engine = MockReleaseEngine::new();
-    let versions = test_versions_report(ReleaseMode::Rc);
 
-    let result = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc), &versions).await;
+    let result = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc)).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -149,9 +125,8 @@ async fn prepare_fails_if_branch_already_exists_clean() {
 async fn prepare_fails_if_branch_exists_dirty() {
     let git = MockGitRepo::new().with_branch_state(BranchState::ExistsDirtyLocal);
     let engine = MockReleaseEngine::new();
-    let versions = test_versions_report(ReleaseMode::Rc);
 
-    let result = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc), &versions).await;
+    let result = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc)).await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("ExistsDirtyLocal"));
@@ -163,9 +138,8 @@ async fn prepare_fails_if_create_branch_fails() {
         .with_branch_state(BranchState::Missing)
         .with_create_branch_error("could not fetch origin");
     let engine = MockReleaseEngine::new();
-    let versions = test_versions_report(ReleaseMode::Rc);
 
-    let result = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc), &versions).await;
+    let result = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc)).await;
 
     assert!(result.is_err());
     assert!(
@@ -178,30 +152,15 @@ async fn prepare_fails_if_create_branch_fails() {
 }
 
 #[tokio::test]
-async fn prepare_passes_none_tags_when_absent() {
+async fn prepare_returns_empty_packages_when_nothing_updated() {
     let git = MockGitRepo::new()
         .with_branch_state(BranchState::Missing)
         .with_create_branch_descriptions(vec!["created branch"]);
-    let engine = MockReleaseEngine::new().with_regenerate_descriptions(vec![]);
-    let versions = VersionsReport {
-        mode: ReleaseMode::Rc,
-        previous_commit: "abc123".to_string(),
-        latest_release_tag: None,
-        latest_non_rc_release_tag: None,
-        current_commit: "def456".to_string(),
-        planned_versions: vec![],
-    };
+    let engine = MockReleaseEngine::new().with_update_result(vec![]);
 
-    handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc), &versions)
+    let report = handle_prepare(&git, &engine, test_prepare_ctx(ReleaseMode::Rc))
         .await
         .unwrap();
 
-    assert!(matches!(
-        &engine.calls()[0],
-        EngineCall::RegenerateArtifacts {
-            latest_release_tag: None,
-            latest_non_rc_release_tag: None,
-            ..
-        }
-    ));
+    assert!(report.updated_packages.is_empty());
 }

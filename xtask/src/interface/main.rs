@@ -4,9 +4,9 @@ use tracing::info;
 
 use crate::application::gha::{
     GhaNpmPublishArgs as AppGhaNpmPublishArgs, GhaNpmUpdatePrArgs as AppGhaNpmUpdatePrArgs,
-    GhaReleasePlzArgs as AppGhaReleasePlzArgs, GhaUniffiReleaseArgs as AppGhaUniffiReleaseArgs,
-    handle_gha_npm_publish, handle_gha_npm_update_pr, handle_gha_release_plz,
-    handle_gha_uniffi_release,
+    GhaPrArgs as AppGhaPrArgs, GhaPublishArgs as AppGhaPublishArgs,
+    GhaUniffiReleaseArgs as AppGhaUniffiReleaseArgs, handle_gha_npm_publish,
+    handle_gha_npm_update_pr, handle_gha_pr, handle_gha_publish, handle_gha_uniffi_release,
 };
 use crate::application::pipeline::ReleasePipeline;
 use crate::domain::types::ReleaseMode;
@@ -17,10 +17,35 @@ pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let pipeline = ReleasePipeline::new(cli.workspace_root.clone());
 
-    // Only GHA commands are exposed through interface CLI.
     match cli.command {
         Commands::Gha(args) => match args.command {
-            GhaCommands::Release(cmd) => {
+            GhaCommands::Pr(cmd) => {
+                info!(
+                    compare_branch=?cmd.compare_branch,
+                    default_branch=%cmd.default_branch,
+                    gha_output=cmd.gha_output,
+                    "running gha pr"
+                );
+                let contract = handle_gha_pr(
+                    &pipeline,
+                    AppGhaPrArgs {
+                        mode: match cmd.mode {
+                            CliReleaseMode::Rc => ReleaseMode::Rc,
+                            CliReleaseMode::Final => ReleaseMode::Final,
+                        },
+                        compare_branch: cmd.compare_branch,
+                        default_branch: cmd.default_branch,
+                        gha_output: cmd.gha_output,
+                    },
+                )
+                .await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&contract)
+                        .unwrap_or_else(|_| format!("{contract:?}"))
+                );
+            }
+            GhaCommands::Publish(cmd) => {
                 info!(
                     compare_branch=?cmd.compare_branch,
                     default_branch=%cmd.default_branch,
@@ -28,15 +53,12 @@ pub async fn run() -> Result<()> {
                     final_branch_prefix=%cmd.final_branch_prefix,
                     gha_output=cmd.gha_output,
                     no_artifacts=cmd.no_artifacts,
-                    "running gha release-plz driver"
+                    "running gha publish"
                 );
-                let contract = handle_gha_release_plz(
+                let contract = handle_gha_publish(
                     &pipeline,
-                    AppGhaReleasePlzArgs {
-                        mode: match cmd.mode {
-                            CliReleaseMode::Rc => ReleaseMode::Rc,
-                            CliReleaseMode::Final => ReleaseMode::Final,
-                        },
+                    AppGhaPublishArgs {
+                        commit_msg: cmd.commit_msg,
                         compare_branch: cmd.compare_branch,
                         default_branch: cmd.default_branch,
                         rc_branch_prefix: cmd.rc_branch_prefix,

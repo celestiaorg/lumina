@@ -23,7 +23,10 @@ pub struct GhaArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum GhaCommands {
-    Release(GhaReleasePlzArgs),
+    /// Create release branch, run release-plz update, commit/push/PR.
+    Pr(GhaPrArgs),
+    /// Publish crates and GitHub releases via release-plz.
+    Publish(GhaPublishArgs),
     NpmUpdatePr(GhaNpmUpdatePrArgs),
     NpmPublish(GhaNpmPublishArgs),
     UniffiRelease(GhaUniffiReleaseArgs),
@@ -36,7 +39,7 @@ pub enum CliReleaseMode {
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct GhaReleasePlzArgs {
+pub struct GhaPrArgs {
     #[arg(long, default_value = "rc", help = "Release mode (rc or final)")]
     pub mode: CliReleaseMode,
 
@@ -44,6 +47,21 @@ pub struct GhaReleasePlzArgs {
         long,
         help = "Branch to compare against for release planning and as target branch for release PRs"
     )]
+    pub compare_branch: Option<String>,
+
+    #[arg(long, default_value = "main")]
+    pub default_branch: String,
+
+    #[arg(long, help = "Write normalized contract fields to GITHUB_OUTPUT")]
+    pub gha_output: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GhaPublishArgs {
+    #[arg(long, help = "Head commit message used to determine release mode")]
+    pub commit_msg: String,
+
+    #[arg(long, help = "Branch to compare against")]
     pub compare_branch: Option<String>,
 
     #[arg(long, default_value = "main")]

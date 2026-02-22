@@ -4,8 +4,7 @@ use std::collections::VecDeque;
 use anyhow::Result;
 
 use crate::domain::types::{
-    AuthContext, BranchState, ComputeVersionsContext, PlannedVersion, PublishContext,
-    PullRequestInfo, ReleaseMode, VersionsReport,
+    AuthContext, BranchState, PublishContext, PullRequestInfo, ReleaseMode, UpdatedPackage,
 };
 
 use super::pipeline_ops::{GitRepo, PrClient, ReleaseEngine};
@@ -48,14 +47,8 @@ pub(crate) enum PrCall {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EngineCall {
-    ComputeVersions {
+    Update {
         mode: ReleaseMode,
-    },
-    RegenerateArtifacts {
-        mode: ReleaseMode,
-        previous_commit: String,
-        latest_release_tag: Option<String>,
-        latest_non_rc_release_tag: Option<String>,
     },
     Publish {
         mode: ReleaseMode,
@@ -252,8 +245,7 @@ impl PrClient for MockPrClient {
 
 pub(crate) struct MockReleaseEngine {
     calls: RefCell<Vec<EngineCall>>,
-    versions_results: RefCell<VecDeque<Result<VersionsReport>>>,
-    regenerate_results: RefCell<VecDeque<Vec<String>>>,
+    update_results: RefCell<VecDeque<Result<Vec<UpdatedPackage>>>>,
     publish_results: RefCell<VecDeque<serde_json::Value>>,
 }
 
@@ -261,22 +253,20 @@ impl MockReleaseEngine {
     pub(crate) fn new() -> Self {
         Self {
             calls: RefCell::new(Vec::new()),
-            versions_results: RefCell::new(VecDeque::new()),
-            regenerate_results: RefCell::new(VecDeque::new()),
+            update_results: RefCell::new(VecDeque::new()),
             publish_results: RefCell::new(VecDeque::new()),
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn with_versions_result(self, report: VersionsReport) -> Self {
-        self.versions_results.borrow_mut().push_back(Ok(report));
+    pub(crate) fn with_update_result(self, packages: Vec<UpdatedPackage>) -> Self {
+        self.update_results.borrow_mut().push_back(Ok(packages));
         self
     }
 
-    pub(crate) fn with_regenerate_descriptions(self, descriptions: Vec<&str>) -> Self {
-        self.regenerate_results
+    pub(crate) fn with_update_error(self, msg: &str) -> Self {
+        self.update_results
             .borrow_mut()
-            .push_back(descriptions.into_iter().map(String::from).collect());
+            .push_back(Err(anyhow::anyhow!("{}", msg)));
         self
     }
 
@@ -291,38 +281,12 @@ impl MockReleaseEngine {
 }
 
 impl ReleaseEngine for MockReleaseEngine {
-    async fn compute_versions(&self, ctx: &ComputeVersionsContext) -> Result<VersionsReport> {
-        self.calls.borrow_mut().push(EngineCall::ComputeVersions {
-            mode: ctx.common.mode,
-        });
-        self.versions_results
+    async fn update(&self, mode: ReleaseMode) -> Result<Vec<UpdatedPackage>> {
+        self.calls.borrow_mut().push(EngineCall::Update { mode });
+        self.update_results
             .borrow_mut()
             .pop_front()
-            .unwrap_or_else(|| Err(anyhow::anyhow!("mock: no versions result queued")))
-    }
-
-    async fn regenerate_artifacts(
-        &self,
-        mode: ReleaseMode,
-        _default_branch: &str,
-        previous_commit: &str,
-        latest_release_tag: Option<&str>,
-        latest_non_rc_release_tag: Option<&str>,
-        _planned_versions: &[PlannedVersion],
-    ) -> Result<Vec<String>> {
-        self.calls
-            .borrow_mut()
-            .push(EngineCall::RegenerateArtifacts {
-                mode,
-                previous_commit: previous_commit.to_string(),
-                latest_release_tag: latest_release_tag.map(String::from),
-                latest_non_rc_release_tag: latest_non_rc_release_tag.map(String::from),
-            });
-        Ok(self
-            .regenerate_results
-            .borrow_mut()
-            .pop_front()
-            .unwrap_or_default())
+            .unwrap_or(Ok(vec![]))
     }
 
     async fn publish(&self, ctx: &PublishContext) -> Result<serde_json::Value> {
