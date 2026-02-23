@@ -6,7 +6,7 @@ permissions:
 
 on:
   push:
-    branches: [ mcrakhman/release-test-rc ]
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       mode:
@@ -65,7 +65,7 @@ jobs:
           cargo xtask gha pr \
             --mode "$INPUT_MODE" \
             --gha-output \
-            --compare-branch "mcrakhman/release-test-rc"
+            --compare-branch "main"
 
       - name: Install wasm-pack
         if: steps.pr.outputs.prs_created == 'true'
@@ -132,8 +132,7 @@ jobs:
           cargo xtask gha publish \
             --commit-msg "${{ github.event.head_commit.message }}" \
             --gha-output \
-            --compare-branch "mcrakhman/release-test-rc" \
-            --no-artifacts
+            --compare-branch "main"
 
       - name: Install wasm-pack
         if: steps.publish.outputs.releases_created == 'true'
@@ -148,7 +147,7 @@ jobs:
           RUST_LOG: info
         run: |
           set -euo pipefail
-          cargo xtask gha npm-publish --no-artifacts
+          cargo xtask gha npm-publish
 
   uniffi:
     name: Publish uniffi
@@ -196,8 +195,7 @@ jobs:
           set -euo pipefail
           cargo xtask gha uniffi-release \
             --releases-json "$RELEASES_JSON" \
-            --gha-output \
-            --no-artifacts
+            --gha-output
 
       - name: Upload uniffi artifacts to GitHub release
         uses: softprops/action-gh-release@v2
