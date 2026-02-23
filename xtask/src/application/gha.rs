@@ -239,10 +239,13 @@ fn handle_gha_npm_publish_impl(args: GhaNpmPublishArgs, ops: &dyn Ops) -> Result
 
     let local_version = cargo_manifest_version(ops, Path::new("node-wasm/Cargo.toml"))?;
     let npm_node_version = package_json_version(ops, Path::new("node-wasm/js/package.json"))?;
-    if npm_version_exists(ops, "lumina-node-wasm", &local_version)? {
+    let wasm_already_published = npm_version_exists(ops, "lumina-node-wasm", &local_version)?;
+    let js_already_published = npm_version_exists(ops, "lumina-node", &npm_node_version)?;
+    if wasm_already_published && js_already_published {
         info!(
-            version = %local_version,
-            "gha/npm-publish: lumina-node-wasm version already on npm, skipping"
+            wasm_version = %local_version,
+            js_version = %npm_node_version,
+            "gha/npm-publish: wasm and js packages already on npm, skipping"
         );
         return Ok(());
     }
@@ -252,53 +255,67 @@ fn handle_gha_npm_publish_impl(args: GhaNpmPublishArgs, ops: &dyn Ops) -> Result
     // package.json is the authoritative source for npm publishing since npm-update-pr may
     // apply an RC suffix independently of the Cargo version.
     let is_rc = extract_rc_suffix(&npm_node_version).is_some();
-    info!(
-        version = %local_version,
-        rc_channel = is_rc,
-        "gha/npm-publish: running wasm-pack build"
-    );
-    ops.run_cmd("wasm-pack", &["build", "node-wasm"], None)?;
+    if !wasm_already_published {
+        info!(
+            version = %local_version,
+            rc_channel = is_rc,
+            "gha/npm-publish: running wasm-pack build"
+        );
+        ops.run_cmd("wasm-pack", &["build", "node-wasm"], None)?;
 
-    if is_rc {
-        info!("gha/npm-publish: publishing wasm package with rc tag");
-        ops.run_cmd(
-            "wasm-pack",
-            &["publish", "--access", "public", "--tag", "rc", "node-wasm"],
-            None,
-        )?;
+        if is_rc {
+            info!("gha/npm-publish: publishing wasm package with rc tag");
+            ops.run_cmd(
+                "wasm-pack",
+                &["publish", "--access", "public", "--tag", "rc", "node-wasm"],
+                None,
+            )?;
+        } else {
+            info!("gha/npm-publish: publishing wasm package with stable tag");
+            ops.run_cmd(
+                "wasm-pack",
+                &["publish", "--access", "public", "node-wasm"],
+                None,
+            )?;
+        }
     } else {
-        info!("gha/npm-publish: publishing wasm package with stable tag");
-        ops.run_cmd(
-            "wasm-pack",
-            &["publish", "--access", "public", "node-wasm"],
-            None,
-        )?;
+        info!(
+            version = %local_version,
+            "gha/npm-publish: lumina-node-wasm version already on npm, skipping wasm publish"
+        );
     }
 
-    let dep_arg = format!("dependencies[lumina-node-wasm]={local_version}");
-    info!(
-        version = %local_version,
-        "gha/npm-publish: setting js package dependency on lumina-node-wasm"
-    );
-    ops.run_cmd(
-        "npm",
-        &["pkg", "set", &dep_arg],
-        Some(Path::new("node-wasm/js")),
-    )?;
-    if is_rc {
-        info!("gha/npm-publish: publishing js package with rc tag");
+    if !js_already_published {
+        let dep_arg = format!("dependencies[lumina-node-wasm]={local_version}");
+        info!(
+            version = %local_version,
+            "gha/npm-publish: setting js package dependency on lumina-node-wasm"
+        );
         ops.run_cmd(
             "npm",
-            &["publish", "--access", "public", "--tag", "rc"],
+            &["pkg", "set", &dep_arg],
             Some(Path::new("node-wasm/js")),
         )?;
+        if is_rc {
+            info!("gha/npm-publish: publishing js package with rc tag");
+            ops.run_cmd(
+                "npm",
+                &["publish", "--access", "public", "--tag", "rc"],
+                Some(Path::new("node-wasm/js")),
+            )?;
+        } else {
+            info!("gha/npm-publish: publishing js package with stable tag");
+            ops.run_cmd(
+                "npm",
+                &["publish", "--access", "public"],
+                Some(Path::new("node-wasm/js")),
+            )?;
+        }
     } else {
-        info!("gha/npm-publish: publishing js package with stable tag");
-        ops.run_cmd(
-            "npm",
-            &["publish", "--access", "public"],
-            Some(Path::new("node-wasm/js")),
-        )?;
+        info!(
+            version = %npm_node_version,
+            "gha/npm-publish: lumina-node version already on npm, skipping js publish"
+        );
     }
 
     Ok(())
@@ -968,6 +985,7 @@ mod tests {
         let ops = MockOps::new()
             .on_cmd("cargo pkgid", "pkg@1.2.3")
             .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
+            .on_cmd_success("npm view", true)
             .on_cmd_success("npm view", true);
 
         let args = GhaNpmPublishArgs {
@@ -975,8 +993,71 @@ mod tests {
         };
         handle_gha_npm_publish_impl(args, &ops).unwrap();
 
-        // Early return after npm view confirms version exists
-        ops.assert_sequence(&["cargo pkgid", "[read_file]", "[check] npm view"]);
+        // Early return after npm view confirms both versions exist
+        ops.assert_sequence(&[
+            "cargo pkgid",
+            "[read_file]",
+            "[check] npm view",
+            "[check] npm view",
+        ]);
+    }
+
+    #[test]
+    fn npm_publish_wasm_already_published_js_missing() {
+        let ops = MockOps::new()
+            .on_cmd("cargo pkgid", "pkg@1.2.3")
+            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
+            // wasm exists
+            .on_cmd_success("npm view", true)
+            // js missing
+            .on_cmd_success("npm view", false)
+            .on_cmd("npm pkg set", "")
+            .on_cmd("npm publish", "");
+
+        let args = GhaNpmPublishArgs {
+            no_artifacts: false,
+        };
+        handle_gha_npm_publish_impl(args, &ops).unwrap();
+
+        ops.assert_sequence(&[
+            "cargo pkgid",
+            "[read_file]",
+            "[check] npm view",
+            "[check] npm view",
+            "npm pkg set",
+            "npm publish",
+        ]);
+        ops.assert_not_called("wasm-pack build");
+        ops.assert_not_called("wasm-pack publish");
+    }
+
+    #[test]
+    fn npm_publish_wasm_missing_js_already_published() {
+        let ops = MockOps::new()
+            .on_cmd("cargo pkgid", "pkg@1.2.3")
+            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
+            // wasm missing
+            .on_cmd_success("npm view", false)
+            // js exists
+            .on_cmd_success("npm view", true)
+            .on_cmd("wasm-pack build", "")
+            .on_cmd("wasm-pack publish", "");
+
+        let args = GhaNpmPublishArgs {
+            no_artifacts: false,
+        };
+        handle_gha_npm_publish_impl(args, &ops).unwrap();
+
+        ops.assert_sequence(&[
+            "cargo pkgid",
+            "[read_file]",
+            "[check] npm view",
+            "[check] npm view",
+            "wasm-pack build",
+            "wasm-pack publish",
+        ]);
+        ops.assert_not_called("npm pkg set");
+        ops.assert_not_called("npm publish");
     }
 
     #[test]
@@ -984,6 +1065,7 @@ mod tests {
         let ops = MockOps::new()
             .on_cmd("cargo pkgid", "pkg@1.2.3")
             .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
+            .on_cmd_success("npm view", false)
             .on_cmd_success("npm view", false)
             .on_cmd("wasm-pack build", "")
             .on_cmd("wasm-pack publish", "")
@@ -998,6 +1080,7 @@ mod tests {
         ops.assert_sequence(&[
             "cargo pkgid",
             "[read_file]",
+            "[check] npm view",
             "[check] npm view",
             "wasm-pack build",
             "wasm-pack publish",
@@ -1038,6 +1121,7 @@ mod tests {
             .on_cmd("cargo pkgid", "pkg@1.2.3-rc.1")
             .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3-rc.1"}"#)
             .on_cmd_success("npm view", false)
+            .on_cmd_success("npm view", false)
             .on_cmd("wasm-pack build", "")
             .on_cmd("wasm-pack publish", "")
             .on_cmd("npm pkg set", "")
@@ -1051,6 +1135,7 @@ mod tests {
         ops.assert_sequence(&[
             "cargo pkgid",
             "[read_file]",
+            "[check] npm view",
             "[check] npm view",
             "wasm-pack build",
             "wasm-pack publish",
@@ -1096,6 +1181,7 @@ mod tests {
             .on_cmd("cargo pkgid", "pkg@1.2.3")
             .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3-rc.1"}"#)
             .on_cmd_success("npm view", false)
+            .on_cmd_success("npm view", false)
             .on_cmd("wasm-pack build", "")
             .on_cmd("wasm-pack publish", "")
             .on_cmd("npm pkg set", "")
@@ -1109,6 +1195,7 @@ mod tests {
         ops.assert_sequence(&[
             "cargo pkgid",
             "[read_file]",
+            "[check] npm view",
             "[check] npm view",
             "wasm-pack build",
             "wasm-pack publish",
