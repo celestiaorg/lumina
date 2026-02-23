@@ -4,7 +4,6 @@ use crate::domain::types::{
     AuthContext, BranchState, PublishContext, PullRequestInfo, ReleaseMode, UpdatedPackage,
 };
 
-/// Trait abstracting git repository operations used by the prepare/submit pipeline stages.
 pub(crate) trait GitRepo {
     fn branch_state(&self, branch_name: &str) -> Result<BranchState>;
     fn create_release_branch_from_default(
@@ -16,7 +15,6 @@ pub(crate) trait GitRepo {
     fn push_branch(&self, branch_name: &str, force: bool, dry_run: bool) -> Result<()>;
 }
 
-/// Trait abstracting GitHub PR operations used by the submit pipeline stage.
 pub(crate) trait PrClient {
     async fn close_stale_open_release_prs(
         &self,
@@ -35,13 +33,12 @@ pub(crate) trait PrClient {
     ) -> Result<Option<PullRequestInfo>>;
 }
 
-/// Trait abstracting release engine operations (update artifacts, publishing).
 pub(crate) trait ReleaseEngine {
     async fn update(&self, mode: ReleaseMode) -> Result<Vec<UpdatedPackage>>;
     async fn publish(&self, ctx: &PublishContext) -> Result<serde_json::Value>;
 }
 
-// ── Implementations for concrete adapters ────────────────────────────────
+// ── Adapter implementations ──────────────────────────────────────────────
 
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_pr::GitHubPrClient;

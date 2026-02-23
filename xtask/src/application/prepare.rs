@@ -6,9 +6,7 @@ use crate::application::pipeline_ops::{GitRepo, ReleaseEngine};
 use crate::domain::model::RELEASE_PR_BRANCH_PREFIX;
 use crate::domain::types::{BranchState, PrepareContext, PrepareReport, ReleaseMode};
 
-/// Prepares release artifacts and branch state for RC/final flow.
-/// Creates a release branch, runs release-plz update, and returns the report.
-/// This does not create commits or push; submit handles that stage.
+/// Creates a release branch, runs release-plz update. Does not commit or push.
 pub async fn handle_prepare(
     git: &impl GitRepo,
     release_engine: &impl ReleaseEngine,
@@ -22,7 +20,6 @@ pub async fn handle_prepare(
         "prepare: creating release branch and running update"
     );
 
-    // Only allow creating a fresh release branch.
     let branch_state = git.branch_state(&branch_name)?;
     if !matches!(branch_state, BranchState::Missing) {
         bail!(
@@ -32,7 +29,6 @@ pub async fn handle_prepare(
 
     git.create_release_branch_from_default(&branch_name, &ctx.default_branch)?;
 
-    // Run release-plz update — writes all artifacts (versions, changelogs, lockfile) to disk.
     let updated_packages = release_engine.update(ctx.mode).await?;
 
     info!(
@@ -49,7 +45,6 @@ pub async fn handle_prepare(
     })
 }
 
-/// Builds canonical release branch name with timestamp and mode suffix (`-rc`/`-final`).
 pub(crate) fn make_release_branch_name(mode: ReleaseMode) -> String {
     static FORMAT: &[FormatItem<'static>] =
         format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]Z");

@@ -12,7 +12,6 @@ use crate::application::pipeline::ReleasePipeline;
 use crate::domain::types::ReleaseMode;
 use crate::interface::cli::{Cli, CliReleaseMode, Commands, GhaCommands};
 
-/// Parses CLI args, dispatches command handlers, and prints optional JSON reports.
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let pipeline = ReleasePipeline::new(cli.workspace_root.clone());

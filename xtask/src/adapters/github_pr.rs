@@ -9,17 +9,14 @@ use crate::domain::types::{AuthContext, PullRequestInfo, ReleaseMode};
 
 #[derive(Debug, Clone)]
 pub struct GitHubPrClient {
-    /// Workspace root used to resolve repository remote URL.
     workspace_root: PathBuf,
 }
 
 impl GitHubPrClient {
-    /// Builds PR client bound to repository at workspace root.
     pub fn new(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
     }
 
-    /// Finds currently open release PR for a branch, if present.
     async fn find_open_release_pr(
         &self,
         client: &release_plz_core::GitClient,
@@ -32,7 +29,6 @@ impl GitHubPrClient {
         Ok(prs.into_iter().find(|pr| pr.branch() == branch_name))
     }
 
-    /// Lists open release PRs by title heuristic.
     async fn open_release_prs(
         &self,
         client: &release_plz_core::GitClient,
@@ -44,9 +40,7 @@ impl GitHubPrClient {
         Ok(prs.into_iter().filter(is_release_pr_candidate).collect())
     }
 
-    /// Creates authenticated GitHub API client from available token + origin URL.
     fn git_client(&self, auth: &AuthContext) -> Result<Option<release_plz_core::GitClient>> {
-        // Prefer dedicated release token, fallback to GitHub token.
         let token = auth
             .release_plz_token
             .clone()
@@ -59,7 +53,6 @@ impl GitHubPrClient {
             return Ok(None);
         };
 
-        // Build release-plz GitHub client bound to origin owner/repo.
         let client = release_plz_core::GitClient::new(release_plz_core::GitForge::Github(
             release_plz_core::GitHub::new(repo_url.owner, repo_url.name, token.into()),
         ))
@@ -67,12 +60,10 @@ impl GitHubPrClient {
         Ok(Some(client))
     }
 
-    /// Resolves repository owner/name from `origin` URL for API operations.
     fn remote_repo_url(&self) -> Result<Option<release_plz_core::RepoUrl>> {
         parse_remote_repo_url(&self.workspace_root)
     }
 
-    /// Closes all open release PRs except optional branch to keep.
     pub async fn close_stale_open_release_prs(
         &self,
         auth: &AuthContext,
@@ -113,7 +104,6 @@ impl GitHubPrClient {
         Ok(closed)
     }
 
-    /// Ensures release PR exists for branch: reuses existing open PR or opens a new one.
     pub async fn ensure_release_pr(
         &self,
         mode: ReleaseMode,
@@ -122,7 +112,6 @@ impl GitHubPrClient {
         skip_pr: bool,
         branch_name: &str,
     ) -> Result<Option<PullRequestInfo>> {
-        // Explicitly allow running full flow without PR operations.
         if skip_pr {
             return Ok(None);
         }
@@ -130,7 +119,6 @@ impl GitHubPrClient {
             return Ok(None);
         };
 
-        // Reuse already open PR for branch when it exists.
         if let Some(existing) = self.find_open_release_pr(&client, branch_name).await? {
             info!(branch=%branch_name, pr_number=existing.number, "github_pr: reusing existing open PR");
             return Ok(Some(PullRequestInfo {
@@ -139,7 +127,6 @@ impl GitHubPrClient {
             }));
         }
 
-        // Otherwise create mode-specific release PR.
         let (title, body) = match mode {
             ReleaseMode::Rc => (
                 RELEASE_PR_TITLE_RC,

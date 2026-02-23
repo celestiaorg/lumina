@@ -50,19 +50,6 @@ pub(crate) enum Call {
 }
 
 impl Call {
-    /// Human-readable label used for matching in `find_call` / `assert_sequence`.
-    ///
-    /// Convention:
-    /// - `RunCmd`           → `"{program} {args…}"`  (bare command string)
-    /// - `CmdSuccess`       → `"[check] {program} {args…}"`
-    /// - `ReadFile`         → `"[read_file] {path}"`
-    /// - `WriteFile`        → `"[write_file] {path}"`
-    /// - `GitCheckout`      → `"[git] checkout {branch}"`
-    /// - `GitHasChanges`    → `"[git] has_changes"`
-    /// - `GitCommit`        → `"[git] commit"`
-    /// - `GitPush`          → `"[git] push {branch}"`
-    /// - `GhaOutput`        → `"[gha] {key}"`
-    /// - `GhaOutputMultiline` → `"[gha:ml] {key}"`
     pub(crate) fn label(&self) -> String {
         match self {
             Call::RunCmd { program, args, .. } => cmd_string(program, args),
@@ -91,9 +78,7 @@ fn cmd_string(program: &str, args: &[String]) -> String {
 
 pub(crate) struct MockOps {
     calls: RefCell<Vec<Call>>,
-    /// Labeled command outputs: `(label, output)`. First matching label is consumed.
     labeled_cmd_outputs: RefCell<Vec<(String, String)>>,
-    /// Labeled command status results: `(label, success)`. First matching label is consumed.
     labeled_cmd_statuses: RefCell<Vec<(String, bool)>>,
     files: RefCell<HashMap<PathBuf, String>>,
     git_has_changes_results: RefCell<Vec<bool>>,
@@ -114,13 +99,6 @@ impl MockOps {
 
     // ── Labeled response builders ────────────────────────────────────
 
-    /// Queue a `run_cmd` response for commands whose command string starts with `label`.
-    ///
-    /// ```ignore
-    /// .on_cmd("cargo pkgid", "pkg@1.2.3")
-    /// .on_cmd("npm version", "")
-    /// .on_cmd("wasm-pack build", "")
-    /// ```
     pub(crate) fn on_cmd(self, label: &str, output: &str) -> Self {
         self.labeled_cmd_outputs
             .borrow_mut()
@@ -128,11 +106,6 @@ impl MockOps {
         self
     }
 
-    /// Queue a `cmd_success` response for commands whose command string starts with `label`.
-    ///
-    /// ```ignore
-    /// .on_cmd_success("npm view", false)
-    /// ```
     pub(crate) fn on_cmd_success(self, label: &str, status: bool) -> Self {
         self.labeled_cmd_statuses
             .borrow_mut()
@@ -140,7 +113,6 @@ impl MockOps {
         self
     }
 
-    /// Register file content returned by `read_file`.
     pub(crate) fn with_file(self, path: &str, content: &str) -> Self {
         self.files
             .borrow_mut()
@@ -148,13 +120,11 @@ impl MockOps {
         self
     }
 
-    /// Queue a `git_has_changes` result.
     pub(crate) fn with_git_has_changes(self, b: bool) -> Self {
         self.git_has_changes_results.borrow_mut().push(b);
         self
     }
 
-    /// Queue a `git_commit` result.
     pub(crate) fn with_git_commit(self, b: bool) -> Self {
         self.git_commit_results.borrow_mut().push(b);
         self
@@ -162,14 +132,11 @@ impl MockOps {
 
     // ── Assertion helpers ────────────────────────────────────────────
 
-    /// Returns all recorded calls.
     #[allow(dead_code)]
     pub(crate) fn calls(&self) -> Vec<Call> {
         self.calls.borrow().clone()
     }
 
-    /// Find the first call whose label starts with `pattern`.
-    ///
     /// Panics with a listing of all recorded calls if no match is found.
     pub(crate) fn find_call(&self, pattern: &str) -> Call {
         let calls = self.calls.borrow();
@@ -185,7 +152,6 @@ impl MockOps {
             .clone()
     }
 
-    /// Assert that at least one call matches the pattern.
     #[allow(dead_code)]
     pub(crate) fn assert_called(&self, pattern: &str) {
         let calls = self.calls.borrow();
@@ -196,7 +162,6 @@ impl MockOps {
         );
     }
 
-    /// Assert that no call matches the pattern.
     #[allow(dead_code)]
     pub(crate) fn assert_not_called(&self, pattern: &str) {
         let calls = self.calls.borrow();
@@ -207,21 +172,7 @@ impl MockOps {
         );
     }
 
-    /// Assert the full call sequence matches the given label prefixes.
-    ///
-    /// Verifies both order and count. Each entry in `expected` is matched
-    /// against the label of the call at the same position using `starts_with`.
-    ///
-    /// ```ignore
-    /// ops.assert_sequence(&[
-    ///     "[git] checkout",
-    ///     "cargo pkgid",
-    ///     "[read]",
-    ///     "npm version",
-    ///     "wasm-pack build",
-    ///     "[git] push",
-    /// ]);
-    /// ```
+    /// Checks order and count. Each entry is matched via `starts_with` on the call label.
     pub(crate) fn assert_sequence(&self, expected: &[&str]) {
         let calls = self.calls.borrow();
         assert_eq!(
@@ -252,7 +203,6 @@ fn format_call_list(calls: &[Call]) -> String {
         .join("\n")
 }
 
-/// Find first labeled response whose label is a prefix of `cmd_str`, and consume it.
 fn take_labeled<T>(entries: &mut Vec<(String, T)>, cmd_str: &str) -> Option<T> {
     let idx = entries
         .iter()

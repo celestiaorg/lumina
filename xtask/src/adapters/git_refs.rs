@@ -3,7 +3,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use git2::Repository;
 
-/// Parses origin remote into release-plz repository URL model.
 pub fn parse_remote_repo_url(workspace_root: &Path) -> Result<Option<release_plz_core::RepoUrl>> {
     let Some(remote) = remote_origin_url(workspace_root)? else {
         return Ok(None);
@@ -13,7 +12,6 @@ pub fn parse_remote_repo_url(workspace_root: &Path) -> Result<Option<release_plz
     Ok(Some(repo_url))
 }
 
-/// Reads URL of `origin` remote when configured.
 pub fn remote_origin_url(workspace_root: &Path) -> Result<Option<String>> {
     let repo = Repository::open(workspace_root)
         .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
