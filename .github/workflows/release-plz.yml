@@ -6,7 +6,7 @@ permissions:
 
 on:
   push:
-    branches: [ mcrakhman/release-test-rc ]
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       mode:
@@ -33,9 +33,6 @@ jobs:
         )
       }}
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +62,7 @@ jobs:
           cargo xtask gha pr \
             --mode "$INPUT_MODE" \
             --gha-output \
-            --compare-branch "mcrakhman/release-test-rc"
+            --compare-branch "main"
 
       - name: Install wasm-pack
         if: steps.pr.outputs.prs_created == 'true'
@@ -87,7 +84,7 @@ jobs:
             --node-rc-prefix="$NODE_RC_PREFIX"
 
   publish:
-    name: Publish
+    name: Publish Crates And Releases
     if: >-
       ${{
         github.event_name == 'push'
@@ -97,9 +94,6 @@ jobs:
         )
       }}
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-      contents: write
 
     outputs:
       releases: ${{ steps.publish.outputs.releases }}
@@ -121,7 +115,7 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Publish releases
+      - name: Publish crates and GitHub releases
         id: publish
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
@@ -132,39 +126,58 @@ jobs:
           cargo xtask gha publish \
             --commit-msg "${{ github.event.head_commit.message }}" \
             --gha-output \
-            --compare-branch "mcrakhman/release-test-rc" \
-            --no-artifacts
+            --compare-branch "main"
+
+  publish_npm:
+    name: Publish npm
+    needs: [ publish ]
+    if: >-
+      ${{
+        needs.publish.outputs.releases_created == 'true'
+      }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          rustflags: ""
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Install wasm-pack
-        if: steps.publish.outputs.releases_created == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.13.1
 
       - name: Publish to npm
-        if: steps.publish.outputs.releases_created == 'true'
         env:
           NPM_REGISTRY_TOKEN: ${{ secrets.NPM_REGISTRY_TOKEN }}
           RUST_LOG: info
         run: |
           set -euo pipefail
-          cargo xtask gha npm-publish --no-artifacts
+          cargo xtask gha npm-publish
 
   uniffi:
     name: Publish uniffi
     needs: [ publish ]
     if: >-
       ${{
-        success()
-        && needs.publish.outputs.releases_created == 'true'
+        needs.publish.outputs.releases_created == 'true'
         && contains(
           fromJSON(needs.publish.outputs.releases).*.package_name,
           'lumina-node-uniffi'
         )
       }}
     runs-on: macos-latest
-    permissions:
-      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -196,13 +209,13 @@ jobs:
           set -euo pipefail
           cargo xtask gha uniffi-release \
             --releases-json "$RELEASES_JSON" \
-            --gha-output \
-            --no-artifacts
+            --gha-output
 
       - name: Upload uniffi artifacts to GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.uniffi.outputs.uniffi_tag }}
+          overwrite_files: true
           files: |
             lumina-node-uniffi-ios.tar.gz
             lumina-node-uniffi-android.tar.gz
