@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0-rc.1] - 2026-02-23
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.18.2](https://github.com/celestiaorg/lumina/compare/lumina-node-v0.18.1...lumina-node-v0.18.2) - 2026-01-27
 
 ### Fixed
