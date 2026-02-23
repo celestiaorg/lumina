@@ -493,7 +493,7 @@ impl EdsId {
 }
 
 /// Raw representation of [`ExtendedDataSquare`].
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct RawExtendedDataSquare {
     /// The raw data of the EDS.
     #[serde(with = "tendermint_proto::serializers::bytes::vec_base64string")]

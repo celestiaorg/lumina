@@ -28,7 +28,7 @@ async fn balance_for_address() {
     let my_addr = client.state_account_address().await.unwrap();
     let my_balance = client.state_balance().await.unwrap();
 
-    let balance = client.state_balance_for_address(&my_addr).await.unwrap();
+    let balance = client.state_balance_for_address(my_addr).await.unwrap();
     assert_eq!(my_balance, balance);
 }
 
@@ -40,7 +40,7 @@ async fn submit_pay_for_blob() {
     let blob = Blob::new(namespace, data, None, AppVersion::V2).unwrap();
 
     let tx_response = client
-        .state_submit_pay_for_blob(&[blob.clone().into()], TxConfig::default())
+        .state_submit_pay_for_blob(vec![blob.clone().into()], TxConfig::default())
         .await
         .unwrap();
 

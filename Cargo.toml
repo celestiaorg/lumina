@@ -48,7 +48,9 @@ futures-util = "0.3"
 # See <https://docs.rs/getrandom/0.3.3/getrandom/#webassembly-support>
 # libp2p 0.56 has dependency on both rand 0.8.5 and 0.9.2, which means we need both
 getrandom_02 = { package = "getrandom", version = "0.2.10", features = ["js"] }
-getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3.4", features = [
+  "wasm_js",
+] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 hex = "0.4.3"
 http = "1"

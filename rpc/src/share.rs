@@ -71,51 +71,57 @@ impl From<(u16, u16)> for SampleCoordinates {
 mod rpc {
     use super::*;
     use celestia_types::eds::RawExtendedDataSquare;
+    use jsonrpsee::core::RpcResult;
 
-    // NOTE: This is `pub` because `rpc` proc-macro adds `pub` in `Share`.
-    // However we do not expose it outside of `share` module.
-    #[derive(Debug, Clone, PartialEq, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct RawGetRowResponse {
         pub(crate) shares: Vec<RawShare>,
         pub(crate) side: RowSide,
     }
 
-    #[rpc(client, namespace = "share", namespace_separator = ".")]
+    /// Share RPC methods.
+    #[rpc(client, server, namespace = "share", namespace_separator = ".")]
     trait Share {
+        /// See [`crate::ShareClient::share_get_eds`].
         #[method(name = "GetEDS")]
-        async fn share_get_eds(&self, height: u64) -> Result<RawExtendedDataSquare, Error>;
+        async fn share_get_eds(&self, height: u64) -> RpcResult<RawExtendedDataSquare>;
 
+        /// See [`crate::ShareClient::share_get_range`].
         #[method(name = "GetRange")]
         async fn share_get_range(
             &self,
             height: u64,
             start: u64,
             end: u64,
-        ) -> Result<GetRangeResponse, Error>;
+        ) -> RpcResult<GetRangeResponse>; // was Result<_, Error>
 
+        /// See [`crate::ShareClient::share_get_samples`].
         #[method(name = "GetSamples")]
         async fn share_get_samples(
             &self,
             height: u64,
-            indices: &[SampleCoordinates],
-        ) -> Result<Vec<RawSample>, Error>;
+            indices: Vec<SampleCoordinates>, // was &[SampleCoordinates]
+        ) -> RpcResult<Vec<RawSample>>; // was Result<_, Error>
 
+        /// See [`crate::ShareClient::share_get_row`].
         #[method(name = "GetRow")]
-        async fn share_get_row(&self, height: u64, row: u16) -> Result<RawGetRowResponse, Error>;
+        async fn share_get_row(&self, height: u64, row: u16) -> RpcResult<RawGetRowResponse>;
 
+        /// See [`crate::ShareClient::share_get_share`].
         #[method(name = "GetShare")]
-        async fn share_get_share(&self, height: u64, row: u16, col: u16)
-        -> Result<RawShare, Error>;
+        async fn share_get_share(&self, height: u64, row: u16, col: u16) -> RpcResult<RawShare>;
 
+        /// See [`crate::ShareClient::share_get_namespace_data`].
         #[method(name = "GetNamespaceData")]
         async fn share_get_namespace_data(
             &self,
             height: u64,
             namespace: Namespace,
-        ) -> Result<NamespaceData, Error>;
+        ) -> RpcResult<NamespaceData>;
 
+        /// See [`crate::ShareClient::share_shares_available`].
         #[method(name = "SharesAvailable")]
-        async fn share_shares_available(&self, height: u64) -> Result<(), Error>;
+        async fn share_shares_available(&self, height: u64) -> RpcResult<()>;
     }
 }
 
@@ -189,7 +195,7 @@ pub trait ShareClient: ClientT {
 
         async move {
             let raw_samples =
-                rpc::ShareClient::share_get_samples(self, height, &coordinates).await?;
+                rpc::ShareClient::share_get_samples(self, height, coordinates.clone()).await?;
             let mut samples = Vec::with_capacity(raw_samples.len());
 
             for (coords, raw_sample) in coordinates.iter().zip(raw_samples.into_iter()) {
@@ -346,3 +352,10 @@ fn is_ods_square(row: u16, column: u16, square_width: u16) -> bool {
     let ods_width = square_width / 2;
     row < ods_width && column < ods_width
 }
+
+/// Server trait for Share RPC endpoints.
+pub trait ShareServer: rpc::ShareServer {}
+
+impl<T> ShareServer for T where T: rpc::ShareServer {}
+
+pub use rpc::ShareServer as ShareRpcServer;
