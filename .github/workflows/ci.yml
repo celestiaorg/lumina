@@ -352,7 +352,8 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         components: clippy
-        toolchain: nightly, stable
+        # TODO: pinned due to https://gitlab.com/ijackson/rust-shellexpand/-/issues/13
+        toolchain: nightly-2026-02-01, stable
         target: wasm32-unknown-unknown
         # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
         rustflags: ""
@@ -366,7 +367,7 @@ jobs:
     - name: Run rustdoc check
       env:
         RUSTDOCFLAGS: --cfg docsrs -D warnings
-      run: cargo +nightly doc --no-deps
+      run: cargo +nightly-2026-02-01 doc --no-deps
 
 
   unused-deps:
@@ -380,7 +381,8 @@ jobs:
     - name: Setup toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: nightly
+        # TODO: pinned due to https://gitlab.com/ijackson/rust-shellexpand/-/issues/13
+        toolchain: nightly-2026-02-01
 
     - name: Install cargo-udeps
       uses: taiki-e/install-action@v2
