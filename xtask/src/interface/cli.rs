@@ -67,10 +67,10 @@ pub struct GhaPublishArgs {
     #[arg(long, default_value = "main")]
     pub default_branch: String,
 
-    #[arg(long, default_value = "release/rc")]
+    #[arg(long, default_value = "lumina/release-plz")]
     pub rc_branch_prefix: String,
 
-    #[arg(long, default_value = "release")]
+    #[arg(long, default_value = "lumina/release-plz")]
     pub final_branch_prefix: String,
 
     #[arg(long, help = "Write normalized contract fields to GITHUB_OUTPUT")]
