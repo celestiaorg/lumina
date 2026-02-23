@@ -12,7 +12,6 @@ pub struct BranchContext {
     pub skip_pr: bool,
 }
 
-/// Alias for prepare stage (uses CommonContext directly).
 pub type PrepareContext = CommonContext;
 
 #[derive(Debug, Clone)]
@@ -56,7 +55,6 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
-    /// Loads release/publish credentials from process environment for downstream adapters.
     pub fn from_env() -> Self {
         Self {
             release_plz_token: std::env::var("RELEASE_PLZ_TOKEN").ok(),

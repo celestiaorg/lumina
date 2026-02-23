@@ -8,19 +8,17 @@ use crate::domain::types::{ReleaseMode, SubmitContext, SubmitReport};
 
 #[derive(Debug, Clone)]
 pub struct SubmitArgs {
-    /// Command-specific submit context.
     pub ctx: SubmitContext,
-    /// Optional branch resolved during prepare; used to keep execute deterministic.
+    /// Overrides generated branch name when set (e.g. from a preceding prepare step).
     pub branch_name_override: Option<String>,
 }
 
-/// Commits generated release artifacts, pushes branch, and ensures an open release PR exists.
+/// Commits release artifacts, force-pushes the branch, and opens/reuses a release PR.
 pub async fn handle_submit(
     git: &impl GitRepo,
     pr_client: &impl PrClient,
     args: SubmitArgs,
 ) -> Result<SubmitReport> {
-    // Use prepared branch when provided by execute, otherwise generate canonical name.
     let branch_name = args
         .branch_name_override
         .clone()
@@ -32,18 +30,15 @@ pub async fn handle_submit(
         "submit: resolved target branch and inputs"
     );
 
-    // Use stable commit message pattern so generated release commits are recognizable.
     let commit_message = match args.ctx.common.mode {
         ReleaseMode::Rc => RELEASE_COMMIT_MESSAGE_RC,
         ReleaseMode::Final => RELEASE_COMMIT_MESSAGE_FINAL,
     }
     .to_string();
 
-    // Submit always follows recreate-branch flow and force-pushes release updates.
     git.stage_all_and_commit(&commit_message, false)?;
     git.push_branch(&branch_name, true, false)?;
 
-    // Close stale release PRs (across rc/final) before opening/ensuring current one.
     let closed_stale_prs = pr_client
         .close_stale_open_release_prs(
             &args.ctx.common.auth,

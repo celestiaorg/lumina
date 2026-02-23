@@ -3,7 +3,6 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 
-/// Appends key-value pair to GitHub Actions output file when running inside Actions.
 pub fn write_github_output(key: &str, value: &str) -> Result<()> {
     let Some(mut file) = open_github_output_file()? else {
         return Ok(());
@@ -12,7 +11,7 @@ pub fn write_github_output(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Appends key-value pair using heredoc format to preserve JSON/special characters.
+/// Uses heredoc format to preserve JSON and special characters.
 pub fn write_github_output_multiline(key: &str, value: &str) -> Result<()> {
     let Some(mut file) = open_github_output_file()? else {
         return Ok(());
@@ -48,6 +47,5 @@ fn unique_delimiter(value: &str) -> String {
             return candidate;
         }
     }
-    // The loop is practically guaranteed to return earlier.
     "__XTASK_GHA_OUTPUT_FALLBACK__".to_string()
 }

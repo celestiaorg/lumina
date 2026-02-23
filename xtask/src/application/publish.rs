@@ -4,14 +4,13 @@ use tracing::info;
 use crate::application::pipeline_ops::ReleaseEngine;
 use crate::domain::types::{PublishContext, ReleaseReport};
 
-/// Executes publish-only stage through release-plz and converts result into report shape.
 pub async fn handle_publish(
     publisher: &impl ReleaseEngine,
     ctx: PublishContext,
 ) -> Result<ReleaseReport> {
     info!(mode=?ctx.common.mode, "publish: invoking release adapter");
     let publish_payload = publisher.publish(&ctx).await?;
-    // release-plz may return `null` or `[]` when nothing was published.
+    // release-plz returns null or [] when nothing was published.
     let published = !publish_payload.is_null()
         && !publish_payload
             .as_array()

@@ -10,19 +10,15 @@ use crate::domain::types::{PublishContext, ReleaseMode, UpdatedPackage};
 
 #[derive(Debug, Clone)]
 pub struct ReleasePlzAdapter {
-    /// Root of repository/workspace where release operations are executed.
     workspace_root: PathBuf,
 }
 
 impl ReleasePlzAdapter {
-    /// Constructs release-plz adapter scoped to one workspace root.
     pub fn new(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
     }
 
-    /// Runs release-plz update with the appropriate ReleaseMode.
-    /// Writes all artifacts (Cargo.toml versions, Cargo.lock, changelogs) to disk.
-    /// Returns the list of updated packages.
+    /// Writes updated versions, changelogs, and lockfile to disk.
     pub async fn update(&self, mode: ReleaseMode) -> Result<Vec<UpdatedPackage>> {
         info!(
             mode=?mode,
@@ -66,7 +62,6 @@ impl ReleasePlzAdapter {
         Ok(updated)
     }
 
-    /// Runs release-plz publish flow and returns machine-readable release payload.
     pub async fn publish(&self, ctx: &PublishContext) -> Result<serde_json::Value> {
         info!(
             mode=?ctx.common.mode,
@@ -96,7 +91,6 @@ impl ReleasePlzAdapter {
             request = request.with_repo_url(repo_url.full_host());
         }
 
-        // Enable GitHub release publishing when token + repo URL are available.
         if let Some(token) = ctx
             .common
             .auth
