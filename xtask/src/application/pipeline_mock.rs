@@ -263,13 +263,6 @@ impl MockReleaseEngine {
         self
     }
 
-    pub(crate) fn with_update_error(self, msg: &str) -> Self {
-        self.update_results
-            .borrow_mut()
-            .push_back(Err(anyhow::anyhow!("{}", msg)));
-        self
-    }
-
     pub(crate) fn with_publish_payload(self, payload: serde_json::Value) -> Self {
         self.publish_results.borrow_mut().push_back(payload);
         self
