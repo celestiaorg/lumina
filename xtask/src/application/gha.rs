@@ -1,77 +1,253 @@
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::info;
 
-use crate::adapters::github_output::{write_github_output, write_github_output_multiline};
-use crate::application::gha_ops::{Ops, RealOps};
-use crate::application::pipeline::ReleasePipeline;
-use crate::domain::model::{RELEASE_PR_TITLE_FINAL, RELEASE_PR_TITLE_RC};
-use crate::domain::types::{
-    AuthContext, CommonContext, ExecuteContext, ExecuteReport, PublishContext, ReleaseMode,
-    ReleaseReport,
+use crate::adapters::github::{
+    Git2Repo, parse_remote_repo_url, write_github_output, write_github_output_multiline,
 };
+use crate::adapters::release_plz::ReleasePlzAdapter;
+use crate::domain::types::{AuthContext, ExecuteReport, PublishContext, ReleaseMode};
 
-#[derive(Debug, Clone)]
-pub struct GhaPrArgs {
-    pub mode: ReleaseMode,
-    pub gha_output: bool,
+// ── Ops trait + RealOps ─────────────────────────────────────────────────
+
+pub(crate) trait Ops {
+    fn run_cmd(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<String>;
+    fn cmd_success(&self, program: &str, args: &[&str]) -> Result<bool>;
+    fn read_file(&self, path: &Path) -> Result<String>;
+    fn write_file(&self, path: &Path, content: &str) -> Result<()>;
+    fn git_checkout(&self, branch: &str) -> Result<()>;
+    fn git_has_changes(&self, paths: &[&str]) -> Result<bool>;
+    fn commit_and_push(&self, branch: &str, message: &str, paths: &[&str]) -> Result<()>;
+    fn gha_output(&self, key: &str, value: &str) -> Result<()>;
+    fn gha_output_multiline(&self, key: &str, value: &str) -> Result<()>;
 }
 
-#[derive(Debug, Clone)]
-pub struct GhaPublishArgs {
-    pub commit_msg: String,
+pub(crate) struct RealOps {
+    git: Git2Repo,
+    root: std::path::PathBuf,
+}
+
+impl RealOps {
+    pub(crate) fn new() -> Result<Self> {
+        let root = std::env::current_dir().context("failed to resolve current workspace root")?;
+        Ok(Self {
+            git: Git2Repo::new(root.clone()),
+            root,
+        })
+    }
+}
+
+impl Ops for RealOps {
+    fn run_cmd(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
+        run_checked(program, args, cwd)
+    }
+
+    fn cmd_success(&self, program: &str, args: &[&str]) -> Result<bool> {
+        let status = Command::new(program)
+            .args(args)
+            .status()
+            .with_context(|| format!("failed to execute `{program}`"))?;
+        Ok(status.success())
+    }
+
+    fn read_file(&self, path: &Path) -> Result<String> {
+        fs::read_to_string(path)
+            .with_context(|| format!("failed to read file at {}", path.display()))
+    }
+
+    fn write_file(&self, path: &Path, content: &str) -> Result<()> {
+        fs::write(path, content)
+            .with_context(|| format!("failed to write file at {}", path.display()))
+    }
+
+    fn git_checkout(&self, branch: &str) -> Result<()> {
+        self.git.checkout_branch_from_origin(branch)
+    }
+
+    fn git_has_changes(&self, paths: &[&str]) -> Result<bool> {
+        self.git.paths_have_changes(paths)
+    }
+
+    fn commit_and_push(&self, branch: &str, message: &str, paths: &[&str]) -> Result<()> {
+        let repo_url = parse_remote_repo_url(&self.root)?
+            .context("no origin remote URL found; cannot create GraphQL commit")?;
+
+        let token =
+            std::env::var("GITHUB_TOKEN").context("GITHUB_TOKEN is required for GraphQL commit")?;
+
+        let git_client = release_plz_core::GitClient::new(release_plz_core::GitForge::Github(
+            release_plz_core::GitHub::new(repo_url.owner, repo_url.name, token.into()),
+        ))
+        .context("failed to create GitClient for GraphQL commit")?;
+
+        let root_str = self
+            .root
+            .to_str()
+            .context("workspace root is not valid UTF-8")?;
+        let git_repo = release_plz_core::git_cmd::Repo::new(root_str)
+            .context("failed to open git_cmd::Repo for GraphQL commit")?;
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                release_plz_core::commit_specific_files(
+                    &git_client,
+                    &git_repo,
+                    message,
+                    branch,
+                    paths,
+                )
+                .await
+                .context("failed to create commit via GitHub GraphQL API")?;
+                Ok(())
+            })
+        })
+    }
+
+    fn gha_output(&self, key: &str, value: &str) -> Result<()> {
+        write_github_output(key, value)
+    }
+
+    fn gha_output_multiline(&self, key: &str, value: &str) -> Result<()> {
+        write_github_output_multiline(key, value)
+    }
+}
+
+// ── CLI ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Parser)]
+#[command(name = "xtask", about = "Release process orchestrator")]
+struct Cli {
+    #[arg(long, default_value = ".")]
+    workspace_root: std::path::PathBuf,
+
+    #[command(subcommand)]
+    command: CliCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommands {
+    Gha(GhaArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct GhaArgs {
+    #[command(subcommand)]
+    command: GhaCommands,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum GhaCommands {
+    /// Create/update release PR and publish crates+GitHub releases.
+    Release(GhaReleaseArgs),
+    NpmUpdatePr(GhaNpmUpdatePrArgs),
+    NpmPublish(GhaNpmPublishArgs),
+    UniffiRelease(GhaUniffiReleaseArgs),
+}
+
+pub async fn run() -> Result<()> {
+    let cli = Cli::parse();
+    let adapter = ReleasePlzAdapter::new(cli.workspace_root.clone());
+
+    match cli.command {
+        CliCommands::Gha(args) => match args.command {
+            GhaCommands::Release(cmd) => {
+                info!(
+                    gha_output = cmd.gha_output,
+                    no_artifacts = cmd.no_artifacts,
+                    "running gha release"
+                );
+                let contract = handle_gha_release(&adapter, cmd).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&contract)
+                        .unwrap_or_else(|_| format!("{contract:?}"))
+                );
+            }
+            GhaCommands::NpmUpdatePr(cmd) => {
+                info!("running gha npm-update-pr");
+                handle_gha_npm_update_pr(cmd)?;
+            }
+            GhaCommands::NpmPublish(cmd) => {
+                info!("running gha npm-publish");
+                handle_gha_npm_publish(cmd)?;
+            }
+            GhaCommands::UniffiRelease(cmd) => {
+                info!("running gha uniffi-release");
+                handle_gha_uniffi_release(cmd)?;
+            }
+        },
+    }
+
+    Ok(())
+}
+
+// ── Args ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Args)]
+pub struct GhaReleaseArgs {
+    #[arg(long, default_value = "rc", help = "Release mode (rc or final)")]
+    pub mode: ReleaseMode,
+
+    #[arg(long, help = "Write normalized contract fields to GITHUB_OUTPUT")]
     pub gha_output: bool,
+
+    #[arg(long, help = "Skip publishing artifacts (crates, GitHub releases)")]
     pub no_artifacts: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Args)]
 pub struct GhaNpmUpdatePrArgs {
+    #[arg(long, help = "Release PR payload JSON from previous job output")]
     pub pr_json: String,
+
+    #[arg(
+        long,
+        default_value = "",
+        allow_hyphen_values = true,
+        help = "Optional `-rc.N` suffix override"
+    )]
     pub node_rc_prefix: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Args)]
 pub struct GhaNpmPublishArgs {
+    #[arg(long, help = "Skip publishing npm artifacts")]
     pub no_artifacts: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Args)]
 pub struct GhaUniffiReleaseArgs {
+    #[arg(long, help = "Release payload JSON from previous job output")]
     pub releases_json: String,
+
+    #[arg(long, help = "Write uniffi tag/files outputs to GITHUB_OUTPUT")]
     pub gha_output: bool,
+
+    #[arg(long, help = "Skip uniffi build and release upload preparation")]
     pub no_artifacts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrContract {
+pub struct ReleaseContract {
     pub pr: Value,
     pub prs_created: bool,
     pub node_rc_prefix: String,
+    pub releases: Value,
+    pub releases_created: bool,
 }
 
-impl Default for PrContract {
+impl Default for ReleaseContract {
     fn default() -> Self {
         Self {
             pr: json!({}),
             prs_created: false,
             node_rc_prefix: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishContract {
-    pub releases: Value,
-    pub releases_created: bool,
-}
-
-impl Default for PublishContract {
-    fn default() -> Self {
-        Self {
             releases: json!([]),
             releases_created: false,
         }
@@ -83,45 +259,39 @@ struct PullRequestPayload {
     head_branch: String,
 }
 
-pub async fn handle_gha_pr(pipeline: &ReleasePipeline, args: GhaPrArgs) -> Result<PrContract> {
-    let report = pipeline
-        .execute(ExecuteContext {
-            common: CommonContext {
-                mode: args.mode,
-                auth: AuthContext::from_env(),
-            },
-        })
-        .await?;
+pub async fn handle_gha_release(
+    adapter: &ReleasePlzAdapter,
+    args: GhaReleaseArgs,
+) -> Result<ReleaseContract> {
+    let auth = AuthContext::from_env();
 
-    let contract = contract_from_execute(report.as_ref());
-
-    if args.gha_output {
-        write_pr_contract_to_gha_output(&contract)?;
+    // 1. Create/update release PR
+    let pr_report = adapter.release_pr(args.mode, &auth).await?;
+    if let Some(ref r) = pr_report {
+        info!(
+            branch=%r.head_branch,
+            pr_url=?r.pr_url,
+            packages=r.updated_packages.len(),
+            "release_pr completed"
+        );
+    } else {
+        info!("release_pr completed: no updates needed");
     }
 
-    Ok(contract)
-}
+    // 2. Publish crates and GitHub releases
+    let publish_ctx = PublishContext {
+        auth,
+        no_artifacts: args.no_artifacts,
+    };
+    info!("publish: invoking release adapter");
+    let publish_payload = adapter.publish(&publish_ctx).await?;
+    let releases_created = is_published(&publish_payload);
+    info!(releases_created, "publish completed");
 
-pub async fn handle_gha_publish(
-    pipeline: &ReleasePipeline,
-    args: GhaPublishArgs,
-) -> Result<PublishContract> {
-    let mode = parse_release_mode_from_commit(&args.commit_msg)?;
-
-    let report = pipeline
-        .publish(PublishContext {
-            common: CommonContext {
-                mode,
-                auth: AuthContext::from_env(),
-            },
-            no_artifacts: args.no_artifacts,
-        })
-        .await?;
-
-    let contract = contract_from_release(&report);
+    let contract = build_release_contract(pr_report.as_ref(), &publish_payload);
 
     if args.gha_output {
-        write_publish_contract_to_gha_output(&contract)?;
+        write_release_contract_to_gha_output(&contract)?;
     }
 
     Ok(contract)
@@ -370,44 +540,50 @@ fn handle_gha_uniffi_release_impl(args: GhaUniffiReleaseArgs, ops: &dyn Ops) -> 
     Ok(())
 }
 
-fn contract_from_execute(report: Option<&ExecuteReport>) -> PrContract {
-    let mut contract = PrContract::default();
-    let Some(report) = report else {
-        return contract;
-    };
-
-    if !report.head_branch.trim().is_empty() {
-        contract.pr = json!({
-            "head_branch": report.head_branch,
-            "html_url": report.pr_url.clone().unwrap_or_default(),
-        });
-        contract.prs_created = report.pr_url.is_some();
-    }
-
-    // Extract RC suffix from lumina-node's updated version if present.
-    let node_version = report
-        .updated_packages
-        .iter()
-        .find(|pkg| pkg.package == "lumina-node")
-        .map(|pkg| pkg.version.as_str());
-    if let Some(version) = node_version
-        && let Some(rc_suffix) = extract_rc_suffix(version)
-    {
-        contract.node_rc_prefix = rc_suffix.to_string();
-    }
-
-    contract
+/// Returns `true` when the publish payload represents actual releases.
+/// release-plz returns `null` or `[]` when nothing was published.
+pub(crate) fn is_published(payload: &Value) -> bool {
+    !payload.is_null() && !payload.as_array().is_some_and(|arr| arr.is_empty())
 }
 
-fn contract_from_release(report: &ReleaseReport) -> PublishContract {
-    let mut contract = PublishContract::default();
-    let releases = report.payload.as_array().cloned().unwrap_or_default();
+pub(crate) fn build_release_contract(
+    pr_report: Option<&ExecuteReport>,
+    publish_payload: &Value,
+) -> ReleaseContract {
+    let mut contract = ReleaseContract::default();
+
+    // PR fields
+    if let Some(report) = pr_report {
+        if !report.head_branch.trim().is_empty() {
+            contract.pr = json!({
+                "head_branch": report.head_branch,
+                "html_url": report.pr_url.clone().unwrap_or_default(),
+            });
+            contract.prs_created = report.pr_url.is_some();
+        }
+
+        // Extract RC suffix from lumina-node's updated version if present.
+        let node_version = report
+            .updated_packages
+            .iter()
+            .find(|pkg| pkg.package == "lumina-node")
+            .map(|pkg| pkg.version.as_str());
+        if let Some(version) = node_version
+            && let Some(rc_suffix) = extract_rc_suffix(version)
+        {
+            contract.node_rc_prefix = rc_suffix.to_string();
+        }
+    }
+
+    // Release fields
+    let releases = publish_payload.as_array().cloned().unwrap_or_default();
     contract.releases_created = !releases.is_empty();
     contract.releases = Value::Array(releases);
+
     contract
 }
 
-fn write_pr_contract_to_gha_output(contract: &PrContract) -> Result<()> {
+fn write_release_contract_to_gha_output(contract: &ReleaseContract) -> Result<()> {
     let pr_json = serde_json::to_string(&contract.pr).context("failed to serialize `pr` output")?;
     write_github_output_multiline("pr", &pr_json)?;
     write_github_output(
@@ -419,10 +595,7 @@ fn write_pr_contract_to_gha_output(contract: &PrContract) -> Result<()> {
         },
     )?;
     write_github_output("node_rc_prefix", &contract.node_rc_prefix)?;
-    Ok(())
-}
 
-fn write_publish_contract_to_gha_output(contract: &PublishContract) -> Result<()> {
     let releases_json = serde_json::to_string(&contract.releases)
         .context("failed to serialize `releases` output")?;
     write_github_output_multiline("releases", &releases_json)?;
@@ -435,20 +608,6 @@ fn write_publish_contract_to_gha_output(contract: &PublishContract) -> Result<()
         },
     )?;
     Ok(())
-}
-
-fn parse_release_mode_from_commit(msg: &str) -> Result<ReleaseMode> {
-    let lower = msg.to_ascii_lowercase();
-    if lower.contains(&RELEASE_PR_TITLE_RC.to_ascii_lowercase()) {
-        Ok(ReleaseMode::Rc)
-    } else if lower.contains(&RELEASE_PR_TITLE_FINAL.to_ascii_lowercase()) {
-        Ok(ReleaseMode::Final)
-    } else {
-        bail!(
-            "could not determine release mode from commit message: {:?}",
-            msg
-        )
-    }
 }
 
 fn extract_rc_suffix(version: &str) -> Option<&str> {
@@ -538,713 +697,5 @@ fn command_display(program: &str, args: &[&str]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::application::gha_mock::{Call, MockOps};
-    use crate::domain::types::UpdatedPackage;
-
-    // ── Pure function tests ──────────────────────────────────────────────
-
-    #[test]
-    fn rc_suffix_is_extracted_from_semver() {
-        assert_eq!(extract_rc_suffix("1.2.3-rc.7"), Some("-rc.7"));
-    }
-
-    #[test]
-    fn missing_suffix_returns_none() {
-        assert_eq!(extract_rc_suffix("1.2.3"), None);
-    }
-
-    #[test]
-    fn rc_suffix_empty_version() {
-        assert_eq!(extract_rc_suffix(""), None);
-    }
-
-    #[test]
-    fn rc_suffix_no_dash() {
-        assert_eq!(extract_rc_suffix("rc.1"), None);
-    }
-
-    #[test]
-    fn rc_suffix_double_rc() {
-        assert_eq!(extract_rc_suffix("1.0.0-rc.1-rc.2"), Some("-rc.2"));
-    }
-
-    #[test]
-    fn rc_suffix_just_prefix() {
-        assert_eq!(extract_rc_suffix("-rc."), None);
-    }
-
-    #[test]
-    fn rc_suffix_zero() {
-        assert_eq!(extract_rc_suffix("1.0.0-rc.0"), Some("-rc.0"));
-    }
-
-    #[test]
-    fn find_uniffi_tag_valid() {
-        let releases = json!([
-            {"package_name": "lumina-node", "tag": "lumina-node-v1.0.0"},
-            {"package_name": "lumina-node-uniffi", "tag": "lumina-node-uniffi-v1.0.0"}
-        ]);
-        assert_eq!(
-            find_uniffi_tag(&releases),
-            Some("lumina-node-uniffi-v1.0.0".to_string())
-        );
-    }
-
-    #[test]
-    fn find_uniffi_tag_missing_package() {
-        let releases = json!([
-            {"package_name": "lumina-node", "tag": "lumina-node-v1.0.0"}
-        ]);
-        assert_eq!(find_uniffi_tag(&releases), None);
-    }
-
-    #[test]
-    fn find_uniffi_tag_empty_array() {
-        assert_eq!(find_uniffi_tag(&json!([])), None);
-    }
-
-    #[test]
-    fn find_uniffi_tag_no_tag_field() {
-        let releases = json!([{"package_name": "lumina-node-uniffi"}]);
-        assert_eq!(find_uniffi_tag(&releases), None);
-    }
-
-    #[test]
-    fn command_display_empty_args() {
-        assert_eq!(command_display("ls", &[]), "ls");
-    }
-
-    #[test]
-    fn command_display_multiple_args() {
-        assert_eq!(
-            command_display("git", &["commit", "-m", "msg"]),
-            "git commit -m msg"
-        );
-    }
-
-    // ── parse_release_mode_from_commit tests ───────────────────────────
-
-    #[test]
-    fn parse_mode_rc_commit() {
-        let mode = parse_release_mode_from_commit("chore: release rc").unwrap();
-        assert_eq!(mode, ReleaseMode::Rc);
-    }
-
-    #[test]
-    fn parse_mode_final_commit() {
-        let mode = parse_release_mode_from_commit("chore: release final").unwrap();
-        assert_eq!(mode, ReleaseMode::Final);
-    }
-
-    #[test]
-    fn parse_mode_case_insensitive() {
-        let mode = parse_release_mode_from_commit("Chore: Release RC").unwrap();
-        assert_eq!(mode, ReleaseMode::Rc);
-    }
-
-    #[test]
-    fn parse_mode_with_extra_text() {
-        let mode = parse_release_mode_from_commit("chore: release rc (#123)\n\nsome body").unwrap();
-        assert_eq!(mode, ReleaseMode::Rc);
-    }
-
-    #[test]
-    fn parse_mode_unknown_commit() {
-        let result = parse_release_mode_from_commit("feat: add something");
-        assert!(result.is_err());
-    }
-
-    // ── contract_from_execute tests ──────────────────────────────────────
-
-    #[test]
-    fn contract_from_execute_with_pr_and_rc_version() {
-        let report = ExecuteReport {
-            head_branch: "release-plz-2025-01-01".to_string(),
-            pr_url: Some("https://github.com/org/repo/pull/1".to_string()),
-            updated_packages: vec![UpdatedPackage {
-                package: "lumina-node".to_string(),
-                version: "1.1.0-rc.1".to_string(),
-            }],
-        };
-        let contract = contract_from_execute(Some(&report));
-        assert!(contract.prs_created);
-        assert_eq!(contract.pr["head_branch"], "release-plz-2025-01-01");
-        assert_eq!(
-            contract.pr["html_url"],
-            "https://github.com/org/repo/pull/1"
-        );
-        assert_eq!(contract.node_rc_prefix, "-rc.1");
-    }
-
-    #[test]
-    fn contract_from_execute_empty_report() {
-        let contract = contract_from_execute(None);
-        assert!(!contract.prs_created);
-        assert_eq!(contract.node_rc_prefix, "");
-    }
-
-    // ── contract_from_release tests ──────────────────────────────────────
-
-    #[test]
-    fn contract_from_release_with_releases() {
-        let report = ReleaseReport {
-            mode: ReleaseMode::Rc,
-            published: true,
-            payload: json!([
-                {"package_name": "lumina-node", "tag": "lumina-node-v1.0.0-rc.1"}
-            ]),
-        };
-        let contract = contract_from_release(&report);
-        assert!(contract.releases_created);
-        assert_eq!(contract.releases.as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn contract_from_release_empty_releases() {
-        let report = ReleaseReport {
-            mode: ReleaseMode::Final,
-            published: false,
-            payload: json!([]),
-        };
-        let contract = contract_from_release(&report);
-        assert!(!contract.releases_created);
-        assert_eq!(contract.releases.as_array().unwrap().len(), 0);
-    }
-
-    // ── npm-update-pr handler tests ──────────────────────────────────────
-
-    fn npm_update_pr_args(pr_json: &str, rc_prefix: &str) -> GhaNpmUpdatePrArgs {
-        GhaNpmUpdatePrArgs {
-            pr_json: pr_json.to_string(),
-            node_rc_prefix: rc_prefix.to_string(),
-        }
-    }
-
-    fn npm_update_pr_base_mock() -> MockOps {
-        MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.0.0"}"#)
-            .on_cmd("npm version", "")
-            .on_cmd("wasm-pack build", "")
-            .on_cmd("npm install", "")
-            .on_cmd("npm clean-install", "")
-            .on_cmd("npm run tsc", "")
-            .on_cmd("npm run update-readme", "")
-            .with_git_has_changes(true)
-    }
-
-    #[test]
-    fn npm_update_pr_stable_full_flow() {
-        let ops = npm_update_pr_base_mock();
-        let args = npm_update_pr_args(r#"{"head_branch":"feature/branch"}"#, "");
-        handle_gha_npm_update_pr_impl(args, &ops).unwrap();
-
-        ops.assert_sequence(&[
-            "[git] checkout",
-            "cargo pkgid",
-            "[read_file]",
-            "npm version",
-            "wasm-pack build",
-            "npm install",
-            "npm clean-install",
-            "npm run tsc",
-            "npm run update-readme",
-            "[git] has_changes",
-            "[git] commit_and_push",
-        ]);
-
-        assert_eq!(
-            ops.find_call("[git] checkout"),
-            Call::GitCheckout {
-                branch: "feature/branch".to_string()
-            }
-        );
-        assert_eq!(
-            ops.find_call("npm version"),
-            Call::RunCmd {
-                program: "npm".to_string(),
-                args: vec![
-                    "version".to_string(),
-                    "1.2.3".to_string(),
-                    "--no-git-tag-version".to_string()
-                ],
-                cwd: Some(PathBuf::from("node-wasm/js")),
-            }
-        );
-        assert_eq!(
-            ops.find_call("[git] commit_and_push"),
-            Call::CommitAndPush {
-                branch: "feature/branch".to_string(),
-                message: "update lumina-node npm package".to_string(),
-                paths: vec![
-                    "node-wasm/js/package.json".to_string(),
-                    "node-wasm/js/package-lock.json".to_string(),
-                    "node-wasm/js/README.md".to_string(),
-                    "node-wasm/js/index.d.ts".to_string(),
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn npm_update_pr_rc_version_flow() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3-rc.1")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.0.0"}"#)
-            .on_cmd("npm version", "")
-            .on_cmd("wasm-pack build", "")
-            .on_cmd("npm install", "")
-            .on_cmd("npm clean-install", "")
-            .on_cmd("npm run tsc", "")
-            .on_cmd("npm run update-readme", "")
-            .with_git_has_changes(true);
-
-        let args = npm_update_pr_args(r#"{"head_branch":"release/rc"}"#, "-rc.1");
-        handle_gha_npm_update_pr_impl(args, &ops).unwrap();
-
-        ops.assert_sequence(&[
-            "[git] checkout",
-            "cargo pkgid",
-            "[read_file]",
-            "npm version",
-            "wasm-pack build",
-            "npm install",
-            "npm clean-install",
-            "npm run tsc",
-            "npm run update-readme",
-            "[git] has_changes",
-            "[git] commit_and_push",
-        ]);
-        // RC prefix is appended to the base version for npm
-        assert_eq!(
-            ops.find_call("npm version"),
-            Call::RunCmd {
-                program: "npm".to_string(),
-                args: vec![
-                    "version".to_string(),
-                    "1.2.3-rc.1".to_string(),
-                    "--no-git-tag-version".to_string()
-                ],
-                cwd: Some(PathBuf::from("node-wasm/js")),
-            }
-        );
-    }
-
-    #[test]
-    fn npm_update_pr_already_up_to_date() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#);
-
-        let args = npm_update_pr_args(r#"{"head_branch":"feature/branch"}"#, "");
-        handle_gha_npm_update_pr_impl(args, &ops).unwrap();
-
-        // Early return: only checkout + version check, no build/push
-        ops.assert_sequence(&["[git] checkout", "cargo pkgid", "[read_file]"]);
-    }
-
-    #[test]
-    fn npm_update_pr_no_changes_after_build() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.0.0"}"#)
-            .on_cmd("npm version", "")
-            .on_cmd("wasm-pack build", "")
-            .on_cmd("npm install", "")
-            .on_cmd("npm clean-install", "")
-            .on_cmd("npm run tsc", "")
-            .on_cmd("npm run update-readme", "")
-            .with_git_has_changes(false);
-
-        let args = npm_update_pr_args(r#"{"head_branch":"feature/branch"}"#, "");
-        handle_gha_npm_update_pr_impl(args, &ops).unwrap();
-
-        // No changes → stops after has_changes check, no commit/push
-        ops.assert_sequence(&[
-            "[git] checkout",
-            "cargo pkgid",
-            "[read_file]",
-            "npm version",
-            "wasm-pack build",
-            "npm install",
-            "npm clean-install",
-            "npm run tsc",
-            "npm run update-readme",
-            "[git] has_changes",
-        ]);
-    }
-
-    #[test]
-    fn npm_update_pr_invalid_json() {
-        let ops = MockOps::new();
-        let args = npm_update_pr_args("not json", "");
-        assert!(handle_gha_npm_update_pr_impl(args, &ops).is_err());
-    }
-
-    #[test]
-    fn npm_update_pr_empty_head_branch() {
-        let ops = MockOps::new();
-        let args = npm_update_pr_args(r#"{"head_branch":""}"#, "");
-        assert!(handle_gha_npm_update_pr_impl(args, &ops).is_err());
-    }
-
-    // ── npm-publish handler tests ────────────────────────────────────────
-
-    #[test]
-    fn npm_publish_no_artifacts() {
-        let ops = MockOps::new();
-        let args = GhaNpmPublishArgs { no_artifacts: true };
-        handle_gha_npm_publish_impl(args, &ops).unwrap();
-        ops.assert_sequence(&[]);
-    }
-
-    #[test]
-    fn npm_publish_already_published() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
-            .on_cmd_success("npm view", true)
-            .on_cmd_success("npm view", true);
-
-        let args = GhaNpmPublishArgs {
-            no_artifacts: false,
-        };
-        handle_gha_npm_publish_impl(args, &ops).unwrap();
-
-        // Early return after npm view confirms both versions exist
-        ops.assert_sequence(&[
-            "cargo pkgid",
-            "[read_file]",
-            "[check] npm view",
-            "[check] npm view",
-        ]);
-    }
-
-    #[test]
-    fn npm_publish_wasm_already_published_js_missing() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
-            // wasm exists
-            .on_cmd_success("npm view", true)
-            // js missing
-            .on_cmd_success("npm view", false)
-            .on_cmd("npm pkg set", "")
-            .on_cmd("npm publish", "");
-
-        let args = GhaNpmPublishArgs {
-            no_artifacts: false,
-        };
-        handle_gha_npm_publish_impl(args, &ops).unwrap();
-
-        ops.assert_sequence(&[
-            "cargo pkgid",
-            "[read_file]",
-            "[check] npm view",
-            "[check] npm view",
-            "npm pkg set",
-            "npm publish",
-        ]);
-        ops.assert_not_called("wasm-pack build");
-        ops.assert_not_called("wasm-pack publish");
-    }
-
-    #[test]
-    fn npm_publish_wasm_missing_js_already_published() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
-            // wasm missing
-            .on_cmd_success("npm view", false)
-            // js exists
-            .on_cmd_success("npm view", true)
-            .on_cmd("wasm-pack build", "")
-            .on_cmd("wasm-pack publish", "");
-
-        let args = GhaNpmPublishArgs {
-            no_artifacts: false,
-        };
-        handle_gha_npm_publish_impl(args, &ops).unwrap();
-
-        ops.assert_sequence(&[
-            "cargo pkgid",
-            "[read_file]",
-            "[check] npm view",
-            "[check] npm view",
-            "wasm-pack build",
-            "wasm-pack publish",
-        ]);
-        ops.assert_not_called("npm pkg set");
-        ops.assert_not_called("npm publish");
-    }
-
-    #[test]
-    fn npm_publish_stable_flow() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3"}"#)
-            .on_cmd_success("npm view", false)
-            .on_cmd_success("npm view", false)
-            .on_cmd("wasm-pack build", "")
-            .on_cmd("wasm-pack publish", "")
-            .on_cmd("npm pkg set", "")
-            .on_cmd("npm publish", "");
-
-        let args = GhaNpmPublishArgs {
-            no_artifacts: false,
-        };
-        handle_gha_npm_publish_impl(args, &ops).unwrap();
-
-        ops.assert_sequence(&[
-            "cargo pkgid",
-            "[read_file]",
-            "[check] npm view",
-            "[check] npm view",
-            "wasm-pack build",
-            "wasm-pack publish",
-            "npm pkg set",
-            "npm publish",
-        ]);
-        // Stable publish: no --tag flag
-        assert_eq!(
-            ops.find_call("wasm-pack publish"),
-            Call::RunCmd {
-                program: "wasm-pack".to_string(),
-                args: vec![
-                    "publish".to_string(),
-                    "--access".to_string(),
-                    "public".to_string(),
-                    "node-wasm".to_string()
-                ],
-                cwd: None,
-            }
-        );
-        assert_eq!(
-            ops.find_call("npm publish"),
-            Call::RunCmd {
-                program: "npm".to_string(),
-                args: vec![
-                    "publish".to_string(),
-                    "--access".to_string(),
-                    "public".to_string()
-                ],
-                cwd: Some(PathBuf::from("node-wasm/js")),
-            }
-        );
-    }
-
-    #[test]
-    fn npm_publish_rc_flow() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3-rc.1")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3-rc.1"}"#)
-            .on_cmd_success("npm view", false)
-            .on_cmd_success("npm view", false)
-            .on_cmd("wasm-pack build", "")
-            .on_cmd("wasm-pack publish", "")
-            .on_cmd("npm pkg set", "")
-            .on_cmd("npm publish", "");
-
-        let args = GhaNpmPublishArgs {
-            no_artifacts: false,
-        };
-        handle_gha_npm_publish_impl(args, &ops).unwrap();
-
-        ops.assert_sequence(&[
-            "cargo pkgid",
-            "[read_file]",
-            "[check] npm view",
-            "[check] npm view",
-            "wasm-pack build",
-            "wasm-pack publish",
-            "npm pkg set",
-            "npm publish",
-        ]);
-        // RC publish: --tag rc on both wasm-pack publish and npm publish
-        assert_eq!(
-            ops.find_call("wasm-pack publish"),
-            Call::RunCmd {
-                program: "wasm-pack".to_string(),
-                args: vec![
-                    "publish".to_string(),
-                    "--access".to_string(),
-                    "public".to_string(),
-                    "--tag".to_string(),
-                    "rc".to_string(),
-                    "node-wasm".to_string()
-                ],
-                cwd: None,
-            }
-        );
-        assert_eq!(
-            ops.find_call("npm publish"),
-            Call::RunCmd {
-                program: "npm".to_string(),
-                args: vec![
-                    "publish".to_string(),
-                    "--access".to_string(),
-                    "public".to_string(),
-                    "--tag".to_string(),
-                    "rc".to_string()
-                ],
-                cwd: Some(PathBuf::from("node-wasm/js")),
-            }
-        );
-    }
-
-    #[test]
-    fn npm_publish_rc_detection_uses_package_json() {
-        // cargo version is stable, but package.json has rc → should publish with --tag rc
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.2.3-rc.1"}"#)
-            .on_cmd_success("npm view", false)
-            .on_cmd_success("npm view", false)
-            .on_cmd("wasm-pack build", "")
-            .on_cmd("wasm-pack publish", "")
-            .on_cmd("npm pkg set", "")
-            .on_cmd("npm publish", "");
-
-        let args = GhaNpmPublishArgs {
-            no_artifacts: false,
-        };
-        handle_gha_npm_publish_impl(args, &ops).unwrap();
-
-        ops.assert_sequence(&[
-            "cargo pkgid",
-            "[read_file]",
-            "[check] npm view",
-            "[check] npm view",
-            "wasm-pack build",
-            "wasm-pack publish",
-            "npm pkg set",
-            "npm publish",
-        ]);
-        // RC detection comes from package.json, not cargo version
-        assert_eq!(
-            ops.find_call("wasm-pack publish"),
-            Call::RunCmd {
-                program: "wasm-pack".to_string(),
-                args: vec![
-                    "publish".to_string(),
-                    "--access".to_string(),
-                    "public".to_string(),
-                    "--tag".to_string(),
-                    "rc".to_string(),
-                    "node-wasm".to_string()
-                ],
-                cwd: None,
-            }
-        );
-    }
-
-    // ── uniffi-release handler tests ─────────────────────────────────────
-
-    fn uniffi_releases_json() -> String {
-        serde_json::to_string(&json!([
-            {"package_name": "lumina-node-uniffi", "tag": "lumina-node-uniffi-v1.0.0"}
-        ]))
-        .unwrap()
-    }
-
-    #[test]
-    fn uniffi_release_no_artifacts() {
-        let ops = MockOps::new();
-        let args = GhaUniffiReleaseArgs {
-            releases_json: "[]".to_string(),
-            gha_output: false,
-            no_artifacts: true,
-        };
-        handle_gha_uniffi_release_impl(args, &ops).unwrap();
-        ops.assert_sequence(&[]);
-    }
-
-    #[test]
-    fn uniffi_release_full_flow() {
-        let ops = MockOps::new()
-            .on_cmd("./node-uniffi/build-ios.sh", "")
-            .on_cmd("tar -cvzf lumina-node-uniffi-ios", "")
-            .on_cmd("./node-uniffi/build-android.sh", "")
-            .on_cmd("tar -cvzf lumina-node-uniffi-android", "")
-            .on_cmd("shasum", "abc123  ios.tar.gz\ndef456  android.tar.gz");
-
-        let args = GhaUniffiReleaseArgs {
-            releases_json: uniffi_releases_json(),
-            gha_output: true,
-            no_artifacts: false,
-        };
-        handle_gha_uniffi_release_impl(args, &ops).unwrap();
-
-        ops.assert_sequence(&[
-            "./node-uniffi/build-ios.sh",
-            "tar -cvzf lumina-node-uniffi-ios",
-            "./node-uniffi/build-android.sh",
-            "tar -cvzf lumina-node-uniffi-android",
-            "shasum",
-            "[write_file]",
-            "[gha] uniffi_tag",
-            "[gha:ml] uniffi_files",
-        ]);
-
-        assert_eq!(
-            ops.find_call("[gha] uniffi_tag"),
-            Call::GhaOutput {
-                key: "uniffi_tag".to_string(),
-                value: "lumina-node-uniffi-v1.0.0".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn uniffi_release_gha_output_disabled() {
-        let ops = MockOps::new()
-            .on_cmd("./node-uniffi/build-ios.sh", "")
-            .on_cmd("tar -cvzf lumina-node-uniffi-ios", "")
-            .on_cmd("./node-uniffi/build-android.sh", "")
-            .on_cmd("tar -cvzf lumina-node-uniffi-android", "")
-            .on_cmd("shasum", "checksums");
-
-        let args = GhaUniffiReleaseArgs {
-            releases_json: uniffi_releases_json(),
-            gha_output: false,
-            no_artifacts: false,
-        };
-        handle_gha_uniffi_release_impl(args, &ops).unwrap();
-
-        // Same build/tar/checksum steps, but no GHA output calls
-        ops.assert_sequence(&[
-            "./node-uniffi/build-ios.sh",
-            "tar -cvzf lumina-node-uniffi-ios",
-            "./node-uniffi/build-android.sh",
-            "tar -cvzf lumina-node-uniffi-android",
-            "shasum",
-            "[write_file]",
-        ]);
-    }
-
-    #[test]
-    fn uniffi_release_missing_uniffi_tag() {
-        let ops = MockOps::new();
-        let args = GhaUniffiReleaseArgs {
-            releases_json: r#"[{"package_name":"lumina-node","tag":"v1.0.0"}]"#.to_string(),
-            gha_output: false,
-            no_artifacts: false,
-        };
-        assert!(handle_gha_uniffi_release_impl(args, &ops).is_err());
-    }
-
-    #[test]
-    fn uniffi_release_invalid_json() {
-        let ops = MockOps::new();
-        let args = GhaUniffiReleaseArgs {
-            releases_json: "not json".to_string(),
-            gha_output: false,
-            no_artifacts: false,
-        };
-        assert!(handle_gha_uniffi_release_impl(args, &ops).is_err());
-    }
-}
+#[path = "tests.rs"]
+mod tests;

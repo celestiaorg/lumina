@@ -3,16 +3,14 @@
 mod adapters;
 mod application;
 mod domain;
-mod interface;
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-/// Entrypoint: delegates to interface layer so `main` stays thin and testable.
 async fn main() -> Result<()> {
     init_tracing();
-    interface::main::run().await
+    application::gha::run().await
 }
 
 fn init_tracing() {
