@@ -19,18 +19,16 @@ on:
           - final
 
 jobs:
-  pr:
-    name: Release PR
-    if: >-
-      ${{
-        github.event_name == 'workflow_dispatch'
-        || (
-          github.event_name == 'push'
-          && !contains(github.event.head_commit.message, 'chore: release rc')
-          && !contains(github.event.head_commit.message, 'chore: release final')
-        )
-      }}
+  release:
+    name: Release
     runs-on: ubuntu-latest
+
+    outputs:
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      pr: ${{ steps.release.outputs.pr }}
+      node_rc_prefix: ${{ steps.release.outputs.node_rc_prefix }}
+      releases: ${{ steps.release.outputs.releases }}
+      releases_created: ${{ steps.release.outputs.releases_created }}
 
     steps:
       - uses: actions/checkout@v4
@@ -48,8 +46,8 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Create release PR
-        id: pr
+      - name: Release
+        id: release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -57,22 +55,22 @@ jobs:
           INPUT_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'rc' }}
         run: |
           set -euo pipefail
-          cargo xtask gha pr \
+          cargo xtask gha release \
             --mode "$INPUT_MODE" \
             --gha-output
 
       - name: Install wasm-pack
-        if: steps.pr.outputs.prs_created == 'true'
+        if: steps.release.outputs.prs_created == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.13.1
 
       - name: Update npm bits on release PR branch
-        if: steps.pr.outputs.prs_created == 'true'
+        if: steps.release.outputs.prs_created == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          PR_JSON: ${{ steps.pr.outputs.pr }}
-          NODE_RC_PREFIX: ${{ steps.pr.outputs.node_rc_prefix }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+          NODE_RC_PREFIX: ${{ steps.release.outputs.node_rc_prefix }}
           RUST_LOG: info
         run: |
           set -euo pipefail
@@ -80,57 +78,12 @@ jobs:
             --pr-json "$PR_JSON" \
             --node-rc-prefix="$NODE_RC_PREFIX"
 
-  publish:
-    name: Publish Crates And Releases
-    if: >-
-      ${{
-        github.event_name == 'push'
-        && (
-          contains(github.event.head_commit.message, 'chore: release rc')
-          || contains(github.event.head_commit.message, 'chore: release final')
-        )
-      }}
-    runs-on: ubuntu-latest
-
-    outputs:
-      releases: ${{ steps.publish.outputs.releases }}
-      releases_created: ${{ steps.publish.outputs.releases_created }}
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: wasm32-unknown-unknown
-          rustflags: ""
-          cache: false
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Publish crates and GitHub releases
-        id: publish
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          RUST_LOG: info
-        run: |
-          set -euo pipefail
-          cargo xtask gha publish \
-            --commit-msg "${{ github.event.head_commit.message }}" \
-            --gha-output
-            --no-artifacts
-
   publish_npm:
     name: Publish npm
-    needs: [ publish ]
+    needs: [ release ]
     if: >-
       ${{
-        needs.publish.outputs.releases_created == 'true'
+        needs.release.outputs.releases_created == 'true'
       }}
     runs-on: ubuntu-latest
 
@@ -161,16 +114,16 @@ jobs:
           RUST_LOG: info
         run: |
           set -euo pipefail
-          cargo xtask gha npm-publish --no-artifacts
+          cargo xtask gha npm-publish
 
   uniffi:
     name: Publish uniffi
-    needs: [ publish ]
+    needs: [ release ]
     if: >-
       ${{
-        needs.publish.outputs.releases_created == 'true'
+        needs.release.outputs.releases_created == 'true'
         && contains(
-          fromJSON(needs.publish.outputs.releases).*.package_name,
+          fromJSON(needs.release.outputs.releases).*.package_name,
           'lumina-node-uniffi'
         )
       }}
@@ -200,14 +153,13 @@ jobs:
         id: uniffi
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          RELEASES_JSON: ${{ needs.publish.outputs.releases }}
+          RELEASES_JSON: ${{ needs.release.outputs.releases }}
           RUST_LOG: info
         run: |
           set -euo pipefail
           cargo xtask gha uniffi-release \
             --releases-json "$RELEASES_JSON" \
-            --gha-output \
-            --no-artifacts
+            --gha-output
 
       - name: Upload uniffi artifacts to GitHub release
         uses: softprops/action-gh-release@v2

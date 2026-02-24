@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use cargo_metadata::MetadataCommand;
 use tracing::info;
 
-use crate::adapters::git_refs::parse_remote_repo_url;
+use crate::adapters::github::parse_remote_repo_url;
 use crate::domain::types::{
     AuthContext, ExecuteReport, PublishContext, ReleaseMode, UpdatedPackage,
 };
@@ -97,12 +97,11 @@ impl ReleasePlzAdapter {
 
     pub async fn publish(&self, ctx: &PublishContext) -> Result<serde_json::Value> {
         info!(
-            mode=?ctx.common.mode,
             no_artifacts=ctx.no_artifacts,
             workspace_root=%self.workspace_root.display(),
-            has_release_plz_token=ctx.common.auth.release_plz_token.is_some(),
-            has_github_token=ctx.common.auth.github_token.is_some(),
-            has_cargo_registry_token=ctx.common.auth.cargo_registry_token.is_some(),
+            has_release_plz_token=ctx.auth.release_plz_token.is_some(),
+            has_github_token=ctx.auth.github_token.is_some(),
+            has_cargo_registry_token=ctx.auth.cargo_registry_token.is_some(),
             "release_plz: starting publish"
         );
 
@@ -120,11 +119,10 @@ impl ReleasePlzAdapter {
         }
 
         if let Some(token) = ctx
-            .common
             .auth
             .release_plz_token
             .clone()
-            .or_else(|| ctx.common.auth.github_token.clone())
+            .or_else(|| ctx.auth.github_token.clone())
             && let Some(repo_url) = parse_remote_repo_url(&self.workspace_root)?
         {
             request = request.with_git_release(release_plz_core::GitRelease {
@@ -136,7 +134,7 @@ impl ReleasePlzAdapter {
             });
         }
 
-        if let Some(token) = &ctx.common.auth.cargo_registry_token {
+        if let Some(token) = &ctx.auth.cargo_registry_token {
             request = request.with_token(token.clone());
         }
 

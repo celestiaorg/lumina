@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use git2::build::CheckoutBuilder;
@@ -7,6 +9,80 @@ use git2::{
     Repository, StatusOptions,
 };
 use tracing::info;
+
+// ── GitHub Actions output ────────────────────────────────────────────────
+
+pub fn write_github_output(key: &str, value: &str) -> Result<()> {
+    let Some(mut file) = open_github_output_file()? else {
+        return Ok(());
+    };
+    writeln!(file, "{key}={value}").context("failed to write GITHUB_OUTPUT entry")?;
+    Ok(())
+}
+
+/// Uses heredoc format to preserve JSON and special characters.
+pub fn write_github_output_multiline(key: &str, value: &str) -> Result<()> {
+    let Some(mut file) = open_github_output_file()? else {
+        return Ok(());
+    };
+    let delimiter = unique_delimiter(value);
+    writeln!(file, "{key}<<{delimiter}").context("failed to write GITHUB_OUTPUT header")?;
+    writeln!(file, "{value}").context("failed to write GITHUB_OUTPUT value body")?;
+    writeln!(file, "{delimiter}").context("failed to write GITHUB_OUTPUT footer")?;
+    Ok(())
+}
+
+fn open_github_output_file() -> Result<Option<std::fs::File>> {
+    let Some(path) = std::env::var_os("GITHUB_OUTPUT") else {
+        return Ok(None);
+    };
+
+    let file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .context("failed to open GITHUB_OUTPUT file")?;
+    Ok(Some(file))
+}
+
+fn unique_delimiter(value: &str) -> String {
+    let base = "__XTASK_GHA_OUTPUT__";
+    if !value.contains(base) {
+        return base.to_string();
+    }
+    for idx in 1..=u32::MAX {
+        let candidate = format!("{base}_{idx}");
+        if !value.contains(&candidate) {
+            return candidate;
+        }
+    }
+    "__XTASK_GHA_OUTPUT_FALLBACK__".to_string()
+}
+
+// ── Remote URL parsing ───────────────────────────────────────────────────
+
+pub fn parse_remote_repo_url(workspace_root: &Path) -> Result<Option<release_plz_core::RepoUrl>> {
+    let Some(remote) = remote_origin_url(workspace_root)? else {
+        return Ok(None);
+    };
+    let repo_url = release_plz_core::RepoUrl::new(&remote)
+        .with_context(|| format!("failed to parse repository URL from `{remote}`"))?;
+    Ok(Some(repo_url))
+}
+
+fn remote_origin_url(workspace_root: &Path) -> Result<Option<String>> {
+    let repo = Repository::open(workspace_root)
+        .with_context(|| format!("failed to open repository at {}", workspace_root.display()))?;
+
+    let remote = match repo.find_remote("origin") {
+        Ok(remote) => remote,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(remote.url().map(|url| url.to_string()))
+}
+
+// ── Git2 repository operations ───────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Git2Repo {
