@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.1](https://github.com/celestiaorg/lumina/compare/lumina-utils-v0.5.2...lumina-utils-v1.0.0-rc.1) - 2026-02-24
+
+### Added
+
+- update all packages to same rc version
+
 ## [0.5.2](https://github.com/celestiaorg/lumina/compare/lumina-utils-v0.5.1...lumina-utils-v0.5.2) - 2026-01-27
 
 ### Fixed

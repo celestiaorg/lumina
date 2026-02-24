@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v0.12.0...celestia-grpc-v1.0.0-rc.1) - 2026-02-24
+
+### Added
+
+- update all packages to same rc version
+- add javascript in browser test suite ([#882](https://github.com/celestiaorg/lumina/pull/882))
+- tx client v2 ([#873](https://github.com/celestiaorg/lumina/pull/873))
+
 ## [0.12.0](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v0.11.0...celestia-grpc-v0.12.0) - 2026-01-27
 
 ### Added

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-grpc-macros-v0.7.0...celestia-grpc-macros-v1.0.0-rc.1) - 2026-02-24
+
+### Added
+
+- update all packages to same rc version
+
 ## [0.7.0](https://github.com/celestiaorg/lumina/compare/celestia-grpc-macros-v0.6.0...celestia-grpc-macros-v0.7.0) - 2026-01-27
 
 ### Added

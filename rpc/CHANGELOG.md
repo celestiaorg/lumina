@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-rpc-v0.16.2...celestia-rpc-v1.0.0-rc.1) - 2026-02-24
+
+### Added
+
+- update all packages to same rc version
+- *(rpc)* [**breaking**] add server trait to rpc crate ([#890](https://github.com/celestiaorg/lumina/pull/890))
+- tx client v2 ([#873](https://github.com/celestiaorg/lumina/pull/873))
+
 ## [0.16.2](https://github.com/celestiaorg/lumina/compare/celestia-rpc-v0.16.1...celestia-rpc-v0.16.2) - 2026-01-27
 
 ### Fixed
