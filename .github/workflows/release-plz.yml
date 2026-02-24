@@ -194,15 +194,24 @@ jobs:
             exit
           fi
 
+          # Determine npm dist-tag from version pre-release identifier.
+          # e.g. "1.0.0-rc.1" -> "rc", "1.0.0-alpha.2" -> "alpha", "1.0.0" -> "latest"
+          if [[ "$local_version" == *-* ]]; then
+            npm_tag="${local_version#*-}"    # "rc.1"
+            npm_tag="${npm_tag%%[.0-9]*}"    # "rc"
+          else
+            npm_tag="latest"
+          fi
+
           # publish lumina-node-wasm
           wasm-pack build node-wasm
-          wasm-pack publish --access public node-wasm
+          wasm-pack publish --access public --tag "$npm_tag" node-wasm
 
           # publish lumina-node
           cd node-wasm/js
           # replace dependency on node-wasm from path based to version in npm
           npm pkg set "dependencies[lumina-node-wasm]=$local_version"
-          npm publish --access public
+          npm publish --access public --tag "$npm_tag"
 
   release-uniffi:
     name: Release-uniffi

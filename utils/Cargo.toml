@@ -1,6 +1,6 @@
 [package]
 name = "lumina-utils"
-version = "0.5.2"
+version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
 description = "Platform abstraction utilities used across lumina project"
