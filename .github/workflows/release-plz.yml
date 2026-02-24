@@ -6,7 +6,8 @@ permissions:
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       mode:
@@ -19,35 +20,38 @@ on:
           - final
 
 jobs:
-  release:
-    name: Release
+  release-plz:
+    name: Release-plz
     runs-on: ubuntu-latest
 
     outputs:
-      prs_created: ${{ steps.release.outputs.prs_created }}
-      pr: ${{ steps.release.outputs.pr }}
-      node_rc_prefix: ${{ steps.release.outputs.node_rc_prefix }}
-      releases: ${{ steps.release.outputs.releases }}
-      releases_created: ${{ steps.release.outputs.releases_created }}
+      pr: ${{ steps.release-plz.outputs.pr }}
+      prs_created: ${{ steps.release-plz.outputs.prs_created }}
+      node_rc_prefix: ${{ steps.release-plz.outputs.node_rc_prefix }}
+      releases: ${{ steps.release-plz.outputs.releases }}
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Setup toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
           rustflags: ""
           cache: false
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
-      - name: Release
-        id: release
+      - name: Run release-plz
+        id: release-plz
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -60,17 +64,17 @@ jobs:
             --gha-output
 
       - name: Install wasm-pack
-        if: steps.release.outputs.prs_created == 'true'
+        if: steps.release-plz.outputs.prs_created == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.13.1
 
-      - name: Update npm bits on release PR branch
-        if: steps.release.outputs.prs_created == 'true'
+      - name: Bump lumina-node npm version
+        if: steps.release-plz.outputs.prs_created == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          PR_JSON: ${{ steps.release.outputs.pr }}
-          NODE_RC_PREFIX: ${{ steps.release.outputs.node_rc_prefix }}
+          PR_JSON: ${{ steps.release-plz.outputs.pr }}
+          NODE_RC_PREFIX: ${{ steps.release-plz.outputs.node_rc_prefix }}
           RUST_LOG: info
         run: |
           set -euo pipefail
@@ -78,28 +82,31 @@ jobs:
             --pr-json "$PR_JSON" \
             --node-rc-prefix="$NODE_RC_PREFIX"
 
-  publish_npm:
-    name: Publish npm
-    needs: [ release ]
+  release-npm:
+    name: Release-npm
+    needs: [ release-plz ]
     if: >-
       ${{
-        needs.release.outputs.releases_created == 'true'
+        needs.release-plz.outputs.releases_created == 'true'
       }}
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Setup toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
           rustflags: ""
           cache: false
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
@@ -116,31 +123,34 @@ jobs:
           set -euo pipefail
           cargo xtask gha npm-publish
 
-  uniffi:
-    name: Publish uniffi
-    needs: [ release ]
+  release-uniffi:
+    name: Release-uniffi
+    needs: [ release-plz ]
     if: >-
       ${{
-        needs.release.outputs.releases_created == 'true'
+        needs.release-plz.outputs.releases_created == 'true'
         && contains(
-          fromJSON(needs.release.outputs.releases).*.package_name,
+          fromJSON(needs.release-plz.outputs.releases).*.package_name,
           'lumina-node-uniffi'
         )
       }}
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Setup toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
           cache: false
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
@@ -153,7 +163,7 @@ jobs:
         id: uniffi
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          RELEASES_JSON: ${{ needs.release.outputs.releases }}
+          RELEASES_JSON: ${{ needs.release-plz.outputs.releases }}
           RUST_LOG: info
         run: |
           set -euo pipefail
