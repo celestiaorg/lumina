@@ -8,8 +8,6 @@ use super::Ops;
 use super::*;
 use crate::domain::types::UpdatedPackage;
 
-// ── MockOps (Call enum + Ops impl) ──────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 enum Call {
     RunCmd {
@@ -269,8 +267,6 @@ impl Ops for MockOps {
     }
 }
 
-// ── Pure function tests ──────────────────────────────────────────────────
-
 #[test]
 fn rc_suffix_is_extracted_from_semver() {
     assert_eq!(extract_rc_suffix("1.2.3-rc.7"), Some("-rc.7"));
@@ -350,8 +346,6 @@ fn command_display_multiple_args() {
     );
 }
 
-// ── build_release_contract tests ─────────────────────────────────────────
-
 #[test]
 fn release_contract_with_pr_and_rc_version() {
     let report = ExecuteReport {
@@ -391,8 +385,6 @@ fn release_contract_empty() {
     assert!(!contract.prs_created);
     assert!(!contract.releases_created);
 }
-
-// ── npm-update-pr handler tests ──────────────────────────────────────────
 
 fn npm_update_pr_args(pr_json: &str, rc_prefix: &str) -> GhaNpmUpdatePrArgs {
     GhaNpmUpdatePrArgs {
@@ -568,8 +560,6 @@ fn npm_update_pr_empty_head_branch() {
     let args = npm_update_pr_args(r#"{"head_branch":""}"#, "");
     assert!(handle_gha_npm_update_pr_impl(args, &ops).is_err());
 }
-
-// ── npm-publish handler tests ────────────────────────────────────────────
 
 #[test]
 fn npm_publish_no_artifacts() {
@@ -819,8 +809,6 @@ fn npm_publish_rc_detection_uses_package_json() {
     );
 }
 
-// ── uniffi-release handler tests ─────────────────────────────────────────
-
 fn uniffi_releases_json() -> String {
     serde_json::to_string(&json!([
         {"package_name": "lumina-node-uniffi", "tag": "lumina-node-uniffi-v1.0.0"}
@@ -924,8 +912,6 @@ fn uniffi_release_invalid_json() {
     };
     assert!(handle_gha_uniffi_release_impl(args, &ops).is_err());
 }
-
-// ── is_published tests ────────────────────────────────────────────────
 
 #[test]
 fn is_published_with_releases() {

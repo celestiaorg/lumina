@@ -14,8 +14,6 @@ use crate::adapters::github::{
 use crate::adapters::release_plz::ReleasePlzAdapter;
 use crate::domain::types::{AuthContext, ExecuteReport, PublishContext, ReleaseMode};
 
-// ── Ops trait + RealOps ─────────────────────────────────────────────────
-
 pub(crate) trait Ops {
     fn run_cmd(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<String>;
     fn cmd_success(&self, program: &str, args: &[&str]) -> Result<bool>;
@@ -118,8 +116,6 @@ impl Ops for RealOps {
     }
 }
 
-// ── CLI ─────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Parser)]
 #[command(name = "xtask", about = "Release process orchestrator")]
 struct Cli {
@@ -186,8 +182,6 @@ pub async fn run() -> Result<()> {
 
     Ok(())
 }
-
-// ── Args ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Args)]
 pub struct GhaReleaseArgs {

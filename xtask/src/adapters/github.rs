@@ -10,8 +10,6 @@ use git2::{
 };
 use tracing::info;
 
-// ── GitHub Actions output ────────────────────────────────────────────────
-
 pub fn write_github_output(key: &str, value: &str) -> Result<()> {
     let Some(mut file) = open_github_output_file()? else {
         return Ok(());
@@ -59,8 +57,6 @@ fn unique_delimiter(value: &str) -> String {
     "__XTASK_GHA_OUTPUT_FALLBACK__".to_string()
 }
 
-// ── Remote URL parsing ───────────────────────────────────────────────────
-
 pub fn parse_remote_repo_url(workspace_root: &Path) -> Result<Option<release_plz_core::RepoUrl>> {
     let Some(remote) = remote_origin_url(workspace_root)? else {
         return Ok(None);
@@ -81,8 +77,6 @@ fn remote_origin_url(workspace_root: &Path) -> Result<Option<String>> {
 
     Ok(remote.url().map(|url| url.to_string()))
 }
-
-// ── Git2 repository operations ───────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Git2Repo {

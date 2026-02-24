@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-// ── Model ────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseMode {
@@ -14,8 +12,6 @@ pub struct UpdatedPackage {
     pub package: String,
     pub version: String,
 }
-
-// ── Contexts ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct PublishContext {
@@ -39,8 +35,6 @@ impl AuthContext {
         }
     }
 }
-
-// ── Reports ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecuteReport {
