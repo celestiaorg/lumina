@@ -44,8 +44,7 @@ jobs:
           target: wasm32-unknown-unknown
           # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
           rustflags: ""
-          cache: false
-
+          
       - name: Run release-plz
         id: release-plz
         env:
@@ -99,7 +98,7 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           rustflags: ""
-          
+
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2
         with:
