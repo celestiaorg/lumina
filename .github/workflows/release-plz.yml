@@ -59,8 +59,7 @@ jobs:
           set -euo pipefail
           cargo xtask gha pr \
             --mode "$INPUT_MODE" \
-            --gha-output \
-            --compare-branch "main"
+            --gha-output
 
       - name: Install wasm-pack
         if: steps.pr.outputs.prs_created == 'true'
@@ -123,8 +122,7 @@ jobs:
           set -euo pipefail
           cargo xtask gha publish \
             --commit-msg "${{ github.event.head_commit.message }}" \
-            --gha-output \
-            --compare-branch "main"
+            --gha-output
 
   publish_npm:
     name: Publish npm

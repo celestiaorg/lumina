@@ -30,14 +30,10 @@ pub(crate) enum Call {
     GitHasChanges {
         paths: Vec<String>,
     },
-    GitCommit {
-        paths: Vec<String>,
-        message: String,
-    },
-    GitPush {
+    CommitAndPush {
         branch: String,
-        force: bool,
-        dry_run: bool,
+        message: String,
+        paths: Vec<String>,
     },
     GhaOutput {
         key: String,
@@ -58,8 +54,7 @@ impl Call {
             Call::WriteFile { path, .. } => format!("[write_file] {}", path.display()),
             Call::GitCheckout { branch } => format!("[git] checkout {branch}"),
             Call::GitHasChanges { .. } => "[git] has_changes".to_string(),
-            Call::GitCommit { .. } => "[git] commit".to_string(),
-            Call::GitPush { branch, .. } => format!("[git] push {branch}"),
+            Call::CommitAndPush { branch, .. } => format!("[git] commit_and_push {branch}"),
             Call::GhaOutput { key, .. } => format!("[gha] {key}"),
             Call::GhaOutputMultiline { key, .. } => format!("[gha:ml] {key}"),
         }
@@ -82,7 +77,6 @@ pub(crate) struct MockOps {
     labeled_cmd_statuses: RefCell<Vec<(String, bool)>>,
     files: RefCell<HashMap<PathBuf, String>>,
     git_has_changes_results: RefCell<Vec<bool>>,
-    git_commit_results: RefCell<Vec<bool>>,
 }
 
 impl MockOps {
@@ -93,7 +87,6 @@ impl MockOps {
             labeled_cmd_statuses: RefCell::new(Vec::new()),
             files: RefCell::new(HashMap::new()),
             git_has_changes_results: RefCell::new(Vec::new()),
-            git_commit_results: RefCell::new(Vec::new()),
         }
     }
 
@@ -122,11 +115,6 @@ impl MockOps {
 
     pub(crate) fn with_git_has_changes(self, b: bool) -> Self {
         self.git_has_changes_results.borrow_mut().push(b);
-        self
-    }
-
-    pub(crate) fn with_git_commit(self, b: bool) -> Self {
-        self.git_commit_results.borrow_mut().push(b);
         self
     }
 
@@ -276,24 +264,11 @@ impl Ops for MockOps {
         })
     }
 
-    fn git_commit(&self, paths: &[&str], message: &str) -> Result<bool> {
-        self.calls.borrow_mut().push(Call::GitCommit {
-            paths: paths.iter().map(|s| s.to_string()).collect(),
-            message: message.to_string(),
-        });
-        let mut results = self.git_commit_results.borrow_mut();
-        Ok(if results.is_empty() {
-            false
-        } else {
-            results.remove(0)
-        })
-    }
-
-    fn git_push(&self, branch: &str, force: bool, dry_run: bool) -> Result<()> {
-        self.calls.borrow_mut().push(Call::GitPush {
+    fn commit_and_push(&self, branch: &str, message: &str, paths: &[&str]) -> Result<()> {
+        self.calls.borrow_mut().push(Call::CommitAndPush {
             branch: branch.to_string(),
-            force,
-            dry_run,
+            message: message.to_string(),
+            paths: paths.iter().map(|s| s.to_string()).collect(),
         });
         Ok(())
     }

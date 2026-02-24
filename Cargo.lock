@@ -1029,7 +1029,7 @@ dependencies = [
 [[package]]
 name = "cargo_utils"
 version = "0.1.77"
-source = "git+https://github.com/mcrakhman/release-plz?branch=mcrakhman%2Frelease-plz-rc#315f123f2da78f02fa95e9e726b25c5fd304cbe0"
+source = "git+https://github.com/mcrakhman/release-plz?branch=mcrakhman%2Frelease-plz-rc#c94585ba2ebd3654275009fd9882a79e6e5e105c"
 dependencies = [
  "anyhow",
  "cargo_metadata 0.23.1",
@@ -2654,7 +2654,7 @@ dependencies = [
 [[package]]
 name = "git_cmd"
 version = "0.6.27"
-source = "git+https://github.com/mcrakhman/release-plz?branch=mcrakhman%2Frelease-plz-rc#315f123f2da78f02fa95e9e726b25c5fd304cbe0"
+source = "git+https://github.com/mcrakhman/release-plz?branch=mcrakhman%2Frelease-plz-rc#c94585ba2ebd3654275009fd9882a79e6e5e105c"
 dependencies = [
  "anyhow",
  "camino",
@@ -6592,7 +6592,7 @@ dependencies = [
 [[package]]
 name = "next_version"
 version = "0.3.0"
-source = "git+https://github.com/mcrakhman/release-plz?branch=mcrakhman%2Frelease-plz-rc#315f123f2da78f02fa95e9e726b25c5fd304cbe0"
+source = "git+https://github.com/mcrakhman/release-plz?branch=mcrakhman%2Frelease-plz-rc#c94585ba2ebd3654275009fd9882a79e6e5e105c"
 dependencies = [
  "git-conventional 1.0.0",
  "regex",
@@ -7974,7 +7974,7 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 [[package]]
 name = "release_plz_core"
 version = "0.36.11"
-source = "git+https://github.com/mcrakhman/release-plz?branch=mcrakhman%2Frelease-plz-rc#315f123f2da78f02fa95e9e726b25c5fd304cbe0"
+source = "git+https://github.com/mcrakhman/release-plz?branch=mcrakhman%2Frelease-plz-rc#c94585ba2ebd3654275009fd9882a79e6e5e105c"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

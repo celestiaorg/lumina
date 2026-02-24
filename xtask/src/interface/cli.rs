@@ -43,15 +43,6 @@ pub struct GhaPrArgs {
     #[arg(long, default_value = "rc", help = "Release mode (rc or final)")]
     pub mode: CliReleaseMode,
 
-    #[arg(
-        long,
-        help = "Branch to compare against for release planning and as target branch for release PRs"
-    )]
-    pub compare_branch: Option<String>,
-
-    #[arg(long, default_value = "main")]
-    pub default_branch: String,
-
     #[arg(long, help = "Write normalized contract fields to GITHUB_OUTPUT")]
     pub gha_output: bool,
 }
@@ -60,18 +51,6 @@ pub struct GhaPrArgs {
 pub struct GhaPublishArgs {
     #[arg(long, help = "Head commit message used to determine release mode")]
     pub commit_msg: String,
-
-    #[arg(long, help = "Branch to compare against")]
-    pub compare_branch: Option<String>,
-
-    #[arg(long, default_value = "main")]
-    pub default_branch: String,
-
-    #[arg(long, default_value = "lumina/release-plz")]
-    pub rc_branch_prefix: String,
-
-    #[arg(long, default_value = "lumina/release-plz")]
-    pub final_branch_prefix: String,
 
     #[arg(long, help = "Write normalized contract fields to GITHUB_OUTPUT")]
     pub gha_output: bool,

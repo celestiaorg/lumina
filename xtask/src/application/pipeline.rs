@@ -3,57 +3,39 @@ use std::path::PathBuf;
 use anyhow::Result;
 use tracing::info;
 
-use crate::adapters::git2_repo::Git2Repo;
-use crate::adapters::github_pr::GitHubPrClient;
 use crate::adapters::release_plz::ReleasePlzAdapter;
-use crate::application::prepare::handle_prepare;
 use crate::application::publish::handle_publish;
-use crate::application::submit::{SubmitArgs, handle_submit};
 use crate::domain::types::{ExecuteContext, ExecuteReport, PublishContext, ReleaseReport};
 
-#[derive(Debug, Clone)]
-pub struct ExecuteArgs {
-    pub ctx: ExecuteContext,
-}
-
-/// Runs prepare -> submit -> publish using real adapters.
+/// Runs release_pr -> publish using real adapters.
 pub struct ReleasePipeline {
     release_engine: ReleasePlzAdapter,
-    git: Git2Repo,
-    pr_client: GitHubPrClient,
 }
 
 impl ReleasePipeline {
     pub fn new(workspace_root: PathBuf) -> Self {
-        let release_engine = ReleasePlzAdapter::new(workspace_root.clone());
-        let git = Git2Repo::new(workspace_root.clone());
-        let pr_client = GitHubPrClient::new(workspace_root);
-
-        Self {
-            release_engine,
-            git,
-            pr_client,
-        }
+        let release_engine = ReleasePlzAdapter::new(workspace_root);
+        Self { release_engine }
     }
 
-    /// Prepare (branch + update) then submit (commit/push/PR). Does not publish.
-    pub async fn execute(&self, args: ExecuteArgs) -> Result<ExecuteReport> {
-        let prepare_ctx = args.ctx.to_prepare_context();
-        let prepare = handle_prepare(&self.git, &self.release_engine, prepare_ctx).await?;
+    /// Opens or updates a release PR. Does not publish.
+    pub async fn execute(&self, ctx: ExecuteContext) -> Result<Option<ExecuteReport>> {
+        let report = self
+            .release_engine
+            .release_pr(ctx.common.mode, &ctx.common.auth)
+            .await?;
 
-        let submit_ctx = args.ctx.to_submit_context();
-        let submit = handle_submit(
-            &self.git,
-            &self.pr_client,
-            SubmitArgs {
-                ctx: submit_ctx,
-                branch_name_override: Some(prepare.branch_name.clone()),
-            },
-        )
-        .await?;
+        if let Some(ref r) = report {
+            info!(
+                branch=%r.head_branch,
+                pr_url=?r.pr_url,
+                packages=r.updated_packages.len(),
+                "execute completed"
+            );
+        } else {
+            info!("execute completed: no updates needed");
+        }
 
-        let report = ExecuteReport { prepare, submit };
-        info!(branch=%report.submit.branch_name, pushed=report.submit.pushed, "execute completed");
         Ok(report)
     }
 
