@@ -19,12 +19,7 @@ pub async fn run() -> Result<()> {
     match cli.command {
         Commands::Gha(args) => match args.command {
             GhaCommands::Pr(cmd) => {
-                info!(
-                    compare_branch=?cmd.compare_branch,
-                    default_branch=%cmd.default_branch,
-                    gha_output=cmd.gha_output,
-                    "running gha pr"
-                );
+                info!(gha_output = cmd.gha_output, "running gha pr");
                 let contract = handle_gha_pr(
                     &pipeline,
                     AppGhaPrArgs {
@@ -32,8 +27,6 @@ pub async fn run() -> Result<()> {
                             CliReleaseMode::Rc => ReleaseMode::Rc,
                             CliReleaseMode::Final => ReleaseMode::Final,
                         },
-                        compare_branch: cmd.compare_branch,
-                        default_branch: cmd.default_branch,
                         gha_output: cmd.gha_output,
                     },
                 )
@@ -46,22 +39,14 @@ pub async fn run() -> Result<()> {
             }
             GhaCommands::Publish(cmd) => {
                 info!(
-                    compare_branch=?cmd.compare_branch,
-                    default_branch=%cmd.default_branch,
-                    rc_branch_prefix=%cmd.rc_branch_prefix,
-                    final_branch_prefix=%cmd.final_branch_prefix,
-                    gha_output=cmd.gha_output,
-                    no_artifacts=cmd.no_artifacts,
+                    gha_output = cmd.gha_output,
+                    no_artifacts = cmd.no_artifacts,
                     "running gha publish"
                 );
                 let contract = handle_gha_publish(
                     &pipeline,
                     AppGhaPublishArgs {
                         commit_msg: cmd.commit_msg,
-                        compare_branch: cmd.compare_branch,
-                        default_branch: cmd.default_branch,
-                        rc_branch_prefix: cmd.rc_branch_prefix,
-                        final_branch_prefix: cmd.final_branch_prefix,
                         gha_output: cmd.gha_output,
                         no_artifacts: cmd.no_artifacts,
                     },

@@ -8,28 +8,22 @@ use tracing::info;
 
 use crate::adapters::github_output::{write_github_output, write_github_output_multiline};
 use crate::application::gha_ops::{Ops, RealOps};
-use crate::application::pipeline::{ExecuteArgs, ReleasePipeline};
+use crate::application::pipeline::ReleasePipeline;
 use crate::domain::model::{RELEASE_PR_TITLE_FINAL, RELEASE_PR_TITLE_RC};
 use crate::domain::types::{
-    AuthContext, BranchContext, CommonContext, ExecuteContext, ExecuteReport, PublishContext,
-    ReleaseMode, ReleaseReport,
+    AuthContext, CommonContext, ExecuteContext, ExecuteReport, PublishContext, ReleaseMode,
+    ReleaseReport,
 };
 
 #[derive(Debug, Clone)]
 pub struct GhaPrArgs {
     pub mode: ReleaseMode,
-    pub compare_branch: Option<String>,
-    pub default_branch: String,
     pub gha_output: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct GhaPublishArgs {
     pub commit_msg: String,
-    pub compare_branch: Option<String>,
-    pub default_branch: String,
-    pub rc_branch_prefix: String,
-    pub final_branch_prefix: String,
     pub gha_output: bool,
     pub no_artifacts: bool,
 }
@@ -90,25 +84,16 @@ struct PullRequestPayload {
 }
 
 pub async fn handle_gha_pr(pipeline: &ReleasePipeline, args: GhaPrArgs) -> Result<PrContract> {
-    let branch = args
-        .compare_branch
-        .clone()
-        .unwrap_or_else(|| args.default_branch.clone());
-
     let report = pipeline
-        .execute(ExecuteArgs {
-            ctx: ExecuteContext {
-                common: CommonContext {
-                    mode: args.mode,
-                    default_branch: branch,
-                    auth: AuthContext::from_env(),
-                },
-                branch: BranchContext { skip_pr: false },
+        .execute(ExecuteContext {
+            common: CommonContext {
+                mode: args.mode,
+                auth: AuthContext::from_env(),
             },
         })
         .await?;
 
-    let contract = contract_from_execute(&report);
+    let contract = contract_from_execute(report.as_ref());
 
     if args.gha_output {
         write_pr_contract_to_gha_output(&contract)?;
@@ -122,20 +107,13 @@ pub async fn handle_gha_publish(
     args: GhaPublishArgs,
 ) -> Result<PublishContract> {
     let mode = parse_release_mode_from_commit(&args.commit_msg)?;
-    let branch = args
-        .compare_branch
-        .clone()
-        .unwrap_or_else(|| args.default_branch.clone());
 
     let report = pipeline
         .publish(PublishContext {
             common: CommonContext {
                 mode,
-                default_branch: branch,
                 auth: AuthContext::from_env(),
             },
-            rc_branch_prefix: args.rc_branch_prefix,
-            final_branch_prefix: args.final_branch_prefix,
             no_artifacts: args.no_artifacts,
         })
         .await?;
@@ -217,13 +195,11 @@ fn handle_gha_npm_update_pr_impl(args: GhaNpmUpdatePrArgs, ops: &dyn Ops) -> Res
         return Ok(());
     }
 
-    let committed = ops.git_commit(&tracked_paths, "update lumina-node npm package")?;
-    if !committed {
-        info!("gha/npm-update-pr: nothing staged, skipping commit");
-        return Ok(());
-    }
-
-    ops.git_push(&pr_payload.head_branch, false, false)?;
+    ops.commit_and_push(
+        &pr_payload.head_branch,
+        "update lumina-node npm package",
+        &tracked_paths,
+    )?;
     Ok(())
 }
 
@@ -394,19 +370,22 @@ fn handle_gha_uniffi_release_impl(args: GhaUniffiReleaseArgs, ops: &dyn Ops) -> 
     Ok(())
 }
 
-fn contract_from_execute(report: &ExecuteReport) -> PrContract {
+fn contract_from_execute(report: Option<&ExecuteReport>) -> PrContract {
     let mut contract = PrContract::default();
-    if !report.submit.branch_name.trim().is_empty() {
+    let Some(report) = report else {
+        return contract;
+    };
+
+    if !report.head_branch.trim().is_empty() {
         contract.pr = json!({
-            "head_branch": report.submit.branch_name,
-            "html_url": report.submit.pr_url.clone().unwrap_or_default(),
+            "head_branch": report.head_branch,
+            "html_url": report.pr_url.clone().unwrap_or_default(),
         });
-        contract.prs_created = report.submit.pr_url.is_some();
+        contract.prs_created = report.pr_url.is_some();
     }
 
     // Extract RC suffix from lumina-node's updated version if present.
     let node_version = report
-        .prepare
         .updated_packages
         .iter()
         .find(|pkg| pkg.package == "lumina-node")
@@ -564,7 +543,7 @@ mod tests {
 
     use super::*;
     use crate::application::gha_mock::{Call, MockOps};
-    use crate::domain::types::{BranchState, PrepareReport, SubmitReport, UpdatedPackage};
+    use crate::domain::types::UpdatedPackage;
 
     // ── Pure function tests ──────────────────────────────────────────────
 
@@ -684,26 +663,16 @@ mod tests {
     #[test]
     fn contract_from_execute_with_pr_and_rc_version() {
         let report = ExecuteReport {
-            prepare: PrepareReport {
-                mode: ReleaseMode::Rc,
-                branch_name: "release/rc".to_string(),
-                branch_state: BranchState::Missing,
-                updated_packages: vec![UpdatedPackage {
-                    package: "lumina-node".to_string(),
-                    version: "1.1.0-rc.1".to_string(),
-                }],
-            },
-            submit: SubmitReport {
-                mode: ReleaseMode::Rc,
-                branch_name: "lumina/release-plz-rc".to_string(),
-                commit_message: "chore(release): prepare rc release".to_string(),
-                pushed: true,
-                pr_url: Some("https://github.com/org/repo/pull/1".to_string()),
-            },
+            head_branch: "release-plz-2025-01-01".to_string(),
+            pr_url: Some("https://github.com/org/repo/pull/1".to_string()),
+            updated_packages: vec![UpdatedPackage {
+                package: "lumina-node".to_string(),
+                version: "1.1.0-rc.1".to_string(),
+            }],
         };
-        let contract = contract_from_execute(&report);
+        let contract = contract_from_execute(Some(&report));
         assert!(contract.prs_created);
-        assert_eq!(contract.pr["head_branch"], "lumina/release-plz-rc");
+        assert_eq!(contract.pr["head_branch"], "release-plz-2025-01-01");
         assert_eq!(
             contract.pr["html_url"],
             "https://github.com/org/repo/pull/1"
@@ -713,22 +682,7 @@ mod tests {
 
     #[test]
     fn contract_from_execute_empty_report() {
-        let report = ExecuteReport {
-            prepare: PrepareReport {
-                mode: ReleaseMode::Final,
-                branch_name: String::new(),
-                branch_state: BranchState::Missing,
-                updated_packages: vec![],
-            },
-            submit: SubmitReport {
-                mode: ReleaseMode::Final,
-                branch_name: "  ".to_string(),
-                commit_message: String::new(),
-                pushed: false,
-                pr_url: None,
-            },
-        };
-        let contract = contract_from_execute(&report);
+        let contract = contract_from_execute(None);
         assert!(!contract.prs_created);
         assert_eq!(contract.node_rc_prefix, "");
     }
@@ -781,7 +735,6 @@ mod tests {
             .on_cmd("npm run tsc", "")
             .on_cmd("npm run update-readme", "")
             .with_git_has_changes(true)
-            .with_git_commit(true)
     }
 
     #[test]
@@ -801,8 +754,7 @@ mod tests {
             "npm run tsc",
             "npm run update-readme",
             "[git] has_changes",
-            "[git] commit",
-            "[git] push",
+            "[git] commit_and_push",
         ]);
 
         assert_eq!(
@@ -824,11 +776,16 @@ mod tests {
             }
         );
         assert_eq!(
-            ops.find_call("[git] push"),
-            Call::GitPush {
+            ops.find_call("[git] commit_and_push"),
+            Call::CommitAndPush {
                 branch: "feature/branch".to_string(),
-                force: false,
-                dry_run: false,
+                message: "update lumina-node npm package".to_string(),
+                paths: vec![
+                    "node-wasm/js/package.json".to_string(),
+                    "node-wasm/js/package-lock.json".to_string(),
+                    "node-wasm/js/README.md".to_string(),
+                    "node-wasm/js/index.d.ts".to_string(),
+                ],
             }
         );
     }
@@ -844,8 +801,7 @@ mod tests {
             .on_cmd("npm clean-install", "")
             .on_cmd("npm run tsc", "")
             .on_cmd("npm run update-readme", "")
-            .with_git_has_changes(true)
-            .with_git_commit(true);
+            .with_git_has_changes(true);
 
         let args = npm_update_pr_args(r#"{"head_branch":"release/rc"}"#, "-rc.1");
         handle_gha_npm_update_pr_impl(args, &ops).unwrap();
@@ -861,8 +817,7 @@ mod tests {
             "npm run tsc",
             "npm run update-readme",
             "[git] has_changes",
-            "[git] commit",
-            "[git] push",
+            "[git] commit_and_push",
         ]);
         // RC prefix is appended to the base version for npm
         assert_eq!(
@@ -920,39 +875,6 @@ mod tests {
             "npm run tsc",
             "npm run update-readme",
             "[git] has_changes",
-        ]);
-    }
-
-    #[test]
-    fn npm_update_pr_commit_returns_false() {
-        let ops = MockOps::new()
-            .on_cmd("cargo pkgid", "pkg@1.2.3")
-            .with_file("node-wasm/js/package.json", r#"{"version":"1.0.0"}"#)
-            .on_cmd("npm version", "")
-            .on_cmd("wasm-pack build", "")
-            .on_cmd("npm install", "")
-            .on_cmd("npm clean-install", "")
-            .on_cmd("npm run tsc", "")
-            .on_cmd("npm run update-readme", "")
-            .with_git_has_changes(true)
-            .with_git_commit(false);
-
-        let args = npm_update_pr_args(r#"{"head_branch":"feature/branch"}"#, "");
-        handle_gha_npm_update_pr_impl(args, &ops).unwrap();
-
-        // Commit returns false → no push
-        ops.assert_sequence(&[
-            "[git] checkout",
-            "cargo pkgid",
-            "[read_file]",
-            "npm version",
-            "wasm-pack build",
-            "npm install",
-            "npm clean-install",
-            "npm run tsc",
-            "npm run update-readme",
-            "[git] has_changes",
-            "[git] commit",
         ]);
     }
 

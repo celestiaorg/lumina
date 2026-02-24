@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use crate::adapters::git_refs::parse_remote_repo_url;
 use crate::adapters::git2_repo::Git2Repo;
 use crate::adapters::github_output::{write_github_output, write_github_output_multiline};
 
@@ -14,21 +15,22 @@ pub(crate) trait Ops {
     fn write_file(&self, path: &Path, content: &str) -> Result<()>;
     fn git_checkout(&self, branch: &str) -> Result<()>;
     fn git_has_changes(&self, paths: &[&str]) -> Result<bool>;
-    fn git_commit(&self, paths: &[&str], message: &str) -> Result<bool>;
-    fn git_push(&self, branch: &str, force: bool, dry_run: bool) -> Result<()>;
+    fn commit_and_push(&self, branch: &str, message: &str, paths: &[&str]) -> Result<()>;
     fn gha_output(&self, key: &str, value: &str) -> Result<()>;
     fn gha_output_multiline(&self, key: &str, value: &str) -> Result<()>;
 }
 
 pub(crate) struct RealOps {
     git: Git2Repo,
+    root: std::path::PathBuf,
 }
 
 impl RealOps {
     pub(crate) fn new() -> Result<Self> {
         let root = std::env::current_dir().context("failed to resolve current workspace root")?;
         Ok(Self {
-            git: Git2Repo::new(root),
+            git: Git2Repo::new(root.clone()),
+            root,
         })
     }
 }
@@ -64,12 +66,39 @@ impl Ops for RealOps {
         self.git.paths_have_changes(paths)
     }
 
-    fn git_commit(&self, paths: &[&str], message: &str) -> Result<bool> {
-        self.git.stage_paths_and_commit(paths, message)
-    }
+    fn commit_and_push(&self, branch: &str, message: &str, paths: &[&str]) -> Result<()> {
+        let repo_url = parse_remote_repo_url(&self.root)?
+            .context("no origin remote URL found; cannot create GraphQL commit")?;
 
-    fn git_push(&self, branch: &str, force: bool, dry_run: bool) -> Result<()> {
-        self.git.push_branch(branch, force, dry_run)
+        let token =
+            std::env::var("GITHUB_TOKEN").context("GITHUB_TOKEN is required for GraphQL commit")?;
+
+        let git_client = release_plz_core::GitClient::new(release_plz_core::GitForge::Github(
+            release_plz_core::GitHub::new(repo_url.owner, repo_url.name, token.into()),
+        ))
+        .context("failed to create GitClient for GraphQL commit")?;
+
+        let root_str = self
+            .root
+            .to_str()
+            .context("workspace root is not valid UTF-8")?;
+        let git_repo = release_plz_core::git_cmd::Repo::new(root_str)
+            .context("failed to open git_cmd::Repo for GraphQL commit")?;
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                release_plz_core::commit_specific_files(
+                    &git_client,
+                    &git_repo,
+                    message,
+                    branch,
+                    paths,
+                )
+                .await
+                .context("failed to create commit via GitHub GraphQL API")?;
+                Ok(())
+            })
+        })
     }
 
     fn gha_output(&self, key: &str, value: &str) -> Result<()> {

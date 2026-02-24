@@ -7,15 +7,12 @@ fn test_publish_ctx(mode: ReleaseMode, no_artifacts: bool) -> PublishContext {
     PublishContext {
         common: CommonContext {
             mode,
-            default_branch: "main".to_string(),
             auth: AuthContext {
                 release_plz_token: Some("release-token".to_string()),
                 github_token: Some("gh-token".to_string()),
                 cargo_registry_token: Some("cargo-token".to_string()),
             },
         },
-        rc_branch_prefix: "lumina/release-plz-rc".to_string(),
-        final_branch_prefix: "lumina/release-plz-final".to_string(),
         no_artifacts,
     }
 }
