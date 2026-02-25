@@ -15,22 +15,22 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 edition = "2024"
 
 [workspace.dependencies]
 beetswap = "0.5"
 blockstore = "0.8"
 leopard-codec = "0.2"
-lumina-node = { version = "=1.0.0-rc.2", path = "node" }
-lumina-node-wasm = { version = "=1.0.0-rc.2", path = "node-wasm" }
-lumina-utils = { version = "=1.0.0-rc.2", path = "utils" }
-celestia-client = { version = "=1.0.0-rc.2", path = "client" }
-celestia-proto = { version = "=1.0.0-rc.2", path = "proto" }
-celestia-grpc = { version = "=1.0.0-rc.2", path = "grpc", default-features = false }
-celestia-grpc-macros = { version = "=1.0.0-rc.2", path = "grpc/grpc-macros" }
-celestia-rpc = { version = "=1.0.0-rc.2", path = "rpc", default-features = false }
-celestia-types = { version = "=1.0.0-rc.2", path = "types", default-features = false }
+lumina-node = { version = "=1.0.0-rc.3", path = "node" }
+lumina-node-wasm = { version = "=1.0.0-rc.3", path = "node-wasm" }
+lumina-utils = { version = "=1.0.0-rc.3", path = "utils" }
+celestia-client = { version = "=1.0.0-rc.3", path = "client" }
+celestia-proto = { version = "=1.0.0-rc.3", path = "proto" }
+celestia-grpc = { version = "=1.0.0-rc.3", path = "grpc", default-features = false }
+celestia-grpc-macros = { version = "=1.0.0-rc.3", path = "grpc/grpc-macros" }
+celestia-rpc = { version = "=1.0.0-rc.3", path = "rpc", default-features = false }
+celestia-types = { version = "=1.0.0-rc.3", path = "types", default-features = false }
 
 anyhow = "1.0.40"
 async-stream = "0.3.5"
