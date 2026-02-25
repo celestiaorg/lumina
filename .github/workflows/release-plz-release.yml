@@ -1,0 +1,163 @@
+name: Release-plz Release
+
+permissions:
+  contents: write
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  release-plz:
+    name: Release-plz
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.pull_request.merged == true
+      && startsWith(github.event.pull_request.head.ref, 'release-plz-')
+
+    outputs:
+      releases: ${{ steps.release-plz.outputs.releases }}
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Setup toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Run release-plz
+        uses: MarcoIeni/release-plz-action@v0.5
+        id: release-plz
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-npm:
+    name: Release-npm
+    runs-on: ubuntu-latest
+
+    needs:
+    - release-plz
+
+    if: success() && needs.release-plz.outputs.releases_created == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Setup toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
+          rustflags: ""
+
+      - name: Install dependencies
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Release to npm
+        env:
+          NPM_REGISTRY_TOKEN: ${{ secrets.NPM_REGISTRY_TOKEN }}
+        run: |
+          set -xeuo pipefail
+
+          published_version=$(npm show lumina-node-wasm version)
+          local_version="$(cargo pkgid --manifest-path=node-wasm/Cargo.toml | cut -d@ -f 2)"
+
+          if [ "$published_version" == "$local_version" ] ; then
+            echo Latest version already in npm, exiting
+            exit
+          fi
+
+          # Determine npm dist-tag from version pre-release identifier.
+          # e.g. "1.0.0-rc.1" -> "rc", "1.0.0-alpha.2" -> "alpha", "1.0.0" -> "latest"
+          if [[ "$local_version" == *-* ]]; then
+            npm_tag="${local_version#*-}"    # "rc.1"
+            npm_tag="${npm_tag%%[.0-9]*}"    # "rc"
+          else
+            npm_tag="latest"
+          fi
+
+          # publish lumina-node-wasm
+          wasm-pack build node-wasm
+          wasm-pack publish --access public --tag "$npm_tag" node-wasm
+
+          # publish lumina-node
+          cd node-wasm/js
+          # replace dependency on node-wasm from path based to version in npm
+          npm pkg set "dependencies[lumina-node-wasm]=$local_version"
+          npm publish --access public --tag "$npm_tag"
+
+  release-uniffi:
+    name: Release-uniffi
+    runs-on: macos-latest
+
+    needs:
+    - release-plz
+
+    if: >-
+      ${{
+        success()
+        && contains(
+          fromJSON(needs.release-plz.outputs.releases).*.package_name,
+          'lumina-node-uniffi'
+        )
+      }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: "\
+            aarch64-apple-ios,\
+            aarch64-apple-ios-sim,\
+            aarch64-linux-android,\
+            armv7-linux-androideabi,\
+            x86_64-linux-android,\
+            i686-linux-android"
+
+      - name: Install cargo-ndk
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-ndk@3.5
+
+      - name: Build node-uniffi for ios
+        run: |
+          set -xeuo pipefail
+          ./node-uniffi/build-ios.sh
+          tar -cvzf lumina-node-uniffi-ios.tar.gz -C node-uniffi ios
+
+      - name: Build node-uniffi for android
+        run: |
+          set -xeuo pipefail
+          ./node-uniffi/build-android.sh
+          tar -cvzf lumina-node-uniffi-android.tar.gz -C node-uniffi app
+
+      - name: Publish artifacts to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          RELEASES: ${{ needs.release-plz.outputs.releases }}
+        run: |
+          set -xeuo pipefail
+
+          tag="$(echo "$RELEASES" | jq -r '.[] | select(.package_name == "lumina-node-uniffi").tag')"
+
+          brew install coreutils
+          sha256sum lumina-node-uniffi-* > lumina-node-uniffi-sha256-checksums.txt
+          gh release upload "$tag" lumina-node-uniffi-*
