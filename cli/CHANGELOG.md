@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.2](https://github.com/celestiaorg/lumina/compare/lumina-cli-v0.13.0...lumina-cli-v1.0.0-rc.2) - 2026-02-25
+
+### Added
+
+- simplified/unified release process ([#928](https://github.com/celestiaorg/lumina/pull/928))
+- add javascript in browser test suite ([#882](https://github.com/celestiaorg/lumina/pull/882))
+
 ## [0.13.0](https://github.com/celestiaorg/lumina/compare/lumina-cli-v0.12.1...lumina-cli-v0.13.0) - 2026-01-27
 
 ### Added
