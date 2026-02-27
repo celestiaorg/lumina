@@ -55,9 +55,9 @@ hex = "0.4.3"
 http = "1"
 http-body = "1"
 js-sys = "0.3.77"
-jsonrpsee = "0.26"
-jsonrpsee-core = "0.26"
-jsonrpsee-types = "0.26"
+jsonrpsee = { version = "0.26", default-features = false }
+jsonrpsee-core = { version = "0.26", default-features = false }
+jsonrpsee-types = { version = "0.26", default-features = false }
 k256 = "0.13"
 libp2p = "0.56"
 libp2p-identity = "0.2.12"
