@@ -1,0 +1,9 @@
+# Generated vectors and binaries
+test_vectors.json
+fuzzy_test_vectors.json
+rs_compat_vectors.json
+generate_rs_compat_vectors
+
+# IDE/OS noise
+.DS_Store
+.idea/
