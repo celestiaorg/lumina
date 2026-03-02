@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 GO_DIR="${REPO_ROOT}/go"
@@ -23,16 +23,19 @@ Environment variables:
 EOF
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  print_help
-  exit 0
-fi
-
-if [[ $# -gt 0 ]]; then
-  echo "error: unexpected arguments: $*" >&2
-  print_help >&2
-  exit 1
-fi
+case "${1:-}" in
+  -h|--help)
+    print_help
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    echo "error: unexpected arguments: $*" >&2
+    print_help >&2
+    exit 1
+    ;;
+esac
 
 RUN_RUST_BENCH="${RUN_RUST_BENCH:-1}"
 RUN_GO_BENCH="${RUN_GO_BENCH:-1}"
@@ -40,8 +43,8 @@ GO_CACHE_DIR="${GO_CACHE_DIR:-/tmp/rsema1d-go-build-cache}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/target}"
 
 validate_binary_flag() {
-  local name="$1"
-  local value="$2"
+  name="$1"
+  value="$2"
   case "${value}" in
     0|1) ;;
     *)
@@ -63,27 +66,27 @@ echo "  RUN_GO_BENCH=${RUN_GO_BENCH} (set RUN_RUST_BENCH=0 for Go-only)"
 echo "  CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
 echo "  GO_CACHE_DIR=${GO_CACHE_DIR}"
 
-if [[ "${RUN_RUST_BENCH}" == "1" ]]; then
+if [ "${RUN_RUST_BENCH}" = "1" ]; then
   if ! command -v cargo >/dev/null 2>&1; then
     echo "error: cargo is not installed or not on PATH" >&2
     exit 1
   fi
 fi
 
-if [[ "${RUN_GO_BENCH}" == "1" ]]; then
+if [ "${RUN_GO_BENCH}" = "1" ]; then
   if ! command -v go >/dev/null 2>&1; then
     echo "error: go is not installed or not on PATH" >&2
     exit 1
   fi
 fi
 
-if [[ "${RUN_RUST_BENCH}" != "1" && "${RUN_GO_BENCH}" != "1" ]]; then
+if [ "${RUN_RUST_BENCH}" != "1" ] && [ "${RUN_GO_BENCH}" != "1" ]; then
   echo "error: nothing to run (set RUN_RUST_BENCH=1 and/or RUN_GO_BENCH=1)" >&2
   exit 1
 fi
 
 step=1
-if [[ "${RUN_RUST_BENCH}" == "1" ]]; then
+if [ "${RUN_RUST_BENCH}" = "1" ]; then
   echo "[${step}] Running Rust Criterion benchmarks..."
   (
     cd "${REPO_ROOT}"
@@ -95,7 +98,7 @@ else
   step=$((step + 1))
 fi
 
-if [[ "${RUN_GO_BENCH}" == "1" ]]; then
+if [ "${RUN_GO_BENCH}" = "1" ]; then
   echo "[${step}] Running Go benchmarks..."
   (
     cd "${GO_DIR}"

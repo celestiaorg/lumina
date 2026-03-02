@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"time"
 
 	rsema1d "github.com/celestiaorg/rsema1d"
@@ -20,12 +21,13 @@ func makeTestData(k, rowSize int) [][]byte {
 }
 
 func benchmarkEncode(name string, k, n, rowSize int) {
+	workers := runtime.GOMAXPROCS(0)
 	data := makeTestData(k, rowSize)
 	config := &rsema1d.Config{
 		K:           k,
 		N:           n,
 		RowSize:     rowSize,
-		WorkerCount: 1,
+		WorkerCount: workers,
 	}
 
 	// Warmup
@@ -52,12 +54,13 @@ func benchmarkEncode(name string, k, n, rowSize int) {
 }
 
 func benchmarkProofGen(name string, k, n, rowSize int) {
+	workers := runtime.GOMAXPROCS(0)
 	data := makeTestData(k, rowSize)
 	config := &rsema1d.Config{
 		K:           k,
 		N:           n,
 		RowSize:     rowSize,
-		WorkerCount: 1,
+		WorkerCount: workers,
 	}
 
 	extData, _, _, err := rsema1d.Encode(data, config)
@@ -86,12 +89,13 @@ func benchmarkProofGen(name string, k, n, rowSize int) {
 }
 
 func benchmarkVerification(name string, k, n, rowSize int) {
+	workers := runtime.GOMAXPROCS(0)
 	data := makeTestData(k, rowSize)
 	config := &rsema1d.Config{
 		K:           k,
 		N:           n,
 		RowSize:     rowSize,
-		WorkerCount: 1,
+		WorkerCount: workers,
 	}
 
 	extData, commitment, _, err := rsema1d.Encode(data, config)
@@ -126,22 +130,23 @@ func benchmarkVerification(name string, k, n, rowSize int) {
 
 func main() {
 	fmt.Println("# Go Benchmark Results")
+	fmt.Printf("# WorkerCount = GOMAXPROCS = %d\n", runtime.GOMAXPROCS(0))
 
 	// Encode benchmarks - matching Rust configurations
-	benchmarkEncode("128KB_k1024_n1024", 1024, 1024, 128)
-	benchmarkEncode("1MB_k1024_n1024", 1024, 1024, 1024)
-	benchmarkEncode("1MB_k4096_n4096", 4096, 4096, 256)
-	benchmarkEncode("8MB_k4096_n4096", 4096, 4096, 2048)
-	benchmarkEncode("128MB_k4096_n4096", 4096, 4096, 32768)
-	benchmarkEncode("128MB_k8192_n8192", 8192, 8192, 16384)
+	benchmarkEncode("128KB_k1024_n3072", 1024, 3072, 128)
+	benchmarkEncode("1MB_k1024_n3072", 1024, 3072, 1024)
+	benchmarkEncode("1MB_k4096_n12288", 4096, 12288, 256)
+	benchmarkEncode("8MB_k4096_n12288", 4096, 12288, 2048)
+	benchmarkEncode("128MB_k4096_n12288", 4096, 12288, 32768)
+	benchmarkEncode("128MB_k8192_n24576", 8192, 24576, 16384)
 
 	// Proof generation benchmarks
-	benchmarkProofGen("1MB_k1024", 1024, 1024, 1024)
-	benchmarkProofGen("8MB_k4096", 4096, 4096, 2048)
-	benchmarkProofGen("128MB_k4096", 4096, 4096, 32768)
+	benchmarkProofGen("1MB_k1024_n3072", 1024, 3072, 1024)
+	benchmarkProofGen("8MB_k4096_n12288", 4096, 12288, 2048)
+	benchmarkProofGen("128MB_k4096_n12288", 4096, 12288, 32768)
 
 	// Verification benchmarks
-	benchmarkVerification("1MB_k1024", 1024, 1024, 1024)
-	benchmarkVerification("8MB_k4096", 4096, 4096, 2048)
-	benchmarkVerification("128MB_k4096", 4096, 4096, 32768)
+	benchmarkVerification("1MB_k1024_n3072", 1024, 3072, 1024)
+	benchmarkVerification("8MB_k4096_n12288", 4096, 12288, 2048)
+	benchmarkVerification("128MB_k4096_n12288", 4096, 12288, 32768)
 }

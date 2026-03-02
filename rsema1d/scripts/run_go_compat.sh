@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 GO_DIR="${REPO_ROOT}/go"
@@ -23,16 +23,19 @@ Environment variables:
 EOF
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  print_help
-  exit 0
-fi
-
-if [[ $# -gt 0 ]]; then
-  echo "error: unexpected arguments: $*" >&2
-  print_help >&2
-  exit 1
-fi
+case "${1:-}" in
+  -h|--help)
+    print_help
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    echo "error: unexpected arguments: $*" >&2
+    print_help >&2
+    exit 1
+    ;;
+esac
 
 FUZZ_TESTS="${FUZZ_TESTS:-250}"
 MAX_TOTAL_ROWS="${MAX_TOTAL_ROWS:-4096}"
@@ -74,7 +77,7 @@ echo "[1/3] Generating Go fuzzy vectors (num_tests=${FUZZ_TESTS}, max_total_rows
   GOCACHE="${GO_CACHE_DIR}" go run ./cmd/generate_fuzzy_vectors/main.go "${FUZZ_TESTS}" "${MAX_TOTAL_ROWS}"
 )
 
-if [[ "${RUN_FULL_TEST_SUITE}" == "1" ]]; then
+if [ "${RUN_FULL_TEST_SUITE}" = "1" ]; then
   echo "[2/3] Running full Rust test suite..."
   (
     cd "${REPO_ROOT}"
