@@ -207,7 +207,7 @@ pub fn verify_proof(
     verify_with_context(proof, commitment, context)
 }
 
-/// Go-style alias for context-based verification.
+/// Convenience alias for context-based verification.
 pub fn verify_row_with_context(
     proof: &RowProof<'_>,
     commitment: &[u8; 32],
@@ -256,7 +256,7 @@ pub fn verify_row_inclusion(
     Ok(true)
 }
 
-/// Go-style alias for standalone proof verification.
+/// Convenience alias for standalone proof verification.
 pub fn verify_standalone_proof(
     proof: &StandaloneProof,
     commitment: &[u8; 32],
@@ -265,7 +265,7 @@ pub fn verify_standalone_proof(
     verify_standalone(proof, commitment, params).map(|_| ())
 }
 
-/// Go-style alias for row inclusion verification.
+/// Convenience alias for row inclusion verification.
 pub fn verify_row_inclusion_proof(
     proof: &RowInclusionProof,
     commitment: &[u8; 32],

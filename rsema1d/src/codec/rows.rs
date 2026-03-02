@@ -29,25 +29,6 @@ impl RowMatrix {
         })
     }
 
-    pub fn from_row_major(data: Vec<u8>, row_size: usize) -> Result<Self> {
-        if row_size == 0 {
-            return Err(Error::InvalidParameters("row_size must be > 0".to_string()));
-        }
-        if !data.len().is_multiple_of(row_size) {
-            return Err(Error::InvalidParameters(format!(
-                "row buffer size mismatch: {} is not divisible by row_size {}",
-                data.len(),
-                row_size
-            )));
-        }
-        let rows = data.len() / row_size;
-        Ok(Self {
-            data,
-            row_size,
-            rows,
-        })
-    }
-
     pub fn rows(&self) -> usize {
         self.rows
     }

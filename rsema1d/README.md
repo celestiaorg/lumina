@@ -1,79 +1,89 @@
-# rsema1d
+# rsema1d (Rust)
 
-Rust implementation of rsema1d - Reed-Solomon erasure coding with Merkle commitments and Random Linear Combinations.
+Rust implementation of the `rsema1d` codec:
+
+- Reed-Solomon row extension (`k` original rows + `n` parity rows)
+- Merkle commitment over rows
+- RLC-based row verification
+- Reconstruction of original rows from any `k` available rows
 
 ## Quick Start
 
 ```bash
-# Run tests
+# unit + integration tests
 cargo test
 
-# Run benchmarks
-cargo bench
+# benchmark runner (Rust and Go)
+./scripts/run_benchmarks.sh
+
+# regenerate Go fuzzy vectors and run Rust Go-compat test
+./scripts/run_go_compat.sh
 ```
 
-## Usage
+## End-to-End Flow (Library API)
+
+1. Build `Parameters(k, n, row_size)`.
+2. Put original data into a contiguous `RowMatrix` (`k * row_size` bytes).
+3. Call `encode` to produce:
+   - `ExtendedData` (all `k+n` rows)
+   - `Commitment` (`[u8; 32]`)
+   - original `RLC` values
+4. Build a `VerificationContext` from original RLC values.
+5. Generate and verify row proofs.
+6. Sample any `k` rows and call `reconstruct` to recover original rows.
+
+## Example
 
 ```rust
-use rsema1d::{Parameters, ExtendedData, RowMatrix};
+use rsema1d::{
+    create_verification_context, encode, reconstruct, verify_row_with_context, Parameters,
+    RowMatrix,
+};
 
-// Create parameters (k original, n parity, row_size bytes)
-let params = Parameters::new(4, 4, 64)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let params = Parameters::new(4, 12, 64)?;
 
-// Generate commitment from contiguous row-major data
-let data = RowMatrix::with_shape(vec![0u8; 4 * 64], 4, 64)?;
-let commitment = ExtendedData::generate(&data, &params)?;
+    // 1) Build contiguous original rows.
+    let mut bytes = vec![0u8; params.k * params.row_size];
+    for i in 0..params.k {
+        bytes[i * params.row_size] = (i as u8) + 1;
+    }
+    let original = RowMatrix::with_shape(bytes, params.k, params.row_size)?;
 
-// Generate proof for row 0
-let proof = commitment.generate_row_proof(0)?;
+    // 2) Encode.
+    let (extended, commitment, rlc_orig) = encode(&original, &params)?;
 
-// Verify proof with context
-let (ctx, _rlc_root) = rsema1d::create_verification_context(&commitment.rlc_original(), &params)?;
-rsema1d::verify_row_with_context(&proof, &commitment.commitment(), &ctx)?;
+    // 3) Create verification context and verify a row proof.
+    let (ctx, _rlc_root) = create_verification_context(&rlc_orig, &params)?;
+    let proof = extended.generate_row_proof(0)?;
+    verify_row_with_context(&proof, &commitment, &ctx)?;
 
-// Reconstruct from any k rows
-let rows = RowMatrix::from_row_major(vec![...], 64)?;
-let indices = vec![0, 1, 2, 3];
-let reconstructed = rsema1d::reconstruct(&rows, &indices, &params)?;
+    // 4) Reconstruct from any k rows.
+    let indices = vec![0usize, 1, params.k, params.k + 1];
+    let sampled = extended.rows().sample(&indices)?;
+    let reconstructed = reconstruct(&sampled, &indices, &params)?;
+
+    assert_eq!(reconstructed.as_row_major(), original.as_row_major());
+    Ok(())
+}
 ```
 
-## Performance
+## Whole-Flow Tests
 
-Benchmarks run on **MacBook Pro M4 Pro** (14-core, 48 GB RAM):
+Primary end-to-end test (encode -> verify -> reconstruct):
 
-### Encoding
+- `basic_encode_verify_reconstruct` in [`src/lib.rs`](/Users/mikhailrakhmanov/repos/mcrakhman-lumina/rsema1d/src/lib.rs)
 
-| Data Size | Rust | Go | Speedup |
-|-----------|------|-----|---------|
-| 128KB (k=1024) | 1.41 ms (88 MiB/s) | 3.47 ms (36 MiB/s) | **2.5x** |
-| 1MB (k=1024) | 2.41 ms (402 MiB/s) | 16.6 ms (60 MiB/s) | **6.9x** |
-| 1MB (k=4096) | 3.92 ms (252 MiB/s) | 23.8 ms (42 MiB/s) | **6.1x** |
-| 8MB (k=4096) | 15.9 ms (497 MiB/s) | 133 ms (60 MiB/s) | **8.4x** |
-| 128MB (k=4096) | 206 ms (619 MiB/s) | 1938 ms (66 MiB/s) | **9.4x** |
-| 128MB (k=8192) | 209 ms (612 MiB/s) | 2003 ms (64 MiB/s) | **9.6x** |
+Cross-language compatibility flow (Go vectors -> Rust encode/verify/reconstruct):
 
-### Proof Generation & Verification
+- `go_fuzzy_vectors_match_rust` in [`tests/go_fuzzy_compat.rs`](/Users/mikhailrakhmanov/repos/mcrakhman-lumina/rsema1d/tests/go_fuzzy_compat.rs)
 
-| Operation | Data Size | Rust | Go | Speedup |
-|-----------|-----------|------|-----|---------|
-| Proof Generation | 1MB | 0.12 µs | 0.12 µs | 1.0x |
-| Proof Generation | 8MB | 0.14 µs | 0.14 µs | 1.0x |
-| Proof Generation | 128MB | 0.14 µs | 0.14 µs | 1.0x |
-| Verification | 1MB | 17 µs | 56 µs | **3.3x** |
-| Verification | 8MB | 33 µs | 110 µs | **3.4x** |
-| Verification | 128MB | 497 µs | 1682 µs | **3.4x** |
+Run:
 
-## Dependencies
+```bash
+# local whole-flow test
+cargo test basic_encode_verify_reconstruct
 
-- `reed-solomon-simd` - Optimized Reed-Solomon encoding/decoding
-- `sha2` - SHA256 hashing for Merkle trees
-- `criterion` - Statistical benchmarking
-- `rayon` - Parallel computation
-
-## Validation
-
-This implementation is validated against the Go reference implementation at [github.com/celestiaorg/rsema1d](https://github.com/celestiaorg/rsema1d).
-
-## License
-
-Same license as the Go reference implementation.
+# cross-language whole-flow test
+./scripts/run_go_compat.sh
+```
