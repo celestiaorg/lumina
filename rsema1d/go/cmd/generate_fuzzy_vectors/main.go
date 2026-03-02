@@ -212,6 +212,41 @@ func generateTestVector(name string, k, n, rowSize int, seed int64, proofIndices
 	}
 }
 
+func randomProofIndices(rng *rand.Rand, k, n, count int) []int {
+	totalRows := k + n
+	if count > totalRows {
+		count = totalRows
+	}
+
+	indices := make([]int, 0, count)
+	seen := make(map[int]struct{}, count)
+
+	add := func(idx int) {
+		if idx < 0 || idx >= totalRows {
+			return
+		}
+		if _, ok := seen[idx]; ok {
+			return
+		}
+		seen[idx] = struct{}{}
+		indices = append(indices, idx)
+	}
+
+	// Ensure we test both original and parity domains when possible.
+	if k > 0 {
+		add(rng.Intn(k))
+	}
+	if n > 0 {
+		add(k + rng.Intn(n))
+	}
+
+	for len(indices) < count {
+		add(rng.Intn(totalRows))
+	}
+
+	return indices
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -220,7 +255,7 @@ func min(a, b int) int {
 }
 
 func main() {
-	numTests := 100
+	numTests := 250
 	if len(os.Args) > 1 {
 		fmt.Sscanf(os.Args[1], "%d", &numTests)
 	}
@@ -229,10 +264,61 @@ func main() {
 		fmt.Sscanf(os.Args[2], "%d", &maxTotalRows)
 	}
 
-	fmt.Printf("Generating %d fuzzy test vectors (max_total_rows=%d)...\n", numTests, maxTotalRows)
+	type fixedCase struct {
+		name    string
+		k       int
+		n       int
+		rowSize int
+		seed    int64
+	}
+	fixedCases := []fixedCase{
+		{
+			name:    "fuzzy_fixed_k4096_n12288_r64",
+			k:       4096,
+			n:       4096 * 3,
+			rowSize: 64,
+			seed:    4096012288064,
+		},
+		{
+			name:    "fuzzy_fixed_k4096_n12288_r128",
+			k:       4096,
+			n:       4096 * 3,
+			rowSize: 128,
+			seed:    4096012288128,
+		},
+		{
+			name:    "fuzzy_fixed_k4096_n12288_r256",
+			k:       4096,
+			n:       4096 * 3,
+			rowSize: 256,
+			seed:    4096012288256,
+		},
+		{
+			name:    "fuzzy_fixed_k4096_n12288_r512",
+			k:       4096,
+			n:       4096 * 3,
+			rowSize: 512,
+			seed:    4096012288512,
+		},
+	}
+
+	fmt.Printf("Generating %d fuzzy test vectors (max_total_rows=%d) + %d fixed high-scale cases...\n", numTests, maxTotalRows, len(fixedCases))
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	var testVectors []TestVector
+
+	// Always include high-scale Fibre-relevant cases.
+	for _, c := range fixedCases {
+		proofRng := rand.New(rand.NewSource(c.seed ^ 0x5DEECE66D))
+		testVectors = append(testVectors, generateTestVector(
+			c.name,
+			c.k,
+			c.n,
+			c.rowSize,
+			c.seed,
+			randomProofIndices(proofRng, c.k, c.n, 6),
+		))
+	}
 
 	// Valid row sizes (must be multiple of 64)
 	rowSizes := []int{64, 128, 256, 512, 1024, 2048}
@@ -246,12 +332,9 @@ func main() {
 		// Generate random proof indices
 		totalRows := k + n
 		numProofs := min(6, totalRows)
-		proofIndices := make([]int, numProofs)
-		for j := 0; j < numProofs; j++ {
-			proofIndices[j] = rng.Intn(totalRows)
-		}
+		proofIndices := randomProofIndices(rng, k, n, numProofs)
 
-		name := fmt.Sprintf("fuzzy_%d_k%d_n%d_r%d", i, k, n, rowSize)
+		name := fmt.Sprintf("fuzzy_random_%d_k%d_n%d_r%d", i, k, n, rowSize)
 		testVectors = append(testVectors, generateTestVector(name, k, n, rowSize, seed, proofIndices))
 	}
 

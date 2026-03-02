@@ -49,25 +49,19 @@ pub fn reconstruct_data(
         RateDecoder::new(params.k, params.n, row_size, engine, None)
             .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {:?}", e)))?;
 
-    let row_bytes = rows.as_row_major();
     for (i, &index) in indices.iter().enumerate() {
         if index >= params.k + params.n {
             return Err(Error::InvalidIndex(index, params.k + params.n));
         }
 
+        let row = rows.row(i)?;
         if index < params.k {
-            let start = i * row_size;
-            let end = start + row_size;
-            decoder
-                .add_original_shard(index, &row_bytes[start..end])
-                .map_err(|e| {
-                    Error::ReedSolomon(format!("Failed to add original shard: {:?}", e))
-                })?;
+            decoder.add_original_shard(index, row).map_err(|e| {
+                Error::ReedSolomon(format!("Failed to add original shard: {:?}", e))
+            })?;
         } else {
-            let start = i * row_size;
-            let end = start + row_size;
             decoder
-                .add_recovery_shard(index - params.k, &row_bytes[start..end])
+                .add_recovery_shard(index - params.k, row)
                 .map_err(|e| {
                     Error::ReedSolomon(format!("Failed to add recovery shard: {:?}", e))
                 })?;
@@ -78,25 +72,23 @@ pub fn reconstruct_data(
         .decode()
         .map_err(|e| Error::ReedSolomon(format!("Failed to decode: {:?}", e)))?;
 
-    let mut all_original = vec![0u8; params.k * row_size];
+    let mut all_original =
+        RowMatrix::with_shape(vec![0u8; params.k * row_size], params.k, params.row_size)?;
 
     for (i, &index) in indices.iter().enumerate() {
         if index < params.k {
-            let src_start = i * row_size;
-            let src_end = src_start + row_size;
-            let dst_start = index * row_size;
-            let dst_end = dst_start + row_size;
-            all_original[dst_start..dst_end].copy_from_slice(&row_bytes[src_start..src_end]);
+            let src = rows.row(i)?;
+            let dst = all_original.row_mut(index)?;
+            dst.copy_from_slice(src);
         }
     }
 
     for (index, shard) in result.restored_original_iter() {
-        let dst_start = index * row_size;
-        let dst_end = dst_start + row_size;
-        all_original[dst_start..dst_end].copy_from_slice(shard);
+        let dst = all_original.row_mut(index)?;
+        dst.copy_from_slice(shard);
     }
 
-    RowMatrix::with_shape(all_original, params.k, params.row_size)
+    Ok(all_original)
 }
 
 #[cfg(test)]

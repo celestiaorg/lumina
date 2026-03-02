@@ -109,13 +109,15 @@ mod tests {
 
         let (ext_a, commitment_a, rlc_a) = encode(&original, &params).unwrap();
 
-        let extended = RowMatrix::with_shape(
+        let mut extended = RowMatrix::with_shape(
             vec![0u8; params.total_rows() * params.row_size],
             params.total_rows(),
             params.row_size,
         )
         .unwrap();
-        let (ext_b, commitment_b, rlc_b) = encode_in_place(&original, extended, &params).unwrap();
+        let split_at = params.k * params.row_size;
+        extended.as_row_major_mut()[..split_at].copy_from_slice(original.as_row_major());
+        let (ext_b, commitment_b, rlc_b) = encode_in_place(extended, &params).unwrap();
 
         assert_eq!(commitment_a, commitment_b);
         assert_eq!(rlc_a, rlc_b);

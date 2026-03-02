@@ -143,38 +143,149 @@ pub fn verify_proof(leaf: &[u8; 32], index: usize, proof: &[[u8; 32]], root: &[u
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_merkle_tree_4_leaves() {
-        let leaves: Vec<Vec<u8>> = (0..4).map(|i| vec![i]).collect();
+    fn make_leaves(count: usize, leaf_size: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|i| {
+                let mut leaf = vec![0u8; leaf_size];
+                if leaf_size > 0 {
+                    leaf[0] = i as u8;
+                }
+                leaf
+            })
+            .collect()
+    }
 
+    #[test]
+    fn new_tree_valid_and_invalid_counts() {
+        for n in [1usize, 2, 4, 8, 64] {
+            let leaves = make_leaves(n, 8);
+            let tree = MerkleTree::new(&leaves);
+            assert_ne!(tree.root(), [0u8; 32]);
+        }
+
+        for n in [0usize, 3, 5] {
+            let leaves = make_leaves(n, 8);
+            let panicked = std::panic::catch_unwind(|| {
+                let _ = MerkleTree::new(&leaves);
+            });
+            assert!(panicked.is_err(), "expected panic for invalid n={}", n);
+        }
+    }
+
+    #[test]
+    fn root_is_deterministic_and_sensitive() {
+        for n in [1usize, 2, 4, 8, 16, 32, 64, 128] {
+            let leaves = make_leaves(n, 16);
+            let tree_a = MerkleTree::new(&leaves);
+            let tree_b = MerkleTree::new(&leaves);
+            assert_eq!(tree_a.root(), tree_b.root());
+
+            let mut modified = leaves.clone();
+            modified[n - 1][0] ^= 0x01;
+            let tree_c = MerkleTree::new(&modified);
+            assert_ne!(tree_a.root(), tree_c.root());
+        }
+    }
+
+    #[test]
+    fn proof_generation_and_verification_for_all_leaves() {
+        let leaves = make_leaves(16, 16);
         let tree = MerkleTree::new(&leaves);
         let root = tree.root();
 
-        // Test proof for each leaf
-        for i in 0..4 {
-            let leaf_hash = hash_leaf(&leaves[i]);
+        for i in 0..16 {
             let proof = tree.generate_proof(i);
+            assert_eq!(proof.len(), 4);
+            let leaf_hash = hash_leaf(&leaves[i]);
             assert!(verify_proof(&leaf_hash, i, &proof, &root));
         }
     }
 
     #[test]
-    fn test_merkle_proof_verification() {
-        let leaves: Vec<Vec<u8>> = (0..8).map(|i| vec![i]).collect();
+    fn generate_proof_panics_for_out_of_bounds_index() {
+        let leaves = make_leaves(8, 8);
+        let tree = MerkleTree::new(&leaves);
 
+        for bad in [8usize, 100] {
+            let panicked = std::panic::catch_unwind(|| {
+                let _ = tree.generate_proof(bad);
+            });
+            assert!(panicked.is_err(), "expected panic for bad index={}", bad);
+        }
+    }
+
+    #[test]
+    fn wrong_index_and_wrong_leaf_fail_verification() {
+        let leaves = make_leaves(16, 8);
         let tree = MerkleTree::new(&leaves);
         let root = tree.root();
 
-        let leaf3_hash = hash_leaf(&leaves[3]);
-        let leaf2_hash = hash_leaf(&leaves[2]);
+        for i in 0..16 {
+            let proof = tree.generate_proof(i);
+            let leaf_hash = hash_leaf(&leaves[i]);
+            assert!(verify_proof(&leaf_hash, i, &proof, &root));
 
-        let proof = tree.generate_proof(3);
-        assert!(verify_proof(&leaf3_hash, 3, &proof, &root));
+            let wrong_index = (i + 1) % 16;
+            assert!(!verify_proof(&leaf_hash, wrong_index, &proof, &root));
 
-        // Wrong leaf should fail
-        assert!(!verify_proof(&leaf2_hash, 3, &proof, &root));
+            let mut wrong_leaf = leaves[i].clone();
+            wrong_leaf[0] ^= 0x01;
+            let wrong_leaf_hash = hash_leaf(&wrong_leaf);
+            assert!(!verify_proof(&wrong_leaf_hash, i, &proof, &root));
+        }
+    }
 
-        // Wrong index should fail
-        assert!(!verify_proof(&leaf3_hash, 2, &proof, &root));
+    #[test]
+    fn hash_pair_is_deterministic_and_order_sensitive() {
+        let left = [1u8; 32];
+        let right = [2u8; 32];
+
+        let h1 = hash_internal(&left, &right);
+        let h2 = hash_internal(&left, &right);
+        assert_eq!(h1, h2);
+        assert_ne!(h1, hash_internal(&right, &left));
+    }
+
+    #[test]
+    fn hash_leaf_has_domain_separation() {
+        let data = b"hello-merkle";
+        let h1 = hash_leaf(data);
+        let h2 = hash_leaf(data);
+        assert_eq!(h1, h2);
+
+        let plain = Sha256::digest(data);
+        let plain: [u8; 32] = plain.into();
+        assert_ne!(h1, plain);
+    }
+
+    #[test]
+    fn edge_cases_leaf_sizes_and_empty_leaves() {
+        for leaf_size in [16usize, 32, 64] {
+            for count in [4usize, 16] {
+                let leaves = make_leaves(count, leaf_size);
+                let tree_a = MerkleTree::new(&leaves);
+                let tree_b = MerkleTree::new(&leaves);
+                assert_eq!(tree_a.root(), tree_b.root());
+            }
+        }
+
+        let leaves_all_empty = vec![Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let tree = MerkleTree::new(&leaves_all_empty);
+        let root = tree.root();
+        let proof = tree.generate_proof(0);
+        assert!(verify_proof(
+            &hash_leaf(&leaves_all_empty[0]),
+            0,
+            &proof,
+            &root
+        ));
+
+        let leaves_mixed = vec![Vec::new(), vec![1], Vec::new(), vec![2, 3]];
+        let tree = MerkleTree::new(&leaves_mixed);
+        let root = tree.root();
+        for (i, leaf) in leaves_mixed.iter().enumerate() {
+            let proof = tree.generate_proof(i);
+            assert!(verify_proof(&hash_leaf(leaf), i, &proof, &root));
+        }
     }
 }

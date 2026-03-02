@@ -55,16 +55,16 @@ fn bench_encode_in_place(c: &mut Criterion) {
         let params = Parameters::new(k, n, row_size).unwrap();
         let data = RowMatrix::with_shape(generate_test_data(k, row_size), k, row_size).unwrap();
         let total_bytes = k * row_size;
-        let mut extended =
-            Some(RowMatrix::with_shape(vec![0u8; (k + n) * row_size], k + n, row_size).unwrap());
+        let mut prefilled = vec![0u8; (k + n) * row_size];
+        prefilled[..k * row_size].copy_from_slice(data.as_row_major());
+        let mut extended = Some(RowMatrix::with_shape(prefilled, k + n, row_size).unwrap());
 
         group.throughput(Throughput::Bytes(total_bytes as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &params, |b, params| {
             b.iter(|| {
                 let buffer = extended.take().expect("buffer must be available");
                 let (ext_data, _commitment, _rlc_orig) =
-                    encode_in_place(black_box(&data), black_box(buffer), black_box(params))
-                        .unwrap();
+                    encode_in_place(black_box(buffer), black_box(params)).unwrap();
                 let rsema1d::ExtendedData { all_rows, .. } = ext_data;
                 extended = Some(all_rows);
             });

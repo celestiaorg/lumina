@@ -40,10 +40,7 @@ fn fill_parity(
             .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
     // Add all original rows
-    for i in 0..k {
-        let start = i * row_size;
-        let end = start + row_size;
-        let row = &original_rows[start..end];
+    for row in original_rows.chunks_exact(row_size) {
         encoder
             .add_original_shard(row)
             .map_err(|e| Error::ReedSolomon(e.to_string()))?;
@@ -54,10 +51,11 @@ fn fill_parity(
         .encode()
         .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
-    for (i, slice) in result.recovery_iter().enumerate() {
-        let start = i * row_size;
-        let end = start + row_size;
-        parity_rows[start..end].copy_from_slice(slice);
+    for (dst_row, src_row) in parity_rows
+        .chunks_exact_mut(row_size)
+        .zip(result.recovery_iter())
+    {
+        dst_row.copy_from_slice(src_row);
     }
 
     Ok(())
@@ -113,11 +111,9 @@ pub fn extend_rlcs(rlc_orig: &[GF128], k: usize, n: usize) -> Result<Vec<GF128>>
     }
 
     let mut shards = vec![0u8; k * 64];
-    for (i, rlc) in rlc_orig.iter().enumerate() {
+    for (dst_shard, rlc) in shards.chunks_exact_mut(64).zip(rlc_orig.iter()) {
         let packed = pack_gf128_to_shard(rlc);
-        let start = i * 64;
-        let end = start + 64;
-        shards[start..end].copy_from_slice(&packed);
+        dst_shard.copy_from_slice(&packed);
     }
 
     let mut extended_shards = vec![0u8; (k + n) * 64];
@@ -155,19 +151,11 @@ mod tests {
 
         // Original rows should be unchanged
         for i in 0..k {
-            let start = i * row_size;
-            let end = start + row_size;
-            assert_eq!(
-                &extended.as_row_major()[start..end],
-                &original.as_row_major()[start..end]
-            );
+            assert_eq!(extended.row(i).unwrap(), original.row(i).unwrap());
         }
 
         // Parity rows should be different
-        assert_ne!(
-            &extended.as_row_major()[(k * row_size)..((k + 1) * row_size)],
-            &original.as_row_major()[0..row_size]
-        );
+        assert_ne!(extended.row(k).unwrap(), original.row(0).unwrap());
     }
 
     #[test]
