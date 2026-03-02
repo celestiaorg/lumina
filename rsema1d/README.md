@@ -15,13 +15,13 @@ cargo bench
 ## Usage
 
 ```rust
-use rsema1d::{Parameters, ExtendedData};
+use rsema1d::{Parameters, ExtendedData, OriginalRows, SampledRows};
 
 // Create parameters (k original, n parity, row_size bytes)
 let params = Parameters::new(4, 4, 64)?;
 
-// Generate commitment
-let data = vec![vec![0u8; 64]; 4];
+// Generate commitment from contiguous row-major data
+let data = OriginalRows::new(vec![0u8; 4 * 64], &params)?;
 let commitment = ExtendedData::generate(&data, &params)?;
 
 // Generate proof for row 0
@@ -32,9 +32,9 @@ let (ctx, _rlc_root) = rsema1d::create_verification_context(&commitment.rlc_orig
 rsema1d::verify_row_with_context(&proof, &commitment.commitment(), &ctx)?;
 
 // Reconstruct from any k rows
-let rows = vec![...];  // Any k rows from the k+n total
+let rows = SampledRows::from_bytes(vec![...], 64)?;
 let indices = vec![0, 1, 2, 3];
-let reconstructed = rsema1d::codec::reconstruct_data(&rows, &indices, 4, 4)?;
+let reconstructed = rsema1d::reconstruct(&rows, &indices, &params)?;
 ```
 
 ## Performance

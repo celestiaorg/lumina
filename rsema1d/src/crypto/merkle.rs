@@ -13,7 +13,13 @@ pub struct MerkleTree {
 impl MerkleTree {
     /// Build tree from raw data (hashes leaves internally)
     pub fn new(leaves: &[Vec<u8>]) -> Self {
-        let num_leaves = leaves.len();
+        let leaf_hashes: Vec<[u8; 32]> = leaves.iter().map(|leaf| hash_leaf(leaf)).collect();
+        Self::from_leaf_hashes(leaf_hashes)
+    }
+
+    /// Build tree from pre-hashed leaves.
+    pub fn from_leaf_hashes(leaf_hashes: Vec<[u8; 32]>) -> Self {
+        let num_leaves = leaf_hashes.len();
         assert!(
             num_leaves.is_power_of_two(),
             "Number of leaves must be power of 2"
@@ -23,19 +29,8 @@ impl MerkleTree {
         let total_nodes = 2 * num_leaves - 1;
         let mut nodes = vec![[0u8; 32]; total_nodes];
 
-        // Hash and copy leaves (parallel for large trees)
-        if num_leaves >= 64 {
-            nodes[0..num_leaves]
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(i, node)| {
-                    *node = hash_leaf(&leaves[i]);
-                });
-        } else {
-            for i in 0..num_leaves {
-                nodes[i] = hash_leaf(&leaves[i]);
-            }
-        }
+        // Copy pre-hashed leaves.
+        nodes[0..num_leaves].copy_from_slice(&leaf_hashes);
 
         // Build internal nodes
         let mut level_start = 0;

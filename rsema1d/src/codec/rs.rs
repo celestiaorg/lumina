@@ -1,29 +1,23 @@
+use crate::codec::rows::{ExtendedRows, OriginalRows};
 use crate::error::{Error, Result};
 use crate::field::GF128;
+use crate::params::Parameters;
 use reed_solomon_simd::engine::DefaultEngine;
 use reed_solomon_simd::rate::{HighRateEncoder, RateEncoder};
 
-fn extend_shards(
-    original_rows: &[Vec<u8>],
-    k: usize,
-    n: usize,
-    row_size: usize,
-) -> Result<Vec<Vec<u8>>> {
-    // Validate all rows have correct size
-    for row in original_rows.iter() {
-        if row.len() != row_size {
-            return Err(Error::RowLengthMismatch {
-                expected: row_size,
-                actual: row.len(),
-            });
-        }
+fn extend_shards(original_rows: &[u8], k: usize, n: usize, row_size: usize) -> Result<Vec<u8>> {
+    if original_rows.len() != k * row_size {
+        return Err(Error::InvalidParameters(format!(
+            "expected {} bytes of original rows, got {}",
+            k * row_size,
+            original_rows.len()
+        )));
     }
 
-    if original_rows.len() != k {
+    if k == 0 || n == 0 || row_size == 0 {
         return Err(Error::InvalidParameters(format!(
-            "expected {} original rows, got {}",
-            k,
-            original_rows.len()
+            "invalid shard extension parameters: k={}, n={}, row_size={}",
+            k, n, row_size
         )));
     }
 
@@ -33,7 +27,10 @@ fn extend_shards(
             .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
     // Add all original rows
-    for row in original_rows {
+    for i in 0..k {
+        let start = i * row_size;
+        let end = start + row_size;
+        let row = &original_rows[start..end];
         encoder
             .add_original_shard(row)
             .map_err(|e| Error::ReedSolomon(e.to_string()))?;
@@ -44,21 +41,36 @@ fn extend_shards(
         .encode()
         .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
-    let mut all_rows = Vec::with_capacity(k + n);
-    original_rows.iter().for_each(|el| all_rows.push(el.clone()));
-    result.recovery_iter().map(|slice| slice.to_vec()).for_each(|el| all_rows.push(el));
-    
+    let mut all_rows = vec![0u8; (k + n) * row_size];
+    all_rows[..(k * row_size)].copy_from_slice(original_rows);
+    for (i, slice) in result.recovery_iter().enumerate() {
+        let start = (k + i) * row_size;
+        let end = start + row_size;
+        all_rows[start..end].copy_from_slice(slice);
+    }
+
     Ok(all_rows)
 }
 
 /// Extend data using Reed-Solomon encoding.
-pub fn extend_data(
-    original_rows: &[Vec<u8>],
-    k: usize,
-    n: usize,
-    row_size: usize,
-) -> Result<Vec<Vec<u8>>> {
-    extend_shards(original_rows, k, n, row_size)
+pub fn extend_data(original_rows: &OriginalRows, params: &Parameters) -> Result<ExtendedRows> {
+    if original_rows.rows() != params.k || original_rows.row_size() != params.row_size {
+        return Err(Error::InvalidParameters(format!(
+            "original rows shape mismatch: expected {}x{}, got {}x{}",
+            params.k,
+            params.row_size,
+            original_rows.rows(),
+            original_rows.row_size()
+        )));
+    }
+
+    let data = extend_shards(
+        original_rows.as_bytes(),
+        params.k,
+        params.n,
+        params.row_size,
+    )?;
+    ExtendedRows::new(data, params)
 }
 
 /// Pack GF128 value into a 64-byte Leopard shard.
@@ -91,12 +103,18 @@ pub fn extend_rlcs(rlc_orig: &[GF128], k: usize, n: usize) -> Result<Vec<GF128>>
         )));
     }
 
-    let shards: Vec<Vec<u8>> = rlc_orig.iter().map(pack_gf128_to_shard).collect();
-    let extended_shards = extend_shards(&shards, k, n, 64)?;
+    let mut shards = vec![0u8; k * 64];
+    for (i, rlc) in rlc_orig.iter().enumerate() {
+        let packed = pack_gf128_to_shard(rlc);
+        let start = i * 64;
+        let end = start + 64;
+        shards[start..end].copy_from_slice(&packed);
+    }
 
+    let extended_shards = extend_shards(&shards, k, n, 64)?;
     Ok(extended_shards
-        .iter()
-        .map(|shard| unpack_shard_to_gf128(shard))
+        .chunks_exact(64)
+        .map(unpack_shard_to_gf128)
         .collect())
 }
 
@@ -109,26 +127,33 @@ mod tests {
         let k = 4;
         let n = 4;
         let row_size = 64;
+        let params = Parameters::new(k, n, row_size).unwrap();
 
-        let original: Vec<Vec<u8>> = (0..k)
-            .map(|i| {
-                let mut row = vec![0u8; row_size];
-                row[0] = i as u8;
-                row
-            })
-            .collect();
+        let mut original = vec![0u8; k * row_size];
+        for i in 0..k {
+            original[i * row_size] = i as u8;
+        }
+        let original = OriginalRows::new(original, &params).unwrap();
 
-        let extended = extend_data(&original, k, n, row_size).unwrap();
+        let extended = extend_data(&original, &params).unwrap();
 
-        assert_eq!(extended.len(), k + n);
+        assert_eq!(extended.as_bytes().len(), (k + n) * row_size);
 
         // Original rows should be unchanged
         for i in 0..k {
-            assert_eq!(extended[i], original[i]);
+            let start = i * row_size;
+            let end = start + row_size;
+            assert_eq!(
+                &extended.as_bytes()[start..end],
+                &original.as_bytes()[start..end]
+            );
         }
 
         // Parity rows should be different
-        assert_ne!(extended[k], original[0]);
+        assert_ne!(
+            &extended.as_bytes()[(k * row_size)..((k + 1) * row_size)],
+            &original.as_bytes()[0..row_size]
+        );
     }
 
     #[test]

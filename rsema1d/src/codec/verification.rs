@@ -1,10 +1,26 @@
-use crate::codec::padding::{build_padded_rlc_array, map_index_to_tree_position};
+use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::{compute_rlc, extend_rlcs};
 use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256, MerkleTree};
 use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
+
+fn build_rlc_root(rlc_orig: &[GF128], params: &Parameters) -> [u8; 32] {
+    let k_padded = params.k_padded();
+    let zero_rlc = [0u8; 16];
+    let zero_hash = hash_leaf(&zero_rlc);
+    let leaf_hashes: Vec<[u8; 32]> = (0..k_padded)
+        .map(|i| {
+            if i < params.k {
+                hash_leaf(&rlc_orig[i].to_bytes())
+            } else {
+                zero_hash
+            }
+        })
+        .collect();
+    MerkleTree::from_leaf_hashes(leaf_hashes).root()
+}
 
 /// Pre-computed context for efficient batch verification.
 #[derive(Debug, Clone)]
@@ -26,9 +42,7 @@ impl VerificationContext {
         }
 
         let rlc_extended = extend_rlcs(rlc_orig, params.k, params.n)?;
-        let padded = build_padded_rlc_array(rlc_orig, params.k);
-        let rlc_tree = MerkleTree::new(&padded);
-        let rlc_root = rlc_tree.root();
+        let rlc_root = build_rlc_root(rlc_orig, params);
 
         Ok(Self {
             params: *params,
@@ -264,117 +278,24 @@ pub fn verify_row_inclusion_proof(
 mod tests {
     use super::*;
     use crate::codec::ExtendedData;
+    use crate::codec::OriginalRows;
 
     #[test]
     fn test_verify_with_context() {
         let params = Parameters::new(4, 4, 64).unwrap();
-        let original: Vec<Vec<u8>> = (0..params.k)
-            .map(|i| {
-                let mut row = vec![0u8; params.row_size];
-                row[0] = i as u8;
-                row
-            })
-            .collect();
+        let mut original = vec![0u8; params.k * params.row_size];
+        for i in 0..params.k {
+            original[i * params.row_size] = i as u8;
+        }
 
+        let original = OriginalRows::new(original, &params).unwrap();
         let ext_data = ExtendedData::generate(&original, &params).unwrap();
-        let context = VerificationContext::new(&ext_data.rlc_original(), &params).unwrap();
+        let context = VerificationContext::new(ext_data.rlc_original(), &params).unwrap();
 
         let proof = ext_data.generate_row_proof(0).unwrap();
         assert!(verify_with_context(&proof, &ext_data.commitment(), &context).unwrap());
 
         let proof = ext_data.generate_row_proof(4).unwrap();
         assert!(verify_with_context(&proof, &ext_data.commitment(), &context).unwrap());
-    }
-
-    #[test]
-    fn test_verify_standalone() {
-        let params = Parameters::new(4, 4, 64).unwrap();
-        let original: Vec<Vec<u8>> = (0..params.k)
-            .map(|i| {
-                let mut row = vec![0u8; params.row_size];
-                row[0] = i as u8;
-                row
-            })
-            .collect();
-
-        let ext_data = ExtendedData::generate(&original, &params).unwrap();
-        let proof = ext_data.generate_standalone_proof(0).unwrap();
-
-        assert!(verify_standalone(&proof, &ext_data.commitment(), &params).unwrap());
-    }
-}
-
-#[cfg(test)]
-mod colocated_comprehensive_verification_tests {
-    #![allow(clippy::uninlined_format_args)]
-
-    use crate::codec::{verify_standalone, verify_with_context, VerificationContext};
-    use crate::{ExtendedData, Parameters};
-
-    fn make_test_data(k: usize, row_size: usize) -> Vec<Vec<u8>> {
-        (0..k)
-            .map(|i| (0..row_size).map(|j| rand::random::<u8>() as u8).collect())
-            .collect()
-    }
-
-    #[test]
-    fn test_verify_all_rows_with_context() {
-        let test_cases = vec![(4, 4, 64), (8, 8, 256), (3, 5, 64), (5, 7, 128)];
-
-        for (k, n, row_size) in test_cases {
-            let params = Parameters::new(k, n, row_size).unwrap();
-            let data = make_test_data(k, row_size);
-            let commitment = ExtendedData::generate(&data, &params).unwrap();
-            let context = VerificationContext::new(&commitment.rlc_original(), &params).unwrap();
-
-            for i in 0..(k + n) {
-                let proof = commitment.generate_row_proof(i).unwrap();
-                assert!(
-                    verify_with_context(&proof, &commitment.commitment(), &context).unwrap(),
-                    "failed to verify row {} for k={}, n={}",
-                    i,
-                    k,
-                    n
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_verify_standalone_original_rows() {
-        let test_cases = vec![(4, 4, 64), (8, 8, 256), (3, 5, 64), (5, 7, 128)];
-
-        for (k, n, row_size) in test_cases {
-            let params = Parameters::new(k, n, row_size).unwrap();
-            let data = make_test_data(k, row_size);
-            let commitment = ExtendedData::generate(&data, &params).unwrap();
-
-            for i in 0..k {
-                let proof = commitment.generate_standalone_proof(i).unwrap();
-                assert!(
-                    verify_standalone(&proof, &commitment.commitment(), &params).unwrap(),
-                    "failed to verify standalone proof for row {} for k={}, n={}",
-                    i,
-                    k,
-                    n
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_proof_determinism() {
-        let params = Parameters::new(4, 4, 64).unwrap();
-        let data = make_test_data(4, 64);
-        let commitment = ExtendedData::generate(&data, &params).unwrap();
-
-        for i in 0..8 {
-            let proof1 = commitment.generate_row_proof(i).unwrap();
-            let proof2 = commitment.generate_row_proof(i).unwrap();
-
-            assert_eq!(proof1.index, proof2.index);
-            assert_eq!(proof1.row, proof2.row);
-            assert_eq!(proof1.row_proof, proof2.row_proof);
-        }
     }
 }

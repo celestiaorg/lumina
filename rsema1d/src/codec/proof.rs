@@ -29,20 +29,19 @@ pub struct RowInclusionProof {
 #[cfg(test)]
 mod tests {
     use crate::codec::ExtendedData;
+    use crate::codec::OriginalRows;
     use crate::params::Parameters;
 
     #[test]
     fn test_proof_generation() {
         let params = Parameters::new(4, 4, 64).unwrap();
 
-        let original: Vec<Vec<u8>> = (0..params.k)
-            .map(|i| {
-                let mut row = vec![0u8; params.row_size];
-                row[0] = i as u8;
-                row
-            })
-            .collect();
+        let mut original = vec![0u8; params.k * params.row_size];
+        for i in 0..params.k {
+            original[i * params.row_size] = i as u8;
+        }
 
+        let original = OriginalRows::new(original, &params).unwrap();
         let ext_data = ExtendedData::generate(&original, &params).unwrap();
 
         let proof = ext_data.generate_row_proof(0).unwrap();

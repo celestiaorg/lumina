@@ -1,12 +1,14 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::Rng;
-use rsema1d::{ExtendedData, Parameters, VerificationContext};
+use rsema1d::{ExtendedData, OriginalRows, Parameters, VerificationContext};
 
-fn generate_test_data(k: usize, row_size: usize) -> Vec<Vec<u8>> {
+fn generate_test_data(k: usize, row_size: usize) -> Vec<u8> {
     let mut rng = rand::thread_rng();
-    (0..k)
-        .map(|_| (0..row_size).map(|_| rng.gen::<u8>()).collect())
-        .collect()
+    let mut data = vec![0u8; k * row_size];
+    for b in &mut data {
+        *b = rng.gen::<u8>();
+    }
+    data
 }
 
 fn bench_encode(c: &mut Criterion) {
@@ -24,7 +26,7 @@ fn bench_encode(c: &mut Criterion) {
 
     for (name, k, n, row_size) in configs {
         let params = Parameters::new(k, n, row_size).unwrap();
-        let data = generate_test_data(k, row_size);
+        let data = OriginalRows::new(generate_test_data(k, row_size), &params).unwrap();
         let total_bytes = k * row_size;
 
         group.throughput(Throughput::Bytes(total_bytes as u64));
@@ -47,7 +49,7 @@ fn bench_proof_generation(c: &mut Criterion) {
 
     for (name, k, n, row_size) in configs {
         let params = Parameters::new(k, n, row_size).unwrap();
-        let data = generate_test_data(k, row_size);
+        let data = OriginalRows::new(generate_test_data(k, row_size), &params).unwrap();
         let commitment = ExtendedData::generate(&data, &params).unwrap();
 
         group.bench_with_input(
@@ -73,7 +75,7 @@ fn bench_verification(c: &mut Criterion) {
 
     for (name, k, n, row_size) in configs {
         let params = Parameters::new(k, n, row_size).unwrap();
-        let data = generate_test_data(k, row_size);
+        let data = OriginalRows::new(generate_test_data(k, row_size), &params).unwrap();
         let commitment = ExtendedData::generate(&data, &params).unwrap();
         let proof = commitment.generate_row_proof(0).unwrap();
         let context = VerificationContext::new(&commitment.rlc_original(), &params).unwrap();
