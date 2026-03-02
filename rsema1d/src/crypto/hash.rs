@@ -24,16 +24,17 @@ pub fn hash_to_gf128(hash: &[u8; 32]) -> GF128 {
 /// Derive RLC coefficients from row root
 pub fn derive_coefficients(row_root: &[u8; 32], num_symbols: usize) -> Vec<GF128> {
     let seed = sha256(row_root);
-
     let mut coeffs = Vec::with_capacity(num_symbols);
-    for i in 0..num_symbols {
-        let mut hasher = Sha256::new();
-        hasher.update(&seed);
-        hasher.update(&(i as u32).to_le_bytes());
-        let hash: [u8; 32] = hasher.finalize().into();
-        coeffs.push(hash_to_gf128(&hash));
-    }
+    let mut buf = [0u8; 32 + 4];
+    buf[..32].copy_from_slice(&seed);
 
+    for i in 0..num_symbols {
+        let i32: u32 = i as u32;
+        buf[32..].copy_from_slice(&i32.to_le_bytes());
+
+        let hash = Sha256::digest(buf);
+        coeffs.push(hash_to_gf128(hash.as_slice().try_into().unwrap()));
+    }
     coeffs
 }
 

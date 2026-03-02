@@ -34,10 +34,11 @@ impl GF128 {
 
     /// Add two GF128 elements (XOR)
     #[inline]
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Self) -> Self {
         let mut limbs = [0u16; 8];
-        for i in 0..8 {
-            limbs[i] = self.limbs[i] ^ other.limbs[i];
+        for (i, limb) in limbs.iter_mut().enumerate() {
+            *limb = self.limbs[i] ^ other.limbs[i];
         }
         Self { limbs }
     }
@@ -49,8 +50,8 @@ impl GF128 {
             return Self::zero();
         }
         let mut limbs = [0u16; 8];
-        for i in 0..8 {
-            limbs[i] = gf16_mul(scalar, self.limbs[i]);
+        for (i, limb) in limbs.iter_mut().enumerate() {
+            *limb = gf16_mul(scalar, self.limbs[i]);
         }
         Self { limbs }
     }

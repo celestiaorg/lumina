@@ -114,7 +114,7 @@ fn bench_verification(c: &mut Criterion) {
         let data = RowMatrix::with_shape(generate_test_data(k, row_size), k, row_size).unwrap();
         let commitment = ExtendedData::generate(&data, &params).unwrap();
         let proof = commitment.generate_row_proof(0).unwrap();
-        let context = VerificationContext::new(&commitment.rlc_original(), &params).unwrap();
+        let context = VerificationContext::new(commitment.rlc_original(), &params).unwrap();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(name),

@@ -88,7 +88,7 @@ impl MerkleTree {
 
         while level_size > 1 {
             // Find sibling
-            let sibling_pos = if pos % 2 == 0 {
+            let sibling_pos = if pos.is_multiple_of(2) {
                 level_start + pos + 1
             } else {
                 level_start + pos - 1
@@ -108,7 +108,7 @@ impl MerkleTree {
 /// Hash leaf node (RFC 6962 format)
 pub fn hash_leaf(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(&[0x00]);
+    hasher.update([0x00]);
     hasher.update(data);
     hasher.finalize().into()
 }
@@ -116,7 +116,7 @@ pub fn hash_leaf(data: &[u8]) -> [u8; 32] {
 /// Hash internal node (RFC 6962 format)
 pub fn hash_internal(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(&[0x01]);
+    hasher.update([0x01]);
     hasher.update(left);
     hasher.update(right);
     hasher.finalize().into()
@@ -128,7 +128,7 @@ pub fn verify_proof(leaf: &[u8; 32], index: usize, proof: &[[u8; 32]], root: &[u
     let mut pos = index;
 
     for sibling in proof {
-        current = if pos % 2 == 0 {
+        current = if pos.is_multiple_of(2) {
             hash_internal(&current, sibling)
         } else {
             hash_internal(sibling, &current)
@@ -193,10 +193,10 @@ mod tests {
         let tree = MerkleTree::new(&leaves);
         let root = tree.root();
 
-        for i in 0..16 {
+        for (i, leaf) in leaves.iter().enumerate() {
             let proof = tree.generate_proof(i);
             assert_eq!(proof.len(), 4);
-            let leaf_hash = hash_leaf(&leaves[i]);
+            let leaf_hash = hash_leaf(leaf);
             assert!(verify_proof(&leaf_hash, i, &proof, &root));
         }
     }
@@ -220,15 +220,15 @@ mod tests {
         let tree = MerkleTree::new(&leaves);
         let root = tree.root();
 
-        for i in 0..16 {
+        for (i, leaf) in leaves.iter().enumerate() {
             let proof = tree.generate_proof(i);
-            let leaf_hash = hash_leaf(&leaves[i]);
+            let leaf_hash = hash_leaf(leaf);
             assert!(verify_proof(&leaf_hash, i, &proof, &root));
 
-            let wrong_index = (i + 1) % 16;
+            let wrong_index = (i + 1) % leaves.len();
             assert!(!verify_proof(&leaf_hash, wrong_index, &proof, &root));
 
-            let mut wrong_leaf = leaves[i].clone();
+            let mut wrong_leaf = leaf.clone();
             wrong_leaf[0] ^= 0x01;
             let wrong_leaf_hash = hash_leaf(&wrong_leaf);
             assert!(!verify_proof(&wrong_leaf_hash, i, &proof, &root));

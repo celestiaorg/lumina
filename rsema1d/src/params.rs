@@ -26,7 +26,7 @@ impl Parameters {
             return Err(Error::InvalidKPlusN(k, n));
         }
 
-        if row_size == 0 || row_size % 64 != 0 {
+        if row_size == 0 || !row_size.is_multiple_of(64) {
             return Err(Error::InvalidRowSize(row_size));
         }
 

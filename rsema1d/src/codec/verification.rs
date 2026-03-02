@@ -73,7 +73,7 @@ pub fn create_verification_context(
 fn reconstruct_root_from_proof(leaf: [u8; 32], mut pos: usize, proof: &[[u8; 32]]) -> [u8; 32] {
     let mut current = leaf;
     for sibling in proof {
-        current = if pos % 2 == 0 {
+        current = if pos.is_multiple_of(2) {
             hash_internal(&current, sibling)
         } else {
             hash_internal(sibling, &current)

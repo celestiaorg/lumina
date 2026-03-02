@@ -33,7 +33,7 @@ impl RowMatrix {
         if row_size == 0 {
             return Err(Error::InvalidParameters("row_size must be > 0".to_string()));
         }
-        if data.len() % row_size != 0 {
+        if !data.len().is_multiple_of(row_size) {
             return Err(Error::InvalidParameters(format!(
                 "row buffer size mismatch: {} is not divisible by row_size {}",
                 data.len(),
