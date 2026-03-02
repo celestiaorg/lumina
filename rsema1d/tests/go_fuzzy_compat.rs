@@ -1,6 +1,6 @@
 use rsema1d::{
-    encode, reconstruct, verify_standalone, verify_with_context, OriginalRows, Parameters,
-    RowProof, StandaloneProof, VerificationContext,
+    encode, reconstruct, verify_standalone, verify_with_context, Parameters, RowMatrix, RowProof,
+    StandaloneProof, VerificationContext,
 };
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -98,7 +98,7 @@ fn go_fuzzy_vectors_match_rust() {
             original.extend_from_slice(&decode_hex_row(row_hex, params.row_size));
         }
 
-        let original_rows = OriginalRows::new(original.clone(), &params)
+        let original_rows = RowMatrix::with_shape(original.clone(), params.k, params.row_size)
             .unwrap_or_else(|e| panic!("{}: original rows shape failed: {}", case.name, e));
 
         let (ext_data, commitment, rlc_orig) = encode(&original_rows, &params)
@@ -167,7 +167,7 @@ fn go_fuzzy_vectors_match_rust() {
         let reconstructed = reconstruct(&rows, &indices, &params)
             .unwrap_or_else(|e| panic!("{}: reconstruct failed: {}", case.name, e));
         assert_eq!(
-            reconstructed.as_bytes(),
+            reconstructed.as_row_major(),
             original.as_slice(),
             "{}: reconstructed original mismatch",
             case.name

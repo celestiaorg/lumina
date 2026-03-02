@@ -29,7 +29,7 @@ pub struct RowInclusionProof {
 #[cfg(test)]
 mod tests {
     use crate::codec::ExtendedData;
-    use crate::codec::OriginalRows;
+    use crate::codec::RowMatrix;
     use crate::params::Parameters;
 
     #[test]
@@ -41,7 +41,7 @@ mod tests {
             original[i * params.row_size] = i as u8;
         }
 
-        let original = OriginalRows::new(original, &params).unwrap();
+        let original = RowMatrix::with_shape(original, params.k, params.row_size).unwrap();
         let ext_data = ExtendedData::generate(&original, &params).unwrap();
 
         let proof = ext_data.generate_row_proof(0).unwrap();

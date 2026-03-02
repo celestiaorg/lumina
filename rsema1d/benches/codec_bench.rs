@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::Rng;
-use rsema1d::{ExtendedData, OriginalRows, Parameters, VerificationContext};
+use rsema1d::{encode, encode_in_place, ExtendedData, Parameters, RowMatrix, VerificationContext};
 
 fn generate_test_data(k: usize, row_size: usize) -> Vec<u8> {
     let mut rng = rand::thread_rng();
@@ -26,12 +26,48 @@ fn bench_encode(c: &mut Criterion) {
 
     for (name, k, n, row_size) in configs {
         let params = Parameters::new(k, n, row_size).unwrap();
-        let data = OriginalRows::new(generate_test_data(k, row_size), &params).unwrap();
+        let data = RowMatrix::with_shape(generate_test_data(k, row_size), k, row_size).unwrap();
         let total_bytes = k * row_size;
 
         group.throughput(Throughput::Bytes(total_bytes as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &data, |b, data| {
-            b.iter(|| ExtendedData::generate(black_box(data), black_box(&params)).unwrap());
+            b.iter(|| encode(black_box(data), black_box(&params)).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_encode_in_place(c: &mut Criterion) {
+    let mut group = c.benchmark_group("encode_in_place");
+
+    // Match the `encode` benchmark matrix exactly.
+    let configs = vec![
+        ("128KB_k1024_n1024", 1024, 1024, 128),
+        ("1MB_k1024_n1024", 1024, 1024, 1024),
+        ("1MB_k4096_n4096", 4096, 4096, 256),
+        ("8MB_k4096_n4096", 4096, 4096, 2048),
+        ("128MB_k4096_n4096", 4096, 4096, 32768),
+        ("128MB_k8192_n8192", 8192, 8192, 16384),
+    ];
+
+    for (name, k, n, row_size) in configs {
+        let params = Parameters::new(k, n, row_size).unwrap();
+        let data = RowMatrix::with_shape(generate_test_data(k, row_size), k, row_size).unwrap();
+        let total_bytes = k * row_size;
+        let mut extended =
+            Some(RowMatrix::with_shape(vec![0u8; (k + n) * row_size], k + n, row_size).unwrap());
+
+        group.throughput(Throughput::Bytes(total_bytes as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &params, |b, params| {
+            b.iter(|| {
+                let buffer = extended.take().expect("buffer must be available");
+                let (ext_data, _commitment, _rlc_orig) =
+                    encode_in_place(black_box(&data), black_box(buffer), black_box(params))
+                        .unwrap();
+                let rsema1d::ExtendedData { all_rows, .. } = ext_data;
+                extended = Some(all_rows);
+            });
         });
     }
 
@@ -49,7 +85,7 @@ fn bench_proof_generation(c: &mut Criterion) {
 
     for (name, k, n, row_size) in configs {
         let params = Parameters::new(k, n, row_size).unwrap();
-        let data = OriginalRows::new(generate_test_data(k, row_size), &params).unwrap();
+        let data = RowMatrix::with_shape(generate_test_data(k, row_size), k, row_size).unwrap();
         let commitment = ExtendedData::generate(&data, &params).unwrap();
 
         group.bench_with_input(
@@ -75,7 +111,7 @@ fn bench_verification(c: &mut Criterion) {
 
     for (name, k, n, row_size) in configs {
         let params = Parameters::new(k, n, row_size).unwrap();
-        let data = OriginalRows::new(generate_test_data(k, row_size), &params).unwrap();
+        let data = RowMatrix::with_shape(generate_test_data(k, row_size), k, row_size).unwrap();
         let commitment = ExtendedData::generate(&data, &params).unwrap();
         let proof = commitment.generate_row_proof(0).unwrap();
         let context = VerificationContext::new(&commitment.rlc_original(), &params).unwrap();
@@ -102,6 +138,7 @@ fn bench_verification(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_encode,
+    bench_encode_in_place,
     bench_proof_generation,
     bench_verification
 );

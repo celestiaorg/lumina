@@ -1,16 +1,29 @@
-use crate::codec::rows::{ExtendedRows, OriginalRows};
+use crate::codec::rows::{OriginalRowsView, RowMatrix};
 use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
 use reed_solomon_simd::engine::DefaultEngine;
 use reed_solomon_simd::rate::{HighRateEncoder, RateEncoder};
 
-fn extend_shards(original_rows: &[u8], k: usize, n: usize, row_size: usize) -> Result<Vec<u8>> {
+fn fill_parity(
+    original_rows: &[u8],
+    parity_rows: &mut [u8],
+    k: usize,
+    n: usize,
+    row_size: usize,
+) -> Result<()> {
     if original_rows.len() != k * row_size {
         return Err(Error::InvalidParameters(format!(
             "expected {} bytes of original rows, got {}",
             k * row_size,
             original_rows.len()
+        )));
+    }
+    if parity_rows.len() != n * row_size {
+        return Err(Error::InvalidParameters(format!(
+            "expected {} bytes of parity rows, got {}",
+            n * row_size,
+            parity_rows.len()
         )));
     }
 
@@ -41,36 +54,32 @@ fn extend_shards(original_rows: &[u8], k: usize, n: usize, row_size: usize) -> R
         .encode()
         .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
-    let mut all_rows = vec![0u8; (k + n) * row_size];
-    all_rows[..(k * row_size)].copy_from_slice(original_rows);
     for (i, slice) in result.recovery_iter().enumerate() {
-        let start = (k + i) * row_size;
+        let start = i * row_size;
         let end = start + row_size;
-        all_rows[start..end].copy_from_slice(slice);
+        parity_rows[start..end].copy_from_slice(slice);
     }
 
-    Ok(all_rows)
+    Ok(())
 }
 
 /// Extend data using Reed-Solomon encoding.
-pub fn extend_data(original_rows: &OriginalRows, params: &Parameters) -> Result<ExtendedRows> {
-    if original_rows.rows() != params.k || original_rows.row_size() != params.row_size {
-        return Err(Error::InvalidParameters(format!(
-            "original rows shape mismatch: expected {}x{}, got {}x{}",
-            params.k,
-            params.row_size,
-            original_rows.rows(),
-            original_rows.row_size()
-        )));
-    }
+pub fn extend_data(original_rows: OriginalRowsView<'_>, params: &Parameters) -> Result<RowMatrix> {
+    let mut all_rows = vec![0u8; (params.k + params.n) * params.row_size];
+    let split_at = params.k * params.row_size;
+    let (orig, parity) = all_rows.split_at_mut(split_at);
+    orig.copy_from_slice(original_rows.as_row_major());
+    fill_parity(orig, parity, params.k, params.n, params.row_size)?;
+    RowMatrix::with_shape(all_rows, params.total_rows(), params.row_size)
+}
 
-    let data = extend_shards(
-        original_rows.as_bytes(),
-        params.k,
-        params.n,
-        params.row_size,
-    )?;
-    ExtendedRows::new(data, params)
+/// Encode parity rows in place into an already allocated extended matrix.
+///
+/// The first K rows must already contain original data.
+pub fn encode_parity_in_place(extended_rows: &mut RowMatrix, params: &Parameters) -> Result<()> {
+    let mut view = extended_rows.extended_view_mut(params)?;
+    let (orig, parity) = view.split_original_parity();
+    fill_parity(orig, parity, params.k, params.n, params.row_size)
 }
 
 /// Pack GF128 value into a 64-byte Leopard shard.
@@ -111,7 +120,11 @@ pub fn extend_rlcs(rlc_orig: &[GF128], k: usize, n: usize) -> Result<Vec<GF128>>
         shards[start..end].copy_from_slice(&packed);
     }
 
-    let extended_shards = extend_shards(&shards, k, n, 64)?;
+    let mut extended_shards = vec![0u8; (k + n) * 64];
+    let split_at = k * 64;
+    let (orig, parity) = extended_shards.split_at_mut(split_at);
+    orig.copy_from_slice(&shards);
+    fill_parity(orig, parity, k, n, 64)?;
     Ok(extended_shards
         .chunks_exact(64)
         .map(unpack_shard_to_gf128)
@@ -133,26 +146,53 @@ mod tests {
         for i in 0..k {
             original[i * row_size] = i as u8;
         }
-        let original = OriginalRows::new(original, &params).unwrap();
+        let original = RowMatrix::with_shape(original, k, row_size).unwrap();
+        let original_view = original.original_view(&params).unwrap();
 
-        let extended = extend_data(&original, &params).unwrap();
+        let extended = extend_data(original_view, &params).unwrap();
 
-        assert_eq!(extended.as_bytes().len(), (k + n) * row_size);
+        assert_eq!(extended.as_row_major().len(), (k + n) * row_size);
 
         // Original rows should be unchanged
         for i in 0..k {
             let start = i * row_size;
             let end = start + row_size;
             assert_eq!(
-                &extended.as_bytes()[start..end],
-                &original.as_bytes()[start..end]
+                &extended.as_row_major()[start..end],
+                &original.as_row_major()[start..end]
             );
         }
 
         // Parity rows should be different
         assert_ne!(
-            &extended.as_bytes()[(k * row_size)..((k + 1) * row_size)],
-            &original.as_bytes()[0..row_size]
+            &extended.as_row_major()[(k * row_size)..((k + 1) * row_size)],
+            &original.as_row_major()[0..row_size]
+        );
+    }
+
+    #[test]
+    fn test_encode_parity_in_place_matches_extend_data() {
+        let k = 4;
+        let n = 4;
+        let row_size = 64;
+        let params = Parameters::new(k, n, row_size).unwrap();
+
+        let mut original = vec![0u8; k * row_size];
+        for i in 0..k {
+            original[i * row_size] = (i as u8).wrapping_mul(17).wrapping_add(3);
+        }
+        let original = RowMatrix::with_shape(original, k, row_size).unwrap();
+        let extended_via_extend_data =
+            extend_data(original.original_view(&params).unwrap(), &params).unwrap();
+
+        let mut in_place = vec![0u8; (k + n) * row_size];
+        in_place[..k * row_size].copy_from_slice(original.as_row_major());
+        let mut extended_in_place = RowMatrix::with_shape(in_place, k + n, row_size).unwrap();
+        encode_parity_in_place(&mut extended_in_place, &params).unwrap();
+
+        assert_eq!(
+            extended_in_place.as_row_major(),
+            extended_via_extend_data.as_row_major()
         );
     }
 

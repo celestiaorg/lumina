@@ -1,4 +1,4 @@
-use crate::codec::rows::{OriginalRows, SampledRows};
+use crate::codec::rows::RowMatrix;
 use crate::error::{Error, Result};
 use crate::params::Parameters;
 use reed_solomon_simd::engine::DefaultEngine;
@@ -6,10 +6,10 @@ use reed_solomon_simd::rate::{HighRateDecoder, RateDecoder};
 
 /// Reconstruct original data from any K rows
 pub fn reconstruct_data(
-    rows: &SampledRows,
+    rows: &RowMatrix,
     indices: &[usize],
     params: &Parameters,
-) -> Result<OriginalRows> {
+) -> Result<RowMatrix> {
     if rows.row_size() != params.row_size {
         return Err(Error::InvalidParameters(format!(
             "row size mismatch: expected {}, got {}",
@@ -49,7 +49,7 @@ pub fn reconstruct_data(
         RateDecoder::new(params.k, params.n, row_size, engine, None)
             .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {:?}", e)))?;
 
-    let row_bytes = rows.as_bytes();
+    let row_bytes = rows.as_row_major();
     for (i, &index) in indices.iter().enumerate() {
         if index >= params.k + params.n {
             return Err(Error::InvalidIndex(index, params.k + params.n));
@@ -96,7 +96,7 @@ pub fn reconstruct_data(
         all_original[dst_start..dst_end].copy_from_slice(shard);
     }
 
-    OriginalRows::new(all_original, params)
+    RowMatrix::with_shape(all_original, params.k, params.row_size)
 }
 
 #[cfg(test)]
@@ -113,12 +113,13 @@ mod tests {
             original[i * params.row_size] = i as u8;
         }
 
-        let original_rows = OriginalRows::new(original.clone(), &params).unwrap();
+        let original_rows =
+            RowMatrix::with_shape(original.clone(), params.k, params.row_size).unwrap();
         let commitment = ExtendedData::generate(&original_rows, &params).unwrap();
         let indices = vec![0usize, 1, 2, 3];
         let rows = commitment.rows().sample(&indices).unwrap();
         let reconstructed = reconstruct_data(&rows, &indices, &params).unwrap();
 
-        assert_eq!(reconstructed.as_bytes(), original.as_slice());
+        assert_eq!(reconstructed.as_row_major(), original.as_slice());
     }
 }

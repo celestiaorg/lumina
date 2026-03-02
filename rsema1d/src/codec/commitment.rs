@@ -1,6 +1,6 @@
 use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
-use crate::codec::rows::{ExtendedRows, OriginalRows};
+use crate::codec::rows::RowMatrix;
 use crate::codec::{compute_rlc, extend_data, extend_rlcs};
 use crate::crypto::{derive_coefficients, hash_leaf, sha256, MerkleTree};
 use crate::error::{Error, Result};
@@ -9,11 +9,11 @@ use crate::params::Parameters;
 use rayon::prelude::*;
 use std::borrow::Cow;
 
-fn row_slice(rows: &ExtendedRows, index: usize) -> &[u8] {
-    rows.matrix().row_unchecked(index)
+fn row_slice(rows: &RowMatrix, index: usize) -> &[u8] {
+    rows.row_unchecked(index)
 }
 
-fn build_row_tree(rows: &ExtendedRows, params: &Parameters) -> MerkleTree {
+fn build_row_tree(rows: &RowMatrix, params: &Parameters) -> MerkleTree {
     let k_padded = params.k_padded();
     let total_padded = params.total_padded();
     let zero_row = vec![0u8; params.row_size];
@@ -78,7 +78,7 @@ pub struct ExtendedData {
     pub commitment_hash: [u8; 32],
     pub row_root: [u8; 32],
     pub rlc_root: [u8; 32],
-    pub all_rows: ExtendedRows,
+    pub all_rows: RowMatrix,
     pub rlc_orig: Vec<GF128>,
     pub rlc_extended: Vec<GF128>,
     params: Parameters,
@@ -88,27 +88,18 @@ pub struct ExtendedData {
 
 impl ExtendedData {
     /// Generate commitment from contiguous original rows.
-    pub fn generate(original_rows: &OriginalRows, params: &Parameters) -> Result<Self> {
-        let all_rows = extend_data(original_rows, params)?;
+    pub fn generate(original_rows: &RowMatrix, params: &Parameters) -> Result<Self> {
+        let original_view = original_rows.original_view(params)?;
+        let all_rows = extend_data(original_view, params)?;
         Self::generate_from_extended_rows(all_rows, params)
     }
 
     /// Generate commitment from contiguous already-extended rows (K+N rows).
     pub fn generate_from_extended_rows(
-        extended_rows: ExtendedRows,
+        extended_rows: RowMatrix,
         params: &Parameters,
     ) -> Result<Self> {
-        if extended_rows.rows() != params.total_rows()
-            || extended_rows.row_size() != params.row_size
-        {
-            return Err(Error::InvalidParameters(format!(
-                "expected {}x{} rows (K+N), got {}x{}",
-                params.total_rows(),
-                params.row_size,
-                extended_rows.rows(),
-                extended_rows.row_size()
-            )));
-        }
+        extended_rows.extended_view(params)?;
 
         let row_tree = build_row_tree(&extended_rows, params);
         let row_root = row_tree.root();
@@ -153,7 +144,7 @@ impl ExtendedData {
         self.rlc_root
     }
 
-    pub fn rows(&self) -> &ExtendedRows {
+    pub fn rows(&self) -> &RowMatrix {
         &self.all_rows
     }
 
@@ -235,13 +226,13 @@ mod tests {
         for i in 0..params.k {
             original[(i + 1) * params.row_size - 1] = (i + 1) as u8;
         }
-        let original = OriginalRows::new(original, &params).unwrap();
+        let original = RowMatrix::with_shape(original, params.k, params.row_size).unwrap();
 
         let ext_data = ExtendedData::generate(&original, &params).unwrap();
 
         assert_eq!(ext_data.commitment_hash.len(), 32);
         assert_eq!(
-            ext_data.all_rows.as_bytes().len(),
+            ext_data.all_rows.as_row_major().len(),
             (params.k + params.n) * params.row_size
         );
         assert_eq!(ext_data.rlc_orig.len(), params.k);

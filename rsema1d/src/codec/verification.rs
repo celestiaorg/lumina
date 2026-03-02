@@ -278,7 +278,7 @@ pub fn verify_row_inclusion_proof(
 mod tests {
     use super::*;
     use crate::codec::ExtendedData;
-    use crate::codec::OriginalRows;
+    use crate::codec::RowMatrix;
 
     #[test]
     fn test_verify_with_context() {
@@ -288,7 +288,7 @@ mod tests {
             original[i * params.row_size] = i as u8;
         }
 
-        let original = OriginalRows::new(original, &params).unwrap();
+        let original = RowMatrix::with_shape(original, params.k, params.row_size).unwrap();
         let ext_data = ExtendedData::generate(&original, &params).unwrap();
         let context = VerificationContext::new(ext_data.rlc_original(), &params).unwrap();
 
