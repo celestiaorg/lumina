@@ -4812,7 +4812,7 @@ dependencies = [
 
 [[package]]
 name = "rsema1d"
-version = "0.1.0"
+version = "1.0.0-rc.2"
 dependencies = [
  "criterion",
  "getrandom 0.2.17",
