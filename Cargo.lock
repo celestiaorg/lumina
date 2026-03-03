@@ -4716,7 +4716,7 @@ dependencies = [
 [[package]]
 name = "reed-solomon-simd"
 version = "3.1.0"
-source = "git+https://github.com/mcrakhman/reed-solomon-simd?branch=mcrakhman%2Favx#835e7efee324de976680b1b28796d17bdb3ff870"
+source = "git+https://github.com/mcrakhman/reed-solomon-simd?branch=mcrakhman%2Favx#eae6f1f02adeb5d6ab6261abecb0423d176da190"
 dependencies = [
  "cpufeatures",
  "fixedbitset",
