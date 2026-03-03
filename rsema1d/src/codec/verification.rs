@@ -51,10 +51,12 @@ impl VerificationContext {
         })
     }
 
+    /// Returns the Merkle root of the RLC tree.
     pub fn rlc_root(&self) -> [u8; 32] {
         self.rlc_root
     }
 
+    /// Returns the parameters used to create this context.
     pub fn params(&self) -> &Parameters {
         &self.params
     }

@@ -3,6 +3,7 @@
 /// GF(2^128) element represented as 8 GF(2^16) limbs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GF128 {
+    /// The 8 GF(2^16) limbs that make up this element.
     pub limbs: [u16; 8],
 }
 

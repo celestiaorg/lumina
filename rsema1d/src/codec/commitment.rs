@@ -75,11 +75,17 @@ fn build_rlc_tree(rlc_orig: &[GF128], params: &Parameters) -> MerkleTree {
 /// Extended data with commitment and cached trees.
 #[derive(Debug, Clone)]
 pub struct ExtendedData {
+    /// The combined commitment hash (SHA-256 of row_root || rlc_root).
     pub commitment_hash: [u8; 32],
+    /// Merkle root of the row tree.
     pub row_root: [u8; 32],
+    /// Merkle root of the RLC tree.
     pub rlc_root: [u8; 32],
+    /// All K+N rows (original followed by parity).
     pub all_rows: RowMatrix,
+    /// RLC values for the original K rows.
     pub rlc_orig: Vec<GF128>,
+    /// RLC values for all K+N rows (original + extended).
     pub rlc_extended: Vec<GF128>,
     params: Parameters,
     row_tree: MerkleTree,
@@ -132,22 +138,27 @@ impl ExtendedData {
         })
     }
 
+    /// Returns the 32-byte commitment hash.
     pub fn commitment(&self) -> [u8; 32] {
         self.commitment_hash
     }
 
+    /// Returns the Merkle root of the row tree.
     pub fn row_root(&self) -> [u8; 32] {
         self.row_root
     }
 
+    /// Returns the Merkle root of the RLC tree.
     pub fn rlc_root(&self) -> [u8; 32] {
         self.rlc_root
     }
 
+    /// Returns a reference to the full row matrix.
     pub fn rows(&self) -> &RowMatrix {
         &self.all_rows
     }
 
+    /// Returns the row at `index`, or an error if out of bounds.
     pub fn row(&self, index: usize) -> Result<&[u8]> {
         if index >= self.params.total_rows() {
             return Err(Error::InvalidIndex(index, self.params.total_rows()));
@@ -155,14 +166,17 @@ impl ExtendedData {
         self.all_rows.row(index)
     }
 
+    /// Returns the RLC values for the original K rows.
     pub fn rlc_original(&self) -> &[GF128] {
         &self.rlc_orig
     }
 
+    /// Returns the RLC values for all K+N rows.
     pub fn rlc_extended(&self) -> &[GF128] {
         &self.rlc_extended
     }
 
+    /// Returns the parameters used to generate this data.
     pub fn params(&self) -> &Parameters {
         &self.params
     }

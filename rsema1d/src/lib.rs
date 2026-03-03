@@ -1,7 +1,12 @@
+//! Reed-Solomon erasure coding with Merkle commitments and Random Linear Combinations.
+
 pub mod codec;
+/// Cryptographic primitives: hashing, Merkle trees, and RLC coefficient derivation.
 pub mod crypto;
+/// Error types for the rsema1d crate.
 pub mod error;
 pub mod field;
+/// Codec parameters (K, N, row_size) with validation.
 pub mod params;
 
 pub use error::{Error, Result};

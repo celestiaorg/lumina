@@ -28,6 +28,7 @@ pub use verification::{
     VerificationContext,
 };
 
+/// A 32-byte SHA-256 commitment hash.
 pub type Commitment = [u8; 32];
 
 /// Encode original rows and return extended data, commitment, and original RLCs.
