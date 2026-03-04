@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/celestiaorg/rsema1d"
+	"github.com/celestiaorg/rsema1d/field"
 )
 
 type TestVector struct {
@@ -18,12 +19,14 @@ type TestVector struct {
 	Seed   int64      `json:"seed"`
 
 	OriginalData []string `json:"original_data"` // Hex-encoded original rows
+	RLCOrig      []string `json:"rlc_orig"`      // Hex-encoded original RLC values (16 bytes each)
 
 	// Public outputs
 	Commitment string `json:"commitment"` // The final commitment
 
 	// Proof tests
-	ProofTests []ProofTest `json:"proof_tests"`
+	ProofTests        []ProofTest        `json:"proof_tests"`
+	RowInclusionTests []RowInclusionTest `json:"row_inclusion_tests"`
 }
 
 type TestParams struct {
@@ -42,6 +45,16 @@ type ProofTest struct {
 	RowProof        []string `json:"row_proof"`        // Row Merkle proof nodes (hex)
 	RLCProof        []string `json:"rlc_proof"`        // RLC Merkle proof nodes (hex, original rows only)
 	StandaloneProof bool     `json:"standalone_proof"` // Whether this is a standalone proof
+}
+
+type RowInclusionTest struct {
+	Index        int      `json:"index"`
+	IsOriginal   bool     `json:"is_original"`
+	RowHash      string   `json:"row_hash"`       // SHA256 of the row data
+	RowProofHash string   `json:"row_proof_hash"` // SHA256 of row Merkle proof
+	RowData      string   `json:"row_data"`       // Raw row bytes (hex)
+	RowProof     []string `json:"row_proof"`      // Row Merkle proof nodes (hex)
+	RLCRoot      string   `json:"rlc_root"`       // 32-byte RLC root (hex)
 }
 
 type TestVectorFile struct {
@@ -142,7 +155,7 @@ func randomValidKN(rng *rand.Rand, maxTotalRows int) (int, int) {
 	}
 }
 
-func generateTestVector(name string, k, n, rowSize int, seed int64, proofIndices []int) TestVector {
+func generateTestVector(name string, k, n, rowSize int, seed int64, proofIndices []int, inclusionIndices []int) TestVector {
 	fmt.Printf("Generating: %s (k=%d, n=%d, rowSize=%d, seed=%d)\n", name, k, n, rowSize, seed)
 
 	originalData := generateDeterministicData(k, rowSize, seed)
@@ -160,9 +173,14 @@ func generateTestVector(name string, k, n, rowSize int, seed int64, proofIndices
 	}
 
 	// Use only public API
-	extData, commitment, _, err := rsema1d.Encode(originalData, config)
+	extData, commitment, rlcOrig, err := rsema1d.Encode(originalData, config)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to encode: %v", err))
+	}
+	rlcOrigHex := make([]string, len(rlcOrig))
+	for i, rlc := range rlcOrig {
+		b := field.ToBytes128(rlc)
+		rlcOrigHex[i] = hex.EncodeToString(b[:])
 	}
 
 	var proofTests []ProofTest
@@ -201,14 +219,32 @@ func generateTestVector(name string, k, n, rowSize int, seed int64, proofIndices
 			})
 		}
 	}
+	var inclusionTests []RowInclusionTest
+	for _, idx := range inclusionIndices {
+		inclusionProof, err := extData.GenerateRowInclusionProof(idx)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to generate inclusion proof for index %d: %v", idx, err))
+		}
+		inclusionTests = append(inclusionTests, RowInclusionTest{
+			Index:        inclusionProof.Index,
+			IsOriginal:   inclusionProof.Index < k,
+			RowHash:      hashBytes(inclusionProof.Row),
+			RowProofHash: hashMerkleProof(inclusionProof.RowProof.RowProof),
+			RowData:      hex.EncodeToString(inclusionProof.Row),
+			RowProof:     encodeProofNodes(inclusionProof.RowProof.RowProof),
+			RLCRoot:      hex.EncodeToString(inclusionProof.RLCRoot[:]),
+		})
+	}
 
 	return TestVector{
-		Name:         name,
-		Params:       TestParams{K: k, N: n, RowSize: rowSize},
-		Seed:         seed,
-		OriginalData: originalDataHex,
-		Commitment:   hex.EncodeToString(commitment[:]),
-		ProofTests:   proofTests,
+		Name:              name,
+		Params:            TestParams{K: k, N: n, RowSize: rowSize},
+		Seed:              seed,
+		OriginalData:      originalDataHex,
+		RLCOrig:           rlcOrigHex,
+		Commitment:        hex.EncodeToString(commitment[:]),
+		ProofTests:        proofTests,
+		RowInclusionTests: inclusionTests,
 	}
 }
 
@@ -317,6 +353,7 @@ func main() {
 			c.rowSize,
 			c.seed,
 			randomProofIndices(proofRng, c.k, c.n, 6),
+			randomProofIndices(proofRng, c.k, c.n, 8),
 		))
 	}
 
@@ -333,9 +370,11 @@ func main() {
 		totalRows := k + n
 		numProofs := min(6, totalRows)
 		proofIndices := randomProofIndices(rng, k, n, numProofs)
+		numInclusionProofs := min(8, totalRows)
+		inclusionIndices := randomProofIndices(rng, k, n, numInclusionProofs)
 
 		name := fmt.Sprintf("fuzzy_random_%d_k%d_n%d_r%d", i, k, n, rowSize)
-		testVectors = append(testVectors, generateTestVector(name, k, n, rowSize, seed, proofIndices))
+		testVectors = append(testVectors, generateTestVector(name, k, n, rowSize, seed, proofIndices, inclusionIndices))
 	}
 
 	output := TestVectorFile{
