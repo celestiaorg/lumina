@@ -22,8 +22,8 @@ use crate::{Error, Result, Share, bail_validation};
 pub use self::commitment::Commitment;
 pub use self::msg_pay_for_blobs::MsgPayForBlobs;
 pub use celestia_proto::celestia::blob::v1::MsgPayForBlobs as RawMsgPayForBlobs;
-pub use celestia_proto::proto::blob::v2::BlobProto as RawBlob;
-pub use celestia_proto::proto::blob::v2::BlobTx as RawBlobTx;
+pub use celestia_proto::proto::blob::v4::BlobProto as RawBlob;
+pub use celestia_proto::proto::blob::v4::BlobTx as RawBlobTx;
 
 /// Arbitrary data that can be stored in the network within certain [`Namespace`].
 // NOTE: We don't use the `serde(try_from)` pattern for this type
