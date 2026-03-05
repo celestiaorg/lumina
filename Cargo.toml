@@ -12,6 +12,7 @@ members = [
   "rpc",
   "types",
   "utils",
+  "rsema1d",
 ]
 
 [workspace.package]
