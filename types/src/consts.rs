@@ -349,6 +349,11 @@ pub mod appconsts {
         }
     }
 
+    /// Maximum width of a single subtree root when generating blob's commitment.
+    ///
+    /// This value is the same for all app versions (V1-V7).
+    pub const SUBTREE_ROOT_THRESHOLD: u64 = 64;
+
     // celestia-app/pkg/appconsts/global_consts
     mod global_consts {
         use crate::nmt::NS_SIZE;

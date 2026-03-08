@@ -645,7 +645,7 @@ mod tests {
     use crate::GrpcClient;
     use crate::test_utils::{CELESTIA_GRPC_URL, load_account, new_tx_client};
     use celestia_types::nmt::Namespace;
-    use celestia_types::{AppVersion, Blob};
+    use celestia_types::Blob;
     use lumina_utils::test_utils::async_test;
     use rand::{Rng, RngCore};
 
@@ -686,7 +686,7 @@ mod tests {
         rng.fill_bytes(&mut blob);
         blob.resize(len, 1);
 
-        Blob::new(namespace, blob, None, AppVersion::latest()).unwrap()
+        Blob::new(namespace, blob, None).unwrap()
     }
 
     #[test]

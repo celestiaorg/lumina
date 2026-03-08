@@ -7,7 +7,7 @@ use celestia_rpc::TxConfig;
 use celestia_rpc::p2p::PeerId;
 use celestia_rpc::prelude::*;
 use celestia_types::nmt::Namespace;
-use celestia_types::{AppVersion, Blob};
+use celestia_types::Blob;
 use futures::FutureExt;
 use gloo_timers::future::sleep;
 use lumina_node_wasm::utils::setup_logging;
@@ -61,7 +61,7 @@ async fn get_blob() {
     let rpc_client = new_rpc_client().await;
     let namespace = Namespace::new_v0(&[0xCD, 0xDC, 0xCD, 0xDC, 0xCD, 0xDC]).unwrap();
     let data = b"Hello, World";
-    let blobs = vec![Blob::new(namespace, data.to_vec(), None, AppVersion::V3).unwrap()];
+    let blobs = vec![Blob::new(namespace, data.to_vec(), None).unwrap()];
 
     let submitted_height = rpc_client
         .blob_submit(&blobs, TxConfig::default())

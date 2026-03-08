@@ -39,13 +39,7 @@ async fn blob_subscription() {
 
     let namespace = Namespace::new_v0(&[200, 199, 198, 197, 196, 195, 194, 193, 192, 191]).unwrap();
     let data = b"bleb0";
-    let blob = Blob::new(
-        namespace,
-        data.to_vec(),
-        None,
-        celestia_types::AppVersion::V6,
-    )
-    .unwrap();
+    let blob = Blob::new(namespace, data.to_vec(), None).unwrap();
 
     let mut blob_stream = node.blob_subscribe(namespace).await.unwrap();
 

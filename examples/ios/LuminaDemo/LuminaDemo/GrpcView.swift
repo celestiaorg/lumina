@@ -104,7 +104,7 @@ class GrpcViewModel : ObservableObject {
         do {
             let data = blobData.data(using: .utf8)!
             let ns = try Namespace(version: 0, id: namespace.data(using: .utf8)!)
-            let blob = try Blob.create(namespace: ns, data: data, appVersion: AppVersion.v3)
+            let blob = try Blob.create(namespace: ns, data: data)
 
             let submit = try await grpcClient!.submitBlobs(blobs: [blob], config: nil)
             return submit

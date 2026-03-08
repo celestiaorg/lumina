@@ -11,7 +11,7 @@ use celestia_types::block::Block;
 use celestia_types::hash::uniffi_types::UniffiHash;
 use celestia_types::state::auth::{Account, AuthParams};
 use celestia_types::state::{AbciQueryResponse, Coin, TxResponse};
-use celestia_types::{AppVersion, Blob};
+use celestia_types::Blob;
 use celestia_types::{ExtendedHeader, UniffiConversionError};
 
 use crate::grpc::{
@@ -239,12 +239,6 @@ impl GrpcClient {
             .client
             .estimate_gas_price_and_usage(priority, tx_bytes)
             .await?)
-    }
-
-    /// AppVersion of the client
-    #[uniffi::method(name = "appVersion")]
-    pub async fn app_version(&self) -> Result<AppVersion> {
-        Ok(self.client.app_version().await?)
     }
 
     /// Submit blobs to the celestia network.

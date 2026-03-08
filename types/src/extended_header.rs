@@ -22,8 +22,7 @@ use crate::hash::Hash;
 use crate::trust_level::DEFAULT_TRUST_LEVEL;
 use crate::validator_set::ValidatorSetExt;
 use crate::{
-    DataAvailabilityHeader, Error, Result, ValidateBasic, ValidateBasicWithAppVersion,
-    bail_validation, bail_verification,
+    DataAvailabilityHeader, Error, Result, ValidateBasic, bail_validation, bail_verification,
 };
 
 /// Information about a tendermint validator.
@@ -226,10 +225,10 @@ impl ExtendedHeader {
         )?;
 
         let app_version = self.header.version.app;
-        let app_version =
+        let _app_version =
             AppVersion::from_u64(app_version).ok_or(Error::UnsupportedAppVersion(app_version))?;
 
-        self.dah.validate_basic(app_version)?;
+        self.dah.validate_basic()?;
 
         Ok(())
     }

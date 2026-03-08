@@ -8,7 +8,7 @@ use blockstore::Blockstore;
 use celestia_rpc::{HeaderClient, ShareClient};
 use celestia_types::nmt::{Namespace, NamespacedSha2Hasher};
 use celestia_types::sample::SampleId;
-use celestia_types::{AppVersion, Blob, ExtendedHeader};
+use celestia_types::{Blob, ExtendedHeader};
 use cid::{Cid, CidGeneric};
 use lumina_node::NodeError;
 use lumina_node::blockstore::InMemoryBlockstore;
@@ -128,7 +128,7 @@ async fn shwap_request_sample() {
 
     let ns = Namespace::const_v0(rand::random());
     let blob_len = rand::random::<usize>() % 4096 + 1;
-    let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
+    let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
     let header = node.get_header_by_height(height).await.unwrap();
@@ -136,13 +136,7 @@ async fn shwap_request_sample() {
 
     // check existing sample
     let expected = client
-        .share_get_share(
-            header.height(),
-            header.app_version(),
-            header.square_width(),
-            0,
-            0,
-        )
+        .share_get_share(header.height(), header.square_width(), 0, 0)
         .await
         .unwrap();
     let sample = node
@@ -171,12 +165,12 @@ async fn shwap_request_row() {
 
     let ns = Namespace::const_v0(rand::random());
     let blob_len = rand::random::<usize>() % 4096 + 1;
-    let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
+    let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
     let header = node.get_header_by_height(height).await.unwrap();
     let eds = client
-        .share_get_eds(header.height(), header.app_version())
+        .share_get_eds(header.height())
         .await
         .unwrap();
     let square_width = header.square_width();
@@ -203,12 +197,12 @@ async fn shwap_request_row_namespace_data() {
 
     let ns = Namespace::const_v0(rand::random());
     let blob_len = rand::random::<usize>() % 4096 + 1;
-    let blob = Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap();
+    let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
     let header = node.get_header_by_height(height).await.unwrap();
     let eds = client
-        .share_get_eds(header.height(), header.app_version())
+        .share_get_eds(header.height())
         .await
         .unwrap();
     let square_width = header.square_width();
@@ -270,7 +264,7 @@ async fn shwap_request_all_blobs() {
     let blobs: Vec<_> = (0..5)
         .map(|_| {
             let blob_len = rand::random::<usize>() % 4096 + 1;
-            Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap()
+            Blob::new(ns, random_bytes(blob_len), None).unwrap()
         })
         .collect();
 
@@ -302,7 +296,7 @@ async fn shwap_request_sample_should_cleanup_unneeded_samples() {
     let blobs: Vec<_> = (0..5)
         .map(|_| {
             let blob_len = rand::random::<usize>() % 4096 + 1;
-            Blob::new(ns, random_bytes(blob_len), None, AppVersion::V2).unwrap()
+            Blob::new(ns, random_bytes(blob_len), None).unwrap()
         })
         .collect();
 

@@ -233,7 +233,7 @@ impl StateApi {
     /// # async fn docs() -> Result<()> {
     /// use celestia_types::nmt::Namespace;
     /// use celestia_types::state::{Address, Coin};
-    /// use celestia_types::{AppVersion, Blob};
+    /// use celestia_types::Blob;
     ///
     /// let client = Client::builder()
     ///     .rpc_url("ws://localhost:26658")
@@ -243,7 +243,7 @@ impl StateApi {
     ///     .await?;
     ///
     /// let ns = Namespace::new_v0(b"abcd").unwrap();
-    /// let blob = Blob::new(ns, "some data".into(), None, AppVersion::latest()).unwrap();
+    /// let blob = Blob::new(ns, "some data".into(), None).unwrap();
     ///
     /// client
     ///     .state()
