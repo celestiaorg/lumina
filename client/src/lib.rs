@@ -6,6 +6,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 mod blob;
 mod blobstream;
 mod client;
+mod fibre;
 mod fraud;
 mod header;
 mod share;
@@ -18,6 +19,7 @@ mod utils;
 pub mod api {
     pub use crate::blob::BlobApi;
     pub use crate::blobstream::BlobstreamApi;
+    pub use crate::fibre::FibreApi;
     pub use crate::fraud::FraudApi;
     pub use crate::header::HeaderApi;
     pub use crate::share::ShareApi;
@@ -27,6 +29,14 @@ pub mod api {
     pub mod blob {
         #[doc(inline)]
         pub use celestia_rpc::blob::BlobsAtHeight;
+    }
+
+    /// Fibre API related types.
+    pub mod fibre {
+        #[doc(inline)]
+        pub use celestia_fibre::{
+            Blob as FibreBlob, BlobID, FibreClient, FibreClientConfig, FibreError, PutResult,
+        };
     }
 
     /// Share API related types.

@@ -743,6 +743,7 @@ dependencies = [
  "async-stream",
  "blockstore",
  "bytes",
+ "celestia-fibre",
  "celestia-grpc",
  "celestia-proto",
  "celestia-rpc",
@@ -766,6 +767,31 @@ dependencies = [
  "tonic",
  "tonic-web-wasm-client",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "celestia-fibre"
+version = "1.0.0-rc.2"
+dependencies = [
+ "async-trait",
+ "bech32",
+ "celestia-grpc",
+ "celestia-proto",
+ "celestia-types",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "k256",
+ "prost",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rsema1d",
+ "sha2 0.10.9",
+ "tendermint-proto",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
@@ -1552,6 +1578,7 @@ dependencies = [
  "ed25519",
  "serde",
  "sha2 0.10.9",
+ "signature",
  "subtle",
  "zeroize",
 ]
