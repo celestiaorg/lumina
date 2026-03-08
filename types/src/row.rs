@@ -370,8 +370,8 @@ mod tests {
             let eds = generate_eds(8 << (rand::random::<usize>() % 6));
 
             let rows: Vec<_> = (1..4).map(|row| Row::new(row, &eds).unwrap()).collect();
-            let blobs = Blob::reconstruct_all(rows.iter().flat_map(|row| row.shares.iter()))
-                .unwrap();
+            let blobs =
+                Blob::reconstruct_all(rows.iter().flat_map(|row| row.shares.iter())).unwrap();
 
             assert_eq!(blobs.len(), 2);
         }

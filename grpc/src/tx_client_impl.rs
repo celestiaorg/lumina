@@ -644,8 +644,8 @@ mod tests {
     use super::*;
     use crate::GrpcClient;
     use crate::test_utils::{CELESTIA_GRPC_URL, load_account, new_tx_client};
-    use celestia_types::nmt::Namespace;
     use celestia_types::Blob;
+    use celestia_types::nmt::Namespace;
     use lumina_utils::test_utils::async_test;
     use rand::{Rng, RngCore};
 

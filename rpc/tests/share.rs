@@ -19,12 +19,7 @@ async fn get_share() {
     for row in 0..square_width {
         for col in 0..square_width {
             let share = client
-                .share_get_share(
-                    header.height(),
-                    square_width,
-                    row,
-                    col,
-                )
+                .share_get_share(header.height(), square_width, row, col)
                 .await
                 .unwrap();
             let is_parity = row >= square_width / 2 || col >= square_width / 2;
@@ -54,10 +49,8 @@ async fn get_shares_by_namespace() {
         .await
         .unwrap();
 
-    let reconstructed = Blob::reconstruct_all(
-        ns_shares.rows().iter().flat_map(|row| row.shares.iter()),
-    )
-    .unwrap();
+    let reconstructed =
+        Blob::reconstruct_all(ns_shares.rows().iter().flat_map(|row| row.shares.iter())).unwrap();
 
     assert_eq!(reconstructed, blobs);
 }
@@ -95,11 +88,7 @@ async fn get_shares_range() {
     let shares = blob_on_chain.to_shares().unwrap();
 
     let shares_range = client
-        .share_get_range(
-            header.height(),
-            index,
-            index + shares.len() as u64,
-        )
+        .share_get_range(header.height(), index, index + shares.len() as u64)
         .await
         .unwrap();
 
@@ -144,21 +133,11 @@ async fn get_shares_range_ignores_parity() {
     let square_width = header.dah.square_width();
 
     let first_parity_share_in_first_row = client
-        .share_get_share(
-            header.height(),
-            header.square_width(),
-            0,
-            square_width / 2,
-        )
+        .share_get_share(header.height(), header.square_width(), 0, square_width / 2)
         .await
         .unwrap();
     let first_ods_share_in_second_row = client
-        .share_get_share(
-            header.height(),
-            header.square_width(),
-            1,
-            0,
-        )
+        .share_get_share(header.height(), header.square_width(), 1, 0)
         .await
         .unwrap();
 
@@ -278,10 +257,7 @@ async fn get_eds() {
     let submitted_height = blob_submit(&client, &[blob]).await.unwrap();
 
     let header = client.header_get_by_height(submitted_height).await.unwrap();
-    let eds = client
-        .share_get_eds(header.height())
-        .await
-        .unwrap();
+    let eds = client.share_get_eds(header.height()).await.unwrap();
 
     for i in 0..header.dah.square_width() {
         let row_root = eds.row_nmt(i).unwrap().root();

@@ -2,12 +2,12 @@ use bytes::{BufMut, BytesMut};
 use celestia_proto::shwap::{
     Row as RawRow, RowNamespaceData as RawRowNamespaceData, Sample as RawSample,
 };
+use celestia_types::DataAvailabilityHeader;
 use celestia_types::consts::appconsts::SHARE_SIZE;
 use celestia_types::eds::{EdsId, ExtendedDataSquare};
 use celestia_types::namespace_data::{NamespaceData, NamespaceDataId};
 use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
-use celestia_types::DataAvailabilityHeader;
 use integer_encoding::VarInt;
 use prost::Message;
 use std::fmt::Display;
@@ -187,8 +187,7 @@ impl ResponseCodec for ExtendedDataSquare {
             ods_shares.push(raw_share.to_vec());
         }
 
-        let eds = ExtendedDataSquare::from_ods(ods_shares)
-            .map_err(CodecError::response_decode)?;
+        let eds = ExtendedDataSquare::from_ods(ods_shares).map_err(CodecError::response_decode)?;
 
         let computed_dah = DataAvailabilityHeader::from_eds(&eds);
 

@@ -169,10 +169,7 @@ async fn shwap_request_row() {
 
     let height = blob_submit(&client, &[blob]).await;
     let header = node.get_header_by_height(height).await.unwrap();
-    let eds = client
-        .share_get_eds(header.height())
-        .await
-        .unwrap();
+    let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
     // check existing row
@@ -201,10 +198,7 @@ async fn shwap_request_row_namespace_data() {
 
     let height = blob_submit(&client, &[blob]).await;
     let header = node.get_header_by_height(height).await.unwrap();
-    let eds = client
-        .share_get_eds(header.height())
-        .await
-        .unwrap();
+    let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
     // check existing row namespace data

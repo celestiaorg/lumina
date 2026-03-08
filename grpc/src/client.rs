@@ -1013,9 +1013,9 @@ mod tests {
 
     use celestia_proto::cosmos::bank::v1beta1::MsgSend;
     use celestia_rpc::HeaderClient;
+    use celestia_types::Blob;
     use celestia_types::nmt::Namespace;
     use celestia_types::state::{Coin, ErrorCode};
-    use celestia_types::Blob;
     use futures::FutureExt;
     use lumina_utils::test_utils::async_test;
     use lumina_utils::time::sleep;

@@ -6,12 +6,12 @@ use prost::Message;
 use tendermint_proto::google::protobuf::Any;
 use uniffi::{Object, Record};
 
+use celestia_types::Blob;
 use celestia_types::blob::BlobParams;
 use celestia_types::block::Block;
 use celestia_types::hash::uniffi_types::UniffiHash;
 use celestia_types::state::auth::{Account, AuthParams};
 use celestia_types::state::{AbciQueryResponse, Coin, TxResponse};
-use celestia_types::Blob;
 use celestia_types::{ExtendedHeader, UniffiConversionError};
 
 use crate::grpc::{

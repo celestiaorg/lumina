@@ -118,11 +118,7 @@ impl Blob {
     ///     }"#},
     /// );
     /// ```
-    pub fn new(
-        namespace: Namespace,
-        data: Vec<u8>,
-        signer: Option<AccAddress>,
-    ) -> Result<Blob> {
+    pub fn new(namespace: Namespace, data: Vec<u8>, signer: Option<AccAddress>) -> Result<Blob> {
         let share_version = if signer.is_none() {
             appconsts::SHARE_VERSION_ZERO
         } else {

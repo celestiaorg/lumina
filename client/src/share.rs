@@ -67,11 +67,7 @@ impl ShareApi {
     /// sample coordinates.
     ///
     /// `coordinates` is a list of `(row, column)`.
-    pub async fn get_samples<I, C>(
-        &self,
-        height: u64,
-        coordinates: I,
-    ) -> Result<Vec<Sample>>
+    pub async fn get_samples<I, C>(&self, height: u64, coordinates: I) -> Result<Vec<Sample>>
     where
         I: IntoIterator<Item = C>,
         C: Into<SampleCoordinates>,
@@ -212,17 +208,8 @@ impl ShareApi {
     /// Retrieves a list of shares and their corresponding proof.
     ///
     /// The start and end index ignores parity shares and corresponds to ODS.
-    pub async fn get_range(
-        &self,
-        height: u64,
-        start: u64,
-        end: u64,
-    ) -> Result<GetRangeResponse> {
-        Ok(self
-            .inner
-            .rpc
-            .share_get_range(height, start, end)
-            .await?)
+    pub async fn get_range(&self, height: u64, start: u64, end: u64) -> Result<GetRangeResponse> {
+        Ok(self.inner.rpc.share_get_range(height, start, end).await?)
     }
 
     /// Retrieves a list of shares and their corresponding proof.
@@ -278,9 +265,7 @@ mod tests {
         ensure_serializable_deserializable(api.get_row(0, 0, 0).await.unwrap());
 
         let namespace = ensure_serializable_deserializable(unimplemented!());
-        ensure_serializable_deserializable(
-            api.get_namespace_data(0, namespace).await.unwrap(),
-        );
+        ensure_serializable_deserializable(api.get_namespace_data(0, namespace).await.unwrap());
 
         ensure_serializable_deserializable(api.get_range(0, 0, 0).await.unwrap());
     }

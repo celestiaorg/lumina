@@ -70,10 +70,7 @@ pub struct DataAvailabilityHeader {
 
 impl DataAvailabilityHeader {
     /// Create new [`DataAvailabilityHeader`].
-    pub fn new(
-        row_roots: Vec<NamespacedHash>,
-        column_roots: Vec<NamespacedHash>,
-    ) -> Result<Self> {
+    pub fn new(row_roots: Vec<NamespacedHash>, column_roots: Vec<NamespacedHash>) -> Result<Self> {
         let dah = DataAvailabilityHeader::new_unchecked(row_roots, column_roots);
         dah.validate_basic()?;
         Ok(dah)
