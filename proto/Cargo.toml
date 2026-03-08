@@ -41,5 +41,6 @@ serde_json.workspace = true
 
 [features]
 tonic = ["dep:tonic", "dep:tonic-build"]
+tonic-server = ["tonic"]
 uniffi = ["dep:uniffi"]
 wasm-bindgen  = ["dep:wasm-bindgen"]

@@ -3,7 +3,7 @@
 set -xeuo pipefail
 
 # Tags
-CELESTIA_APP="5.0.0-rc0"
+CELESTIA_APP="7.0.2-mocha"
 COMETBFT="0.38.17"
 COSMOS_PULSAR="1.0.0-beta.5"
 COSMOS_PROTOBUF="1.7.0"

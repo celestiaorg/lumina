@@ -9,8 +9,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/celestiaorg/rsema1d"
-	"github.com/celestiaorg/rsema1d/field"
+	"github.com/celestiaorg/celestia-app/v8/pkg/rsema1d"
+	"github.com/celestiaorg/celestia-app/v8/pkg/rsema1d/field"
 )
 
 type TestVector struct {
