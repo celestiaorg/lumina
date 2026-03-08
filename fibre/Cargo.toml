@@ -23,11 +23,12 @@ rand.workspace = true
 rand_chacha = "0.3"
 
 # Async runtime
-tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+tokio = { workspace = true, features = ["sync", "macros"] }
 futures.workspace = true
+lumina-utils = { workspace = true, features = ["executor"] }
 
 # gRPC
-tonic = { workspace = true, features = ["transport", "codegen"] }
+tonic = { workspace = true, features = ["codegen"] }
 prost.workspace = true
 tendermint-proto.workspace = true
 
@@ -37,6 +38,9 @@ tracing.workspace = true
 hex.workspace = true
 async-trait.workspace = true
 bech32 = "0.11"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tonic = { workspace = true, features = ["transport"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

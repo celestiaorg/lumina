@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod abci_proofs;
-pub(crate) mod boxed;
+pub mod boxed;
 mod builder;
 mod client;
 mod error;
@@ -16,9 +16,10 @@ mod tx_client_impl;
 pub mod tx_client_v2;
 #[cfg(all(not(target_arch = "wasm32"), feature = "uniffi"))]
 pub mod uniffi_client;
-mod utils;
+pub(crate) mod utils;
 
-pub use crate::builder::{Endpoint, GrpcClientBuilder};
+pub use crate::boxed::BoxedTransport;
+pub use crate::builder::{Endpoint, GrpcClientBuilder, connect_lazy};
 pub use crate::client::GrpcClient;
 pub use crate::error::{Error, GrpcClientBuilderError, Result};
 pub use crate::signer::DocSigner;

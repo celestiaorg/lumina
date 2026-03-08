@@ -7,13 +7,16 @@
 //! The [`FibreClient::put()`] method combines upload with on-chain
 //! `MsgPayForFibre` broadcast for a complete put flow.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use celestia_grpc::TxConfig;
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Notify;
-use tokio::task::JoinSet;
+
+use lumina_utils::cond_send::{BoxFuture, CondSend, into_boxed};
 
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
@@ -23,6 +26,24 @@ use crate::payment_promise::{PaymentPromise, SignedPaymentPromise};
 use crate::shard_assignment::ShardMap;
 use crate::signature_set::SignatureSet;
 use crate::validator::ValidatorSet;
+
+/// Spawn a task via [`lumina_utils::executor::spawn`] and track its result in a
+/// [`FuturesUnordered`] collection via a oneshot channel.
+///
+/// This avoids depending on `tokio::task::JoinSet` (which requires the `rt`
+/// feature) and works on both native and wasm32 targets.
+fn spawn_task<T>(
+    unordered: &mut FuturesUnordered<BoxFuture<'static, Option<T>>>,
+    fut: impl Future<Output = T> + CondSend + 'static,
+) where
+    T: CondSend + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    lumina_utils::executor::spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    unordered.push(into_boxed(async move { rx.await.ok() }));
+}
 
 /// Result of a successful [`FibreClient::put()`] operation.
 ///
@@ -224,7 +245,8 @@ impl FibreClient {
         let rlc_coeffs: Arc<Vec<rsema1d::GF128>> =
             Arc::new(blob.rlc_coeffs().map(|c| c.to_vec()).unwrap_or_default());
 
-        let mut join_set = JoinSet::new();
+        let mut futures: FuturesUnordered<BoxFuture<'static, Option<()>>> =
+            FuturesUnordered::new();
 
         for (val_idx, proofs) in validator_tasks {
             let connector = Arc::clone(&self.connector);
@@ -235,7 +257,7 @@ impl FibreClient {
             let promise = promise.clone();
             let rlc_coeffs = Arc::clone(&rlc_coeffs);
 
-            join_set.spawn(async move {
+            spawn_task(&mut futures, async move {
                 // Acquire semaphore permit to bound concurrency.
                 let _permit = match semaphore.acquire().await {
                     Ok(permit) => permit,
@@ -296,12 +318,11 @@ impl FibreClient {
         tokio::select! {
             _ = done_notify.notified() => {
                 // Threshold met -- we have enough signatures.
-                // We do NOT abort remaining tasks; they can continue in the
-                // background and potentially add more signatures. But we
-                // let them be dropped when `join_set` goes out of scope.
+                // Remaining tasks continue in the background via
+                // lumina_utils::executor::spawn.
             }
             _ = async {
-                while join_set.join_next().await.is_some() {}
+                while futures.next().await.is_some() {}
             } => {
                 // All tasks completed (threshold may or may not have been met).
             }

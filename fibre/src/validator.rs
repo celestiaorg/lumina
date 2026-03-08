@@ -8,6 +8,7 @@ use crate::blob::Commitment;
 use crate::config::Fraction;
 use crate::shard_assignment::{self, ShardMap};
 use crate::shard_selection;
+use celestia_grpc::BoxedTransport;
 
 /// A validator's identity and stake information.
 #[derive(Debug, Clone)]
@@ -106,13 +107,12 @@ impl ValidatorSet {
 /// Trait for retrieving the current validator set.
 ///
 /// The client only needs the latest set; height-specific lookups are server-side only.
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait SetGetter: Send + Sync {
     /// Get the latest validator set.
     async fn head(&self) -> Result<ValidatorSet, FibreError>;
 }
-
-use tonic::transport::Channel;
 
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetRequest;
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::block_api_client::BlockApiClient;
@@ -122,17 +122,18 @@ use celestia_proto::tendermint_celestia_mods::rpc::grpc::block_api_client::Block
 /// Queries `ValidatorSet` with `height = 0` to retrieve the latest validator
 /// set, then converts the protobuf response into the domain [`ValidatorSet`].
 pub struct GrpcSetGetter {
-    channel: Channel,
+    channel: BoxedTransport,
 }
 
 impl GrpcSetGetter {
     /// Create a new getter using the given gRPC channel to the CometBFT node.
-    pub fn new(channel: Channel) -> Self {
+    pub fn new(channel: BoxedTransport) -> Self {
         Self { channel }
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl SetGetter for GrpcSetGetter {
     async fn head(&self) -> Result<ValidatorSet, FibreError> {
         let mut client = BlockApiClient::new(self.channel.clone());

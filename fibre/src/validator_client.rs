@@ -38,7 +38,8 @@ pub struct DownloadedRow {
 ///
 /// In production this is backed by a tonic gRPC channel.
 /// In tests this is an in-memory store with signing capability.
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait ValidatorConnection: Send + Sync {
     /// Upload a shard (payment promise + row proofs + RLC coefficients) and receive a validator signature.
     async fn upload_shard(
@@ -57,7 +58,8 @@ pub trait ValidatorConnection: Send + Sync {
 /// In production this resolves hosts via [`crate::host_registry::HostRegistry`]
 /// and manages tonic channels. In tests this returns mock connections that
 /// can be inspected after the test.
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait ValidatorConnector: Send + Sync {
     /// Get or create a connection to the given validator.
     async fn connect(

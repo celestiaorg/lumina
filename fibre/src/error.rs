@@ -113,6 +113,7 @@ pub enum FibreError {
     Encoding(#[from] rsema1d::Error),
 
     /// A tonic transport error (connection failure, TLS, etc.).
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("transport error: {0}")]
     Transport(#[from] tonic::transport::Error),
 

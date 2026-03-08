@@ -21,6 +21,15 @@ use crate::{DocSigner, GrpcClient, GrpcClientBuilderError};
 
 use imp::build_transport;
 
+/// Create a lazily-connected [`BoxedTransport`] from a URL string.
+///
+/// This uses the same transport construction as [`GrpcClientBuilder`],
+/// handling native (`tonic::transport::Channel`) and wasm32
+/// (`tonic_web_wasm_client::Client`) transparently.
+pub fn connect_lazy(url: &str) -> Result<BoxedTransport, GrpcClientBuilderError> {
+    build_transport(url.to_string(), Context::default())
+}
+
 /// A URL endpoint with per-endpoint configuration.
 ///
 /// This includes HTTP/2 headers (metadata) and timeout that will be applied

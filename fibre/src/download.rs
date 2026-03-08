@@ -16,17 +16,39 @@
 //! The main task collects proofs and applies them to the blob sequentially,
 //! avoiding the need for shared mutable state (`Arc<Mutex<Blob>>`).
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use futures::FutureExt;
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Notify, Semaphore};
-use tokio::task::JoinSet;
+
+use lumina_utils::cond_send::{BoxFuture, CondSend, into_boxed};
 
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
 use crate::config::BlobConfig;
 use crate::error::FibreError;
 use crate::validator::ValidatorSet;
+
+/// Spawn a task via [`lumina_utils::executor::spawn`] and track its result in a
+/// [`FuturesUnordered`] collection via a oneshot channel.
+///
+/// This avoids depending on `tokio::task::JoinSet` (which requires the `rt`
+/// feature) and works on both native and wasm32 targets.
+fn spawn_task<T>(
+    unordered: &mut FuturesUnordered<BoxFuture<'static, Option<T>>>,
+    fut: impl Future<Output = T> + CondSend + 'static,
+) where
+    T: CondSend + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    lumina_utils::executor::spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    unordered.push(into_boxed(async move { rx.await.ok() }));
+}
 
 impl FibreClient {
     /// Download and reconstruct a blob by its [`BlobID`].
@@ -125,7 +147,9 @@ impl FibreClient {
         let successes = Arc::new(AtomicU32::new(0));
         let done_notify = Arc::new(Notify::new());
 
-        let mut join_set = JoinSet::new();
+        let mut futures: FuturesUnordered<
+            BoxFuture<'static, Option<Result<Vec<rsema1d::RowInclusionProof>, FibreError>>>,
+        > = FuturesUnordered::new();
         let blob_id = blob.id().clone();
         let download_target_u32 = download_target as u32;
 
@@ -157,7 +181,7 @@ impl FibreClient {
             let successes = successes.clone();
             let done_notify = done_notify.clone();
 
-            join_set.spawn(async move {
+            spawn_task(&mut futures, async move {
                 let _global = global_permit;
 
                 let result: Result<Vec<rsema1d::RowInclusionProof>, FibreError> = async {
@@ -196,19 +220,19 @@ impl FibreClient {
         let done_notify_clone = done_notify.clone();
         loop {
             tokio::select! {
-                task_result = join_set.join_next() => {
+                task_result = futures.next() => {
                     match task_result {
-                        Some(Ok(Ok(proofs))) => {
+                        Some(Some(Ok(proofs))) => {
                             for proof in &proofs {
                                 // Ignore individual row errors (matching Go behavior)
                                 let _ = blob.set_row(proof);
                             }
                         }
-                        Some(Ok(Err(_))) => {
+                        Some(Some(Err(_))) => {
                             // Task returned an error; already handled by permit release
                         }
-                        Some(Err(_join_err)) => {
-                            // Task panicked; skip
+                        Some(None) => {
+                            // Task was cancelled or panicked; skip
                         }
                         None => {
                             // All tasks completed
@@ -218,8 +242,8 @@ impl FibreClient {
                 }
                 _ = done_notify_clone.notified() => {
                     // We have enough successes. Drain any already-completed tasks.
-                    while let Some(result) = join_set.try_join_next() {
-                        if let Ok(Ok(proofs)) = result {
+                    while let Some(item) = futures.next().now_or_never().flatten() {
+                        if let Some(Ok(proofs)) = item {
                             for proof in &proofs {
                                 let _ = blob.set_row(proof);
                             }

@@ -6,15 +6,14 @@
 
 use std::collections::HashMap;
 
-use tonic::transport::Channel;
+use crate::error::FibreError;
+use celestia_grpc::BoxedTransport;
+use crate::validator::ValidatorInfo;
 
 use celestia_proto::celestia::valaddr::v1::query_client::QueryClient as ValaddrQueryClient;
 use celestia_proto::celestia::valaddr::v1::{
     QueryAllFibreProvidersRequest, QueryFibreProviderInfoRequest,
 };
-
-use crate::error::FibreError;
-use crate::validator::ValidatorInfo;
 
 /// A validator's network address (e.g., `"dns:///validator.example.com:9090"`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,7 +23,8 @@ pub struct Host(pub String);
 ///
 /// In production this is backed by the `x/valaddr` on-chain query service.
 /// In tests this can be a simple `HashMap`.
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait HostRegistry: Send + Sync {
     /// Resolve the fibre gRPC address for the given validator.
     async fn get_host(&self, validator: &ValidatorInfo) -> Result<Host, FibreError>;
@@ -37,13 +37,13 @@ pub trait HostRegistry: Send + Sync {
 /// lazily filled per-validator via
 /// [`pull_host()`](GrpcHostRegistry::pull_host).
 pub struct GrpcHostRegistry {
-    channel: Channel,
-    cache: tokio::sync::RwLock<HashMap<[u8; 20], Host>>,
+    channel: BoxedTransport,
+    pub(crate) cache: tokio::sync::RwLock<HashMap<[u8; 20], Host>>,
 }
 
 impl GrpcHostRegistry {
     /// Create a new registry using the given gRPC channel to the Cosmos app.
-    pub fn new(channel: Channel) -> Self {
+    pub fn new(channel: BoxedTransport) -> Self {
         Self {
             channel,
             cache: tokio::sync::RwLock::new(HashMap::new()),
@@ -119,7 +119,8 @@ impl GrpcHostRegistry {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl HostRegistry for GrpcHostRegistry {
     async fn get_host(&self, validator: &ValidatorInfo) -> Result<Host, FibreError> {
         // Check cache first.
@@ -310,7 +311,8 @@ mod tests {
 
     #[tokio::test]
     async fn grpc_registry_returns_cached_host() {
-        let channel = tonic::transport::Endpoint::from_static("http://[::1]:50051").connect_lazy();
+        let channel = celestia_grpc::connect_lazy("http://localhost:50051")
+            .expect("connect_lazy should succeed for test URL");
 
         let registry = GrpcHostRegistry::new(channel);
 

@@ -1,20 +1,19 @@
 //! Production gRPC transport implementation.
 //!
 //! [`GrpcValidatorConnector`] resolves validator addresses via a
-//! [`HostRegistry`] and caches tonic [`Channel`]s.
+//! [`HostRegistry`] and caches tonic channels.
 //! [`GrpcValidatorConnection`] uses generated tonic clients to upload
 //! and download shards over the Fibre gRPC service.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tonic::transport::Channel;
-
 use crate::blob::BlobID;
 use crate::error::FibreError;
 use crate::host_registry::HostRegistry;
 use crate::payment_promise::PaymentPromise;
 use crate::proto_conv;
+use celestia_grpc::BoxedTransport;
 use crate::validator::ValidatorInfo;
 use crate::validator_client::{
     DownloadResponse, DownloadedRow, UploadResponse, ValidatorConnection, ValidatorConnector,
@@ -26,7 +25,7 @@ use celestia_proto::celestia::fibre::v1::fibre_client::FibreClient as ProtoFibre
 /// Factory that resolves validator hosts and caches gRPC connections.
 ///
 /// Uses a [`HostRegistry`] to map validator addresses to network endpoints,
-/// then creates tonic [`Channel`]s lazily and caches them by the 20-byte
+/// then creates gRPC channels lazily and caches them by the 20-byte
 /// validator consensus address.
 pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
@@ -48,7 +47,8 @@ impl GrpcValidatorConnector {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl ValidatorConnector for GrpcValidatorConnector {
     async fn connect(
         &self,
@@ -65,9 +65,8 @@ impl ValidatorConnector for GrpcValidatorConnector {
         // Cache miss: resolve host and create a new channel.
         let host = self.host_registry.get_host(validator).await?;
 
-        let channel = tonic::transport::Endpoint::from_shared(host.0.clone())
-            .map_err(|e| FibreError::Other(format!("invalid endpoint '{}': {e}", host.0)))?
-            .connect_lazy();
+        let channel = celestia_grpc::connect_lazy(&host.0)
+            .map_err(|e| FibreError::Other(format!("invalid endpoint '{}': {e}", host.0)))?;
 
         let conn = Arc::new(GrpcValidatorConnection {
             channel,
@@ -84,13 +83,14 @@ impl ValidatorConnector for GrpcValidatorConnector {
 
 /// A connection to a single validator's Fibre gRPC service.
 ///
-/// Wraps a tonic [`Channel`] and applies message size limits to every RPC.
+/// Wraps a gRPC channel and applies message size limits to every RPC.
 pub struct GrpcValidatorConnection {
-    channel: Channel,
+    channel: BoxedTransport,
     max_message_size: usize,
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl ValidatorConnection for GrpcValidatorConnection {
     async fn upload_shard(
         &self,

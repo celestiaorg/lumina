@@ -61,11 +61,11 @@ impl FibreClient {
     /// Convenience constructor that builds a fully-wired [`FibreClient`] from a
     /// single gRPC endpoint URL.
     ///
-    /// Creates a [`tonic::transport::Channel`] for chain queries (validator sets
-    /// via CometBFT `BlockAPI` and host resolution via `x/valaddr`), wires up the
-    /// production [`GrpcSetGetter`], [`GrpcHostRegistry`], and
-    /// [`GrpcValidatorConnector`], and optionally takes a [`GrpcClient`] for
-    /// broadcasting `MsgPayForFibre` transactions on-chain.
+    /// Creates a gRPC channel for chain queries (validator sets via CometBFT
+    /// `BlockAPI` and host resolution via `x/valaddr`), wires up the production
+    /// [`GrpcSetGetter`], [`GrpcHostRegistry`], and [`GrpcValidatorConnector`],
+    /// and optionally takes a [`GrpcClient`] for broadcasting `MsgPayForFibre`
+    /// transactions on-chain.
     ///
     /// # Arguments
     ///
@@ -80,9 +80,8 @@ impl FibreClient {
         grpc_client: Option<GrpcClient>,
         config: FibreClientConfig,
     ) -> Result<Self, FibreError> {
-        let channel = tonic::transport::Endpoint::from_shared(grpc_url.to_string())
-            .map_err(|e| FibreError::Other(format!("invalid gRPC endpoint '{}': {e}", grpc_url)))?
-            .connect_lazy();
+        let channel = celestia_grpc::connect_lazy(grpc_url)
+            .map_err(|e| FibreError::Other(format!("invalid gRPC endpoint '{grpc_url}': {e}")))?;
 
         let host_registry = Arc::new(crate::host_registry::GrpcHostRegistry::new(channel.clone()));
         let connector = crate::grpc_validator_client::GrpcValidatorConnector::new(
