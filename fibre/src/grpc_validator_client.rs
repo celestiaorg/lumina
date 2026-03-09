@@ -65,8 +65,13 @@ impl ValidatorConnector for GrpcValidatorConnector {
         // Cache miss: resolve host and create a new channel.
         let host = self.host_registry.get_host(validator).await?;
 
-        let channel = celestia_grpc::connect_lazy(&host.0)
-            .map_err(|e| FibreError::Other(format!("invalid endpoint '{}': {e}", host.0)))?;
+        // Validators may register hosts in gRPC name-resolution format
+        // (e.g. "dns:///1.2.3.4:9091"). Tonic's connect_lazy expects a
+        // standard http(s) URI, so normalise the address first.
+        let endpoint = normalize_host(&host.0);
+
+        let channel = celestia_grpc::connect_lazy(&endpoint)
+            .map_err(|e| FibreError::Other(format!("invalid endpoint '{}': {e}", endpoint)))?;
 
         let conn = Arc::new(GrpcValidatorConnection {
             channel,
@@ -79,6 +84,22 @@ impl ValidatorConnector for GrpcValidatorConnector {
 
         Ok(conn as Arc<dyn ValidatorConnection>)
     }
+}
+
+/// Normalise a host string that may be in gRPC name-resolution format
+/// (e.g. `"dns:///1.2.3.4:9091"`) into a standard `http://` URI that tonic
+/// can parse.
+fn normalize_host(raw: &str) -> String {
+    // Strip the "dns:///" (or "dns://") prefix if present.
+    if let Some(rest) = raw.strip_prefix("dns:///").or_else(|| raw.strip_prefix("dns://")) {
+        return format!("http://{rest}");
+    }
+    // Already a normal URI (http:// or https://).
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return raw.to_string();
+    }
+    // Bare host:port — assume http.
+    format!("http://{raw}")
 }
 
 /// A connection to a single validator's Fibre gRPC service.
@@ -265,5 +286,37 @@ mod tests {
             Err(other) => panic!("expected HostNotFound error, got: {other}"),
             Ok(_) => panic!("expected connect to fail for unknown validator"),
         }
+    }
+
+    #[test]
+    fn normalize_host_strips_dns_prefix() {
+        assert_eq!(
+            normalize_host("dns:///138.68.236.99:9091"),
+            "http://138.68.236.99:9091"
+        );
+        assert_eq!(
+            normalize_host("dns://138.68.236.99:9091"),
+            "http://138.68.236.99:9091"
+        );
+    }
+
+    #[test]
+    fn normalize_host_preserves_http() {
+        assert_eq!(
+            normalize_host("http://127.0.0.1:9090"),
+            "http://127.0.0.1:9090"
+        );
+        assert_eq!(
+            normalize_host("https://validator.example.com:9090"),
+            "https://validator.example.com:9090"
+        );
+    }
+
+    #[test]
+    fn normalize_host_adds_http_to_bare() {
+        assert_eq!(
+            normalize_host("138.68.236.99:9091"),
+            "http://138.68.236.99:9091"
+        );
     }
 }
