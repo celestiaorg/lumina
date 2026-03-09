@@ -20,7 +20,7 @@ k256 = { workspace = true, features = ["ecdsa"] }
 ed25519-dalek = { version = "2", features = ["digest"] }
 sha2 = "0.10"
 rand.workspace = true
-rand_chacha = "0.3"
+chacha8rand = "0.1.2"
 
 # Async runtime
 tokio = { workspace = true, features = ["sync", "macros"] }

@@ -778,6 +778,7 @@ dependencies = [
  "celestia-grpc",
  "celestia-proto",
  "celestia-types",
+ "chacha8rand",
  "ed25519-dalek",
  "futures",
  "hex",
@@ -785,7 +786,6 @@ dependencies = [
  "lumina-utils",
  "prost",
  "rand 0.8.5",
- "rand_chacha 0.3.1",
  "rsema1d",
  "sha2 0.10.9",
  "tendermint-proto",
@@ -989,6 +989,12 @@ dependencies = [
  "poly1305",
  "zeroize",
 ]
+
+[[package]]
+name = "chacha8rand"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cdfe312a490977049cd14af9af1e893bbc1bd94b489265801564921dd04f92d"
 
 [[package]]
 name = "ciborium"

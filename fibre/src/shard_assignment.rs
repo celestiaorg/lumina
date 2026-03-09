@@ -4,12 +4,15 @@
 //! ChaCha8 RNG seeded with the blob commitment for deterministic, reproducible
 //! assignment. This mirrors the Go implementation in
 //! `celestia-app-fibre/fibre/validator/set.go`.
+//!
+//! Uses [`chacha8rand`] which implements the C2SP chacha8rand spec — the same
+//! PRNG used by Go's `math/rand/v2`. The bounded integer generation
+//! ([`uint64n`]) and shuffle ([`go_shuffle`]) also match Go's exact algorithms
+//! to ensure cross-language determinism.
 
 use std::collections::{HashMap, HashSet};
 
-use rand::SeedableRng;
-use rand::seq::SliceRandom;
-use rand_chacha::ChaCha8Rng;
+use chacha8rand::ChaCha8Rand;
 
 use crate::blob::Commitment;
 use crate::config::Fraction;
@@ -134,13 +137,13 @@ pub fn assign(
         })
         .collect();
 
-    // Seed ChaCha8 RNG with the commitment
-    let rng_seed: [u8; 32] = commitment;
-    let mut rng = ChaCha8Rng::from_seed(rng_seed);
+    // Seed ChaCha8 RNG with the commitment — uses C2SP chacha8rand spec
+    // matching Go's math/rand/v2.NewChaCha8.
+    let mut rng = ChaCha8Rand::new(&commitment);
 
-    // Create and shuffle row indices using Fisher-Yates
+    // Create and shuffle row indices using Go-compatible Fisher-Yates
     let mut row_indices: Vec<usize> = (0..total_rows).collect();
-    row_indices.shuffle(&mut rng);
+    go_shuffle(&mut rng, &mut row_indices);
 
     // Assign consecutive chunks to each validator, wrapping with modulo
     let mut shard_map = HashMap::with_capacity(validators.len());
@@ -154,6 +157,49 @@ pub fn assign(
     }
 
     ShardMap { inner: shard_map }
+}
+
+/// Fisher-Yates shuffle matching Go's `math/rand/v2.(*Rand).Shuffle`.
+///
+/// Iterates backwards from `n-1` to `1`, picking `j` uniformly from `[0, i]`
+/// using [`uint64n`] which mirrors Go's `uint64n` (Lemire's algorithm).
+fn go_shuffle<T>(rng: &mut ChaCha8Rand, slice: &mut [T]) {
+    let n = slice.len();
+    for i in (1..n).rev() {
+        let j = uint64n(rng, (i + 1) as u64) as usize;
+        slice.swap(i, j);
+    }
+}
+
+/// Bounded random integer matching Go's `math/rand/v2.(*Rand).uint64n`.
+///
+/// Uses Lemire's "nearly divisionless" algorithm:
+/// 1. Power-of-two fast path: mask with `n - 1`.
+/// 2. Otherwise: multiply a random `u64` by `n`, take the high 64 bits.
+///    Reject if the low 64 bits fall in the bias zone.
+fn uint64n(rng: &mut ChaCha8Rand, n: u64) -> u64 {
+    if n & (n - 1) == 0 {
+        // n is a power of two
+        return rng.read_u64() & (n - 1);
+    }
+
+    let (mut hi, mut lo) = mul_u64_full(rng.read_u64(), n);
+    if lo < n {
+        let thresh = n.wrapping_neg() % n; // (2^64 - n) % n
+        while lo < thresh {
+            let (h, l) = mul_u64_full(rng.read_u64(), n);
+            hi = h;
+            lo = l;
+        }
+    }
+    hi
+}
+
+/// Full 64×64 → 128-bit multiplication, returning (high, low).
+#[inline]
+fn mul_u64_full(a: u64, b: u64) -> (u64, u64) {
+    let full = (a as u128) * (b as u128);
+    ((full >> 64) as u64, full as u64)
 }
 
 #[cfg(test)]
@@ -516,6 +562,100 @@ mod tests {
             (0..v.len())
                 .map(|i| map.get(i).unwrap().len())
                 .sum::<usize>()
+        );
+    }
+
+    /// Cross-language test: verifies that our ChaCha8 + shuffle produces the
+    /// exact same sequence as Go's math/rand/v2 with the same seed.
+    /// Go test: celestia-app-fibre/fibre/validator/cross_test.go
+    #[test]
+    fn cross_language_shuffle_matches_go() {
+        // Seed: bytes 1..32
+        let mut seed = [0u8; 32];
+        for i in 0..32 {
+            seed[i] = (i + 1) as u8;
+        }
+
+        // Test 1: shuffle [0..16)
+        let mut rng = ChaCha8Rand::new(&seed);
+        let mut indices: Vec<usize> = (0..16).collect();
+        go_shuffle(&mut rng, &mut indices);
+
+        // Expected from Go: [3 13 15 12 1 7 0 8 4 10 11 2 9 14 6 5]
+        assert_eq!(
+            indices,
+            vec![3, 13, 15, 12, 1, 7, 0, 8, 4, 10, 11, 2, 9, 14, 6, 5],
+            "16-element shuffle must match Go output"
+        );
+
+        // Test 2: shuffle [0..100) with fresh RNG (same seed)
+        let mut rng2 = ChaCha8Rand::new(&seed);
+        let mut indices2: Vec<usize> = (0..100).collect();
+        go_shuffle(&mut rng2, &mut indices2);
+
+        // Expected first 20 from Go: [80 56 48 69 26 60 57 22 49 54 93 13 5 75 97 38 84 16 11 89]
+        assert_eq!(
+            &indices2[..20],
+            &[80, 56, 48, 69, 26, 60, 57, 22, 49, 54, 93, 13, 5, 75, 97, 38, 84, 16, 11, 89],
+            "100-element shuffle (first 20) must match Go output"
+        );
+    }
+
+    /// Cross-language test: verifies the full assign() output matches Go's
+    /// validator/Set.Assign() for the same parameters.
+    /// Go test: celestia-app-fibre/fibre/validator/cross_test.go
+    #[test]
+    fn cross_language_assign_matches_go() {
+        // 3 validators: power 300, 200, 100 (same order as Go's sorted output)
+        let validators = vec![
+            make_validator(300, 1),
+            make_validator(200, 2),
+            make_validator(100, 3),
+        ];
+        let total_voting_power: i64 = 600;
+
+        // Commitment = [1, 2, 3, ..., 32]
+        let mut commitment = [0u8; 32];
+        for i in 0..32 {
+            commitment[i] = (i + 1) as u8;
+        }
+
+        let total_rows = 16;
+        let original_rows = 8;
+        let min_rows = 2;
+        let liveness = Fraction {
+            numerator: 1,
+            denominator: 3,
+        };
+
+        let map = assign(
+            &validators,
+            total_voting_power,
+            commitment,
+            total_rows,
+            original_rows,
+            min_rows,
+            liveness,
+        );
+
+        // Expected from Go:
+        //   validator[0] (power=300): rows=[3, 13, 15, 12, 1, 7, 0, 8]
+        //   validator[1] (power=200): rows=[4, 10, 11, 2, 9, 14, 6, 5]
+        //   validator[2] (power=100): rows=[3, 13, 15, 12]
+        assert_eq!(
+            map.get(0).unwrap(),
+            &vec![3, 13, 15, 12, 1, 7, 0, 8],
+            "validator[0] rows must match Go"
+        );
+        assert_eq!(
+            map.get(1).unwrap(),
+            &vec![4, 10, 11, 2, 9, 14, 6, 5],
+            "validator[1] rows must match Go"
+        );
+        assert_eq!(
+            map.get(2).unwrap(),
+            &vec![3, 13, 15, 12],
+            "validator[2] rows must match Go"
         );
     }
 
