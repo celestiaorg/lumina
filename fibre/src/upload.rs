@@ -111,7 +111,9 @@ impl FibreClient {
         );
 
         // 4. Create signature set
-        let validator_sign_bytes = promise.sign_bytes()?;
+        // Validators sign with CometBFT's RawBytesMessageSignBytes wrapping,
+        // so we must verify against the same wrapped bytes.
+        let validator_sign_bytes = promise.sign_bytes_validator()?;
         let sig_set =
             Arc::new(val_set.new_signature_set(self.cfg.safety_threshold, validator_sign_bytes));
 
@@ -381,9 +383,9 @@ mod tests {
             // Record what was uploaded.
             self.uploaded.lock().unwrap().push(rows.to_vec());
 
-            // Sign the promise's sign_bytes with the validator's ed25519 key.
+            // Sign the promise's validator sign bytes (with CometBFT wrapping).
             use ed25519_dalek::Signer;
-            let sign_bytes = promise.sign_bytes()?;
+            let sign_bytes = promise.sign_bytes_validator()?;
             let signature = self.ed_signing_key.sign(&sign_bytes);
 
             Ok(UploadResponse {

@@ -118,6 +118,31 @@ impl PaymentPromise {
         Ok(buf)
     }
 
+    /// Compute the bytes that validators sign when counter-signing this promise.
+    ///
+    /// Wraps [`sign_bytes()`](Self::sign_bytes) with CometBFT's
+    /// `RawBytesMessageSignBytes` domain separation format:
+    ///
+    /// ```text
+    /// "COMET::RAW_BYTES::SIGN"
+    /// || varint(len(proto_bytes))
+    /// || proto_bytes(SignRawBytesRequest { chain_id, raw_bytes, unique_id })
+    /// ```
+    ///
+    /// Where `unique_id` is `"fibre/pp:v0"` and `raw_bytes` is the output of
+    /// [`sign_bytes()`](Self::sign_bytes).
+    ///
+    /// This matches Go's `PaymentPromise.SignBytesValidator()` which calls
+    /// `core.RawBytesMessageSignBytes(chainID, signBytesPrefix, signBytes)`.
+    pub fn sign_bytes_validator(&self) -> Result<Vec<u8>, FibreError> {
+        let raw_bytes = self.sign_bytes()?;
+        Ok(raw_bytes_message_sign_bytes(
+            &self.chain_id,
+            SIGN_BYTES_PREFIX,
+            &raw_bytes,
+        ))
+    }
+
     /// Sign this promise with the given signing key.
     ///
     /// Computes the sign bytes and signs them using secp256k1 ECDSA.
@@ -248,23 +273,6 @@ impl PaymentPromise {
         Ok(hasher.finalize().into())
     }
 
-    /// Compute sign bytes for validator signing (CometBFT domain separation).
-    ///
-    /// This wraps the `sign_bytes()` with CometBFT's `RawBytesMessageSignBytes`
-    /// domain separation format. In Go this calls:
-    /// `core.RawBytesMessageSignBytes(p.ChainID, signBytesPrefix, signBytes)`
-    ///
-    /// TODO: Implement once CometBFT's exact encoding format is available
-    /// in the Rust ecosystem.
-    pub fn sign_bytes_validator(&self) -> Result<Vec<u8>, FibreError> {
-        // TODO: Implement CometBFT domain separation wrapping.
-        // This requires the exact protobuf encoding used by CometBFT's
-        // RawBytesMessageSignBytes function.
-        Err(FibreError::Other(
-            "sign_bytes_validator not yet implemented: requires CometBFT domain separation format"
-                .into(),
-        ))
-    }
 }
 
 /// A `PaymentPromise` together with validator signatures confirming the promise.
@@ -275,6 +283,36 @@ pub struct SignedPaymentPromise {
     /// Signatures from validators confirming they received and stored the blob.
     /// Ordered by validator set position; `None` entries for non-signers.
     pub validator_signatures: Vec<Option<Vec<u8>>>,
+}
+
+/// CometBFT's domain separation prefix for raw-bytes signing.
+///
+/// Matches `RawBytesSignBytesPrefix` in celestia-core's `types/priv_validator.go`.
+const COMET_RAW_BYTES_PREFIX: &[u8] = b"COMET::RAW_BYTES::SIGN";
+
+/// Construct the bytes that celestia-core's `RawBytesMessageSignBytes` produces.
+///
+/// Format: `"COMET::RAW_BYTES::SIGN" || MarshalDelimited(SignRawBytesRequest)`
+///
+/// Uses the [`SignRawBytesRequest`] proto from celestia-core's `tendermint/privval/types.proto`,
+/// encoded with `prost::Message::encode_length_delimited` (matching Go's `protoio.MarshalDelimited`).
+fn raw_bytes_message_sign_bytes(chain_id: &str, unique_id: &[u8], raw_bytes: &[u8]) -> Vec<u8> {
+    use celestia_proto::tendermint_celestia_mods::privval::SignRawBytesRequest;
+    use prost::Message;
+
+    let request = SignRawBytesRequest {
+        chain_id: chain_id.to_string(),
+        raw_bytes: raw_bytes.to_vec(),
+        unique_id: String::from_utf8_lossy(unique_id).into_owned(),
+    };
+
+    let mut result = Vec::with_capacity(COMET_RAW_BYTES_PREFIX.len() + request.encoded_len() + 5);
+    result.extend_from_slice(COMET_RAW_BYTES_PREFIX);
+    request
+        .encode_length_delimited(&mut result)
+        .expect("encoding SignRawBytesRequest into Vec cannot fail");
+
+    result
 }
 
 /// Seconds between Go's internal epoch (January 1, year 1) and Unix epoch
@@ -833,5 +871,26 @@ mod tests {
 
         // Also verify the signature still validates
         reconstructed.validate().unwrap();
+    }
+
+    /// Cross-language test: verifies that `raw_bytes_message_sign_bytes` produces
+    /// the exact same output as Go's `core.RawBytesMessageSignBytes`.
+    /// Go test: celestia-app-fibre/fibre/validator/cross_test.go
+    #[test]
+    fn cross_language_raw_bytes_message_sign_bytes() {
+        let chain_id = "test-chain-1";
+        let unique_id = b"fibre/pp:v0";
+        let raw_bytes = b"hello world - test raw bytes";
+
+        let result = raw_bytes_message_sign_bytes(chain_id, unique_id, raw_bytes);
+
+        // Expected from Go's RawBytesMessageSignBytes:
+        let expected = "434f4d45543a3a5241575f42595445533a3a5349474e390a0c746573742d636861696e2d31121c68656c6c6f20776f726c64202d2074657374207261772062797465731a0b66696272652f70703a7630";
+
+        assert_eq!(
+            hex::encode(&result),
+            expected,
+            "must match Go's RawBytesMessageSignBytes output"
+        );
     }
 }
