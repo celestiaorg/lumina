@@ -311,6 +311,43 @@ fn tonic_build(fds: FileDescriptorSet) {
     tonic_config
         .compile_fds_with_config(prost_config, fds)
         .expect("should be able to compile protobuf using tonic");
+
+    fix_grpc_service_paths();
+}
+
+/// Fix gRPC service paths in generated tonic code.
+///
+/// The `tendermint_celestia_mods` package renaming avoids conflicts with the external
+/// `tendermint-proto` crate for message types. However, for gRPC services the package name
+/// is part of the service path on the wire, so the Go server (celestia-core) registers
+/// services under `tendermint.rpc.grpc` while the generated Rust client uses
+/// `tendermint_celestia_mods.rpc.grpc`. This post-processing step fixes the wire paths.
+#[cfg(feature = "tonic")]
+fn fix_grpc_service_paths() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let path = std::path::Path::new(&out_dir).join("tendermint_celestia_mods.rpc.grpc.rs");
+
+    if !path.exists() {
+        return;
+    }
+
+    let content = std::fs::read_to_string(&path).expect("failed to read generated grpc file");
+
+    let content = content
+        .replace(
+            "tendermint_celestia_mods.rpc.grpc.BlockAPI",
+            "tendermint.rpc.grpc.BlockAPI",
+        )
+        .replace(
+            "tendermint_celestia_mods.rpc.grpc.BroadcastAPI",
+            "tendermint.rpc.grpc.BroadcastAPI",
+        )
+        .replace(
+            "tendermint_celestia_mods.rpc.grpc.BlobstreamAPI",
+            "tendermint.rpc.grpc.BlobstreamAPI",
+        );
+
+    std::fs::write(&path, content).expect("failed to write fixed grpc file");
 }
 
 /// Create a list of Tentermint messages that needs to be replaced with Celestia's modifications.
