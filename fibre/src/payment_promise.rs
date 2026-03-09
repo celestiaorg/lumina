@@ -130,10 +130,28 @@ impl PaymentPromise {
     pub fn sign(&mut self, signing_key: &SigningKey) -> Result<(), FibreError> {
         let sign_bytes = self.sign_bytes()?;
 
+        tracing::debug!(
+            sign_bytes_hex = %hex::encode(&sign_bytes),
+            sign_bytes_len = sign_bytes.len(),
+            chain_id = %self.chain_id,
+            height = self.height,
+            upload_size = self.upload_size,
+            blob_version = self.blob_version,
+            namespace_hex = %hex::encode(&self.namespace),
+            commitment_hex = %hex::encode(&self.commitment),
+            pubkey_hex = %hex::encode(self.signer_pubkey.to_sec1_bytes().as_ref()),
+            "signing payment promise"
+        );
+
         // k256's Signer::sign() internally computes SHA-256(sign_bytes)
         // before ECDSA signing, matching Go's secp256k1.Sign() behavior.
         let signature: Signature = signing_key.sign(&sign_bytes);
         self.signature = Some(signature.to_bytes().to_vec());
+
+        tracing::debug!(
+            signature_hex = %hex::encode(self.signature.as_ref().unwrap()),
+            "payment promise signed"
+        );
 
         Ok(())
     }
@@ -259,22 +277,32 @@ pub struct SignedPaymentPromise {
     pub validator_signatures: Vec<Option<Vec<u8>>>,
 }
 
+/// Seconds between Go's internal epoch (January 1, year 1) and Unix epoch
+/// (January 1, 1970). Go's `time.Time.MarshalBinary()` encodes seconds since
+/// year 1, not Unix epoch.
+///
+/// Computed as: `(1969*365 + 1969/4 - 1969/100 + 1969/400) * 86400`
+/// This matches Go's `unixToInternal` constant in `time/time.go`.
+const UNIX_TO_INTERNAL: i64 = (1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400) * 86400;
+
 /// Marshal a `SystemTime` into Go's `time.Time.MarshalBinary()` format.
 ///
 /// Go's binary time format (version 1, UTC):
 /// - Byte 0: version = 1
-/// - Bytes 1-8: seconds since Unix epoch as big-endian int64
+/// - Bytes 1-8: seconds since January 1, year 1 as big-endian int64
 /// - Bytes 9-12: nanoseconds as big-endian int32
 /// - Bytes 13-14: timezone offset as big-endian int16 (-1 for UTC sentinel)
 ///
-/// In Go, when the time is in UTC (as enforced by calling `.UTC().MarshalBinary()`),
-/// the timezone offset is set to -1 as a special sentinel value indicating UTC.
+/// **Important**: Go's `MarshalBinary()` uses `t.sec()` which returns seconds
+/// since January 1, year 1 (Go's internal epoch), NOT Unix epoch seconds.
+/// The conversion adds `UNIX_TO_INTERNAL` (62135596800) to Unix seconds.
 fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
     let duration = t
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|_| FibreError::InvalidPaymentPromise("timestamp before Unix epoch".into()))?;
 
-    let secs = duration.as_secs() as i64;
+    // Convert from Unix epoch to Go's internal epoch (year 1)
+    let secs = duration.as_secs() as i64 + UNIX_TO_INTERNAL;
     let nsecs = duration.subsec_nanos() as i32;
 
     let mut buf = Vec::with_capacity(TIMESTAMP_BINARY_SIZE);
@@ -282,7 +310,7 @@ fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
     // Version byte
     buf.push(1);
 
-    // Seconds as big-endian int64
+    // Seconds since year 1 as big-endian int64
     buf.extend_from_slice(&secs.to_be_bytes());
 
     // Nanoseconds as big-endian int32
@@ -298,7 +326,9 @@ fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
 
 /// Unmarshal a timestamp from Go's `time.Time.MarshalBinary()` format back to `SystemTime`.
 ///
-/// This is the inverse of `marshal_binary_time`.
+/// This is the inverse of `marshal_binary_time`. The seconds field represents
+/// seconds since January 1, year 1 (Go's internal epoch), so we subtract
+/// `UNIX_TO_INTERNAL` to convert back to Unix epoch.
 #[allow(dead_code)]
 fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
     if data.len() != TIMESTAMP_BINARY_SIZE {
@@ -316,12 +346,16 @@ fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
         )));
     }
 
-    let secs = i64::from_be_bytes(data[1..9].try_into().unwrap());
+    // Seconds since year 1 (Go's internal epoch)
+    let internal_secs = i64::from_be_bytes(data[1..9].try_into().unwrap());
     let nsecs = i32::from_be_bytes(data[9..13].try_into().unwrap());
 
-    if secs < 0 {
+    // Convert from Go's internal epoch to Unix epoch
+    let unix_secs = internal_secs - UNIX_TO_INTERNAL;
+
+    if unix_secs < 0 {
         return Err(FibreError::Other(
-            "negative timestamp seconds not supported".into(),
+            "timestamp before Unix epoch not supported".into(),
         ));
     }
     if nsecs < 0 {
@@ -330,7 +364,7 @@ fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
         ));
     }
 
-    let duration = std::time::Duration::new(secs as u64, nsecs as u32);
+    let duration = std::time::Duration::new(unix_secs as u64, nsecs as u32);
     Ok(SystemTime::UNIX_EPOCH + duration)
 }
 
@@ -548,9 +582,10 @@ mod tests {
         let offset = i16::from_be_bytes(bytes[13..15].try_into().unwrap());
         assert_eq!(offset, -1);
 
-        // Check seconds
+        // Check seconds (since year 1, Go's internal epoch)
         let secs = i64::from_be_bytes(bytes[1..9].try_into().unwrap());
-        assert_eq!(secs, 1700000000);
+        // Unix 1700000000 + UNIX_TO_INTERNAL (62135596800) = 63835596800
+        assert_eq!(secs, 1700000000 + UNIX_TO_INTERNAL);
 
         // Check nanoseconds
         let nsecs = i32::from_be_bytes(bytes[9..13].try_into().unwrap());
@@ -581,5 +616,222 @@ mod tests {
         assert!(signed.validator_signatures[0].is_none());
         assert!(signed.validator_signatures[1].is_some());
         assert!(signed.validator_signatures[2].is_none());
+    }
+
+    /// Cross-language compatibility test.
+    ///
+    /// Uses a deterministic private key and fixed field values so the output
+    /// can be reproduced in Go to verify sign_bytes and signature compatibility.
+    ///
+    /// Corresponding Go test:
+    /// ```go
+    /// func TestCrossLanguageSignBytes(t *testing.T) {
+    ///     keyBytes, _ := hex.DecodeString("<PRIVATE_KEY_HEX from test output>")
+    ///     privKey := &secp256k1.PrivKey{Key: keyBytes}
+    ///     pubKey := privKey.PubKey().(*secp256k1.PubKey)
+    ///     ns, _ := share.NewNamespaceFromBytes(bytes.Repeat([]byte{0}, 29))
+    ///     pp := &fibre.PaymentPromise{
+    ///         ChainID:           "mocha-4",
+    ///         Height:            100,
+    ///         Namespace:         ns,
+    ///         UploadSize:        1024,
+    ///         BlobVersion:       0,
+    ///         Commitment:        fibre.Commitment(bytes.Repeat([]byte{0xAB}, 32)),
+    ///         CreationTimestamp:  time.Unix(1700000000, 0),
+    ///         SignerKey:         pubKey,
+    ///     }
+    ///     signBytes, err := pp.SignBytes()
+    ///     require.NoError(t, err)
+    ///     t.Logf("Go sign_bytes hex: %s", hex.EncodeToString(signBytes))
+    ///     // Compare with Rust output
+    /// }
+    /// ```
+    #[test]
+    fn cross_language_sign_bytes_deterministic() {
+        // Use a deterministic private key (32 bytes, all 0x01).
+        let key_bytes = [0x01u8; 32];
+        let signing_key = SigningKey::from_bytes((&key_bytes).into()).unwrap();
+        let verifying_key = *signing_key.verifying_key();
+
+        // Fixed timestamp: 2023-11-14 22:13:20 UTC (Unix 1700000000, 0 nanos)
+        let timestamp =
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(1700000000, 0);
+
+        let mut promise = PaymentPromise {
+            chain_id: "mocha-4".to_string(),
+            height: 100,
+            namespace: vec![0u8; NAMESPACE_SIZE],
+            upload_size: 1024,
+            blob_version: 0,
+            commitment: [0xABu8; 32],
+            creation_timestamp: timestamp,
+            signer_pubkey: verifying_key,
+            signature: None,
+        };
+
+        let sign_bytes = promise.sign_bytes().unwrap();
+
+        // Print hex values for cross-language comparison
+        let pubkey_hex = hex::encode(verifying_key.to_sec1_bytes().as_ref());
+        let sign_bytes_hex = hex::encode(&sign_bytes);
+        eprintln!("=== Cross-language compatibility test ===");
+        eprintln!("Private key hex: {}", hex::encode(key_bytes));
+        eprintln!("Public key hex (33 bytes compressed): {pubkey_hex}");
+        eprintln!("Sign bytes hex ({} bytes): {sign_bytes_hex}", sign_bytes.len());
+
+        // Verify expected total size
+        let expected_size =
+            SIGN_BYTES_PREFIX.len() + "mocha-4".len() + SIGN_BYTES_FIXED_SIZE;
+        assert_eq!(sign_bytes.len(), expected_size, "sign_bytes has wrong length");
+
+        // Sign and print signature
+        promise.sign(&signing_key).unwrap();
+        let signature_hex = hex::encode(promise.signature.as_ref().unwrap());
+        eprintln!("Signature hex (64 bytes): {signature_hex}");
+
+        // Verify the signature passes our own validation
+        promise.validate().unwrap();
+
+        // Print the SHA-256 hash of sign_bytes (this is what ECDSA actually signs)
+        use sha2::{Digest as _, Sha256};
+        let hash = Sha256::digest(&sign_bytes);
+        eprintln!("SHA-256(sign_bytes) hex: {}", hex::encode(hash));
+        eprintln!("=== End cross-language compatibility test ===");
+
+        // Verify field layout byte by byte
+        let mut offset = 0;
+
+        // Prefix: "fibre/pp:v0" (11 bytes)
+        assert_eq!(&sign_bytes[offset..offset + 11], b"fibre/pp:v0");
+        offset += 11;
+
+        // Chain ID: "mocha-4" (7 bytes)
+        assert_eq!(&sign_bytes[offset..offset + 7], b"mocha-4");
+        offset += 7;
+
+        // Public key (33 bytes)
+        assert_eq!(
+            &sign_bytes[offset..offset + 33],
+            verifying_key.to_sec1_bytes().as_ref()
+        );
+        offset += 33;
+
+        // Namespace (29 bytes, all zeros)
+        assert_eq!(&sign_bytes[offset..offset + 29], &[0u8; 29]);
+        offset += 29;
+
+        // Upload size: 1024 = 0x00000400 (4 bytes BE)
+        assert_eq!(&sign_bytes[offset..offset + 4], &[0x00, 0x00, 0x04, 0x00]);
+        offset += 4;
+
+        // Commitment (32 bytes, all 0xAB)
+        assert_eq!(&sign_bytes[offset..offset + 32], &[0xABu8; 32]);
+        offset += 32;
+
+        // Blob version: 0 (4 bytes BE)
+        assert_eq!(&sign_bytes[offset..offset + 4], &[0x00, 0x00, 0x00, 0x00]);
+        offset += 4;
+
+        // Height: 100 = 0x0000000000000064 (8 bytes BE)
+        assert_eq!(
+            &sign_bytes[offset..offset + 8],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]
+        );
+        offset += 8;
+
+        // Timestamp: marshal_binary_time(Unix 1700000000, 0 nanos)
+        // Go's MarshalBinary uses seconds since year 1 (internal epoch):
+        //   1700000000 + 62135596800 = 63835596800 = 0x0EDCE5E800
+        // version=1, secs=0x0000000EDCE5E800, nanos=0x00000000, offset=0xFFFF
+        let expected_ts: [u8; 15] = [
+            0x01, // version
+            0x00, 0x00, 0x00, 0x0E, 0xDC, 0xE5, 0xE8, 0x00, // seconds since year 1 BE
+            0x00, 0x00, 0x00, 0x00, // nanos BE
+            0xFF, 0xFF, // UTC offset (-1)
+        ];
+        assert_eq!(&sign_bytes[offset..offset + 15], &expected_ts);
+        offset += 15;
+
+        assert_eq!(offset, sign_bytes.len());
+    }
+
+    /// Proto round-trip test: verify sign_bytes survive serialization.
+    ///
+    /// Converts a PaymentPromise to proto, encodes to bytes with prost,
+    /// decodes back, reconstructs a PaymentPromise, and checks sign_bytes match.
+    #[test]
+    fn proto_roundtrip_preserves_sign_bytes() {
+        use crate::proto_conv;
+        use prost::Message;
+
+        let key_bytes = [0x01u8; 32];
+        let signing_key = SigningKey::from_bytes((&key_bytes).into()).unwrap();
+
+        let timestamp =
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(1700000000, 500_000_000);
+
+        let mut promise = PaymentPromise {
+            chain_id: "mocha-4".to_string(),
+            height: 100,
+            namespace: vec![0u8; NAMESPACE_SIZE],
+            upload_size: 1024,
+            blob_version: 0,
+            commitment: [0xABu8; 32],
+            creation_timestamp: timestamp,
+            signer_pubkey: *signing_key.verifying_key(),
+            signature: None,
+        };
+        promise.sign(&signing_key).unwrap();
+
+        let original_sign_bytes = promise.sign_bytes().unwrap();
+
+        // Convert to proto and encode
+        let proto_pp = proto_conv::payment_promise_to_proto(&promise);
+        let proto_bytes = proto_pp.encode_to_vec();
+
+        // Print the raw proto bytes for cross-language decoding
+        eprintln!("=== Proto round-trip test ===");
+        eprintln!("Proto bytes hex ({} bytes): {}", proto_bytes.len(), hex::encode(&proto_bytes));
+        eprintln!("=== End proto round-trip test ===");
+
+        // Decode back from proto bytes
+        use celestia_proto::celestia::fibre::v1::PaymentPromise as ProtoPP;
+        let decoded_proto = ProtoPP::decode(proto_bytes.as_slice()).unwrap();
+
+        // Reconstruct the domain PaymentPromise from decoded proto
+        let ts = decoded_proto.creation_timestamp.unwrap();
+        let reconstructed_timestamp = if ts.seconds >= 0 {
+            SystemTime::UNIX_EPOCH
+                + std::time::Duration::new(ts.seconds as u64, ts.nanos as u32)
+        } else {
+            panic!("negative timestamp in test");
+        };
+
+        let pk_bytes = decoded_proto.signer_public_key.unwrap().key;
+        let reconstructed_pubkey =
+            VerifyingKey::from_sec1_bytes(&pk_bytes).unwrap();
+
+        let reconstructed = PaymentPromise {
+            chain_id: decoded_proto.chain_id,
+            height: decoded_proto.height as u64,
+            namespace: decoded_proto.namespace,
+            upload_size: decoded_proto.blob_size,
+            blob_version: decoded_proto.blob_version,
+            commitment: decoded_proto.commitment.try_into().unwrap(),
+            creation_timestamp: reconstructed_timestamp,
+            signer_pubkey: reconstructed_pubkey,
+            signature: Some(decoded_proto.signature),
+        };
+
+        let reconstructed_sign_bytes = reconstructed.sign_bytes().unwrap();
+
+        assert_eq!(
+            hex::encode(&original_sign_bytes),
+            hex::encode(&reconstructed_sign_bytes),
+            "sign_bytes must survive proto round-trip"
+        );
+
+        // Also verify the signature still validates
+        reconstructed.validate().unwrap();
     }
 }
