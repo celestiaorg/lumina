@@ -639,8 +639,6 @@ mod custom_serde {
         type Error = Error;
 
         fn try_from(value: SerdeBlob) -> Result<Self> {
-            // we don't need to require app version when deserializing because commitment is provided
-            // user can still verify commitment and app version compatibility using `Blob::validate`
             commitment::validate_blob(value.share_version, value.signer.is_some())?;
 
             Ok(Blob {

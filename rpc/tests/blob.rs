@@ -208,7 +208,7 @@ async fn blob_submit_too_large() {
     let namespace = random_ns();
     // wrapping blob in a transaction has a small overhead, so if we try to submit
     // blob of `MAX_TX_SIZE`, it should fail
-    let blob_len = appconsts::max_tx_size(appconsts::AppVersion::latest());
+    let blob_len = appconsts::v7::MAX_TX_SIZE;
     let data = random_bytes(blob_len as usize);
     let blob = Blob::new(namespace, data, None).unwrap();
 
