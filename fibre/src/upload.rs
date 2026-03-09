@@ -166,11 +166,14 @@ impl FibreClient {
             .get_account_address()
             .ok_or_else(|| FibreError::Other("grpc_client has no signer configured".into()))?;
 
-        // 4. Filter out None signatures for the on-chain message.
+        // 4. Map signatures to on-chain format, preserving positional alignment.
+        // The on-chain code maps signatures[i] → validator[i], so we must keep
+        // None entries as empty vecs (which the chain skips) rather than removing
+        // them, which would shift later signatures to wrong validator indices.
         let validator_signatures: Vec<Vec<u8>> = signed_promise
             .validator_signatures
             .iter()
-            .filter_map(|s| s.clone())
+            .map(|s| s.clone().unwrap_or_default())
             .collect();
 
         // 5. Construct the MsgPayForFibre proto message.
