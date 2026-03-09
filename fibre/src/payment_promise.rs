@@ -124,16 +124,15 @@ impl PaymentPromise {
     /// Sets `self.signature` to the 64-byte compact signature (r || s).
     ///
     /// The Go implementation uses `privKey.Sign(signBytes)` which internally
-    /// hashes the message with SHA-256 before ECDSA signing.
+    /// hashes the message with SHA-256 before ECDSA signing. The k256
+    /// `Signer::sign()` trait method does the same, so we pass the raw
+    /// sign bytes directly — no manual pre-hashing.
     pub fn sign(&mut self, signing_key: &SigningKey) -> Result<(), FibreError> {
         let sign_bytes = self.sign_bytes()?;
 
-        // Hash the sign bytes with SHA-256 before signing.
-        // This matches the Go cosmos-sdk secp256k1.Sign() behavior which
-        // calls crypto/sha256 on the message before passing to btcec.
-        let hash = Sha256::digest(&sign_bytes);
-
-        let signature: Signature = signing_key.sign(&hash);
+        // k256's Signer::sign() internally computes SHA-256(sign_bytes)
+        // before ECDSA signing, matching Go's secp256k1.Sign() behavior.
+        let signature: Signature = signing_key.sign(&sign_bytes);
         self.signature = Some(signature.to_bytes().to_vec());
 
         Ok(())
@@ -198,16 +197,19 @@ impl PaymentPromise {
 
         // Verify signature
         let sign_bytes = self.sign_bytes()?;
-        let hash = Sha256::digest(&sign_bytes);
 
         let signature = Signature::from_slice(signature_bytes).map_err(|e| {
             FibreError::InvalidPaymentPromise(format!("invalid signature format: {}", e))
         })?;
 
+        // k256's Verifier::verify() internally computes SHA-256(sign_bytes)
+        // before ECDSA verification, matching Go's secp256k1.VerifySignature().
         use k256::ecdsa::signature::Verifier;
-        self.signer_pubkey.verify(&hash, &signature).map_err(|_| {
-            FibreError::InvalidPaymentPromise("signature verification failed".into())
-        })?;
+        self.signer_pubkey
+            .verify(&sign_bytes, &signature)
+            .map_err(|_| {
+                FibreError::InvalidPaymentPromise("signature verification failed".into())
+            })?;
 
         Ok(())
     }
