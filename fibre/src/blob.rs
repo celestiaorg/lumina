@@ -139,18 +139,18 @@ impl Blob {
 
         let header = BlobHeaderV0::new(data.len());
         let row_size = cfg.row_size(data.len());
-        let rows = header.encode_to_rows(data, row_size, cfg.original_rows);
 
-        // Build the flat buffer for rsema1d encoding
-        let mut flat = Vec::with_capacity(cfg.original_rows * row_size);
-        for row in &rows {
-            flat.extend_from_slice(row);
-        }
-        let original = rsema1d::RowMatrix::with_shape(flat, cfg.original_rows, row_size)?;
+        // Allocate the full extended matrix (original + parity rows) up front.
+        // Write header + data directly into the first K rows; parity rows stay
+        // zeroed and will be filled by encode_in_place.
+        let total_rows = cfg.original_rows + cfg.parity_rows;
+        let mut flat = vec![0u8; total_rows * row_size];
+        header.encode_into_buffer(data, &mut flat);
+        let extended = rsema1d::RowMatrix::with_shape(flat, total_rows, row_size)?;
 
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
 
-        let (ext_data, commitment, rlc_orig) = rsema1d::encode(&original, &params)?;
+        let (ext_data, commitment, rlc_orig) = rsema1d::encode_in_place(extended, &params)?;
 
         let id = BlobID::new(cfg.blob_version, commitment);
 

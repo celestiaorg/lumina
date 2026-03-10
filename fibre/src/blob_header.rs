@@ -57,7 +57,8 @@ impl BlobHeaderV0 {
     /// by the start of the data.
     ///
     /// This matches the Go `blobHeaderV0.encodeToRows` method.
-    pub fn encode_to_rows(&self, data: &[u8], row_size: usize, num_rows: usize) -> Vec<Vec<u8>> {
+    #[cfg(test)]
+    fn encode_to_rows(&self, data: &[u8], row_size: usize, num_rows: usize) -> Vec<Vec<u8>> {
         let mut rows: Vec<Vec<u8>> = Vec::with_capacity(num_rows);
 
         // First row: header + beginning of data
@@ -91,6 +92,21 @@ impl BlobHeaderV0 {
         }
 
         rows
+    }
+
+    /// Encode the header and data directly into a flat row-major buffer.
+    ///
+    /// Writes the 5-byte header at the start of the buffer, followed by `data`,
+    /// writing across row boundaries. The buffer must be at least
+    /// `num_rows * row_size` bytes; any trailing bytes are left as-is (typically
+    /// zero-initialised by the caller).
+    ///
+    /// This is the zero-copy counterpart of the test-only `encode_to_rows`.
+    pub fn encode_into_buffer(&self, data: &[u8], buf: &mut [u8]) {
+        self.encode(buf);
+        let payload_start = Self::HEADER_SIZE;
+        let to_copy = data.len().min(buf.len() - payload_start);
+        buf[payload_start..payload_start + to_copy].copy_from_slice(&data[..to_copy]);
     }
 
     /// Decode the header and extract original data from rows.
