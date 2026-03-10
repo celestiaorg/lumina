@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"time"
 
-	rsema1d "github.com/celestiaorg/rsema1d"
+	rsema1d "github.com/celestiaorg/celestia-app/v8/pkg/rsema1d"
 )
 
 func makeTestData(k, rowSize int) [][]byte {

@@ -152,6 +152,10 @@ const PROTO_FILES: &[&str] = &[
     "vendor/celestia/blob/v1/params.proto",
     "vendor/celestia/blob/v1/query.proto",
     "vendor/celestia/blob/v1/tx.proto",
+    "vendor/celestia/forwarding/v1/event.proto",
+    "vendor/celestia/forwarding/v1/genesis.proto",
+    "vendor/celestia/forwarding/v1/query.proto",
+    "vendor/celestia/forwarding/v1/tx.proto",
     "vendor/celestia/core/v1/da/data_availability_header.proto",
     "vendor/celestia/core/v1/gas_estimation/gas_estimator.proto",
     "vendor/celestia/core/v1/proof/proof.proto",
@@ -286,7 +290,7 @@ fn tonic_build(fds: FileDescriptorSet) {
     let mut tonic_config = tonic_build::configure()
         .include_file("mod.rs")
         .build_client(true)
-        .build_server(false)
+        .build_server(cfg!(feature = "tonic-server"))
         .build_transport(false)
         .use_arc_self(true)
         .compile_well_known_types(true)
