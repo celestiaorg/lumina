@@ -13,11 +13,11 @@ use crate::error::FibreError;
 use crate::host_registry::HostRegistry;
 use crate::payment_promise::PaymentPromise;
 use crate::proto_conv;
-use celestia_grpc::BoxedTransport;
 use crate::validator::ValidatorInfo;
 use crate::validator_client::{
     DownloadResponse, DownloadedRow, UploadResponse, ValidatorConnection, ValidatorConnector,
 };
+use celestia_grpc::BoxedTransport;
 
 use celestia_proto::celestia::fibre::v1::DownloadShardRequest;
 use celestia_proto::celestia::fibre::v1::fibre_client::FibreClient as ProtoFibreClient;
@@ -91,7 +91,10 @@ impl ValidatorConnector for GrpcValidatorConnector {
 /// can parse.
 fn normalize_host(raw: &str) -> String {
     // Strip the "dns:///" (or "dns://") prefix if present.
-    if let Some(rest) = raw.strip_prefix("dns:///").or_else(|| raw.strip_prefix("dns://")) {
+    if let Some(rest) = raw
+        .strip_prefix("dns:///")
+        .or_else(|| raw.strip_prefix("dns://"))
+    {
         return format!("http://{rest}");
     }
     // Already a normal URI (http:// or https://).

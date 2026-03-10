@@ -24,6 +24,7 @@ chacha8rand = "0.1.2"
 
 # Async runtime
 tokio = { workspace = true, features = ["sync", "macros"] }
+tokio-util.workspace = true
 futures.workspace = true
 lumina-utils = { workspace = true, features = ["executor"] }
 

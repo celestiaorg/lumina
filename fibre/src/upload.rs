@@ -7,16 +7,15 @@
 //! The [`FibreClient::put()`] method combines upload with on-chain
 //! `MsgPayForFibre` broadcast for a complete put flow.
 
-use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use celestia_grpc::TxConfig;
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::{BoxFuture, CondSend, into_boxed};
+use lumina_utils::cond_send::BoxFuture;
 
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
@@ -25,25 +24,8 @@ use crate::error::FibreError;
 use crate::payment_promise::{PaymentPromise, SignedPaymentPromise};
 use crate::shard_assignment::ShardMap;
 use crate::signature_set::SignatureSet;
+use crate::task::spawn_task;
 use crate::validator::ValidatorSet;
-
-/// Spawn a task via [`lumina_utils::executor::spawn`] and track its result in a
-/// [`FuturesUnordered`] collection via a oneshot channel.
-///
-/// This avoids depending on `tokio::task::JoinSet` (which requires the `rt`
-/// feature) and works on both native and wasm32 targets.
-fn spawn_task<T>(
-    unordered: &mut FuturesUnordered<BoxFuture<'static, Option<T>>>,
-    fut: impl Future<Output = T> + CondSend + 'static,
-) where
-    T: CondSend + 'static,
-{
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    lumina_utils::executor::spawn(async move {
-        let _ = tx.send(fut.await);
-    });
-    unordered.push(into_boxed(async move { rx.await.ok() }));
-}
 
 /// Result of a successful [`FibreClient::put()`] operation.
 ///
@@ -80,7 +62,7 @@ impl FibreClient {
         namespace: &[u8],
         blob: &Blob,
     ) -> Result<SignedPaymentPromise, FibreError> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
 
@@ -118,8 +100,15 @@ impl FibreClient {
             Arc::new(val_set.new_signature_set(self.cfg.safety_threshold, validator_sign_bytes));
 
         // 5. Fan-out upload
-        self.upload_shards(&val_set, &shard_map, &promise, blob, &sig_set)
-            .await?;
+        self.upload_shards(
+            &val_set,
+            &shard_map,
+            &promise,
+            blob,
+            &sig_set,
+            &self.cancel_token,
+        )
+        .await?;
 
         // 6. Collect signatures
         let sigs = sig_set.signatures()?;
@@ -146,7 +135,7 @@ impl FibreClient {
     /// - [`FibreError::Other`] if the gRPC client has not been configured.
     /// - Any error from blob encoding, upload, or transaction broadcast.
     pub async fn put(&self, namespace: &[u8], data: &[u8]) -> Result<PutResult, FibreError> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
 
@@ -217,6 +206,7 @@ impl FibreClient {
         promise: &PaymentPromise,
         blob: &Blob,
         sig_set: &Arc<SignatureSet>,
+        cancel_token: &CancellationToken,
     ) -> Result<(), FibreError> {
         let done_notify = Arc::new(Notify::new());
 
@@ -250,8 +240,7 @@ impl FibreClient {
         let rlc_coeffs: Arc<Vec<rsema1d::GF128>> =
             Arc::new(blob.rlc_coeffs().map(|c| c.to_vec()).unwrap_or_default());
 
-        let mut futures: FuturesUnordered<BoxFuture<'static, Option<()>>> =
-            FuturesUnordered::new();
+        let mut futures: FuturesUnordered<BoxFuture<'static, Option<()>>> = FuturesUnordered::new();
 
         for (val_idx, proofs) in validator_tasks {
             let connector = Arc::clone(&self.connector);
@@ -319,7 +308,7 @@ impl FibreClient {
             });
         }
 
-        // Wait for the threshold to be met OR all tasks to complete.
+        // Wait for the threshold to be met, all tasks to complete, or cancellation.
         tokio::select! {
             _ = done_notify.notified() => {
                 // Threshold met -- we have enough signatures.
@@ -330,6 +319,9 @@ impl FibreClient {
                 while futures.next().await.is_some() {}
             } => {
                 // All tasks completed (threshold may or may not have been met).
+            }
+            _ = cancel_token.cancelled() => {
+                return Err(FibreError::Cancelled);
             }
         }
 
@@ -642,7 +634,7 @@ mod tests {
         let v4 = make_validator(100, 4); // fails
         let v5 = make_validator(100, 5); // fails
 
-        let all_validators = vec![v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
+        let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
         let val_infos: Vec<ValidatorInfo> = all_validators
             .iter()
             .map(|(_, info)| info.clone())
@@ -698,7 +690,7 @@ mod tests {
         let v4 = make_validator(100, 4); // fails
         let v5 = make_validator(100, 5); // fails
 
-        let all_validators = vec![v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
+        let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
         let val_infos: Vec<ValidatorInfo> = all_validators
             .iter()
             .map(|(_, info)| info.clone())

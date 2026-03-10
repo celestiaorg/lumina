@@ -163,7 +163,7 @@ impl PaymentPromise {
             upload_size = self.upload_size,
             blob_version = self.blob_version,
             namespace_hex = %hex::encode(&self.namespace),
-            commitment_hex = %hex::encode(&self.commitment),
+            commitment_hex = %hex::encode(self.commitment),
             pubkey_hex = %hex::encode(self.signer_pubkey.to_sec1_bytes().as_ref()),
             "signing payment promise"
         );
@@ -272,7 +272,6 @@ impl PaymentPromise {
         hasher.update(signature);
         Ok(hasher.finalize().into())
     }
-
 }
 
 /// A `PaymentPromise` together with validator signatures confirming the promise.
@@ -367,7 +366,7 @@ fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
 /// This is the inverse of `marshal_binary_time`. The seconds field represents
 /// seconds since January 1, year 1 (Go's internal epoch), so we subtract
 /// `UNIX_TO_INTERNAL` to convert back to Unix epoch.
-#[allow(dead_code)]
+#[cfg(test)]
 fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
     if data.len() != TIMESTAMP_BINARY_SIZE {
         return Err(FibreError::Other(format!(
@@ -692,8 +691,7 @@ mod tests {
         let verifying_key = *signing_key.verifying_key();
 
         // Fixed timestamp: 2023-11-14 22:13:20 UTC (Unix 1700000000, 0 nanos)
-        let timestamp =
-            SystemTime::UNIX_EPOCH + std::time::Duration::new(1700000000, 0);
+        let timestamp = SystemTime::UNIX_EPOCH + std::time::Duration::new(1700000000, 0);
 
         let mut promise = PaymentPromise {
             chain_id: "mocha-4".to_string(),
@@ -715,12 +713,18 @@ mod tests {
         eprintln!("=== Cross-language compatibility test ===");
         eprintln!("Private key hex: {}", hex::encode(key_bytes));
         eprintln!("Public key hex (33 bytes compressed): {pubkey_hex}");
-        eprintln!("Sign bytes hex ({} bytes): {sign_bytes_hex}", sign_bytes.len());
+        eprintln!(
+            "Sign bytes hex ({} bytes): {sign_bytes_hex}",
+            sign_bytes.len()
+        );
 
         // Verify expected total size
-        let expected_size =
-            SIGN_BYTES_PREFIX.len() + "mocha-4".len() + SIGN_BYTES_FIXED_SIZE;
-        assert_eq!(sign_bytes.len(), expected_size, "sign_bytes has wrong length");
+        let expected_size = SIGN_BYTES_PREFIX.len() + "mocha-4".len() + SIGN_BYTES_FIXED_SIZE;
+        assert_eq!(
+            sign_bytes.len(),
+            expected_size,
+            "sign_bytes has wrong length"
+        );
 
         // Sign and print signature
         promise.sign(&signing_key).unwrap();
@@ -805,8 +809,7 @@ mod tests {
         let key_bytes = [0x01u8; 32];
         let signing_key = SigningKey::from_bytes((&key_bytes).into()).unwrap();
 
-        let timestamp =
-            SystemTime::UNIX_EPOCH + std::time::Duration::new(1700000000, 500_000_000);
+        let timestamp = SystemTime::UNIX_EPOCH + std::time::Duration::new(1700000000, 500_000_000);
 
         let mut promise = PaymentPromise {
             chain_id: "mocha-4".to_string(),
@@ -829,7 +832,11 @@ mod tests {
 
         // Print the raw proto bytes for cross-language decoding
         eprintln!("=== Proto round-trip test ===");
-        eprintln!("Proto bytes hex ({} bytes): {}", proto_bytes.len(), hex::encode(&proto_bytes));
+        eprintln!(
+            "Proto bytes hex ({} bytes): {}",
+            proto_bytes.len(),
+            hex::encode(&proto_bytes)
+        );
         eprintln!("=== End proto round-trip test ===");
 
         // Decode back from proto bytes
@@ -839,15 +846,13 @@ mod tests {
         // Reconstruct the domain PaymentPromise from decoded proto
         let ts = decoded_proto.creation_timestamp.unwrap();
         let reconstructed_timestamp = if ts.seconds >= 0 {
-            SystemTime::UNIX_EPOCH
-                + std::time::Duration::new(ts.seconds as u64, ts.nanos as u32)
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(ts.seconds as u64, ts.nanos as u32)
         } else {
             panic!("negative timestamp in test");
         };
 
         let pk_bytes = decoded_proto.signer_public_key.unwrap().key;
-        let reconstructed_pubkey =
-            VerifyingKey::from_sec1_bytes(&pk_bytes).unwrap();
+        let reconstructed_pubkey = VerifyingKey::from_sec1_bytes(&pk_bytes).unwrap();
 
         let reconstructed = PaymentPromise {
             chain_id: decoded_proto.chain_id,

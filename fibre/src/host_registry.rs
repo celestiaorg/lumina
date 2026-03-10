@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use crate::error::FibreError;
-use celestia_grpc::BoxedTransport;
 use crate::validator::ValidatorInfo;
+use celestia_grpc::BoxedTransport;
 
 use celestia_proto::celestia::valaddr::v1::query_client::QueryClient as ValaddrQueryClient;
 use celestia_proto::celestia::valaddr::v1::{

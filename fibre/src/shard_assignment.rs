@@ -572,8 +572,8 @@ mod tests {
     fn cross_language_shuffle_matches_go() {
         // Seed: bytes 1..32
         let mut seed = [0u8; 32];
-        for i in 0..32 {
-            seed[i] = (i + 1) as u8;
+        for (i, byte) in seed.iter_mut().enumerate() {
+            *byte = (i + 1) as u8;
         }
 
         // Test 1: shuffle [0..16)
@@ -596,7 +596,9 @@ mod tests {
         // Expected first 20 from Go: [80 56 48 69 26 60 57 22 49 54 93 13 5 75 97 38 84 16 11 89]
         assert_eq!(
             &indices2[..20],
-            &[80, 56, 48, 69, 26, 60, 57, 22, 49, 54, 93, 13, 5, 75, 97, 38, 84, 16, 11, 89],
+            &[
+                80, 56, 48, 69, 26, 60, 57, 22, 49, 54, 93, 13, 5, 75, 97, 38, 84, 16, 11, 89
+            ],
             "100-element shuffle (first 20) must match Go output"
         );
     }
@@ -616,8 +618,8 @@ mod tests {
 
         // Commitment = [1, 2, 3, ..., 32]
         let mut commitment = [0u8; 32];
-        for i in 0..32 {
-            commitment[i] = (i + 1) as u8;
+        for (i, byte) in commitment.iter_mut().enumerate() {
+            *byte = (i + 1) as u8;
         }
 
         let total_rows = 16;

@@ -100,7 +100,10 @@ impl SignatureSet {
 
         // Lock, record, and check threshold.
         let mut inner = self.inner.lock().expect("SignatureSet mutex poisoned");
-        inner.voting_power += validator.voting_power;
+        // Only count voting power once per validator (idempotent on duplicates).
+        if !inner.signatures.contains_key(&validator.address) {
+            inner.voting_power += validator.voting_power;
+        }
         inner
             .signatures
             .insert(validator.address, signature.to_vec());
@@ -330,9 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_add_accumulates() {
-        // Go behavior: adding the same validator twice accumulates voting power.
-        // The signature map entry is overwritten but voting_power keeps increasing.
+    fn duplicate_add_is_idempotent() {
+        // Adding the same validator twice does NOT double-count voting power.
+        // The signature map entry is overwritten but voting_power stays the same.
         let (sk, v) = make_validator(25);
         let data = b"dup test";
 
@@ -350,9 +353,9 @@ mod tests {
         let met = ss.add(&v, &sign(&sk, data)).unwrap();
         assert!(met, "first add: 25 >= 16, threshold met");
 
-        // Second add: power = 50 >= 16 => true (accumulated)
+        // Second add: power still 25 (not accumulated) >= 16 => true
         let met = ss.add(&v, &sign(&sk, data)).unwrap();
-        assert!(met, "second add: 50 >= 16, threshold still met");
+        assert!(met, "second add: 25 >= 16, threshold still met");
 
         // Verify the signature map has exactly one entry (overwritten).
         let sigs = ss.signatures().unwrap();

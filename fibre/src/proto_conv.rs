@@ -4,7 +4,9 @@
 //! protobuf types from `celestia-proto`. They are used by the gRPC transport
 //! layer ([`crate::grpc_validator_client`]) and the put flow ([`crate::upload`]).
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use celestia_proto::celestia::fibre::v1 as proto;
 use celestia_proto::cosmos::crypto::secp256k1::PubKey as ProtoPubKey;
@@ -206,7 +208,7 @@ fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> Result<SystemTime, FibreError> {
     if t.seconds >= 0 {
         let d = Duration::new(t.seconds as u64, t.nanos as u32);

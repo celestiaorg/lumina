@@ -16,39 +16,22 @@
 //! The main task collects proofs and applies them to the blob sequentially,
 //! avoiding the need for shared mutable state (`Arc<Mutex<Blob>>`).
 
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Notify, Semaphore};
+use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::{BoxFuture, CondSend, into_boxed};
+use lumina_utils::cond_send::BoxFuture;
 
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
 use crate::config::BlobConfig;
 use crate::error::FibreError;
+use crate::task::spawn_task;
 use crate::validator::ValidatorSet;
-
-/// Spawn a task via [`lumina_utils::executor::spawn`] and track its result in a
-/// [`FuturesUnordered`] collection via a oneshot channel.
-///
-/// This avoids depending on `tokio::task::JoinSet` (which requires the `rt`
-/// feature) and works on both native and wasm32 targets.
-fn spawn_task<T>(
-    unordered: &mut FuturesUnordered<BoxFuture<'static, Option<T>>>,
-    fut: impl Future<Output = T> + CondSend + 'static,
-) where
-    T: CondSend + 'static,
-{
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    lumina_utils::executor::spawn(async move {
-        let _ = tx.send(fut.await);
-    });
-    unordered.push(into_boxed(async move { rx.await.ok() }));
-}
 
 impl FibreClient {
     /// Download and reconstruct a blob by its [`BlobID`].
@@ -68,7 +51,7 @@ impl FibreClient {
     /// - [`FibreError::NotEnoughShards`] if too few validators succeeded.
     /// - Any error from reconstruction (commitment mismatch, encoding, etc.).
     pub async fn download(&self, id: &BlobID) -> Result<Blob, FibreError> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
 
@@ -83,8 +66,14 @@ impl FibreClient {
 
         let mut blob = Blob::empty(id.clone())?;
 
-        self.download_blob(&val_set, &ordered_indices, download_target, &mut blob)
-            .await?;
+        self.download_blob(
+            &val_set,
+            &ordered_indices,
+            download_target,
+            &mut blob,
+            &self.cancel_token,
+        )
+        .await?;
 
         blob.reconstruct()?;
 
@@ -101,7 +90,7 @@ impl FibreClient {
         id: &BlobID,
         blob_cfg: BlobConfig,
     ) -> Result<Blob, FibreError> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
 
@@ -115,8 +104,14 @@ impl FibreClient {
 
         let mut blob = Blob::empty_with_config(id.clone(), blob_cfg);
 
-        self.download_blob(&val_set, &ordered_indices, download_target, &mut blob)
-            .await?;
+        self.download_blob(
+            &val_set,
+            &ordered_indices,
+            download_target,
+            &mut blob,
+            &self.cancel_token,
+        )
+        .await?;
 
         blob.reconstruct()?;
 
@@ -138,6 +133,7 @@ impl FibreClient {
         ordered_indices: &[usize],
         download_target: usize,
         blob: &mut Blob,
+        cancel_token: &CancellationToken,
     ) -> Result<(), FibreError> {
         if ordered_indices.is_empty() {
             return Err(FibreError::NotFound);
@@ -147,6 +143,7 @@ impl FibreClient {
         let successes = Arc::new(AtomicU32::new(0));
         let done_notify = Arc::new(Notify::new());
 
+        #[allow(clippy::type_complexity)]
         let mut futures: FuturesUnordered<
             BoxFuture<'static, Option<Result<Vec<rsema1d::RowInclusionProof>, FibreError>>>,
         > = FuturesUnordered::new();
@@ -216,7 +213,8 @@ impl FibreClient {
             });
         }
 
-        // Collect results: wait for either `done` notification or all tasks to complete
+        // Collect results: wait for either `done` notification, all tasks to complete,
+        // or cancellation.
         let done_notify_clone = done_notify.clone();
         loop {
             tokio::select! {
@@ -250,6 +248,9 @@ impl FibreClient {
                         }
                     }
                     break;
+                }
+                _ = cancel_token.cancelled() => {
+                    return Err(FibreError::Cancelled);
                 }
             }
         }

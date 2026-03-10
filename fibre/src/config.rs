@@ -158,23 +158,8 @@ impl ProtocolParams {
     ///
     /// Panics if `blob_version` is not 0.
     pub fn row_size(&self, blob_version: u8, total_len: usize) -> usize {
-        assert!(
-            blob_version == 0,
-            "unsupported blob version: {blob_version}"
-        );
-
-        if total_len == 0 {
-            return 0;
-        }
-
-        let mut row_size = ceil_div(total_len, self.rows);
-
-        // Round up to nearest multiple of min_row_size
-        if row_size % self.min_row_size != 0 {
-            row_size = ((row_size / self.min_row_size) + 1) * self.min_row_size;
-        }
-
-        row_size
+        assert_eq!(blob_version, 0, "unsupported blob version: {blob_version}");
+        compute_row_size(total_len, self.rows, self.min_row_size)
     }
 
     /// Returns the maximum row size based on `max_blob_size`.
@@ -312,20 +297,7 @@ impl BlobConfig {
     /// matching Go's `BlobConfig.RowSize(dataLen)` which calls
     /// `p.RowSize(blobVersion, dataLen + blobHeaderLen)`.
     pub fn row_size(&self, data_len: usize) -> usize {
-        let total_len = data_len + BLOB_HEADER_LEN;
-
-        if total_len == 0 {
-            return 0;
-        }
-
-        let mut row_size = ceil_div(total_len, self.rows);
-
-        // Round up to nearest multiple of min_row_size
-        if row_size % self.min_row_size != 0 {
-            row_size = ((row_size / self.min_row_size) + 1) * self.min_row_size;
-        }
-
-        row_size
+        compute_row_size(data_len + BLOB_HEADER_LEN, self.rows, self.min_row_size)
     }
 
     /// Calculates the upload size of blob data with padding and without parity.
@@ -344,26 +316,6 @@ impl BlobConfig {
             0 => Ok(Self::v0()),
             _ => Err(crate::error::FibreError::UnsupportedBlobVersion(version)),
         }
-    }
-
-    /// Creates a `BlobConfig` for version 0 with custom test parameters.
-    ///
-    /// A convenience wrapper around `new_test` for the common case of
-    /// version 0 blobs with small K/N values.
-    #[cfg(test)]
-    pub(crate) fn v0_with_test_params(
-        original_rows: usize,
-        parity_rows: usize,
-        min_row_size: usize,
-    ) -> Self {
-        Self::new_test(
-            0,
-            original_rows,
-            parity_rows,
-            DEFAULT_PROTOCOL_PARAMS.max_blob_size - BLOB_HEADER_LEN,
-            original_rows,
-            min_row_size,
-        )
     }
 
     /// Creates a `BlobConfig` with custom parameters for testing.
@@ -392,7 +344,20 @@ impl BlobConfig {
 
 /// Returns `ceil(a / b)` using integer arithmetic.
 fn ceil_div(a: usize, b: usize) -> usize {
-    (a + b - 1) / b
+    a.div_ceil(b)
+}
+
+/// Computes the row size for a given total byte length, rounding up to
+/// `min_row_size` boundaries.
+///
+/// Returns 0 if `total_len` is 0. Used by both [`ProtocolParams::row_size`]
+/// and [`BlobConfig::row_size`] to avoid duplicating the rounding logic.
+fn compute_row_size(total_len: usize, rows: usize, min_row_size: usize) -> usize {
+    if total_len == 0 {
+        return 0;
+    }
+
+    total_len.div_ceil(rows).div_ceil(min_row_size) * min_row_size
 }
 
 #[cfg(test)]

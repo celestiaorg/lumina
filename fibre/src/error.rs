@@ -99,10 +99,14 @@ pub enum FibreError {
     #[error("client is closed")]
     ClientClosed,
 
+    /// The operation was cancelled via the cancellation token.
+    #[error("operation cancelled")]
+    Cancelled,
+
     // -- Wrapped errors --
     /// A gRPC status error from tonic.
     #[error("gRPC error: {0}")]
-    Grpc(#[from] tonic::Status),
+    Grpc(Box<tonic::Status>),
 
     /// An error from the celestia-grpc client.
     #[error("grpc client error: {0}")]
@@ -133,6 +137,12 @@ pub enum FibreError {
     /// A catch-all error for cases not covered by other variants.
     #[error("{0}")]
     Other(String),
+}
+
+impl From<tonic::Status> for FibreError {
+    fn from(err: tonic::Status) -> Self {
+        FibreError::Grpc(Box::new(err))
+    }
 }
 
 impl From<k256::ecdsa::Error> for FibreError {

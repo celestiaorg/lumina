@@ -8,9 +8,9 @@
 //! an instance.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use k256::ecdsa::SigningKey;
+use tokio_util::sync::CancellationToken;
 
 use celestia_grpc::GrpcClient;
 
@@ -32,7 +32,7 @@ pub struct FibreClient {
     pub(crate) connector: Arc<dyn ValidatorConnector>,
     pub(crate) upload_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) download_semaphore: Arc<tokio::sync::Semaphore>,
-    pub(crate) closed: AtomicBool,
+    pub(crate) cancel_token: CancellationToken,
     pub(crate) grpc_client: Option<GrpcClient>,
 }
 
@@ -49,13 +49,21 @@ impl FibreClient {
 
     /// Returns `true` if the client has been closed.
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
+        self.cancel_token.is_cancelled()
     }
 
-    /// Mark the client as closed so that subsequent operations return
-    /// [`FibreError::ClientClosed`].
+    /// Mark the client as closed so that subsequent and in-flight operations
+    /// are cancelled with [`FibreError::ClientClosed`].
     pub fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+        self.cancel_token.cancel();
+    }
+
+    /// Returns the client's cancellation token.
+    ///
+    /// Callers can use this to listen for cancellation or to create child
+    /// tokens for individual operations.
+    pub fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancel_token
     }
 
     /// Convenience constructor that builds a fully-wired [`FibreClient`] from a
@@ -186,7 +194,7 @@ impl FibreClientBuilder {
             signing_key,
             set_getter,
             connector,
-            closed: AtomicBool::new(false),
+            cancel_token: CancellationToken::new(),
             grpc_client: self.grpc_client,
         })
     }
@@ -257,8 +265,10 @@ mod tests {
     #[tokio::test]
     async fn from_url_sets_config_correctly() {
         let sk = SigningKey::random(&mut OsRng);
-        let mut config = FibreClientConfig::default();
-        config.chain_id = "test-123".to_string();
+        let config = FibreClientConfig {
+            chain_id: "test-123".to_string(),
+            ..Default::default()
+        };
 
         let client = FibreClient::from_url("http://localhost:9090", sk, None, config)
             .expect("from_url should succeed");

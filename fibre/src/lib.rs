@@ -17,6 +17,7 @@ mod proto_conv;
 mod shard_assignment;
 mod shard_selection;
 mod signature_set;
+mod task;
 mod upload;
 pub mod validator;
 mod validator_client;

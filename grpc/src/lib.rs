@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod abci_proofs;
+/// Boxed transport types for type-erased gRPC connections.
 pub mod boxed;
 mod builder;
 mod client;
