@@ -50,63 +50,14 @@ impl BlobHeaderV0 {
         Ok(Self { data_size })
     }
 
-    /// Encode the data into rows with the version 0 header prepended.
+    /// Encode the header and data directly into a flat buffer.
     ///
-    /// Returns `num_rows` rows of `row_size` bytes each, padding the last row
-    /// with zeros as needed. The first row begins with the 5-byte header followed
-    /// by the start of the data.
-    ///
-    /// This matches the Go `blobHeaderV0.encodeToRows` method.
-    #[cfg(test)]
-    fn encode_to_rows(&self, data: &[u8], row_size: usize, num_rows: usize) -> Vec<Vec<u8>> {
-        let mut rows: Vec<Vec<u8>> = Vec::with_capacity(num_rows);
-
-        // First row: header + beginning of data
-        let mut first_row = vec![0u8; row_size];
-        self.encode(&mut first_row);
-
-        let first_row_data_capacity = row_size - Self::HEADER_SIZE;
-        let first_row_data_size = first_row_data_capacity.min(data.len());
-        first_row[Self::HEADER_SIZE..Self::HEADER_SIZE + first_row_data_size]
-            .copy_from_slice(&data[..first_row_data_size]);
-        rows.push(first_row);
-
-        // Remaining rows
-        let mut data_offset = first_row_data_size;
-        for _ in 1..num_rows {
-            let start = data_offset;
-            let end = start + row_size;
-            data_offset += row_size;
-
-            if end <= data.len() {
-                // Full row available in data
-                rows.push(data[start..end].to_vec());
-            } else {
-                // Partial or empty row: allocate zero-filled padded row
-                let mut row = vec![0u8; row_size];
-                if start < data.len() {
-                    row[..data.len() - start].copy_from_slice(&data[start..]);
-                }
-                rows.push(row);
-            }
-        }
-
-        rows
-    }
-
-    /// Encode the header and data directly into a flat row-major buffer.
-    ///
-    /// Writes the 5-byte header at the start of the buffer, followed by `data`,
-    /// writing across row boundaries. The buffer must be at least
-    /// `num_rows * row_size` bytes; any trailing bytes are left as-is (typically
-    /// zero-initialised by the caller).
-    ///
-    /// This is the zero-copy counterpart of the test-only `encode_to_rows`.
+    /// Writes the 5-byte header at the start of `buf`, followed by `data`
+    /// contiguously. The caller must ensure `buf` is at least
+    /// `HEADER_SIZE + data.len()` bytes.
     pub fn encode_into_buffer(&self, data: &[u8], buf: &mut [u8]) {
         self.encode(buf);
-        let payload_start = Self::HEADER_SIZE;
-        let to_copy = data.len().min(buf.len() - payload_start);
-        buf[payload_start..payload_start + to_copy].copy_from_slice(&data[..to_copy]);
+        buf[Self::HEADER_SIZE..Self::HEADER_SIZE + data.len()].copy_from_slice(data);
     }
 
     /// Decode the header and extract original data from rows.
@@ -207,53 +158,19 @@ mod tests {
     }
 
     #[test]
-    fn encode_decode_roundtrip_small_data() {
-        let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    fn encode_into_buffer_writes_header_and_data() {
+        let data = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         let header = BlobHeaderV0::new(data.len());
-        let cfg = test_blob_config();
-        let row_size = 64;
-        let num_rows = cfg.original_rows;
+        let mut buf = vec![0u8; 64];
+        header.encode_into_buffer(&data, &mut buf);
 
-        let rows = header.encode_to_rows(&data, row_size, num_rows);
-
-        assert_eq!(rows.len(), num_rows);
-        for row in &rows {
-            assert_eq!(row.len(), row_size);
-        }
-
-        // Verify header is at start of first row
-        assert_eq!(rows[0][0], 0); // version
-        assert_eq!(
-            u32::from_be_bytes(rows[0][1..5].try_into().unwrap()),
-            data.len() as u32
-        );
-
-        // Decode back
-        let (decoded_header, decoded_data) =
-            BlobHeaderV0::decode_from_rows(&rows[..num_rows], &cfg).unwrap();
-        assert_eq!(decoded_header.data_size, data.len() as u32);
-        assert_eq!(decoded_data, data);
-    }
-
-    #[test]
-    fn encode_decode_roundtrip_large_data() {
-        // Data that spans multiple rows
-        let data: Vec<u8> = (0..200).map(|i| i as u8).collect();
-        let header = BlobHeaderV0::new(data.len());
-        let row_size = 64;
-        let num_rows = 4;
-        let cfg = test_blob_config();
-
-        let rows = header.encode_to_rows(&data, row_size, num_rows);
-
-        assert_eq!(rows.len(), num_rows);
-        for row in &rows {
-            assert_eq!(row.len(), row_size);
-        }
-
-        let (decoded_header, decoded_data) = BlobHeaderV0::decode_from_rows(&rows, &cfg).unwrap();
-        assert_eq!(decoded_header.data_size, data.len() as u32);
-        assert_eq!(decoded_data, data);
+        // Header: version 0, data_size 10
+        assert_eq!(buf[0], 0);
+        assert_eq!(u32::from_be_bytes(buf[1..5].try_into().unwrap()), 10);
+        // Data immediately after header
+        assert_eq!(&buf[5..15], &data);
+        // Rest is zero-padded
+        assert!(buf[15..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -266,18 +183,14 @@ mod tests {
     #[test]
     fn decode_empty_rows() {
         let cfg = test_blob_config();
-        let result = BlobHeaderV0::decode_from_rows(&[], &cfg);
-        assert!(result.is_err());
+        assert!(BlobHeaderV0::decode_from_rows(&[], &cfg).is_err());
     }
 
     #[test]
     fn decode_zero_data_size() {
         let cfg = test_blob_config();
         let mut row = vec![0u8; 64];
-        // version 0, data_size 0
-        row[0] = 0;
         row[1..5].copy_from_slice(&0u32.to_be_bytes());
-        let result = BlobHeaderV0::decode_from_rows(&[row], &cfg);
-        assert!(result.is_err());
+        assert!(BlobHeaderV0::decode_from_rows(&[row], &cfg).is_err());
     }
 }

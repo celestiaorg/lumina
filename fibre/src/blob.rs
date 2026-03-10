@@ -147,9 +147,7 @@ impl Blob {
         let mut flat = vec![0u8; total_rows * row_size];
         header.encode_into_buffer(data, &mut flat);
         let extended = rsema1d::RowMatrix::with_shape(flat, total_rows, row_size)?;
-
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
-
         let (ext_data, commitment, rlc_orig) = rsema1d::encode_in_place(extended, &params)?;
 
         let id = BlobID::new(cfg.blob_version, commitment);
