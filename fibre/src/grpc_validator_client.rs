@@ -1,12 +1,14 @@
 //! Production gRPC transport implementation.
 //!
 //! [`GrpcValidatorConnector`] resolves validator addresses via a
-//! [`HostRegistry`] and caches tonic channels.
-//! [`GrpcValidatorConnection`] uses generated tonic clients to upload
+//! [`HostRegistry`] and caches [`GrpcClient`] connections.
+//! [`GrpcValidatorConnection`] uses [`GrpcClient`] methods to upload
 //! and download shards over the Fibre gRPC service.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use celestia_grpc::GrpcClient;
 
 use crate::blob::BlobID;
 use crate::error::FibreError;
@@ -17,31 +19,22 @@ use crate::validator::ValidatorInfo;
 use crate::validator_client::{
     DownloadResponse, DownloadedRow, UploadResponse, ValidatorConnection, ValidatorConnector,
 };
-use celestia_grpc::BoxedTransport;
-
-use celestia_proto::celestia::fibre::v1::DownloadShardRequest;
-use celestia_proto::celestia::fibre::v1::fibre_client::FibreClient as ProtoFibreClient;
 
 /// Factory that resolves validator hosts and caches gRPC connections.
 ///
 /// Uses a [`HostRegistry`] to map validator addresses to network endpoints,
-/// then creates gRPC channels lazily and caches them by the 20-byte
+/// then creates [`GrpcClient`] instances lazily and caches them by the 20-byte
 /// validator consensus address.
 pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
-    max_message_size: usize,
     connections: tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorConnection>>>,
 }
 
 impl GrpcValidatorConnector {
     /// Create a new connector backed by the given host registry.
-    ///
-    /// `max_message_size` controls the tonic encoding/decoding limits applied
-    /// to every connection created through this connector.
-    pub fn new(host_registry: Arc<dyn HostRegistry>, max_message_size: usize) -> Self {
+    pub fn new(host_registry: Arc<dyn HostRegistry>) -> Self {
         Self {
             host_registry,
-            max_message_size,
             connections: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -66,17 +59,16 @@ impl ValidatorConnector for GrpcValidatorConnector {
         let host = self.host_registry.get_host(validator).await?;
 
         // Validators may register hosts in gRPC name-resolution format
-        // (e.g. "dns:///1.2.3.4:9091"). Tonic's connect_lazy expects a
-        // standard http(s) URI, so normalise the address first.
-        let endpoint = normalize_host(&host.0);
+        // (e.g. "dns:///1.2.3.4:9091"). Tonic expects a standard http(s)
+        // URI, so normalise the address first.
+        let url = normalize_host(&host.0);
 
-        let channel = celestia_grpc::connect_lazy(&endpoint)
-            .map_err(|e| FibreError::Other(format!("invalid endpoint '{}': {e}", endpoint)))?;
+        let client = GrpcClient::builder()
+            .url(&url)
+            .build()
+            .map_err(|e| FibreError::Other(format!("invalid endpoint '{}': {e}", url)))?;
 
-        let conn = Arc::new(GrpcValidatorConnection {
-            channel,
-            max_message_size: self.max_message_size,
-        });
+        let conn = Arc::new(GrpcValidatorConnection { client });
 
         // Insert into cache.
         let mut cache = self.connections.lock().await;
@@ -107,10 +99,9 @@ fn normalize_host(raw: &str) -> String {
 
 /// A connection to a single validator's Fibre gRPC service.
 ///
-/// Wraps a gRPC channel and applies message size limits to every RPC.
+/// Wraps a [`GrpcClient`] for issuing upload/download RPCs.
 pub struct GrpcValidatorConnection {
-    channel: BoxedTransport,
-    max_message_size: usize,
+    client: GrpcClient,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -122,10 +113,6 @@ impl ValidatorConnection for GrpcValidatorConnection {
         rows: &[rsema1d::RowInclusionProof],
         rlc_coeffs: &[rsema1d::GF128],
     ) -> Result<UploadResponse, FibreError> {
-        let mut client = ProtoFibreClient::new(self.channel.clone())
-            .max_encoding_message_size(self.max_message_size)
-            .max_decoding_message_size(self.max_message_size);
-
         let proto_promise = proto_conv::payment_promise_to_proto(promise);
         let proto_shard = proto_conv::build_upload_shard(rows, rlc_coeffs);
 
@@ -134,26 +121,20 @@ impl ValidatorConnection for GrpcValidatorConnection {
             shard: Some(proto_shard),
         };
 
-        let response = client.upload_shard(request).await?;
-        let inner = response.into_inner();
+        let response = self.client.upload_shard(request).await?;
 
         Ok(UploadResponse {
-            validator_signature: inner.validator_signature,
+            validator_signature: response.validator_signature,
         })
     }
 
     async fn download_shard(&self, blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
-        let mut client = ProtoFibreClient::new(self.channel.clone())
-            .max_decoding_message_size(self.max_message_size);
+        let response = self
+            .client
+            .download_shard(blob_id.as_bytes().to_vec())
+            .await?;
 
-        let request = DownloadShardRequest {
-            blob_id: blob_id.as_bytes().to_vec(),
-        };
-
-        let response = client.download_shard(request).await?;
-        let inner = response.into_inner();
-
-        let proofs = proto_conv::parse_download_response(inner)?;
+        let proofs = proto_conv::parse_download_response(response)?;
 
         Ok(DownloadResponse {
             rows: proofs
@@ -211,7 +192,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         });
 
-        let connector = GrpcValidatorConnector::new(registry.clone(), 4 * 1024 * 1024);
+        let connector = GrpcValidatorConnector::new(registry.clone());
 
         // First connect should call the registry.
         let conn1 = connector.connect(&validator).await;
@@ -249,7 +230,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         });
 
-        let connector = GrpcValidatorConnector::new(registry.clone(), 4 * 1024 * 1024);
+        let connector = GrpcValidatorConnector::new(registry.clone());
 
         let conn_a = connector.connect(&validator_a).await;
         assert!(conn_a.is_ok(), "connect to validator A should succeed");
@@ -275,7 +256,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         });
 
-        let connector = GrpcValidatorConnector::new(registry.clone(), 4 * 1024 * 1024);
+        let connector = GrpcValidatorConnector::new(registry.clone());
 
         let result = connector.connect(&validator).await;
         match result {

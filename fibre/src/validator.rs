@@ -8,7 +8,7 @@ use crate::blob::Commitment;
 use crate::config::Fraction;
 use crate::shard_assignment::{self, ShardMap};
 use crate::shard_selection;
-use celestia_grpc::BoxedTransport;
+use celestia_grpc::GrpcClient;
 
 /// A validator's identity and stake information.
 #[derive(Debug, Clone)]
@@ -114,21 +114,18 @@ pub trait SetGetter: Send + Sync {
     async fn head(&self) -> Result<ValidatorSet, FibreError>;
 }
 
-use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetRequest;
-use celestia_proto::tendermint_celestia_mods::rpc::grpc::block_api_client::BlockApiClient;
-
 /// Production [`SetGetter`] backed by the CometBFT `BlockAPI` gRPC service.
 ///
 /// Queries `ValidatorSet` with `height = 0` to retrieve the latest validator
 /// set, then converts the protobuf response into the domain [`ValidatorSet`].
 pub struct GrpcSetGetter {
-    channel: BoxedTransport,
+    client: GrpcClient,
 }
 
 impl GrpcSetGetter {
-    /// Create a new getter using the given gRPC channel to the CometBFT node.
-    pub fn new(channel: BoxedTransport) -> Self {
-        Self { channel }
+    /// Create a new getter using the given [`GrpcClient`] to the CometBFT node.
+    pub fn new(client: GrpcClient) -> Self {
+        Self { client }
     }
 }
 
@@ -136,16 +133,11 @@ impl GrpcSetGetter {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl SetGetter for GrpcSetGetter {
     async fn head(&self) -> Result<ValidatorSet, FibreError> {
-        let mut client = BlockApiClient::new(self.channel.clone());
+        let resp = self.client.get_fibre_validator_set(0).await?;
 
-        let resp = client
-            .validator_set(ValidatorSetRequest { height: 0 })
-            .await?;
+        let height = resp.height as u64;
 
-        let inner = resp.into_inner();
-        let height = inner.height as u64;
-
-        let proto_set = inner.validator_set.ok_or_else(|| {
+        let proto_set = resp.validator_set.ok_or_else(|| {
             FibreError::Other("ValidatorSetResponse missing validator_set".into())
         })?;
 

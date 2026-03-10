@@ -4,12 +4,12 @@
 //! signatures until the safety threshold is met, then returns a
 //! [`SignedPaymentPromise`].
 //!
-//! The [`FibreClient::put()`] method combines upload with on-chain
-//! `MsgPayForFibre` broadcast for a complete put flow.
+//! The [`FibreClient::put()`] method encodes a blob, uploads it to validators,
+//! and returns a [`PreparedPut`] containing the `MsgPayForFibre` ready for
+//! broadcast by the caller.
 
 use std::sync::Arc;
 
-use celestia_grpc::TxConfig;
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Notify;
@@ -29,19 +29,18 @@ use crate::validator::ValidatorSet;
 
 /// Result of a successful [`FibreClient::put()`] operation.
 ///
-/// Contains the blob identifier, collected validator signatures, and
-/// information about the on-chain `MsgPayForFibre` transaction.
+/// Contains the blob identifier, the constructed `MsgPayForFibre` message
+/// ready for on-chain broadcast, and the collected validator signatures.
 #[derive(Debug)]
-pub struct PutResult {
+pub struct PreparedPut {
     /// The unique identifier of the uploaded blob.
     pub blob_id: BlobID,
+    /// The `MsgPayForFibre` message ready for on-chain broadcast.
+    pub msg: MsgPayForFibre,
     /// Validator signatures confirming they received and stored the blob.
-    /// Only contains non-`None` signatures from the upload result.
+    /// Positionally aligned with the validator set: `signatures[i]` corresponds
+    /// to `validator[i]`. Missing signatures are empty `Vec<u8>`.
     pub validator_signatures: Vec<Vec<u8>>,
-    /// The transaction hash of the on-chain `MsgPayForFibre` transaction.
-    pub tx_hash: String,
-    /// The block height at which the transaction was committed.
-    pub height: u64,
 }
 
 impl FibreClient {
@@ -119,30 +118,36 @@ impl FibreClient {
         })
     }
 
-    /// Upload data and broadcast a `MsgPayForFibre` transaction on-chain.
+    /// Encode data, upload to validators, and build a `MsgPayForFibre`.
     ///
     /// This is the high-level "put" operation that combines:
     /// 1. Encoding the data into a [`Blob`].
     /// 2. Uploading the blob to validators via [`FibreClient::upload()`].
-    /// 3. Broadcasting a `MsgPayForFibre` message on-chain using the gRPC client.
+    /// 3. Constructing a `MsgPayForFibre` message ready for on-chain broadcast.
     ///
-    /// Returns a [`PutResult`] containing the blob ID, validator signatures,
-    /// and on-chain transaction information.
+    /// Returns a [`PreparedPut`] containing the blob ID, the message, and
+    /// validator signatures. The caller is responsible for broadcasting the
+    /// message on-chain.
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace for the blob.
+    /// * `data` - The raw data to encode and upload.
+    /// * `signer_address` - The on-chain signer address for `MsgPayForFibre`.
     ///
     /// # Errors
     ///
     /// - [`FibreError::ClientClosed`] if the client has been closed.
-    /// - [`FibreError::Other`] if the gRPC client has not been configured.
-    /// - Any error from blob encoding, upload, or transaction broadcast.
-    pub async fn put(&self, namespace: &[u8], data: &[u8]) -> Result<PutResult, FibreError> {
+    /// - Any error from blob encoding or upload.
+    pub async fn put(
+        &self,
+        namespace: &[u8],
+        data: &[u8],
+        signer_address: &str,
+    ) -> Result<PreparedPut, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
-
-        let grpc_client = self
-            .grpc_client
-            .as_ref()
-            .ok_or_else(|| FibreError::Other("grpc_client not configured".into()))?;
 
         // 1. Encode data into a Blob.
         let blob = Blob::new(data, BlobConfig::for_version(0)?)?;
@@ -150,12 +155,7 @@ impl FibreClient {
         // 2. Upload to validators and collect signatures.
         let signed_promise = self.upload(namespace, &blob).await?;
 
-        // 3. Get the signer address from the gRPC client.
-        let signer_address = grpc_client
-            .get_account_address()
-            .ok_or_else(|| FibreError::Other("grpc_client has no signer configured".into()))?;
-
-        // 4. Map signatures to on-chain format, preserving positional alignment.
+        // 3. Map signatures to on-chain format, preserving positional alignment.
         // The on-chain code maps signatures[i] → validator[i], so we must keep
         // None entries as empty vecs (which the chain skips) rather than removing
         // them, which would shift later signatures to wrong validator indices.
@@ -165,7 +165,7 @@ impl FibreClient {
             .map(|s| s.clone().unwrap_or_default())
             .collect();
 
-        // 5. Construct the MsgPayForFibre proto message.
+        // 4. Construct the MsgPayForFibre proto message.
         let msg = MsgPayForFibre {
             signer: signer_address.to_string(),
             payment_promise: Some(crate::proto_conv::payment_promise_to_proto(
@@ -174,17 +174,10 @@ impl FibreClient {
             validator_signatures: validator_signatures.clone(),
         };
 
-        // 6. Broadcast the transaction.
-        let tx_info = grpc_client
-            .submit_message(msg, TxConfig::default())
-            .await
-            .map_err(FibreError::GrpcClient)?;
-
-        Ok(PutResult {
+        Ok(PreparedPut {
             blob_id: blob.id().clone(),
+            msg,
             validator_signatures,
-            tx_hash: tx_info.hash.to_string(),
-            height: tx_info.height,
         })
     }
 
@@ -746,40 +739,11 @@ mod tests {
 
         let namespace = vec![0u8; 29];
         let data = vec![1u8; 100];
-        let result = client.put(&namespace, &data).await;
+        let result = client.put(&namespace, &data, "celestia1test").await;
         assert!(result.is_err());
         match result.unwrap_err() {
             FibreError::ClientClosed => {}
             other => panic!("expected ClientClosed, got: {other}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn put_fails_when_grpc_client_not_configured() {
-        let (ed_key, val) = make_validator(100, 1);
-        let validators = vec![(ed_key, val.clone())];
-        let (connector, _conns) = make_connector(&validators);
-
-        let val_set = ValidatorSet {
-            validators: vec![val],
-            height: 1,
-        };
-
-        // build_client does NOT set grpc_client, so it should be None.
-        let client = build_client(val_set, connector);
-
-        let namespace = vec![0u8; 29];
-        let data = vec![1u8; 100];
-        let result = client.put(&namespace, &data).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            FibreError::Other(msg) => {
-                assert!(
-                    msg.contains("grpc_client not configured"),
-                    "expected 'grpc_client not configured' error, got: {msg}"
-                );
-            }
-            other => panic!("expected Other error about grpc_client, got: {other}"),
         }
     }
 }

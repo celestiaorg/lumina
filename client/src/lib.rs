@@ -35,7 +35,8 @@ pub mod api {
     pub mod fibre {
         #[doc(inline)]
         pub use celestia_fibre::{
-            Blob as FibreBlob, BlobID, FibreClient, FibreClientConfig, FibreError, PutResult,
+            Blob as FibreBlob, BlobID, FibreClient, FibreClientConfig, FibreError, PaymentPromise,
+            PreparedPut, SignedPaymentPromise, payment_promise_to_proto,
         };
     }
 
@@ -65,7 +66,9 @@ pub mod tx {
     #[doc(inline)]
     pub use celestia_grpc::grpc::{GasEstimate, TxPriority};
     #[doc(inline)]
-    pub use celestia_grpc::{DocSigner, IntoProtobufAny, SignDoc, TxConfig, TxInfo};
+    pub use celestia_grpc::{
+        BroadcastedTx, DocSigner, IntoProtobufAny, SignDoc, SubmittedTx, TxConfig, TxInfo,
+    };
     #[doc(inline)]
     pub use k256::ecdsa::signature::{Error as SignatureError, Keypair};
     #[doc(inline)]

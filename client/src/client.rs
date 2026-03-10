@@ -90,24 +90,13 @@ pub(crate) struct ClientInner {
 }
 
 /// A builder for [`Client`].
+#[derive(Default)]
 pub struct ClientBuilder {
     rpc_url: Option<String>,
     rpc_auth_token: Option<String>,
     timeout: Option<Duration>,
     grpc_builder: Option<GrpcClientBuilder>,
     fibre_client: Option<celestia_fibre::FibreClient>,
-}
-
-impl Default for ClientBuilder {
-    fn default() -> Self {
-        Self {
-            rpc_url: None,
-            rpc_auth_token: None,
-            timeout: None,
-            grpc_builder: None,
-            fibre_client: None,
-        }
-    }
 }
 
 impl fmt::Debug for ClientBuilder {
@@ -340,7 +329,7 @@ impl ClientBuilder {
     /// When set, the client exposes a [`FibreApi`](crate::fibre::FibreApi) via
     /// [`Client::fibre()`].
     ///
-    /// Use [`FibreClient::from_url()`](celestia_fibre::FibreClient::from_url) for
+    /// Use [`FibreClient::from_endpoint()`](celestia_fibre::FibreClient::from_endpoint) for
     /// convenient construction from a gRPC endpoint URL.
     pub fn fibre_client(mut self, fibre_client: celestia_fibre::FibreClient) -> Self {
         self.fibre_client = Some(fibre_client);

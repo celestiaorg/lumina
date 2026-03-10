@@ -26,6 +26,7 @@ mod validator_client;
 mod roundtrip_test;
 
 pub use blob::{Blob, BlobID, Commitment};
+pub use celestia_grpc::Endpoint;
 pub use client::{FibreClient, FibreClientBuilder};
 pub use config::{
     BlobConfig, DEFAULT_PROTOCOL_PARAMS, FibreClientConfig, Fraction, ProtocolParams,
@@ -33,6 +34,8 @@ pub use config::{
 pub use error::{FibreError, Result};
 pub use grpc_validator_client::GrpcValidatorConnector;
 pub use host_registry::{GrpcHostRegistry, Host, HostRegistry};
-pub use upload::PutResult;
+pub use payment_promise::{PaymentPromise, SignedPaymentPromise};
+pub use proto_conv::payment_promise_to_proto;
+pub use upload::PreparedPut;
 pub use validator::{GrpcSetGetter, SetGetter, ValidatorInfo, ValidatorSet};
 pub use validator_client::{ValidatorConnection, ValidatorConnector};

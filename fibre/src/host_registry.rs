@@ -8,12 +8,7 @@ use std::collections::HashMap;
 
 use crate::error::FibreError;
 use crate::validator::ValidatorInfo;
-use celestia_grpc::BoxedTransport;
-
-use celestia_proto::celestia::valaddr::v1::query_client::QueryClient as ValaddrQueryClient;
-use celestia_proto::celestia::valaddr::v1::{
-    QueryAllFibreProvidersRequest, QueryFibreProviderInfoRequest,
-};
+use celestia_grpc::GrpcClient;
 
 /// A validator's network address (e.g., `"dns:///validator.example.com:9090"`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -37,15 +32,15 @@ pub trait HostRegistry: Send + Sync {
 /// lazily filled per-validator via
 /// [`pull_host()`](GrpcHostRegistry::pull_host).
 pub struct GrpcHostRegistry {
-    channel: BoxedTransport,
+    client: GrpcClient,
     pub(crate) cache: tokio::sync::RwLock<HashMap<[u8; 20], Host>>,
 }
 
 impl GrpcHostRegistry {
-    /// Create a new registry using the given gRPC channel to the Cosmos app.
-    pub fn new(channel: BoxedTransport) -> Self {
+    /// Create a new registry using the given [`GrpcClient`] to the Cosmos app.
+    pub fn new(client: GrpcClient) -> Self {
         Self {
-            channel,
+            client,
             cache: tokio::sync::RwLock::new(HashMap::new()),
         }
     }
@@ -56,13 +51,9 @@ impl GrpcHostRegistry {
     /// provider's bech32 consensus address to a 20-byte key, and stores the
     /// host mapping.
     pub async fn pull_all(&self) -> Result<(), FibreError> {
-        let mut client = ValaddrQueryClient::new(self.channel.clone());
+        let resp = self.client.get_all_fibre_providers().await?;
 
-        let resp = client
-            .all_fibre_providers(QueryAllFibreProvidersRequest {})
-            .await?;
-
-        let providers = resp.into_inner().providers;
+        let providers = resp.providers;
         let mut cache = self.cache.write().await;
 
         for provider in providers {
@@ -84,22 +75,15 @@ impl GrpcHostRegistry {
     pub async fn pull_host(&self, validator: &ValidatorInfo) -> Result<Host, FibreError> {
         let bech32_addr = encode_bech32_address("celestiavalcons", &validator.address)?;
 
-        let mut client = ValaddrQueryClient::new(self.channel.clone());
+        let resp = self.client.get_fibre_provider_info(bech32_addr).await?;
 
-        let resp = client
-            .fibre_provider_info(QueryFibreProviderInfoRequest {
-                validator_consensus_address: bech32_addr,
-            })
-            .await?;
-
-        let inner = resp.into_inner();
-        if !inner.found {
+        if !resp.found {
             return Err(FibreError::HostNotFound(hex::encode_upper(
                 validator.address,
             )));
         }
 
-        let host_str = inner.info.map(|info| info.host).unwrap_or_default();
+        let host_str = resp.info.map(|info| info.host).unwrap_or_default();
 
         if host_str.is_empty() {
             return Err(FibreError::HostNotFound(hex::encode_upper(
@@ -311,10 +295,12 @@ mod tests {
 
     #[tokio::test]
     async fn grpc_registry_returns_cached_host() {
-        let channel = celestia_grpc::connect_lazy("http://localhost:50051")
-            .expect("connect_lazy should succeed for test URL");
+        let client = GrpcClient::builder()
+            .url("http://localhost:50051")
+            .build()
+            .expect("GrpcClient builder should succeed for test URL");
 
-        let registry = GrpcHostRegistry::new(channel);
+        let registry = GrpcHostRegistry::new(client);
 
         let addr = [7u8; 20];
         let expected_host = Host("dns:///cached-validator.example.com:9090".to_string());

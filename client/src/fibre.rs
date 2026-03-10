@@ -5,8 +5,10 @@
 
 use std::sync::Arc;
 
-use celestia_fibre::{Blob, BlobID, FibreClient, FibreError, PutResult};
+use celestia_fibre::{Blob, BlobID, FibreClient, FibreError, PreparedPut};
+use celestia_grpc::{SubmittedTx, TxConfig};
 
+use crate::Error;
 use crate::client::ClientInner;
 
 /// Fibre API for off-chain data availability.
@@ -14,7 +16,6 @@ use crate::client::ClientInner;
 /// Provides access to the Fibre DA protocol for uploading and downloading
 /// blobs directly to/from validators, bypassing on-chain blob submission.
 pub struct FibreApi {
-    #[allow(dead_code)]
     inner: Arc<ClientInner>,
     fibre_client: Arc<FibreClient>,
 }
@@ -31,12 +32,31 @@ impl FibreApi {
     ///
     /// Encodes the data into a blob, distributes it to validators via the
     /// Fibre protocol, collects signatures, and broadcasts a `MsgPayForFibre`
-    /// transaction.
+    /// transaction. Returns the prepared put data and a [`SubmittedTx`] handle
+    /// that can be used to confirm the transaction.
     ///
-    /// Requires the [`FibreClient`] to have been constructed with a
-    /// [`GrpcClient`](celestia_grpc::GrpcClient) for transaction broadcast.
-    pub async fn put(&self, namespace: &[u8], data: &[u8]) -> Result<PutResult, FibreError> {
-        self.fibre_client.put(namespace, data).await
+    /// Requires the client to have a gRPC endpoint and signer configured.
+    pub async fn put(
+        &self,
+        namespace: &[u8],
+        data: &[u8],
+    ) -> Result<(PreparedPut, SubmittedTx), Error> {
+        let grpc = self.inner.grpc()?;
+        let signer_address = grpc
+            .get_account_address()
+            .ok_or(Error::NoAssociatedAddress)?;
+
+        let prepared = self
+            .fibre_client
+            .put(namespace, data, &signer_address.to_string())
+            .await
+            .map_err(fibre_err)?;
+
+        let submitted = grpc
+            .broadcast_message(prepared.msg.clone(), TxConfig::default())
+            .await?;
+
+        Ok((prepared, submitted))
     }
 
     /// Download and reconstruct a blob by its [`BlobID`].
@@ -55,5 +75,18 @@ impl FibreApi {
     /// Close the underlying fibre client.
     pub fn close(&self) {
         self.fibre_client.close();
+    }
+}
+
+/// Convert a [`FibreError`] into the client [`Error`] type.
+fn fibre_err(e: FibreError) -> Error {
+    match e {
+        FibreError::Grpc(status) => Error::Grpc(celestia_grpc::Error::from(*status)),
+        FibreError::GrpcClient(grpc_err) => Error::Grpc(grpc_err),
+        #[cfg(not(target_arch = "wasm32"))]
+        FibreError::Transport(t) => Error::Grpc(celestia_grpc::Error::from(t)),
+        other => Error::Grpc(celestia_grpc::Error::TonicError(Box::new(
+            tonic::Status::internal(other.to_string()),
+        ))),
     }
 }

@@ -104,11 +104,11 @@ pub enum FibreError {
     Cancelled,
 
     // -- Wrapped errors --
-    /// A gRPC status error from tonic.
+    /// A gRPC status error from tonic (per-validator connections).
     #[error("gRPC error: {0}")]
     Grpc(Box<tonic::Status>),
 
-    /// An error from the celestia-grpc client.
+    /// An error from the GrpcClient (consensus node queries).
     #[error("grpc client error: {0}")]
     GrpcClient(#[from] celestia_grpc::Error),
 

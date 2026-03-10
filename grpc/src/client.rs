@@ -14,12 +14,22 @@ use celestia_grpc_macros::grpc_method;
 use celestia_proto::celestia::blob::v1::query_client::QueryClient as BlobQueryClient;
 use celestia_proto::celestia::core::v1::gas_estimation::gas_estimator_client::GasEstimatorClient;
 use celestia_proto::celestia::core::v1::tx::tx_client::TxClient as TxStatusClient;
+use celestia_proto::celestia::fibre::v1::fibre_client::FibreClient as FibreServiceClient;
+use celestia_proto::celestia::fibre::v1::{
+    DownloadShardResponse, UploadShardRequest, UploadShardResponse,
+};
+use celestia_proto::celestia::valaddr::v1::query_client::QueryClient as ValaddrQueryClient;
+use celestia_proto::celestia::valaddr::v1::{
+    QueryAllFibreProvidersResponse, QueryFibreProviderInfoResponse,
+};
 use celestia_proto::cosmos::auth::v1beta1::query_client::QueryClient as AuthQueryClient;
 use celestia_proto::cosmos::bank::v1beta1::query_client::QueryClient as BankQueryClient;
 use celestia_proto::cosmos::base::node::v1beta1::service_client::ServiceClient as ConfigServiceClient;
 use celestia_proto::cosmos::base::tendermint::v1beta1::service_client::ServiceClient as TendermintServiceClient;
 use celestia_proto::cosmos::staking::v1beta1::query_client::QueryClient as StakingQueryClient;
 use celestia_proto::cosmos::tx::v1beta1::service_client::ServiceClient as TxServiceClient;
+use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetResponse;
+use celestia_proto::tendermint_celestia_mods::rpc::grpc::block_api_client::BlockApiClient as FibreBlockApiClient;
 use celestia_types::blob::{BlobParams, MsgPayForBlobs, RawBlobTx, RawMsgPayForBlobs};
 use celestia_types::block::Block;
 use celestia_types::consts::appconsts;
@@ -281,6 +291,31 @@ impl GrpcClient {
         priority: TxPriority,
         tx_bytes: Vec<u8>,
     ) -> AsyncGrpcCall<GasEstimate>;
+
+    // fibre: consensus queries
+
+    /// Get fibre validator set at the given height (0 = latest).
+    #[grpc_method(FibreBlockApiClient::validator_set)]
+    fn get_fibre_validator_set(&self, height: i64) -> AsyncGrpcCall<ValidatorSetResponse>;
+
+    /// Get all fibre providers registered on-chain.
+    #[grpc_method(ValaddrQueryClient::all_fibre_providers)]
+    fn get_all_fibre_providers(&self) -> AsyncGrpcCall<QueryAllFibreProvidersResponse>;
+
+    /// Get fibre provider info for a single validator by bech32 consensus address.
+    #[grpc_method(ValaddrQueryClient::fibre_provider_info)]
+    fn get_fibre_provider_info(
+        &self,
+        address: String,
+    ) -> AsyncGrpcCall<QueryFibreProviderInfoResponse>;
+
+    /// Upload a shard to a validator.
+    #[grpc_method(FibreServiceClient::upload_shard)]
+    fn upload_shard(&self, request: UploadShardRequest) -> AsyncGrpcCall<UploadShardResponse>;
+
+    /// Download a shard from a validator.
+    #[grpc_method(FibreServiceClient::download_shard)]
+    fn download_shard(&self, blob_id: Vec<u8>) -> AsyncGrpcCall<DownloadShardResponse>;
 
     /// Submit given message to celestia network.
     ///

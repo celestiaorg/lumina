@@ -19,7 +19,7 @@ use crate::payment_promise::PaymentPromise;
 use crate::validator::{ValidatorInfo, ValidatorSet};
 
 /// Convert a domain [`PaymentPromise`] to a proto [`proto::PaymentPromise`].
-pub(crate) fn payment_promise_to_proto(pp: &PaymentPromise) -> proto::PaymentPromise {
+pub fn payment_promise_to_proto(pp: &PaymentPromise) -> proto::PaymentPromise {
     let creation_timestamp = system_time_to_timestamp(pp.creation_timestamp);
 
     let signer_public_key = Some(ProtoPubKey {

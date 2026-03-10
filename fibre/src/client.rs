@@ -12,8 +12,6 @@ use std::sync::Arc;
 use k256::ecdsa::SigningKey;
 use tokio_util::sync::CancellationToken;
 
-use celestia_grpc::GrpcClient;
-
 use crate::config::FibreClientConfig;
 use crate::error::FibreError;
 use crate::validator::SetGetter;
@@ -33,7 +31,6 @@ pub struct FibreClient {
     pub(crate) upload_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) download_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) cancel_token: CancellationToken,
-    pub(crate) grpc_client: Option<GrpcClient>,
 }
 
 impl FibreClient {
@@ -67,47 +64,54 @@ impl FibreClient {
     }
 
     /// Convenience constructor that builds a fully-wired [`FibreClient`] from a
-    /// single gRPC endpoint URL.
+    /// single gRPC endpoint.
     ///
-    /// Creates a gRPC channel for chain queries (validator sets via CometBFT
+    /// Accepts anything that converts into a [`celestia_grpc::Endpoint`], such
+    /// as a URL string (`"http://localhost:9090"`) or a rich [`Endpoint`] with
+    /// metadata and timeout.
+    ///
+    /// Creates a [`GrpcClient`] for chain queries (validator sets via CometBFT
     /// `BlockAPI` and host resolution via `x/valaddr`), wires up the production
-    /// [`GrpcSetGetter`], [`GrpcHostRegistry`], and [`GrpcValidatorConnector`],
-    /// and optionally takes a [`GrpcClient`] for broadcasting `MsgPayForFibre`
-    /// transactions on-chain.
+    /// [`GrpcSetGetter`], [`GrpcHostRegistry`], and [`GrpcValidatorConnector`].
     ///
     /// # Arguments
     ///
-    /// * `grpc_url` - The consensus node gRPC endpoint (e.g. `"http://localhost:9090"`).
+    /// * `endpoint` - The consensus node gRPC endpoint.
     /// * `signing_key` - secp256k1 key for signing payment promises.
-    /// * `grpc_client` - Optional [`GrpcClient`] for on-chain broadcast. Only
-    ///   needed if you intend to call [`FibreClient::put()`].
     /// * `config` - Client configuration. Use [`FibreClientConfig::default()`] for defaults.
-    pub fn from_url(
-        grpc_url: &str,
+    pub fn from_endpoint(
+        endpoint: impl Into<celestia_grpc::Endpoint>,
         signing_key: SigningKey,
-        grpc_client: Option<GrpcClient>,
         config: FibreClientConfig,
     ) -> Result<Self, FibreError> {
-        let channel = celestia_grpc::connect_lazy(grpc_url)
-            .map_err(|e| FibreError::Other(format!("invalid gRPC endpoint '{grpc_url}': {e}")))?;
+        let grpc_client = celestia_grpc::GrpcClient::builder()
+            .endpoint(endpoint)
+            .build()
+            .map_err(|e| FibreError::Other(format!("failed to build GrpcClient: {e}")))?;
 
-        let host_registry = Arc::new(crate::host_registry::GrpcHostRegistry::new(channel.clone()));
-        let connector = crate::grpc_validator_client::GrpcValidatorConnector::new(
-            host_registry,
-            config.max_message_size,
-        );
+        Self::from_grpc_client(grpc_client, signing_key, config)
+    }
 
-        let mut builder = Self::builder()
+    /// Construct a [`FibreClient`] from an existing [`GrpcClient`].
+    ///
+    /// Use this when the caller already has a configured [`GrpcClient`]
+    /// (e.g. with multiple endpoints, auth metadata, or a custom signer).
+    pub fn from_grpc_client(
+        grpc_client: celestia_grpc::GrpcClient,
+        signing_key: SigningKey,
+        config: FibreClientConfig,
+    ) -> Result<Self, FibreError> {
+        let host_registry = Arc::new(crate::host_registry::GrpcHostRegistry::new(
+            grpc_client.clone(),
+        ));
+        let connector = crate::grpc_validator_client::GrpcValidatorConnector::new(host_registry);
+
+        Self::builder()
             .config(config)
             .signing_key(signing_key)
-            .set_getter(crate::validator::GrpcSetGetter::new(channel))
-            .connector(connector);
-
-        if let Some(client) = grpc_client {
-            builder = builder.grpc_client(client);
-        }
-
-        builder.build()
+            .set_getter(crate::validator::GrpcSetGetter::new(grpc_client))
+            .connector(connector)
+            .build()
     }
 }
 
@@ -120,7 +124,6 @@ pub struct FibreClientBuilder {
     signing_key: Option<SigningKey>,
     set_getter: Option<Arc<dyn SetGetter>>,
     connector: Option<Arc<dyn ValidatorConnector>>,
-    grpc_client: Option<GrpcClient>,
 }
 
 impl FibreClientBuilder {
@@ -131,7 +134,6 @@ impl FibreClientBuilder {
             signing_key: None,
             set_getter: None,
             connector: None,
-            grpc_client: None,
         }
     }
 
@@ -161,16 +163,6 @@ impl FibreClientBuilder {
         self
     }
 
-    /// Sets the gRPC client used for broadcasting transactions.
-    ///
-    /// This is optional. Only the [`FibreClient::put()`] method requires it
-    /// for broadcasting `MsgPayForFibre` on-chain. Upload and download work
-    /// without a gRPC client.
-    pub fn grpc_client(mut self, client: GrpcClient) -> Self {
-        self.grpc_client = Some(client);
-        self
-    }
-
     /// Builds the [`FibreClient`].
     ///
     /// Returns an error if any required field (`signing_key`, `set_getter`,
@@ -195,7 +187,6 @@ impl FibreClientBuilder {
             set_getter,
             connector,
             cancel_token: CancellationToken::new(),
-            grpc_client: self.grpc_client,
         })
     }
 }
@@ -235,60 +226,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_url_with_valid_url() {
+    async fn from_endpoint_with_valid_url() {
         let sk = SigningKey::random(&mut OsRng);
-        let result = FibreClient::from_url(
-            "http://localhost:9090",
-            sk,
-            None,
-            FibreClientConfig::default(),
-        );
+        let result =
+            FibreClient::from_endpoint("http://localhost:9090", sk, FibreClientConfig::default());
         assert!(
             result.is_ok(),
-            "from_url with valid URL should succeed but got err: {}",
+            "from_endpoint with valid URL should succeed but got err: {}",
             result.err().map(|e| e.to_string()).unwrap_or_default()
         );
     }
 
     #[tokio::test]
-    async fn from_url_with_invalid_url() {
+    async fn from_endpoint_with_invalid_url() {
         let sk = SigningKey::random(&mut OsRng);
-        let result = FibreClient::from_url(
-            "not a valid url \x00",
-            sk,
-            None,
-            FibreClientConfig::default(),
+        let result =
+            FibreClient::from_endpoint("not a valid url \x00", sk, FibreClientConfig::default());
+        assert!(
+            result.is_err(),
+            "from_endpoint with invalid URL should fail"
         );
-        assert!(result.is_err(), "from_url with invalid URL should fail");
     }
 
     #[tokio::test]
-    async fn from_url_sets_config_correctly() {
+    async fn from_endpoint_sets_config_correctly() {
         let sk = SigningKey::random(&mut OsRng);
         let config = FibreClientConfig {
             chain_id: "test-123".to_string(),
             ..Default::default()
         };
 
-        let client = FibreClient::from_url("http://localhost:9090", sk, None, config)
-            .expect("from_url should succeed");
+        let client = FibreClient::from_endpoint("http://localhost:9090", sk, config)
+            .expect("from_endpoint should succeed");
 
         assert_eq!(client.config().chain_id, "test-123");
-    }
-
-    #[tokio::test]
-    async fn from_url_without_grpc_client_builds_successfully() {
-        let sk = SigningKey::random(&mut OsRng);
-        let client = FibreClient::from_url(
-            "http://localhost:9090",
-            sk,
-            None,
-            FibreClientConfig::default(),
-        )
-        .expect("from_url without grpc_client should succeed");
-
-        // The client should be constructed, but grpc_client is None so put() would fail.
-        assert!(client.grpc_client.is_none());
     }
 
     #[test]
