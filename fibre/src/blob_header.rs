@@ -67,7 +67,7 @@ impl BlobHeaderV0 {
     ///
     /// This matches the Go `blobHeaderV0.decodeFromRows` method.
     pub fn decode_from_rows(
-        rows: &[Vec<u8>],
+        rows: &[&[u8]],
         cfg: &BlobConfig,
     ) -> Result<(Self, Vec<u8>), FibreError> {
         if rows.is_empty() {
@@ -111,7 +111,7 @@ impl BlobHeaderV0 {
             let row_data = if i == 0 {
                 &row[Self::HEADER_SIZE..]
             } else {
-                row.as_slice()
+                row
             };
 
             let remaining = data_size - offset;
@@ -183,7 +183,8 @@ mod tests {
     #[test]
     fn decode_empty_rows() {
         let cfg = test_blob_config();
-        assert!(BlobHeaderV0::decode_from_rows(&[], &cfg).is_err());
+        let rows: &[&[u8]] = &[];
+        assert!(BlobHeaderV0::decode_from_rows(rows, &cfg).is_err());
     }
 
     #[test]
@@ -191,6 +192,6 @@ mod tests {
         let cfg = test_blob_config();
         let mut row = vec![0u8; 64];
         row[1..5].copy_from_slice(&0u32.to_be_bytes());
-        assert!(BlobHeaderV0::decode_from_rows(&[row], &cfg).is_err());
+        assert!(BlobHeaderV0::decode_from_rows(&[row.as_slice()], &cfg).is_err());
     }
 }

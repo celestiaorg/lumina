@@ -51,17 +51,17 @@ pub(crate) fn row_proof_to_blob_row(proof: &rsema1d::RowInclusionProof) -> proto
 /// Convert a proto [`proto::BlobRow`] and an RLC root into a
 /// [`rsema1d::RowInclusionProof`].
 pub(crate) fn blob_row_to_row_proof(
-    row: &proto::BlobRow,
+    row: proto::BlobRow,
     rlc_root: [u8; 32],
 ) -> Result<rsema1d::RowInclusionProof, FibreError> {
     let row_proof = row
         .proof
-        .iter()
+        .into_iter()
         .map(|h| {
-            h.as_slice().try_into().map_err(|_| {
+            let len = h.len();
+            h.try_into().map_err(|_| {
                 FibreError::InvalidData(format!(
-                    "proof hash has invalid length {}, expected 32",
-                    h.len()
+                    "proof hash has invalid length {len}, expected 32",
                 ))
             })
         })
@@ -69,7 +69,7 @@ pub(crate) fn blob_row_to_row_proof(
 
     Ok(rsema1d::RowInclusionProof {
         index: row.index as usize,
-        row: row.data.clone(),
+        row: row.data,
         row_proof,
         rlc_root,
     })
@@ -128,7 +128,7 @@ pub(crate) fn parse_download_response(
 
     shard
         .rows
-        .iter()
+        .into_iter()
         .map(|row| blob_row_to_row_proof(row, rlc_root))
         .collect()
 }
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(blob_row.data, vec![42u8; 64]);
         assert_eq!(blob_row.proof.len(), 2);
 
-        let back = blob_row_to_row_proof(&blob_row, [3u8; 32]).unwrap();
+        let back = blob_row_to_row_proof(blob_row, [3u8; 32]).unwrap();
         assert_eq!(back.index, 5);
         assert_eq!(back.row, vec![42u8; 64]);
         assert_eq!(back.row_proof, vec![[1u8; 32], [2u8; 32]]);
@@ -288,7 +288,7 @@ mod tests {
             data: vec![0u8; 64],
             proof: vec![vec![0u8; 31]], // wrong length
         };
-        let result = blob_row_to_row_proof(&row, [0u8; 32]);
+        let result = blob_row_to_row_proof(row, [0u8; 32]);
         assert!(result.is_err());
     }
 

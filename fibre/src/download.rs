@@ -221,7 +221,7 @@ impl FibreClient {
                 task_result = futures.next() => {
                     match task_result {
                         Some(Some(Ok(proofs))) => {
-                            for proof in &proofs {
+                            for proof in proofs {
                                 // Ignore individual row errors (matching Go behavior)
                                 let _ = blob.set_row(proof);
                             }
@@ -242,7 +242,7 @@ impl FibreClient {
                     // We have enough successes. Drain any already-completed tasks.
                     while let Some(item) = futures.next().now_or_never().flatten() {
                         if let Some(Ok(proofs)) = item {
-                            for proof in &proofs {
+                            for proof in proofs {
                                 let _ = blob.set_row(proof);
                             }
                         }

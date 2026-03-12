@@ -264,16 +264,16 @@ impl Blob {
     ///
     /// The row is verified against the blob's commitment before being stored.
     /// It is safe to call this method concurrently only for disjoint indices.
-    pub fn set_row(&mut self, proof: &rsema1d::RowInclusionProof) -> Result<(), FibreError> {
+    pub fn set_row(&mut self, proof: rsema1d::RowInclusionProof) -> Result<(), FibreError> {
         let row_size = proof.row.len();
         let params =
             rsema1d::Parameters::new(self.cfg.original_rows, self.cfg.parity_rows, row_size)?;
 
-        rsema1d::verify_row_inclusion_proof(proof, &self.id.commitment(), &params)?;
+        rsema1d::verify_row_inclusion_proof(&proof, &self.id.commitment(), &params)?;
 
         if let Some(ref mut rows) = self.rows {
             if proof.index < rows.len() {
-                rows[proof.index] = Some(proof.row.clone());
+                rows[proof.index] = Some(proof.row);
             } else {
                 return Err(FibreError::Other(format!(
                     "row index {} out of bounds (total rows: {})",
@@ -332,15 +332,14 @@ impl Blob {
         // Take exactly K rows for reconstruction
         let k = self.cfg.original_rows;
         let selected_indices: Vec<usize> = indices[..k].to_vec();
-        let selected_flat: Vec<u8> = selected_indices
+        let selected_rows: Vec<&[u8]> = selected_indices
             .iter()
-            .flat_map(|&i| rows_buffer[i].as_ref().unwrap().iter().copied())
+            .map(|&i| rows_buffer[i].as_ref().unwrap().as_slice())
             .collect();
 
-        let sampled = rsema1d::RowMatrix::with_shape(selected_flat, k, row_size)?;
-
         // Reconstruct original rows
-        let reconstructed = rsema1d::reconstruct(&sampled, &selected_indices, &params)?;
+        let reconstructed =
+            rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
 
         // Verify commitment by re-encoding
         let (ext_data, reconstructed_commitment, rlc_coeffs) =
@@ -353,16 +352,12 @@ impl Blob {
             });
         }
 
-        // Extract original rows as Vec<Vec<u8>>
-        let mut original_rows_vec = Vec::with_capacity(k);
-        for i in 0..k {
-            let row = reconstructed.row(i)?;
-            original_rows_vec.push(row.to_vec());
-        }
-
         // Decode header and extract original data from the first K rows
+        let original_rows: Vec<&[u8]> = (0..k)
+            .map(|i| reconstructed.row(i).unwrap())
+            .collect();
         let (header, original_data) =
-            BlobHeaderV0::decode_from_rows(&original_rows_vec, &self.cfg)?;
+            BlobHeaderV0::decode_from_rows(&original_rows, &self.cfg)?;
 
         self.header = header;
         self.data = Some(original_data);
@@ -477,7 +472,7 @@ mod tests {
         // Set enough rows (need at least K=4)
         for i in 0..4 {
             let proof = blob.row(i).unwrap();
-            empty.set_row(&proof).unwrap();
+            empty.set_row(proof).unwrap();
         }
 
         // Reconstruct
