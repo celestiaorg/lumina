@@ -803,7 +803,6 @@ mod tests {
     /// decodes back, reconstructs a PaymentPromise, and checks sign_bytes match.
     #[test]
     fn proto_roundtrip_preserves_sign_bytes() {
-        use crate::proto_conv;
         use prost::Message;
 
         let key_bytes = [0x01u8; 32];
@@ -827,7 +826,7 @@ mod tests {
         let original_sign_bytes = promise.sign_bytes().unwrap();
 
         // Convert to proto and encode
-        let proto_pp = proto_conv::payment_promise_to_proto(&promise);
+        let proto_pp = celestia_proto::celestia::fibre::v1::PaymentPromise::from(&promise);
         let proto_bytes = proto_pp.encode_to_vec();
 
         // Print the raw proto bytes for cross-language decoding

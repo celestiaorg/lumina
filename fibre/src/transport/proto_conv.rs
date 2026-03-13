@@ -18,24 +18,25 @@ use crate::error::FibreError;
 use crate::payment_promise::PaymentPromise;
 use crate::validator::{ValidatorInfo, ValidatorSet};
 
-/// Convert a domain [`PaymentPromise`] to a proto [`proto::PaymentPromise`].
-pub fn payment_promise_to_proto(pp: &PaymentPromise) -> proto::PaymentPromise {
-    let creation_timestamp = system_time_to_timestamp(pp.creation_timestamp);
+impl From<&PaymentPromise> for proto::PaymentPromise {
+    fn from(pp: &PaymentPromise) -> Self {
+        let creation_timestamp = system_time_to_timestamp(pp.creation_timestamp);
 
-    let signer_public_key = Some(ProtoPubKey {
-        key: pp.signer_pubkey.to_encoded_point(true).as_bytes().to_vec(),
-    });
+        let signer_public_key = Some(ProtoPubKey {
+            key: pp.signer_pubkey.to_encoded_point(true).as_bytes().to_vec(),
+        });
 
-    proto::PaymentPromise {
-        chain_id: pp.chain_id.clone(),
-        height: pp.height as i64,
-        namespace: pp.namespace.clone(),
-        blob_size: pp.upload_size,
-        blob_version: pp.blob_version,
-        commitment: pp.commitment.to_vec(),
-        creation_timestamp: Some(creation_timestamp),
-        signer_public_key,
-        signature: pp.signature.clone().unwrap_or_default(),
+        proto::PaymentPromise {
+            chain_id: pp.chain_id.clone(),
+            height: pp.height as i64,
+            namespace: pp.namespace.clone(),
+            blob_size: pp.upload_size,
+            blob_version: pp.blob_version,
+            commitment: pp.commitment.to_vec(),
+            creation_timestamp: Some(creation_timestamp),
+            signer_public_key,
+            signature: pp.signature.clone().unwrap_or_default(),
+        }
     }
 }
 
@@ -133,62 +134,66 @@ pub(crate) fn parse_download_response(
         .collect()
 }
 
-/// Parse a [`tendermint_proto::v0_38::types::ValidatorSet`] response into a
-/// domain [`ValidatorSet`].
-pub(crate) fn validator_set_from_proto(
-    proto_set: &tendermint_proto::v0_38::types::ValidatorSet,
-    height: u64,
-) -> Result<ValidatorSet, FibreError> {
-    let validators = proto_set
-        .validators
-        .iter()
-        .map(validator_from_proto)
-        .collect::<Result<Vec<_>, _>>()?;
+impl TryFrom<(&tendermint_proto::v0_38::types::ValidatorSet, u64)> for ValidatorSet {
+    type Error = FibreError;
 
-    Ok(ValidatorSet { validators, height })
+    fn try_from(
+        (proto_set, height): (&tendermint_proto::v0_38::types::ValidatorSet, u64),
+    ) -> Result<Self, Self::Error> {
+        let validators = proto_set
+            .validators
+            .iter()
+            .map(ValidatorInfo::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ValidatorSet { validators, height })
+    }
 }
 
-/// Parse a single proto [`Validator`] into a domain [`ValidatorInfo`].
-fn validator_from_proto(
-    proto_val: &tendermint_proto::v0_38::types::Validator,
-) -> Result<ValidatorInfo, FibreError> {
-    let pubkey_bytes = match proto_val.pub_key.as_ref() {
-        Some(pk) => match &pk.sum {
-            Some(CryptoKeySum::Ed25519(bytes)) => bytes.clone(),
-            _ => {
-                return Err(FibreError::Other(
-                    "expected ed25519 public key for validator".into(),
-                ));
+impl TryFrom<&tendermint_proto::v0_38::types::Validator> for ValidatorInfo {
+    type Error = FibreError;
+
+    fn try_from(
+        proto_val: &tendermint_proto::v0_38::types::Validator,
+    ) -> Result<Self, Self::Error> {
+        let pubkey_bytes = match proto_val.pub_key.as_ref() {
+            Some(pk) => match &pk.sum {
+                Some(CryptoKeySum::Ed25519(bytes)) => bytes.clone(),
+                _ => {
+                    return Err(FibreError::Other(
+                        "expected ed25519 public key for validator".into(),
+                    ));
+                }
+            },
+            None => {
+                return Err(FibreError::Other("validator missing public key".into()));
             }
-        },
-        None => {
-            return Err(FibreError::Other("validator missing public key".into()));
-        }
-    };
+        };
 
-    let pubkey =
-        Ed25519PublicKey::from_bytes(pubkey_bytes.as_slice().try_into().map_err(|_| {
-            FibreError::InvalidData(format!(
-                "ed25519 key has invalid length {}, expected 32",
-                pubkey_bytes.len()
-            ))
-        })?)
-        .map_err(|e| FibreError::Other(format!("invalid ed25519 key: {e}")))?;
+        let pubkey =
+            Ed25519PublicKey::from_bytes(pubkey_bytes.as_slice().try_into().map_err(|_| {
+                FibreError::InvalidData(format!(
+                    "ed25519 key has invalid length {}, expected 32",
+                    pubkey_bytes.len()
+                ))
+            })?)
+            .map_err(|e| FibreError::Other(format!("invalid ed25519 key: {e}")))?;
 
-    // CometBFT address = first 20 bytes of SHA-256(pubkey)
-    let address: [u8; 20] = {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(pubkey.as_bytes());
-        hash[..20]
-            .try_into()
-            .expect("sha256 output is always 32 bytes")
-    };
+        // CometBFT address = first 20 bytes of SHA-256(pubkey)
+        let address: [u8; 20] = {
+            use sha2::{Digest, Sha256};
+            let hash = Sha256::digest(pubkey.as_bytes());
+            hash[..20]
+                .try_into()
+                .expect("sha256 output is always 32 bytes")
+        };
 
-    Ok(ValidatorInfo {
-        address,
-        pubkey,
-        voting_power: proto_val.voting_power,
-    })
+        Ok(ValidatorInfo {
+            address,
+            pubkey,
+            voting_power: proto_val.voting_power,
+        })
+    }
 }
 
 fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
@@ -244,7 +249,7 @@ mod tests {
             signature: Some(vec![1u8; 64]),
         };
 
-        let proto_pp = payment_promise_to_proto(&pp);
+        let proto_pp = proto::PaymentPromise::from(&pp);
         assert_eq!(proto_pp.chain_id, "test-chain");
         assert_eq!(proto_pp.height, 42);
         assert_eq!(proto_pp.namespace, vec![0u8; 29]);
@@ -380,7 +385,7 @@ mod tests {
             proposer_priority: 0,
         };
 
-        let info = validator_from_proto(&proto_val).unwrap();
+        let info = ValidatorInfo::try_from(&proto_val).unwrap();
         assert_eq!(info.pubkey, pk);
         assert_eq!(info.voting_power, 100);
         // Verify address is derived from pubkey
@@ -397,6 +402,6 @@ mod tests {
             voting_power: 100,
             proposer_priority: 0,
         };
-        assert!(validator_from_proto(&proto_val).is_err());
+        assert!(ValidatorInfo::try_from(&proto_val).is_err());
     }
 }

@@ -36,7 +36,7 @@ pub mod api {
         #[doc(inline)]
         pub use celestia_fibre::{
             Blob as FibreBlob, BlobID, FibreClient, FibreClientConfig, FibreError, PaymentPromise,
-            PreparedPut, SignedPaymentPromise, payment_promise_to_proto,
+            PreparedPut, SignedPaymentPromise,
         };
     }
 

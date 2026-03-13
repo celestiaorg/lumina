@@ -14,6 +14,7 @@ pub struct ShardMap {
 }
 
 impl ShardMap {
+    /// Convenience method which initializes ShardMap with a HashMap
     pub(crate) fn new(inner: HashMap<usize, Vec<usize>>) -> Self {
         Self { inner }
     }

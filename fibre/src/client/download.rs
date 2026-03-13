@@ -16,21 +16,15 @@
 //! The main task collects proofs and applies them to the blob sequentially,
 //! avoiding the need for shared mutable state (`Arc<Mutex<Blob>>`).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::BoxFuture;
+use lumina_utils::cond_send::{BoxFuture, into_boxed};
 
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
 use crate::config::BlobConfig;
 use crate::error::FibreError;
-use crate::task::spawn_task;
 use crate::validator::ValidatorSet;
 
 impl FibreClient {
@@ -120,13 +114,15 @@ impl FibreClient {
 
     /// Download row proofs from validators and apply them to the blob.
     ///
-    /// Uses a two-level semaphore pattern:
-    /// - `local_sem` with `download_target` permits controls initial fan-out.
-    /// - `self.download_semaphore` limits total concurrent downloads globally.
+    /// Uses a single select loop that interleaves task spawning with result
+    /// collection. An `active` counter replaces the local semaphore: at most
+    /// `download_target` tasks run concurrently. When a task fails, `active`
+    /// decrements, allowing a replacement validator to be tried on the next
+    /// iteration.
     ///
-    /// Each task downloads proofs from one validator and returns them. On success
-    /// the local permit is consumed normally; on failure it is released back so a
-    /// replacement validator can be tried.
+    /// `self.download_semaphore` limits total concurrent downloads globally.
+    /// Each spawned task is a pure download — all orchestration (row
+    /// application, success counting, replacement) happens in this loop.
     async fn download_blob(
         &self,
         val_set: &ValidatorSet,
@@ -139,115 +135,100 @@ impl FibreClient {
             return Err(FibreError::NotFound);
         }
 
-        let local_sem = Arc::new(Semaphore::new(download_target));
-        let successes = Arc::new(AtomicU32::new(0));
-        let done_notify = Arc::new(Notify::new());
+        let download_target_u32 = download_target as u32;
+        let blob_id = blob.id().clone();
 
         #[allow(clippy::type_complexity)]
         let mut futures: FuturesUnordered<
-            BoxFuture<'static, Option<Result<Vec<rsema1d::RowInclusionProof>, FibreError>>>,
+            BoxFuture<
+                'static,
+                (usize, Option<Result<Vec<rsema1d::RowInclusionProof>, FibreError>>),
+            >,
         > = FuturesUnordered::new();
-        let blob_id = blob.id().clone();
-        let download_target_u32 = download_target as u32;
 
-        for &val_idx in ordered_indices {
-            // Check if we have enough successes before acquiring permits
-            if successes.load(Ordering::SeqCst) >= download_target_u32 {
+        let mut val_iter = ordered_indices.iter();
+        let mut active = 0u32;
+        let mut successes = 0u32;
+
+        loop {
+            let can_spawn = active < download_target_u32
+                && successes < download_target_u32
+                && val_iter.len() > 0;
+
+            if !can_spawn && futures.is_empty() {
                 break;
             }
 
-            // Acquire local semaphore first (limits initial fan-out)
-            let local_permit = local_sem
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| FibreError::Other("local semaphore closed".into()))?;
-
-            // Acquire global semaphore (limits total concurrent downloads)
-            let global_permit = self
-                .download_semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| FibreError::Other("global semaphore closed".into()))?;
-
-            let connector = self.connector.clone();
-            let validator = val_set.validators[val_idx].clone();
-            let blob_id = blob_id.clone();
-            let local_sem = local_sem.clone();
-            let successes = successes.clone();
-            let done_notify = done_notify.clone();
-
-            spawn_task(&mut futures, async move {
-                let _global = global_permit;
-
-                let result: Result<Vec<rsema1d::RowInclusionProof>, FibreError> = async {
-                    let conn = connector.connect(&validator).await?;
-                    let resp = conn.download_shard(&blob_id).await?;
-
-                    if resp.rows.is_empty() {
-                        return Err(FibreError::EmptyShardResponse);
-                    }
-
-                    Ok(resp.rows.into_iter().map(|r| r.proof).collect())
-                }
-                .await;
-
-                match &result {
-                    Ok(_) => {
-                        let count = successes.fetch_add(1, Ordering::SeqCst) + 1;
-                        if count >= download_target_u32 {
-                            done_notify.notify_waiters();
-                        }
-                        // Normal drop of local_permit
-                        drop(local_permit);
-                    }
-                    Err(_) => {
-                        // Release local permit so a replacement validator can be tried
-                        local_sem.add_permits(1);
-                        drop(local_permit);
-                    }
-                }
-
-                result
-            });
-        }
-
-        // Collect results: wait for either `done` notification, all tasks to complete,
-        // or cancellation.
-        let done_notify_clone = done_notify.clone();
-        loop {
             tokio::select! {
-                task_result = futures.next() => {
-                    match task_result {
-                        Some(Some(Ok(proofs))) => {
-                            for proof in proofs {
-                                // Ignore individual row errors (matching Go behavior)
-                                let _ = blob.set_row(proof);
+                result = self.download_semaphore.clone().acquire_owned(), if can_spawn => {
+                    let global_permit = result
+                        .map_err(|_| FibreError::Other("global semaphore closed".into()))?;
+                    let &val_idx = val_iter.next().unwrap();
+                    active += 1;
+
+                    let connector = self.connector.clone();
+                    let validator = val_set.validators[val_idx].clone();
+                    let blob_id = blob_id.clone();
+
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    lumina_utils::executor::spawn(async move {
+                        let _global = global_permit;
+                        let result = async {
+                            let conn = connector.connect(&validator).await?;
+                            let resp = conn.download_shard(&blob_id).await?;
+                            if resp.rows.is_empty() {
+                                return Err(FibreError::EmptyShardResponse);
                             }
+                            Ok(resp.rows.into_iter().map(|r| r.proof).collect())
                         }
-                        Some(Some(Err(_))) => {
-                            // Task returned an error; already handled by permit release
-                        }
-                        Some(None) => {
-                            // Task was cancelled or panicked; skip
-                        }
-                        None => {
-                            // All tasks completed
-                            break;
-                        }
-                    }
+                        .await;
+                        let _ = tx.send(result);
+                    });
+                    futures.push(into_boxed(async move {
+                        (val_idx, rx.await.ok())
+                    }));
                 }
-                _ = done_notify_clone.notified() => {
-                    // We have enough successes. Drain any already-completed tasks.
-                    while let Some(item) = futures.next().now_or_never().flatten() {
-                        if let Some(Ok(proofs)) = item {
+                task_result = futures.next(), if !futures.is_empty() => {
+                    active -= 1;
+                    match task_result {
+                        Some((val_idx, Some(Ok(proofs)))) => {
+                            let total = proofs.len();
+                            let mut applied = 0usize;
                             for proof in proofs {
-                                let _ = blob.set_row(proof);
+                                if blob.set_row(proof).is_ok() {
+                                    applied += 1;
+                                }
+                            }
+                            if applied == 0 && total > 0 {
+                                let validator = &val_set.validators[val_idx];
+                                tracing::warn!(
+                                    validator = %hex::encode(validator.address),
+                                    total,
+                                    "no rows applied from validator response"
+                                );
+                            }
+                            successes += 1;
+                            if successes >= download_target_u32 {
+                                break;
                             }
                         }
+                        Some((val_idx, Some(Err(e)))) => {
+                            let validator = &val_set.validators[val_idx];
+                            tracing::warn!(
+                                validator = %hex::encode(validator.address),
+                                error = %e,
+                                "shard download failed"
+                            );
+                        }
+                        Some((val_idx, None)) => {
+                            let validator = &val_set.validators[val_idx];
+                            tracing::warn!(
+                                validator = %hex::encode(validator.address),
+                                "download task dropped unexpectedly"
+                            );
+                        }
+                        None => break,
                     }
-                    break;
                 }
                 _ = cancel_token.cancelled() => {
                     return Err(FibreError::Cancelled);
@@ -255,15 +236,21 @@ impl FibreClient {
             }
         }
 
-        let s = successes.load(Ordering::SeqCst);
-        if s == 0 {
+        if successes == 0 {
             return Err(FibreError::NotFound);
         }
-        if s < download_target_u32 {
+        if successes < download_target_u32 {
             return Err(FibreError::NotEnoughShards {
-                got: s as usize,
+                got: successes as usize,
                 need: download_target,
             });
+        }
+        if successes > download_target_u32 {
+            tracing::warn!(
+                downloaded = successes,
+                expected_target = download_target_u32,
+                "downloaded more shards than needed"
+            );
         }
 
         Ok(())

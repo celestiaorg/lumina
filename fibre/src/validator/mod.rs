@@ -213,7 +213,7 @@ impl SetGetter for GrpcSetGetter {
             FibreError::Other("ValidatorSetResponse missing validator_set".into())
         })?;
 
-        crate::proto_conv::validator_set_from_proto(&proto_set, height)
+        (&proto_set, height).try_into()
     }
 }
 

@@ -113,7 +113,7 @@ impl ValidatorConnection for GrpcValidatorConnection {
         rows: &[rsema1d::RowInclusionProof],
         rlc_coeffs: &[rsema1d::GF128],
     ) -> Result<UploadResponse, FibreError> {
-        let proto_promise = proto_conv::payment_promise_to_proto(promise);
+        let proto_promise = promise.into();
         let proto_shard = proto_conv::build_upload_shard(rows, rlc_coeffs);
 
         let request = celestia_proto::celestia::fibre::v1::UploadShardRequest {

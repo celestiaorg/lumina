@@ -12,10 +12,9 @@ use std::sync::Arc;
 
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::BoxFuture;
+use lumina_utils::cond_send::{BoxFuture, into_boxed};
 
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
@@ -23,7 +22,6 @@ use crate::config::BlobConfig;
 use crate::error::FibreError;
 use crate::payment_promise::{PaymentPromise, SignedPaymentPromise};
 use crate::signature_set::SignatureSet;
-use crate::task::spawn_task;
 use crate::validator::{ShardMap, ValidatorSet};
 
 /// Result of a successful [`FibreClient::put()`] operation.
@@ -167,9 +165,7 @@ impl FibreClient {
         // 4. Construct the MsgPayForFibre proto message.
         let msg = MsgPayForFibre {
             signer: signer_address.to_string(),
-            payment_promise: Some(crate::proto_conv::payment_promise_to_proto(
-                &signed_promise.promise,
-            )),
+            payment_promise: Some((&signed_promise.promise).into()),
             validator_signatures: validator_signatures.clone(),
         };
 
@@ -180,16 +176,16 @@ impl FibreClient {
         })
     }
 
-    /// Fan-out upload of row proofs to all validators in the shard map.
+    /// Fan-out upload of row proofs to validators in the shard map.
     ///
-    /// For each validator:
-    /// - Acquires an upload semaphore permit (bounding concurrency).
-    /// - Generates the row inclusion proofs for that validator's assigned rows.
-    /// - Connects to the validator and uploads the shard.
-    /// - Adds the returned signature to the [`SignatureSet`].
+    /// Uses a single select loop that interleaves task spawning (bounded by
+    /// `self.upload_semaphore`) with result collection. Each spawned task is a
+    /// pure upload — all orchestration (signature validation, threshold
+    /// checking, error logging) happens in this loop.
     ///
-    /// Uses `tokio::select!` to return early when the signature threshold is met.
-    /// Individual upload failures are logged but not fatal -- the method succeeds
+    /// Returns early when the signature threshold is met. Already-spawned tasks
+    /// continue in the background via `lumina_utils::executor::spawn`.
+    /// Individual upload failures are logged but not fatal — the method succeeds
     /// as long as enough signatures are ultimately collected.
     async fn upload_shards(
         &self,
@@ -200,8 +196,6 @@ impl FibreClient {
         sig_set: &Arc<SignatureSet>,
         cancel_token: &CancellationToken,
     ) -> Result<(), FibreError> {
-        let done_notify = Arc::new(Notify::new());
-
         // Pre-generate row proofs for each validator before spawning tasks,
         // since `blob.row()` takes `&self` and `Blob` is not Send/Sync.
         let mut validator_tasks: Vec<(usize, Vec<rsema1d::RowInclusionProof>)> = Vec::new();
@@ -232,88 +226,87 @@ impl FibreClient {
         let rlc_coeffs: Arc<Vec<rsema1d::GF128>> =
             Arc::new(blob.rlc_coeffs().map(|c| c.to_vec()).unwrap_or_default());
 
-        let mut futures: FuturesUnordered<BoxFuture<'static, Option<()>>> = FuturesUnordered::new();
+        #[allow(clippy::type_complexity)]
+        let mut futures: FuturesUnordered<
+            BoxFuture<'static, (usize, Option<Result<Vec<u8>, FibreError>>)>,
+        > = FuturesUnordered::new();
 
-        for (val_idx, proofs) in validator_tasks {
-            let connector = Arc::clone(&self.connector);
-            let semaphore = Arc::clone(&self.upload_semaphore);
-            let sig_set = Arc::clone(sig_set);
-            let done_notify = Arc::clone(&done_notify);
-            let validator = val_set.validators[val_idx].clone();
-            let promise = promise.clone();
-            let rlc_coeffs = Arc::clone(&rlc_coeffs);
+        let mut task_iter = validator_tasks.into_iter();
 
-            spawn_task(&mut futures, async move {
-                // Acquire semaphore permit to bound concurrency.
-                let _permit = match semaphore.acquire().await {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        tracing::warn!(
-                            validator = %hex::encode(validator.address),
-                            "upload semaphore closed"
-                        );
-                        return;
-                    }
-                };
+        loop {
+            let can_spawn = task_iter.len() > 0;
 
-                // Connect to the validator.
-                let conn = match connector.connect(&validator).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(
-                            validator = %hex::encode(validator.address),
-                            error = %e,
-                            "failed to connect to validator"
-                        );
-                        return;
-                    }
-                };
+            if !can_spawn && futures.is_empty() {
+                break;
+            }
 
-                // Upload the shard.
-                let resp = match conn.upload_shard(&promise, &proofs, &rlc_coeffs).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(
-                            validator = %hex::encode(validator.address),
-                            error = %e,
-                            "shard upload failed"
-                        );
-                        return;
-                    }
-                };
+            tokio::select! {
+                result = self.upload_semaphore.clone().acquire_owned(), if can_spawn => {
+                    let permit = result
+                        .map_err(|_| FibreError::Other("upload semaphore closed".into()))?;
+                    let (val_idx, proofs) = task_iter.next().unwrap();
 
-                // Add the signature to the set.
-                match sig_set.add(&validator, &resp.validator_signature) {
-                    Ok(threshold_met) => {
-                        if threshold_met {
-                            done_notify.notify_one();
+                    let connector = Arc::clone(&self.connector);
+                    let validator = val_set.validators[val_idx].clone();
+                    let promise = promise.clone();
+                    let rlc_coeffs = Arc::clone(&rlc_coeffs);
+
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    lumina_utils::executor::spawn(async move {
+                        let _permit = permit;
+                        let result = async {
+                            let conn = connector.connect(&validator).await?;
+                            let resp =
+                                conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
+                            Ok(resp.validator_signature)
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            validator = %hex::encode(validator.address),
-                            error = %e,
-                            "invalid validator signature"
-                        );
+                        .await;
+                        let _ = tx.send(result);
+                    });
+                    futures.push(into_boxed(async move {
+                        (val_idx, rx.await.ok())
+                    }));
+                }
+                task_result = futures.next(), if !futures.is_empty() => {
+                    match task_result {
+                        Some((val_idx, Some(Ok(signature)))) => {
+                            let validator = &val_set.validators[val_idx];
+                            match sig_set.add(validator, &signature) {
+                                Ok(threshold_met) => {
+                                    if threshold_met {
+                                        return Ok(());
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        validator = %hex::encode(validator.address),
+                                        error = %e,
+                                        "invalid validator signature"
+                                    );
+                                }
+                            }
+                        }
+                        Some((val_idx, Some(Err(e)))) => {
+                            let validator = &val_set.validators[val_idx];
+                            tracing::warn!(
+                                validator = %hex::encode(validator.address),
+                                error = %e,
+                                "shard upload failed"
+                            );
+                        }
+                        Some((val_idx, None)) => {
+                            let validator = &val_set.validators[val_idx];
+                            tracing::warn!(
+                                validator = %hex::encode(validator.address),
+                                "upload task dropped unexpectedly"
+                            );
+                        }
+                        None => break,
                     }
                 }
-            });
-        }
-
-        // Wait for the threshold to be met, all tasks to complete, or cancellation.
-        tokio::select! {
-            _ = done_notify.notified() => {
-                // Threshold met -- we have enough signatures.
-                // Remaining tasks continue in the background via
-                // lumina_utils::executor::spawn.
-            }
-            _ = async {
-                while futures.next().await.is_some() {}
-            } => {
-                // All tasks completed (threshold may or may not have been met).
-            }
-            _ = cancel_token.cancelled() => {
-                return Err(FibreError::Cancelled);
+                _ = cancel_token.cancelled() => {
+                    return Err(FibreError::Cancelled);
+                }
             }
         }
 
