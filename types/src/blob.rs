@@ -12,7 +12,6 @@ mod commitment;
 mod msg_pay_for_blobs;
 
 use crate::consts::appconsts;
-use crate::consts::appconsts::AppVersion;
 #[cfg(feature = "uniffi")]
 use crate::error::UniffiResult;
 use crate::nmt::Namespace;
@@ -90,12 +89,11 @@ impl Blob {
     /// # Errors
     ///
     /// This function propagates any error from the [`Commitment`] creation.
-    /// To use `signer = Some(address)`, [`AppVersion`] must be at least [`AppVersion::V3`].
     ///
     /// # Example
     ///
     /// ```
-    /// use celestia_types::{AppVersion, Blob, nmt::Namespace, state::AccAddress};
+    /// use celestia_types::{Blob, nmt::Namespace, state::AccAddress};
     ///
     /// let my_namespace = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
     /// let signer: AccAddress = "celestia1377k5an3f94v6wyaceu0cf4nq6gk2jtpc46g7h"
@@ -105,7 +103,6 @@ impl Blob {
     ///     my_namespace,
     ///     b"some data to store on blockchain".to_vec(),
     ///     Some(signer),
-    ///     AppVersion::latest(),
     /// )
     /// .expect("Failed to create a blob");
     ///
@@ -121,25 +118,15 @@ impl Blob {
     ///     }"#},
     /// );
     /// ```
-    pub fn new(
-        namespace: Namespace,
-        data: Vec<u8>,
-        signer: Option<AccAddress>,
-        app_version: AppVersion,
-    ) -> Result<Blob> {
+    pub fn new(namespace: Namespace, data: Vec<u8>, signer: Option<AccAddress>) -> Result<Blob> {
         let share_version = if signer.is_none() {
             appconsts::SHARE_VERSION_ZERO
         } else {
             appconsts::SHARE_VERSION_ONE
         };
 
-        let commitment = Commitment::from_blob(
-            namespace,
-            &data[..],
-            share_version,
-            signer.as_ref(),
-            app_version,
-        )?;
+        let commitment =
+            Commitment::from_blob(namespace, &data[..], share_version, signer.as_ref())?;
 
         Ok(Blob {
             namespace,
@@ -151,19 +138,14 @@ impl Blob {
         })
     }
 
-    /// Creates a `Blob` from [`RawBlob`] and an [`AppVersion`].
-    pub fn from_raw(raw: RawBlob, app_version: AppVersion) -> Result<Blob> {
+    /// Creates a `Blob` from [`RawBlob`].
+    pub fn from_raw(raw: RawBlob) -> Result<Blob> {
         let namespace = Namespace::new(raw.namespace_version as u8, &raw.namespace_id)?;
         let share_version =
             u8::try_from(raw.share_version).map_err(|_| Error::UnsupportedShareVersion(u8::MAX))?;
         let signer = raw.signer.try_into().map(AccAddress::new).ok();
-        let commitment = Commitment::from_blob(
-            namespace,
-            &raw.data[..],
-            share_version,
-            signer.as_ref(),
-            app_version,
-        )?;
+        let commitment =
+            Commitment::from_blob(namespace, &raw.data[..], share_version, signer.as_ref())?;
 
         Ok(Blob {
             namespace,
@@ -185,27 +167,25 @@ impl Blob {
     ///
     /// ```
     /// use celestia_types::Blob;
-    /// # use celestia_types::consts::appconsts::AppVersion;
     /// # use celestia_types::nmt::Namespace;
     /// #
     /// # let namespace = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
     ///
-    /// let mut blob = Blob::new(namespace, b"foo".to_vec(), None, AppVersion::latest()).unwrap();
+    /// let mut blob = Blob::new(namespace, b"foo".to_vec(), None).unwrap();
     ///
-    /// assert!(blob.validate(AppVersion::latest()).is_ok());
+    /// assert!(blob.validate().is_ok());
     ///
-    /// let other_blob = Blob::new(namespace, b"bar".to_vec(), None, AppVersion::latest()).unwrap();
+    /// let other_blob = Blob::new(namespace, b"bar".to_vec(), None).unwrap();
     /// blob.commitment = other_blob.commitment;
     ///
-    /// assert!(blob.validate(AppVersion::V2).is_err());
+    /// assert!(blob.validate().is_err());
     /// ```
-    pub fn validate(&self, app_version: AppVersion) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         let computed_commitment = Commitment::from_blob(
             self.namespace,
             &self.data,
             self.share_version,
             self.signer.as_ref(),
-            app_version,
         )?;
 
         if self.commitment != computed_commitment {
@@ -225,31 +205,26 @@ impl Blob {
     ///
     /// ```
     /// use celestia_types::Blob;
-    /// # use celestia_types::consts::appconsts::AppVersion;
     /// # use celestia_types::nmt::Namespace;
     /// #
     /// # let namespace = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
     /// #
-    /// # let commitment = Blob::new(namespace, b"foo".to_vec(), None, AppVersion::latest())
+    /// # let commitment = Blob::new(namespace, b"foo".to_vec(), None)
     /// #     .unwrap()
     /// #     .commitment;
     ///
-    /// let blob = Blob::new(namespace, b"foo".to_vec(), None, AppVersion::latest()).unwrap();
+    /// let blob = Blob::new(namespace, b"foo".to_vec(), None).unwrap();
     ///
-    /// assert!(blob.validate_with_commitment(&commitment, AppVersion::latest()).is_ok());
+    /// assert!(blob.validate_with_commitment(&commitment).is_ok());
     ///
-    /// let other_commitment = Blob::new(namespace, b"bar".to_vec(), None, AppVersion::latest())
+    /// let other_commitment = Blob::new(namespace, b"bar".to_vec(), None)
     ///     .unwrap()
     ///     .commitment;
     ///
-    /// assert!(blob.validate_with_commitment(&other_commitment, AppVersion::V2).is_err());
+    /// assert!(blob.validate_with_commitment(&other_commitment).is_err());
     /// ```
-    pub fn validate_with_commitment(
-        &self,
-        commitment: &Commitment,
-        app_version: AppVersion,
-    ) -> Result<()> {
-        self.validate(app_version)?;
+    pub fn validate_with_commitment(&self, commitment: &Commitment) -> Result<()> {
+        self.validate()?;
 
         if self.commitment != *commitment {
             bail_validation!("blob commitment != commitment");
@@ -271,11 +246,10 @@ impl Blob {
     ///
     /// ```
     /// use celestia_types::Blob;
-    /// # use celestia_types::consts::appconsts::AppVersion;
     /// # use celestia_types::nmt::Namespace;
     /// # let namespace = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
     ///
-    /// let blob = Blob::new(namespace, b"foo".to_vec(), None, AppVersion::latest()).unwrap();
+    /// let blob = Blob::new(namespace, b"foo".to_vec(), None).unwrap();
     /// let shares = blob.to_shares().unwrap();
     ///
     /// assert_eq!(shares.len(), 1);
@@ -305,18 +279,18 @@ impl Blob {
     /// # Example
     ///
     /// ```
-    /// use celestia_types::{AppVersion, Blob};
+    /// use celestia_types::Blob;
     /// # use celestia_types::nmt::Namespace;
     /// # let namespace = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
     ///
-    /// let blob = Blob::new(namespace, b"foo".to_vec(), None, AppVersion::V2).unwrap();
+    /// let blob = Blob::new(namespace, b"foo".to_vec(), None).unwrap();
     /// let shares = blob.to_shares().unwrap();
     ///
-    /// let reconstructed = Blob::reconstruct(&shares, AppVersion::latest()).unwrap();
+    /// let reconstructed = Blob::reconstruct(&shares).unwrap();
     ///
     /// assert_eq!(blob, reconstructed);
     /// ```
-    pub fn reconstruct<'a, I>(shares: I, app_version: AppVersion) -> Result<Self>
+    pub fn reconstruct<'a, I>(shares: I) -> Result<Self>
     where
         I: IntoIterator<Item = &'a Share>,
     {
@@ -362,11 +336,11 @@ impl Blob {
         data.truncate(blob_len as usize);
 
         if share_version == appconsts::SHARE_VERSION_ZERO {
-            Self::new(namespace, data, None, app_version)
+            Self::new(namespace, data, None)
         } else if share_version == appconsts::SHARE_VERSION_ONE {
             // shouldn't happen as we have user namespace, seq start, and share v1
             let signer = signer.ok_or(Error::MissingSigner)?;
-            Self::new(namespace, data, Some(signer), app_version)
+            Self::new(namespace, data, Some(signer))
         } else {
             Err(Error::UnsupportedShareVersion(share_version))
         }
@@ -387,24 +361,24 @@ impl Blob {
     /// # Example
     ///
     /// ```
-    /// use celestia_types::{AppVersion, Blob};
+    /// use celestia_types::Blob;
     /// # use celestia_types::nmt::Namespace;
     /// # let namespace1 = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
     /// # let namespace2 = Namespace::new_v0(&[2, 3, 4, 5, 6]).expect("Invalid namespace");
     ///
     /// let blobs = vec![
-    ///     Blob::new(namespace1, b"foo".to_vec(), None, AppVersion::latest()).unwrap(),
-    ///     Blob::new(namespace2, b"bar".to_vec(), None, AppVersion::latest()).unwrap(),
+    ///     Blob::new(namespace1, b"foo".to_vec(), None).unwrap(),
+    ///     Blob::new(namespace2, b"bar".to_vec(), None).unwrap(),
     /// ];
     /// let shares: Vec<_> = blobs.iter().flat_map(|blob| blob.to_shares().unwrap()).collect();
     ///
-    /// let reconstructed = Blob::reconstruct_all(&shares, AppVersion::latest()).unwrap();
+    /// let reconstructed = Blob::reconstruct_all(&shares).unwrap();
     ///
     /// assert_eq!(blobs, reconstructed);
     /// ```
     ///
     /// [`ExtendedDataSquare`]: crate::ExtendedDataSquare
-    pub fn reconstruct_all<'a, I>(shares: I, app_version: AppVersion) -> Result<Vec<Self>>
+    pub fn reconstruct_all<'a, I>(shares: I) -> Result<Vec<Self>>
     where
         I: IntoIterator<Item = &'a Share>,
     {
@@ -421,7 +395,7 @@ impl Blob {
                 };
                 iter::once(start).chain(&mut shares)
             };
-            blobs.push(Blob::reconstruct(&mut blob, app_version)?);
+            blobs.push(Blob::reconstruct(&mut blob)?);
         }
 
         Ok(blobs)
@@ -432,11 +406,11 @@ impl Blob {
     /// # Example
     ///
     /// ```
-    /// use celestia_types::{AppVersion, Blob};
+    /// use celestia_types::Blob;
     /// # use celestia_types::nmt::Namespace;
     /// # let namespace = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
     ///
-    /// let blob = Blob::new(namespace, b"foo".to_vec(), None, AppVersion::latest()).unwrap();
+    /// let blob = Blob::new(namespace, b"foo".to_vec(), None).unwrap();
     /// let shares_len = blob.shares_len();
     ///
     /// let blob_shares = blob.to_shares().unwrap();
@@ -465,30 +439,24 @@ impl Blob {
     /// This function propagates any error from the [`Commitment`] creation.
     // constructor cannot be named `new`, otherwise it doesn't show up in Kotlin ¯\_(ツ)_/¯
     #[uniffi::constructor(name = "create")]
-    pub fn uniffi_new(
-        namespace: Arc<Namespace>,
-        data: Vec<u8>,
-        app_version: AppVersion,
-    ) -> UniffiResult<Self> {
+    pub fn uniffi_new(namespace: Arc<Namespace>, data: Vec<u8>) -> UniffiResult<Self> {
         let namespace = Arc::unwrap_or_clone(namespace);
-        Ok(Blob::new(namespace, data, None, app_version)?)
+        Ok(Blob::new(namespace, data, None)?)
     }
 
     /// Create a new blob with the given data within the [`Namespace`] and with given signer.
     ///
     /// # Errors
     ///
-    /// This function propagates any error from the [`Commitment`] creation. Also [`AppVersion`]
-    /// must be at least [`AppVersion::V3`].
+    /// This function propagates any error from the [`Commitment`] creation.
     #[uniffi::constructor(name = "create_with_signer")]
     pub fn uniffi_new_with_signer(
         namespace: Arc<Namespace>,
         data: Vec<u8>,
         signer: AccAddress,
-        app_version: AppVersion,
     ) -> UniffiResult<Blob> {
         let namespace = Arc::unwrap_or_clone(namespace);
-        Ok(Blob::new(namespace, data, Some(signer), app_version)?)
+        Ok(Blob::new(namespace, data, Some(signer))?)
     }
 
     /// A [`Namespace`] the [`Blob`] belongs to.
@@ -535,12 +503,8 @@ impl Blob {
 impl Blob {
     /// Create a new blob with the given data within the [`Namespace`].
     #[wasm_bindgen(constructor)]
-    pub fn js_new(
-        namespace: &Namespace,
-        data: Vec<u8>,
-        app_version: &appconsts::JsAppVersion,
-    ) -> Result<Blob> {
-        Self::new(*namespace, data, None, (*app_version).into())
+    pub fn js_new(namespace: &Namespace, data: Vec<u8>) -> Result<Blob> {
+        Self::new(*namespace, data, None)
     }
 
     /// Clone a blob creating a new deep copy of it.
@@ -675,9 +639,7 @@ mod custom_serde {
         type Error = Error;
 
         fn try_from(value: SerdeBlob) -> Result<Self> {
-            // we don't need to require app version when deserializing because commitment is provided
-            // user can still verify commitment and app version compatibility using `Blob::validate`
-            commitment::validate_blob(value.share_version, value.signer.is_some(), None)?;
+            commitment::validate_blob(value.share_version, value.signer.is_some())?;
 
             Ok(Blob {
                 namespace: value.namespace,
@@ -732,13 +694,8 @@ mod tests {
         use crate::consts::appconsts;
 
         let ns = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
-        let blob = Blob::new(
-            ns,
-            b"some data to store on blockchain".to_vec(),
-            None,
-            AppVersion::V2,
-        )
-        .expect("Failed to create blob");
+        let blob = Blob::new(ns, b"some data to store on blockchain".to_vec(), None)
+            .expect("Failed to create blob");
 
         let shares = blob.to_shares().expect("to_shares failed");
         assert!(!shares.is_empty(), "expected at least one share");
@@ -774,12 +731,10 @@ mod tests {
             .parse()
             .expect("invalid signer");
 
-        // AppVersion must allow signer (>= V3)
         let blob = Blob::new(
             ns,
             b"some data to store on blockchain".to_vec(),
             Some(signer),
-            AppVersion::V5,
         )
         .expect("Failed to create signed blob");
 
@@ -812,7 +767,7 @@ mod tests {
     fn create_from_raw() {
         let expected = sample_blob();
         let raw = RawBlob::from(expected.clone());
-        let created = Blob::from_raw(raw, AppVersion::V2).unwrap();
+        let created = Blob::from_raw(raw).unwrap();
 
         assert_eq!(created, expected);
     }
@@ -820,26 +775,20 @@ mod tests {
     #[test]
     fn create_from_raw_with_signer() {
         let expected = sample_blob_with_signer();
-
         let raw = RawBlob::from(expected.clone());
-
-        Blob::from_raw(raw.clone(), AppVersion::V2).unwrap_err();
-        let created = Blob::from_raw(raw, AppVersion::V3).unwrap();
+        let created = Blob::from_raw(raw).unwrap();
 
         assert_eq!(created, expected);
     }
 
     #[test]
     fn validate_blob() {
-        sample_blob().validate(AppVersion::V2).unwrap();
+        sample_blob().validate().unwrap();
     }
 
     #[test]
     fn validate_blob_with_signer() {
-        sample_blob_with_signer()
-            .validate(AppVersion::V2)
-            .unwrap_err();
-        sample_blob_with_signer().validate(AppVersion::V3).unwrap();
+        sample_blob_with_signer().validate().unwrap();
     }
 
     #[test]
@@ -847,7 +796,7 @@ mod tests {
         let mut blob = sample_blob();
         blob.commitment = Commitment::new([7; 32]);
 
-        blob.validate(AppVersion::V2).unwrap_err();
+        blob.validate().unwrap_err();
     }
 
     #[test]
@@ -895,10 +844,10 @@ mod tests {
             let len = rand::random::<usize>() % (1024 * 1024) + 1;
             let data = random_bytes(len);
             let ns = Namespace::const_v0(rand::random());
-            let blob = Blob::new(ns, data, None, AppVersion::V2).unwrap();
+            let blob = Blob::new(ns, data, None).unwrap();
 
             let shares = blob.to_shares().unwrap();
-            assert_eq!(blob, Blob::reconstruct(&shares, AppVersion::V2).unwrap());
+            assert_eq!(blob, Blob::reconstruct(&shares).unwrap());
         }
     }
 
@@ -910,18 +859,17 @@ mod tests {
             let ns = Namespace::const_v0(rand::random());
             let signer = rand::random::<[u8; 20]>().into();
 
-            let blob = Blob::new(ns, data, Some(signer), AppVersion::V3).unwrap();
+            let blob = Blob::new(ns, data, Some(signer)).unwrap();
             let shares = blob.to_shares().unwrap();
 
-            Blob::reconstruct(&shares, AppVersion::V2).unwrap_err();
-            assert_eq!(blob, Blob::reconstruct(&shares, AppVersion::V3).unwrap());
+            assert_eq!(blob, Blob::reconstruct(&shares).unwrap());
         }
     }
 
     #[test]
     fn reconstruct_empty() {
         assert!(matches!(
-            Blob::reconstruct(&Vec::<Share>::new(), AppVersion::V2),
+            Blob::reconstruct(&Vec::<Share>::new()),
             Err(Error::MissingShares)
         ));
     }
@@ -931,16 +879,13 @@ mod tests {
         let len = rand::random::<usize>() % (1024 * 1024) + 1;
         let data = random_bytes(len);
         let ns = Namespace::const_v0(rand::random());
-        let mut shares = Blob::new(ns, data, None, AppVersion::V2)
-            .unwrap()
-            .to_shares()
-            .unwrap();
+        let mut shares = Blob::new(ns, data, None).unwrap().to_shares().unwrap();
 
         // modify info byte to remove sequence start bit
         shares[0].as_mut()[NS_SIZE] &= 0b11111110;
 
         assert!(matches!(
-            Blob::reconstruct(&shares, AppVersion::V2),
+            Blob::reconstruct(&shares),
             Err(Error::ExpectedShareWithSequenceStart)
         ));
     }
@@ -957,13 +902,13 @@ mod tests {
         }) {
             let len = (rand::random::<usize>() % 1023 + 1) * 2;
             let data = random_bytes(len);
-            let shares = Blob::new(ns.unwrap(), data, None, AppVersion::V2)
+            let shares = Blob::new(ns.unwrap(), data, None)
                 .unwrap()
                 .to_shares()
                 .unwrap();
 
             assert!(matches!(
-                Blob::reconstruct(&shares, AppVersion::V2),
+                Blob::reconstruct(&shares),
                 Err(Error::UnexpectedReservedNamespace)
             ));
         }
@@ -974,14 +919,11 @@ mod tests {
         let len = rand::random::<usize>() % 1024 * 1024 + 2048;
         let data = random_bytes(len);
         let ns = Namespace::const_v0(rand::random());
-        let shares = Blob::new(ns, data, None, AppVersion::V2)
-            .unwrap()
-            .to_shares()
-            .unwrap();
+        let shares = Blob::new(ns, data, None).unwrap().to_shares().unwrap();
 
         assert!(matches!(
             // minimum for len is 4 so 3 will break stuff
-            Blob::reconstruct(&shares[..2], AppVersion::V2),
+            Blob::reconstruct(&shares[..2]),
             Err(Error::MissingShares)
         ));
     }
@@ -991,16 +933,13 @@ mod tests {
         let len = rand::random::<usize>() % (1024 * 1024) + 512;
         let data = random_bytes(len);
         let ns = Namespace::const_v0(rand::random());
-        let mut shares = Blob::new(ns, data, None, AppVersion::V2)
-            .unwrap()
-            .to_shares()
-            .unwrap();
+        let mut shares = Blob::new(ns, data, None).unwrap().to_shares().unwrap();
 
         // change share version in second share
         shares[1].as_mut()[NS_SIZE] = 0b11111110;
 
         assert!(matches!(
-            Blob::reconstruct(&shares, AppVersion::V2),
+            Blob::reconstruct(&shares),
             Err(Error::BlobSharesMetadataMismatch(..))
         ));
     }
@@ -1011,16 +950,13 @@ mod tests {
         let data = random_bytes(len);
         let ns = Namespace::const_v0(rand::random());
         let ns2 = Namespace::const_v0(rand::random());
-        let mut shares = Blob::new(ns, data, None, AppVersion::V2)
-            .unwrap()
-            .to_shares()
-            .unwrap();
+        let mut shares = Blob::new(ns, data, None).unwrap().to_shares().unwrap();
 
         // change namespace in second share
         shares[1].as_mut()[..NS_SIZE].copy_from_slice(ns2.as_bytes());
 
         assert!(matches!(
-            Blob::reconstruct(&shares, AppVersion::V2),
+            Blob::reconstruct(&shares),
             Err(Error::BlobSharesMetadataMismatch(..))
         ));
     }
@@ -1030,16 +966,13 @@ mod tests {
         let len = rand::random::<usize>() % (1024 * 1024) + 512;
         let data = random_bytes(len);
         let ns = Namespace::const_v0(rand::random());
-        let mut shares = Blob::new(ns, data, None, AppVersion::V2)
-            .unwrap()
-            .to_shares()
-            .unwrap();
+        let mut shares = Blob::new(ns, data, None).unwrap().to_shares().unwrap();
 
         // modify info byte to add sequence start bit
         shares[1].as_mut()[NS_SIZE] |= 0b00000001;
 
         assert!(matches!(
-            Blob::reconstruct(&shares, AppVersion::V2),
+            Blob::reconstruct(&shares),
             Err(Error::UnexpectedSequenceStart)
         ));
     }
@@ -1051,7 +984,7 @@ mod tests {
                 let len = rand::random::<usize>() % (1024 * 1024) + 512;
                 let data = random_bytes(len);
                 let ns = Namespace::const_v0(rand::random());
-                Blob::new(ns, data, None, AppVersion::V2).unwrap()
+                Blob::new(ns, data, None).unwrap()
             })
             .collect();
 
@@ -1059,7 +992,7 @@ mod tests {
             .iter()
             .flat_map(|blob| blob.to_shares().unwrap())
             .collect();
-        let reconstructed = Blob::reconstruct_all(&shares, AppVersion::V2).unwrap();
+        let reconstructed = Blob::reconstruct_all(&shares).unwrap();
 
         assert_eq!(blobs, reconstructed);
     }

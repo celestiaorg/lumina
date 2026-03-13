@@ -5,7 +5,6 @@ use celestia_rpc::ShareClient;
 use crate::Result;
 use crate::api::share::{GetRangeResponse, GetRowResponse, SampleCoordinates};
 use crate::client::ClientInner;
-use crate::types::AppVersion;
 use crate::types::namespace_data::NamespaceData;
 use crate::types::nmt::Namespace;
 use crate::types::sample::Sample;
@@ -34,7 +33,6 @@ impl ShareApi {
     pub async fn get(
         &self,
         height: u64,
-        app_version: AppVersion,
         square_width: u16,
         row: u16,
         column: u16,
@@ -42,7 +40,7 @@ impl ShareApi {
         Ok(self
             .inner
             .rpc
-            .share_get_share(height, app_version, square_width, row, column)
+            .share_get_share(height, square_width, row, column)
             .await?)
     }
 
@@ -61,13 +59,7 @@ impl ShareApi {
         Ok(self
             .inner
             .rpc
-            .share_get_share(
-                header.height(),
-                header.app_version(),
-                header.square_width(),
-                row,
-                column,
-            )
+            .share_get_share(header.height(), header.square_width(), row, column)
             .await?)
     }
 
@@ -75,12 +67,7 @@ impl ShareApi {
     /// sample coordinates.
     ///
     /// `coordinates` is a list of `(row, column)`.
-    pub async fn get_samples<I, C>(
-        &self,
-        height: u64,
-        app_version: AppVersion,
-        coordinates: I,
-    ) -> Result<Vec<Sample>>
+    pub async fn get_samples<I, C>(&self, height: u64, coordinates: I) -> Result<Vec<Sample>>
     where
         I: IntoIterator<Item = C>,
         C: Into<SampleCoordinates>,
@@ -88,7 +75,7 @@ impl ShareApi {
         Ok(self
             .inner
             .rpc
-            .share_get_samples(height, app_version, coordinates)
+            .share_get_samples(height, coordinates)
             .await?)
     }
 
@@ -117,17 +104,13 @@ impl ShareApi {
         Ok(self
             .inner
             .rpc
-            .share_get_samples(header.height(), header.app_version(), coordinates)
+            .share_get_samples(header.height(), coordinates)
             .await?)
     }
 
     /// Retrieves the complete [`ExtendedDataSquare`] for the specified height.
-    pub async fn get_eds(
-        &self,
-        height: u64,
-        app_version: AppVersion,
-    ) -> Result<ExtendedDataSquare> {
-        Ok(self.inner.rpc.share_get_eds(height, app_version).await?)
+    pub async fn get_eds(&self, height: u64) -> Result<ExtendedDataSquare> {
+        Ok(self.inner.rpc.share_get_eds(height).await?)
     }
 
     /// Retrieves the complete [`ExtendedDataSquare`] for the specified height.
@@ -141,11 +124,7 @@ impl ShareApi {
     /// the equivalent method without the `_with_root` suffix.
     pub async fn get_eds_with_root(&self, height: u64) -> Result<ExtendedDataSquare> {
         let header = self.inner.get_header_validated(height).await?;
-        Ok(self
-            .inner
-            .rpc
-            .share_get_eds(header.height(), header.app_version())
-            .await?)
+        Ok(self.inner.rpc.share_get_eds(header.height()).await?)
     }
 
     /// Retrieves all shares from a specific row of the [`ExtendedDataSquare`]
@@ -153,14 +132,13 @@ impl ShareApi {
     pub async fn get_row(
         &self,
         height: u64,
-        app_version: AppVersion,
         square_width: u16,
         row: u16,
     ) -> Result<GetRowResponse> {
         Ok(self
             .inner
             .rpc
-            .share_get_row(height, app_version, square_width, row)
+            .share_get_row(height, square_width, row)
             .await?)
     }
 
@@ -179,12 +157,7 @@ impl ShareApi {
         Ok(self
             .inner
             .rpc
-            .share_get_row(
-                header.height(),
-                header.app_version(),
-                header.square_width(),
-                row,
-            )
+            .share_get_row(header.height(), header.square_width(), row)
             .await?)
     }
 
@@ -196,13 +169,12 @@ impl ShareApi {
     pub async fn get_namespace_data(
         &self,
         height: u64,
-        app_version: AppVersion,
         namespace: Namespace,
     ) -> Result<NamespaceData> {
         Ok(self
             .inner
             .rpc
-            .share_get_namespace_data(height, app_version, namespace)
+            .share_get_namespace_data(height, namespace)
             .await?)
     }
 
@@ -229,25 +201,15 @@ impl ShareApi {
         Ok(self
             .inner
             .rpc
-            .share_get_namespace_data(header.height(), header.app_version(), namespace)
+            .share_get_namespace_data(header.height(), namespace)
             .await?)
     }
 
     /// Retrieves a list of shares and their corresponding proof.
     ///
     /// The start and end index ignores parity shares and corresponds to ODS.
-    pub async fn get_range(
-        &self,
-        height: u64,
-        app_version: AppVersion,
-        start: u64,
-        end: u64,
-    ) -> Result<GetRangeResponse> {
-        Ok(self
-            .inner
-            .rpc
-            .share_get_range(height, app_version, start, end)
-            .await?)
+    pub async fn get_range(&self, height: u64, start: u64, end: u64) -> Result<GetRangeResponse> {
+        Ok(self.inner.rpc.share_get_range(height, start, end).await?)
     }
 
     /// Retrieves a list of shares and their corresponding proof.
@@ -271,7 +233,7 @@ impl ShareApi {
         Ok(self
             .inner
             .rpc
-            .share_get_range(header.height(), header.app_version(), start, end)
+            .share_get_range(header.height(), start, end)
             .await?)
     }
 }
@@ -294,25 +256,17 @@ mod tests {
 
         let coordinates: Vec<SampleCoordinates> =
             ensure_serializable_deserializable(unimplemented!());
-        ensure_serializable(
-            api.get_samples(0, unimplemented!(), coordinates)
-                .await
-                .unwrap(),
-        );
+        ensure_serializable(api.get_samples(0, coordinates).await.unwrap());
 
-        ensure_serializable(api.get_eds(0, unimplemented!()).await.unwrap());
+        ensure_serializable(api.get_eds(0).await.unwrap());
 
-        ensure_serializable_deserializable(api.get(0, unimplemented!(), 0, 0, 0).await.unwrap());
+        ensure_serializable_deserializable(api.get(0, 0, 0, 0).await.unwrap());
 
-        ensure_serializable_deserializable(api.get_row(0, unimplemented!(), 0, 0).await.unwrap());
+        ensure_serializable_deserializable(api.get_row(0, 0, 0).await.unwrap());
 
         let namespace = ensure_serializable_deserializable(unimplemented!());
-        ensure_serializable_deserializable(
-            api.get_namespace_data(0, unimplemented!(), namespace)
-                .await
-                .unwrap(),
-        );
+        ensure_serializable_deserializable(api.get_namespace_data(0, namespace).await.unwrap());
 
-        ensure_serializable_deserializable(api.get_range(0, unimplemented!(), 0, 0).await.unwrap());
+        ensure_serializable_deserializable(api.get_range(0, 0, 0).await.unwrap());
     }
 }

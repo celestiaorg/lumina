@@ -1,9 +1,8 @@
 Error.stackTraceLimit = 99; // rust stack traces can get pretty big, increase the default
 
-import { AppVersion, Blob, Namespace, NodeConfig, spawnNode } from "lumina-node";
+import { Blob, Namespace, NodeConfig, spawnNode } from "lumina-node";
 
 // Expose classes on window so they can be used from the console
-window.AppVersion = AppVersion;
 window.Blob = Blob;
 window.Namespace = Namespace;
 

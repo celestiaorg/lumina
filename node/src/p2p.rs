@@ -643,32 +643,12 @@ impl P2p {
 
     /// Request all blobs with provided namespace in the block corresponding to this header
     /// using bitswap protocol.
-    pub async fn get_all_blobs<S>(
+    pub async fn get_all_blobs(
         &self,
         namespace: Namespace,
         block_height: u64,
         timeout: Option<Duration>,
-        store: &S,
-    ) -> Result<Vec<Blob>>
-    where
-        S: Store,
-    {
-        // TODO: Figure out app_version based on network id and height instead
-        // of retrieving the header.
-        let app_version = match store.get_by_height(block_height).await {
-            Ok(header) => header.app_version(),
-            Err(StoreError::NotFound) => {
-                let pruned_ranges = store.get_pruned_ranges().await?;
-
-                if pruned_ranges.contains(block_height) {
-                    return Err(P2pError::HeaderPruned(block_height));
-                } else {
-                    return Err(P2pError::HeaderNotSynced(block_height));
-                }
-            }
-            Err(e) => return Err(e.into()),
-        };
-
+    ) -> Result<Vec<Blob>> {
         let namespace_data = self
             .get_namespace_data(namespace, block_height, timeout)
             .await?;
@@ -678,7 +658,7 @@ impl P2p {
             .iter()
             .flat_map(|row| row.shares.iter());
 
-        Ok(Blob::reconstruct_all(shares, app_version)?)
+        Ok(Blob::reconstruct_all(shares)?)
     }
 
     /// Get the addresses where [`P2p`] listens on for incoming connections.

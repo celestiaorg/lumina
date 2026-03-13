@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(feature = "wasm-bindgen", target_arch = "wasm32"))]
 use wasm_bindgen::prelude::*;
 
-use crate::consts::appconsts::{self, AppVersion};
+use crate::consts::appconsts;
 #[cfg(feature = "uniffi")]
 use crate::error::UniffiResult;
 use crate::nmt::{
@@ -119,17 +119,6 @@ impl Share {
             data: data.try_into().unwrap(),
             is_parity: true,
         })
-    }
-
-    /// Check if share is valid in given [`AppVersion`]
-    pub fn validate(&self, app: AppVersion) -> Result<()> {
-        if self.info_byte().is_some_and(|info| {
-            info.version() == appconsts::SHARE_VERSION_ONE && app < AppVersion::V3
-        }) {
-            Err(Error::UnsupportedShareVersion(appconsts::SHARE_VERSION_ONE))
-        } else {
-            Ok(())
-        }
     }
 
     /// Returns true if share contains parity data.
@@ -245,12 +234,6 @@ impl Share {
         Ok(Share::parity(data)?)
     }
 
-    /// Check if share is valid in given [`AppVersion`]
-    #[uniffi::method(name = "validate")]
-    pub fn uniffi_validate(&self, app: AppVersion) -> UniffiResult<()> {
-        Ok(self.validate(app)?)
-    }
-
     /// Returns true if share contains parity data.
     #[uniffi::method(name = "is_parity")]
     pub fn uniffi_is_parity(&self) -> bool {
@@ -350,7 +333,6 @@ impl From<Share> for RawShare {
 mod tests {
     use super::*;
     use crate::Blob;
-    use crate::consts::appconsts::AppVersion;
     use crate::nmt::{NAMESPACED_HASH_SIZE, NamespaceProof, NamespacedHash};
     use base64::prelude::*;
 
@@ -360,7 +342,7 @@ mod tests {
     #[test]
     fn share_v0_structure() {
         let ns = Namespace::new_v0(b"foo").unwrap();
-        let blob = Blob::new(ns, vec![7; 512], None, AppVersion::V2).unwrap();
+        let blob = Blob::new(ns, vec![7; 512], None).unwrap();
 
         let shares = blob.to_shares().unwrap();
 
@@ -399,7 +381,7 @@ mod tests {
     #[test]
     fn share_v1_structure() {
         let ns = Namespace::new_v0(b"foo").unwrap();
-        let blob = Blob::new(ns, vec![7; 512], Some([5; 20].into()), AppVersion::V3).unwrap();
+        let blob = Blob::new(ns, vec![7; 512], Some([5; 20].into())).unwrap();
 
         let shares = blob.to_shares().unwrap();
 
@@ -445,38 +427,6 @@ mod tests {
         Share::from_raw(&[0; 2 * appconsts::SHARE_SIZE]).unwrap_err();
 
         Share::from_raw(&vec![0; appconsts::SHARE_SIZE]).unwrap();
-    }
-
-    #[test]
-    fn share_validate() {
-        let app_versions = [
-            AppVersion::V1,
-            AppVersion::V2,
-            AppVersion::V3,
-            AppVersion::latest(),
-        ];
-
-        // v0
-        let share = Share::from_raw(&[0; appconsts::SHARE_SIZE]).unwrap();
-
-        for app in app_versions {
-            share.validate(app).unwrap();
-        }
-
-        // v1
-        let mut data = [0; appconsts::SHARE_SIZE];
-        data[NS_SIZE] = InfoByte::new(appconsts::SHARE_VERSION_ONE, false)
-            .unwrap()
-            .as_u8();
-        let share = Share::from_raw(&data).unwrap();
-
-        for app in app_versions {
-            if app < AppVersion::V3 {
-                share.validate(app).unwrap_err();
-            } else {
-                share.validate(app).unwrap();
-            }
-        }
     }
 
     #[test]

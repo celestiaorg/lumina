@@ -59,7 +59,7 @@ use std::env;
 use celestia_client::{Client, Result};
 use celestia_client::tx::TxConfig;
 use celestia_client::types::nmt::Namespace;
-use celestia_client::types::{AppVersion, Blob};
+use celestia_client::types::Blob;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -76,7 +76,6 @@ async fn main() -> Result<()> {
         ns,
         b"some data to store".to_vec(),
         Some(client.address()?),
-        AppVersion::latest(),
     )?;
 
     // This is the hash of the blob which is needed later on for retrieving

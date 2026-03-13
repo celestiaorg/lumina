@@ -640,7 +640,6 @@ mod tests {
     use crate::utils::OneshotResultSender;
     use bytes::BytesMut;
     use celestia_proto::bitswap::Block;
-    use celestia_types::consts::appconsts::AppVersion;
     use celestia_types::sample::{Sample, SampleId};
     use celestia_types::test_utils::{ExtendedHeaderGenerator, generate_dummy_eds};
     use celestia_types::{AxisType, DataAvailabilityHeader, ExtendedDataSquare};
@@ -845,7 +844,7 @@ mod tests {
         let mut headers = Vec::new();
 
         for _ in 0..20 {
-            let eds = generate_dummy_eds(2, AppVersion::V2);
+            let eds = generate_dummy_eds(2);
             let dah = DataAvailabilityHeader::from_eds(&eds);
             let header = generator.next_with_dah(dah);
 
@@ -919,7 +918,7 @@ mod tests {
         handle.expect_no_cmd().await;
 
         // Push block 21 in the store
-        let eds = generate_dummy_eds(2, AppVersion::V2);
+        let eds = generate_dummy_eds(2);
         let dah = DataAvailabilityHeader::from_eds(&eds);
         let header = generator.next_with_dah(dah);
         store.insert(header).await.unwrap();
@@ -1069,7 +1068,7 @@ mod tests {
         let mut edses = HashMap::new();
 
         for height in 991..=1000 {
-            let eds = generate_dummy_eds(2, AppVersion::V2);
+            let eds = generate_dummy_eds(2);
             let dah = DataAvailabilityHeader::from_eds(&eds);
             let header = generator.next_with_dah(dah);
 
@@ -1186,7 +1185,7 @@ mod tests {
         square_width: usize,
         simulate_sampling_timeout: bool,
     ) {
-        let eds = generate_dummy_eds(square_width, AppVersion::V2);
+        let eds = generate_dummy_eds(square_width);
         let dah = DataAvailabilityHeader::from_eds(&eds);
         let header = generator.next_with_dah(dah);
         let height = header.height();
