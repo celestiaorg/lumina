@@ -7,6 +7,10 @@
 //! Use [`FibreClientBuilder`] (via [`FibreClient::builder()`]) to construct
 //! an instance.
 
+pub(crate) mod download;
+pub(crate) mod task;
+pub(crate) mod upload;
+
 use std::sync::Arc;
 
 use k256::ecdsa::SigningKey;

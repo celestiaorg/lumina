@@ -4,38 +4,35 @@
 //! blob data on-chain, Fibre distributes it directly to validators via gRPC. Only a
 //! small payment receipt (`MsgPayForFibre`) goes on-chain.
 
-mod blob;
-mod blob_header;
-mod client;
-pub mod config;
-mod download;
-pub mod error;
-mod grpc_validator_client;
-mod host_registry;
-mod payment_promise;
-mod proto_conv;
-mod shard_assignment;
-mod shard_selection;
-mod signature_set;
-mod task;
-mod upload;
+pub mod client;
+pub mod domain;
+pub mod transport;
 pub mod validator;
-mod validator_client;
+
+pub use domain::config;
+pub use domain::error;
+
+// Compatibility aliases preserve historical crate-local paths so tests and
+// internals don't need broad path rewrites during this refactor.
+pub(crate) use client::task;
+pub(crate) use domain::{blob, blob_header, payment_promise};
+pub(crate) use transport::{grpc_validator_client, host_registry, proto_conv, validator_client};
+pub(crate) use validator::signature_set;
 
 #[cfg(test)]
 mod roundtrip_test;
 
-pub use blob::{Blob, BlobID, Commitment};
 pub use celestia_grpc::Endpoint;
+pub use client::upload::PreparedPut;
 pub use client::{FibreClient, FibreClientBuilder};
 pub use config::{
     BlobConfig, DEFAULT_PROTOCOL_PARAMS, FibreClientConfig, Fraction, ProtocolParams,
 };
+pub use domain::blob::{Blob, BlobID, Commitment};
+pub use domain::payment_promise::{PaymentPromise, SignedPaymentPromise};
 pub use error::{FibreError, Result};
-pub use grpc_validator_client::GrpcValidatorConnector;
-pub use host_registry::{GrpcHostRegistry, Host, HostRegistry};
-pub use payment_promise::{PaymentPromise, SignedPaymentPromise};
-pub use proto_conv::payment_promise_to_proto;
-pub use upload::PreparedPut;
+pub use transport::grpc_validator_client::GrpcValidatorConnector;
+pub use transport::host_registry::{GrpcHostRegistry, Host, HostRegistry};
+pub use transport::proto_conv::payment_promise_to_proto;
+pub use transport::validator_client::{ValidatorConnection, ValidatorConnector};
 pub use validator::{GrpcSetGetter, SetGetter, ValidatorInfo, ValidatorSet};
-pub use validator_client::{ValidatorConnection, ValidatorConnector};

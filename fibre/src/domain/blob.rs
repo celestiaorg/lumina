@@ -338,8 +338,7 @@ impl Blob {
             .collect();
 
         // Reconstruct original rows
-        let reconstructed =
-            rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
+        let reconstructed = rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
 
         // Verify commitment by re-encoding
         let (ext_data, reconstructed_commitment, rlc_coeffs) =
@@ -353,11 +352,8 @@ impl Blob {
         }
 
         // Decode header and extract original data from the first K rows
-        let original_rows: Vec<&[u8]> = (0..k)
-            .map(|i| reconstructed.row(i).unwrap())
-            .collect();
-        let (header, original_data) =
-            BlobHeaderV0::decode_from_rows(&original_rows, &self.cfg)?;
+        let original_rows: Vec<&[u8]> = (0..k).map(|i| reconstructed.row(i).unwrap()).collect();
+        let (header, original_data) = BlobHeaderV0::decode_from_rows(&original_rows, &self.cfg)?;
 
         self.header = header;
         self.data = Some(original_data);

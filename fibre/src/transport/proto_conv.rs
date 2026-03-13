@@ -60,9 +60,9 @@ pub(crate) fn blob_row_to_row_proof(
         .map(|h| {
             let len = h.len();
             h.try_into().map_err(|_| {
-                FibreError::InvalidData(format!(
-                    "proof hash has invalid length {len}, expected 32",
-                ))
+                FibreError::InvalidData(
+                    format!("proof hash has invalid length {len}, expected 32",),
+                )
             })
         })
         .collect::<Result<Vec<[u8; 32]>, FibreError>>()?;

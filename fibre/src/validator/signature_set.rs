@@ -89,7 +89,6 @@ impl SignatureSet {
             }
         })?;
 
-        // Verify BEFORE acquiring the lock — verification is expensive.
         validator
             .pubkey
             .verify(&self.required_bytes_signed, &ed_sig)

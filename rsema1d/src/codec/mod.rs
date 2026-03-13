@@ -283,8 +283,7 @@ mod tests {
                 .iter()
                 .map(|&i| ext_data.rows().row(i).unwrap())
                 .collect();
-            let reconstructed =
-                reconstruct(&original_rows, &original_indices, &params).unwrap();
+            let reconstructed = reconstruct(&original_rows, &original_indices, &params).unwrap();
             assert_eq!(reconstructed.as_row_major(), original.as_row_major());
 
             if params.n >= params.k {
@@ -293,8 +292,7 @@ mod tests {
                     .iter()
                     .map(|&i| ext_data.rows().row(i).unwrap())
                     .collect();
-                let reconstructed =
-                    reconstruct(&parity_rows, &parity_indices, &params).unwrap();
+                let reconstructed = reconstruct(&parity_rows, &parity_indices, &params).unwrap();
                 assert_eq!(reconstructed.as_row_major(), original.as_row_major());
             }
 

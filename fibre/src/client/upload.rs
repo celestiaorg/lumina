@@ -22,10 +22,9 @@ use crate::client::FibreClient;
 use crate::config::BlobConfig;
 use crate::error::FibreError;
 use crate::payment_promise::{PaymentPromise, SignedPaymentPromise};
-use crate::shard_assignment::ShardMap;
 use crate::signature_set::SignatureSet;
 use crate::task::spawn_task;
-use crate::validator::ValidatorSet;
+use crate::validator::{ShardMap, ValidatorSet};
 
 /// Result of a successful [`FibreClient::put()`] operation.
 ///

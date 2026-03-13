@@ -43,7 +43,9 @@ pub fn reconstruct_data(
         if row.len() != row_size {
             return Err(Error::InvalidParameters(format!(
                 "row {} size mismatch: expected {}, got {}",
-                i, row_size, row.len()
+                i,
+                row_size,
+                row.len()
             )));
         }
     }
