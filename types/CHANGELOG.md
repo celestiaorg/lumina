@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/celestia-types-v1.0.0-rc.2...celestia-types-v1.0.0-rc.3) - 2026-03-13
+
+### Added
+
+- [**breaking**] remove app version ([#940](https://github.com/celestiaorg/lumina/pull/940))
+
 ## [1.0.0-rc.2](https://github.com/celestiaorg/lumina/compare/celestia-types-v0.20.0...celestia-types-v1.0.0-rc.2) - 2026-02-25
 
 ### Added
