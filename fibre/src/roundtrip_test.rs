@@ -79,9 +79,9 @@ impl ValidatorConnection for MockValidatorConnection {
             .or_default()
             .extend(rows.to_vec());
 
-        // Sign the promise's validator sign bytes (with CometBFT wrapping).
+        // Sign the promise's sign bytes (CometBFT-wrapped, same for client and validators).
         use ed25519_dalek::Signer;
-        let sign_bytes = promise.sign_bytes_validator()?;
+        let sign_bytes = promise.sign_bytes()?;
         let signature = self.ed_signing_key.sign(&sign_bytes);
 
         Ok(UploadResponse {

@@ -66,13 +66,13 @@ pub struct PaymentPromise {
 }
 
 impl PaymentPromise {
-    /// Compute the canonical sign bytes for this payment promise.
+    /// Compute the stripped sign bytes (payload only, no prefix or chain ID).
     ///
     /// Format:
     /// ```text
-    /// prefix || chain_id || signer_bytes(33) || namespace(29)
-    /// || blob_size(4 BE) || commitment(32) || blob_version(4 BE)
-    /// || height(8 BE) || timestamp(15 binary)
+    /// signer_bytes(33) || namespace(29) || blob_size(4 BE)
+    /// || commitment(32) || blob_version(4 BE) || height(8 BE)
+    /// || timestamp(15 binary)
     /// ```
     ///
     /// The timestamp uses Go's `time.Time.MarshalBinary()` format:
@@ -80,17 +80,13 @@ impl PaymentPromise {
     /// - 8 bytes: seconds as big-endian int64
     /// - 4 bytes: nanoseconds as big-endian int32
     /// - 2 bytes: timezone offset as big-endian int16 (-1 for UTC)
-    pub fn sign_bytes(&self) -> Result<Vec<u8>, FibreError> {
+    ///
+    /// These bytes are suitable for wrapping with CometBFT domain separation
+    /// via [`raw_bytes_message_sign_bytes`].
+    fn stripped_sign_bytes(&self) -> Result<Vec<u8>, FibreError> {
         let timestamp_bytes = marshal_binary_time(self.creation_timestamp)?;
 
-        let total_size = SIGN_BYTES_PREFIX.len() + self.chain_id.len() + SIGN_BYTES_FIXED_SIZE;
-        let mut buf = Vec::with_capacity(total_size);
-
-        // Prepend domain separation prefix
-        buf.extend_from_slice(SIGN_BYTES_PREFIX);
-
-        // Append chainID
-        buf.extend_from_slice(self.chain_id.as_bytes());
+        let mut buf = Vec::with_capacity(SIGN_BYTES_FIXED_SIZE);
 
         // Append signer_bytes (33 bytes - compressed public key)
         let pubkey_bytes = self.signer_pubkey.to_sec1_bytes();
@@ -118,9 +114,9 @@ impl PaymentPromise {
         Ok(buf)
     }
 
-    /// Compute the bytes that validators sign when counter-signing this promise.
+    /// Compute the canonical sign bytes for this payment promise.
     ///
-    /// Wraps [`sign_bytes()`](Self::sign_bytes) with CometBFT's
+    /// Wraps [`stripped_sign_bytes()`](Self::stripped_sign_bytes) with CometBFT's
     /// `RawBytesMessageSignBytes` domain separation format:
     ///
     /// ```text
@@ -130,16 +126,16 @@ impl PaymentPromise {
     /// ```
     ///
     /// Where `unique_id` is `"fibre/pp:v0"` and `raw_bytes` is the output of
-    /// [`sign_bytes()`](Self::sign_bytes).
+    /// [`stripped_sign_bytes()`](Self::stripped_sign_bytes).
     ///
-    /// This matches Go's `PaymentPromise.SignBytesValidator()` which calls
-    /// `core.RawBytesMessageSignBytes(chainID, signBytesPrefix, signBytes)`.
-    pub fn sign_bytes_validator(&self) -> Result<Vec<u8>, FibreError> {
-        let raw_bytes = self.sign_bytes()?;
+    /// Both the client signer and validators sign these same bytes.
+    /// This matches Go's `PaymentPromise.SignBytes()` in celestia-app.
+    pub fn sign_bytes(&self) -> Result<Vec<u8>, FibreError> {
+        let stripped = self.stripped_sign_bytes()?;
         Ok(raw_bytes_message_sign_bytes(
             &self.chain_id,
             SIGN_BYTES_PREFIX,
-            &raw_bytes,
+            &stripped,
         ))
     }
 
@@ -431,82 +427,75 @@ mod tests {
     }
 
     #[test]
-    fn sign_bytes_format() {
+    fn stripped_sign_bytes_format() {
         let (_, promise) = make_test_promise();
-        let sign_bytes = promise.sign_bytes().unwrap();
+        let stripped = promise.stripped_sign_bytes().unwrap();
 
-        // Expected total size
-        let expected_size =
-            SIGN_BYTES_PREFIX.len() + promise.chain_id.len() + SIGN_BYTES_FIXED_SIZE;
-        assert_eq!(sign_bytes.len(), expected_size);
-
-        // Check prefix
-        assert_eq!(&sign_bytes[..SIGN_BYTES_PREFIX.len()], SIGN_BYTES_PREFIX);
+        // stripped_sign_bytes has no prefix or chain_id
+        assert_eq!(stripped.len(), SIGN_BYTES_FIXED_SIZE);
     }
 
     #[test]
-    fn sign_bytes_field_layout() {
+    fn sign_bytes_uses_comet_wrapper() {
         let (_, promise) = make_test_promise();
         let sign_bytes = promise.sign_bytes().unwrap();
 
+        // sign_bytes starts with "COMET::RAW_BYTES::SIGN"
+        assert_eq!(
+            &sign_bytes[..COMET_RAW_BYTES_PREFIX.len()],
+            COMET_RAW_BYTES_PREFIX
+        );
+    }
+
+    #[test]
+    fn stripped_sign_bytes_field_layout() {
+        let (_, promise) = make_test_promise();
+        let stripped = promise.stripped_sign_bytes().unwrap();
+
         let mut offset = 0;
-
-        // Prefix
-        assert_eq!(
-            &sign_bytes[offset..offset + SIGN_BYTES_PREFIX.len()],
-            SIGN_BYTES_PREFIX
-        );
-        offset += SIGN_BYTES_PREFIX.len();
-
-        // Chain ID
-        assert_eq!(
-            &sign_bytes[offset..offset + promise.chain_id.len()],
-            promise.chain_id.as_bytes()
-        );
-        offset += promise.chain_id.len();
 
         // Signer pubkey (33 bytes)
         let expected_pubkey = promise.signer_pubkey.to_sec1_bytes();
         assert_eq!(
-            &sign_bytes[offset..offset + PUBKEY_SIZE],
+            &stripped[offset..offset + PUBKEY_SIZE],
             expected_pubkey.as_ref()
         );
         offset += PUBKEY_SIZE;
 
         // Namespace (29 bytes)
         assert_eq!(
-            &sign_bytes[offset..offset + NAMESPACE_SIZE],
+            &stripped[offset..offset + NAMESPACE_SIZE],
             &promise.namespace
         );
         offset += NAMESPACE_SIZE;
 
         // Upload size (4 bytes BE)
         assert_eq!(
-            &sign_bytes[offset..offset + 4],
+            &stripped[offset..offset + 4],
             &promise.upload_size.to_be_bytes()
         );
         offset += 4;
 
         // Commitment (32 bytes)
-        assert_eq!(&sign_bytes[offset..offset + 32], &promise.commitment);
+        assert_eq!(&stripped[offset..offset + 32], &promise.commitment);
         offset += 32;
 
         // Blob version (4 bytes BE)
         assert_eq!(
-            &sign_bytes[offset..offset + 4],
+            &stripped[offset..offset + 4],
             &promise.blob_version.to_be_bytes()
         );
         offset += 4;
 
         // Height (8 bytes BE)
         assert_eq!(
-            &sign_bytes[offset..offset + 8],
+            &stripped[offset..offset + 8],
             &promise.height.to_be_bytes()
         );
         offset += 8;
 
         // Timestamp (15 bytes)
-        assert_eq!(sign_bytes.len() - offset, TIMESTAMP_BINARY_SIZE);
+        assert_eq!(stripped.len() - offset, TIMESTAMP_BINARY_SIZE);
     }
 
     #[test]
@@ -659,30 +648,6 @@ mod tests {
     ///
     /// Uses a deterministic private key and fixed field values so the output
     /// can be reproduced in Go to verify sign_bytes and signature compatibility.
-    ///
-    /// Corresponding Go test:
-    /// ```go
-    /// func TestCrossLanguageSignBytes(t *testing.T) {
-    ///     keyBytes, _ := hex.DecodeString("<PRIVATE_KEY_HEX from test output>")
-    ///     privKey := &secp256k1.PrivKey{Key: keyBytes}
-    ///     pubKey := privKey.PubKey().(*secp256k1.PubKey)
-    ///     ns, _ := share.NewNamespaceFromBytes(bytes.Repeat([]byte{0}, 29))
-    ///     pp := &fibre.PaymentPromise{
-    ///         ChainID:           "mocha-4",
-    ///         Height:            100,
-    ///         Namespace:         ns,
-    ///         UploadSize:        1024,
-    ///         BlobVersion:       0,
-    ///         Commitment:        fibre.Commitment(bytes.Repeat([]byte{0xAB}, 32)),
-    ///         CreationTimestamp:  time.Unix(1700000000, 0),
-    ///         SignerKey:         pubKey,
-    ///     }
-    ///     signBytes, err := pp.SignBytes()
-    ///     require.NoError(t, err)
-    ///     t.Logf("Go sign_bytes hex: %s", hex.EncodeToString(signBytes))
-    ///     // Compare with Rust output
-    /// }
-    /// ```
     #[test]
     fn cross_language_sign_bytes_deterministic() {
         // Use a deterministic private key (32 bytes, all 0x01).
@@ -705,96 +670,88 @@ mod tests {
             signature: None,
         };
 
-        let sign_bytes = promise.sign_bytes().unwrap();
+        // Verify stripped_sign_bytes layout (fields only, no prefix/chainID)
+        let stripped = promise.stripped_sign_bytes().unwrap();
+        assert_eq!(stripped.len(), SIGN_BYTES_FIXED_SIZE);
 
-        // Print hex values for cross-language comparison
-        let pubkey_hex = hex::encode(verifying_key.to_sec1_bytes().as_ref());
-        let sign_bytes_hex = hex::encode(&sign_bytes);
-        eprintln!("=== Cross-language compatibility test ===");
-        eprintln!("Private key hex: {}", hex::encode(key_bytes));
-        eprintln!("Public key hex (33 bytes compressed): {pubkey_hex}");
-        eprintln!(
-            "Sign bytes hex ({} bytes): {sign_bytes_hex}",
-            sign_bytes.len()
-        );
-
-        // Verify expected total size
-        let expected_size = SIGN_BYTES_PREFIX.len() + "mocha-4".len() + SIGN_BYTES_FIXED_SIZE;
-        assert_eq!(
-            sign_bytes.len(),
-            expected_size,
-            "sign_bytes has wrong length"
-        );
-
-        // Sign and print signature
-        promise.sign(&signing_key).unwrap();
-        let signature_hex = hex::encode(promise.signature.as_ref().unwrap());
-        eprintln!("Signature hex (64 bytes): {signature_hex}");
-
-        // Verify the signature passes our own validation
-        promise.validate().unwrap();
-
-        // Print the SHA-256 hash of sign_bytes (this is what ECDSA actually signs)
-        use sha2::{Digest as _, Sha256};
-        let hash = Sha256::digest(&sign_bytes);
-        eprintln!("SHA-256(sign_bytes) hex: {}", hex::encode(hash));
-        eprintln!("=== End cross-language compatibility test ===");
-
-        // Verify field layout byte by byte
         let mut offset = 0;
-
-        // Prefix: "fibre/pp:v0" (11 bytes)
-        assert_eq!(&sign_bytes[offset..offset + 11], b"fibre/pp:v0");
-        offset += 11;
-
-        // Chain ID: "mocha-4" (7 bytes)
-        assert_eq!(&sign_bytes[offset..offset + 7], b"mocha-4");
-        offset += 7;
 
         // Public key (33 bytes)
         assert_eq!(
-            &sign_bytes[offset..offset + 33],
+            &stripped[offset..offset + 33],
             verifying_key.to_sec1_bytes().as_ref()
         );
         offset += 33;
 
         // Namespace (29 bytes, all zeros)
-        assert_eq!(&sign_bytes[offset..offset + 29], &[0u8; 29]);
+        assert_eq!(&stripped[offset..offset + 29], &[0u8; 29]);
         offset += 29;
 
         // Upload size: 1024 = 0x00000400 (4 bytes BE)
-        assert_eq!(&sign_bytes[offset..offset + 4], &[0x00, 0x00, 0x04, 0x00]);
+        assert_eq!(&stripped[offset..offset + 4], &[0x00, 0x00, 0x04, 0x00]);
         offset += 4;
 
         // Commitment (32 bytes, all 0xAB)
-        assert_eq!(&sign_bytes[offset..offset + 32], &[0xABu8; 32]);
+        assert_eq!(&stripped[offset..offset + 32], &[0xABu8; 32]);
         offset += 32;
 
         // Blob version: 0 (4 bytes BE)
-        assert_eq!(&sign_bytes[offset..offset + 4], &[0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(&stripped[offset..offset + 4], &[0x00, 0x00, 0x00, 0x00]);
         offset += 4;
 
         // Height: 100 = 0x0000000000000064 (8 bytes BE)
         assert_eq!(
-            &sign_bytes[offset..offset + 8],
+            &stripped[offset..offset + 8],
             &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]
         );
         offset += 8;
 
         // Timestamp: marshal_binary_time(Unix 1700000000, 0 nanos)
-        // Go's MarshalBinary uses seconds since year 1 (internal epoch):
-        //   1700000000 + 62135596800 = 63835596800 = 0x0EDCE5E800
-        // version=1, secs=0x0000000EDCE5E800, nanos=0x00000000, offset=0xFFFF
         let expected_ts: [u8; 15] = [
             0x01, // version
             0x00, 0x00, 0x00, 0x0E, 0xDC, 0xE5, 0xE8, 0x00, // seconds since year 1 BE
             0x00, 0x00, 0x00, 0x00, // nanos BE
             0xFF, 0xFF, // UTC offset (-1)
         ];
-        assert_eq!(&sign_bytes[offset..offset + 15], &expected_ts);
+        assert_eq!(&stripped[offset..offset + 15], &expected_ts);
         offset += 15;
+        assert_eq!(offset, stripped.len());
 
-        assert_eq!(offset, sign_bytes.len());
+        // sign_bytes() wraps stripped with CometBFT domain separation
+        let sign_bytes = promise.sign_bytes().unwrap();
+        assert_eq!(
+            &sign_bytes[..COMET_RAW_BYTES_PREFIX.len()],
+            COMET_RAW_BYTES_PREFIX
+        );
+
+        // Print hex values for cross-language comparison
+        let sign_bytes_hex = hex::encode(&sign_bytes);
+        eprintln!("=== Cross-language compatibility test ===");
+        eprintln!("Private key hex: {}", hex::encode(key_bytes));
+        eprintln!(
+            "Public key hex (33 bytes compressed): {}",
+            hex::encode(verifying_key.to_sec1_bytes().as_ref())
+        );
+        eprintln!(
+            "Stripped sign bytes hex ({} bytes): {}",
+            stripped.len(),
+            hex::encode(&stripped)
+        );
+        eprintln!(
+            "Sign bytes hex ({} bytes): {sign_bytes_hex}",
+            sign_bytes.len()
+        );
+
+        // Sign and verify
+        promise.sign(&signing_key).unwrap();
+        let signature_hex = hex::encode(promise.signature.as_ref().unwrap());
+        eprintln!("Signature hex (64 bytes): {signature_hex}");
+        promise.validate().unwrap();
+
+        use sha2::{Digest as _, Sha256};
+        let hash = Sha256::digest(&sign_bytes);
+        eprintln!("SHA-256(sign_bytes) hex: {}", hex::encode(hash));
+        eprintln!("=== End cross-language compatibility test ===");
     }
 
     /// Proto round-trip test: verify sign_bytes survive serialization.
