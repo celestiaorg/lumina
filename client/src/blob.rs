@@ -36,7 +36,7 @@ impl BlobApi {
     /// # async fn docs() -> Result<()> {
     /// use celestia_types::nmt::Namespace;
     /// use celestia_types::state::{Address, Coin};
-    /// use celestia_types::{AppVersion, Blob};
+    /// use celestia_types::Blob;
     ///
     /// let client = Client::builder()
     ///     .rpc_url("ws://localhost:26658")
@@ -46,7 +46,7 @@ impl BlobApi {
     ///     .await?;
     ///
     /// let ns = Namespace::new_v0(b"abcd").unwrap();
-    /// let blob = Blob::new(ns, "some data".into(), None, AppVersion::latest()).unwrap();
+    /// let blob = Blob::new(ns, "some data".into(), None).unwrap();
     ///
     /// client.blob().submit(&[blob], TxConfig::default()).await?;
     /// # Ok(())
@@ -79,9 +79,8 @@ impl BlobApi {
             .rpc
             .blob_get(height, namespace, commitment)
             .await?;
-        let app_version = self.inner.get_header_validated(height).await?.app_version();
 
-        blob.validate_with_commitment(&commitment, app_version)?;
+        blob.validate_with_commitment(&commitment)?;
 
         Ok(blob)
     }
@@ -96,10 +95,8 @@ impl BlobApi {
             return Ok(None);
         };
 
-        let app_version = self.inner.get_header_validated(height).await?.app_version();
-
         for blob in &blobs {
-            blob.validate(app_version)?;
+            blob.validate()?;
         }
 
         Ok(Some(blobs))
@@ -179,7 +176,6 @@ impl BlobApi {
 mod tests {
     use super::*;
     use crate::test_utils::{ensure_serializable_deserializable, new_client};
-    use celestia_types::AppVersion;
     use lumina_utils::test_utils::async_test;
 
     #[async_test]
@@ -192,7 +188,6 @@ mod tests {
             ns,
             b"some data to store".to_vec(),
             Some(client.address().unwrap()),
-            AppVersion::V3,
         )
         .unwrap();
 
@@ -210,7 +205,7 @@ mod tests {
             .unwrap();
 
         received_blob
-            .validate_with_commitment(&submitted_commitment, AppVersion::V3)
+            .validate_with_commitment(&submitted_commitment)
             .unwrap();
     }
 

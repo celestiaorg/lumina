@@ -9,15 +9,12 @@ use tendermint_proto::Protobuf;
 #[cfg(all(feature = "wasm-bindgen", target_arch = "wasm32"))]
 use wasm_bindgen::prelude::*;
 
-use crate::consts::appconsts::AppVersion;
-use crate::consts::data_availability_header::{
-    MIN_EXTENDED_SQUARE_WIDTH, max_extended_square_width,
-};
+use crate::consts::data_availability_header::MIN_EXTENDED_SQUARE_WIDTH;
 use crate::eds::AxisType;
 use crate::hash::Hash;
 use crate::nmt::{Namespace, NamespacedHash, NamespacedHashExt, NamespacedSha2Hasher};
 use crate::{
-    Error, ExtendedDataSquare, MerkleProof, Result, ValidateBasicWithAppVersion, ValidationError,
+    Error, ExtendedDataSquare, MerkleProof, Result, ValidateBasic, ValidationError,
     bail_validation, bail_verification, validation_error,
 };
 
@@ -73,13 +70,9 @@ pub struct DataAvailabilityHeader {
 
 impl DataAvailabilityHeader {
     /// Create new [`DataAvailabilityHeader`].
-    pub fn new(
-        row_roots: Vec<NamespacedHash>,
-        column_roots: Vec<NamespacedHash>,
-        app_version: AppVersion,
-    ) -> Result<Self> {
+    pub fn new(row_roots: Vec<NamespacedHash>, column_roots: Vec<NamespacedHash>) -> Result<Self> {
         let dah = DataAvailabilityHeader::new_unchecked(row_roots, column_roots);
-        dah.validate_basic(app_version)?;
+        dah.validate_basic()?;
         Ok(dah)
     }
 
@@ -326,10 +319,8 @@ impl From<DataAvailabilityHeader> for RawDataAvailabilityHeader {
     }
 }
 
-impl ValidateBasicWithAppVersion for DataAvailabilityHeader {
-    fn validate_basic(&self, app_version: AppVersion) -> Result<(), ValidationError> {
-        let max_extended_square_width = max_extended_square_width(app_version);
-
+impl ValidateBasic for DataAvailabilityHeader {
+    fn validate_basic(&self) -> Result<(), ValidationError> {
         if self.column_roots.len() != self.row_roots.len() {
             bail_validation!(
                 "column_roots len ({}) != row_roots len ({})",
@@ -343,14 +334,6 @@ impl ValidateBasicWithAppVersion for DataAvailabilityHeader {
                 "row_roots len ({}) < minimum ({})",
                 self.row_roots.len(),
                 MIN_EXTENDED_SQUARE_WIDTH,
-            )
-        }
-
-        if self.row_roots.len() > max_extended_square_width {
-            bail_validation!(
-                "row_roots len ({}) > maximum ({})",
-                self.row_roots.len(),
-                max_extended_square_width,
             )
         }
 
@@ -508,7 +491,7 @@ mod tests {
     fn validate_correct() {
         let dah = sample_dah();
 
-        dah.validate_basic(AppVersion::V2).unwrap();
+        dah.validate_basic().unwrap();
     }
 
     #[test]
@@ -516,7 +499,7 @@ mod tests {
         let mut dah = sample_dah();
         dah.row_roots.pop();
 
-        dah.validate_basic(AppVersion::V2).unwrap_err();
+        dah.validate_basic().unwrap_err();
     }
 
     #[test]
@@ -535,36 +518,12 @@ mod tests {
             .take(MIN_EXTENDED_SQUARE_WIDTH)
             .collect();
 
-        dah.validate_basic(AppVersion::V2).unwrap();
+        dah.validate_basic().unwrap();
 
         dah.row_roots.pop();
         dah.column_roots.pop();
 
-        dah.validate_basic(AppVersion::V2).unwrap_err();
-    }
-
-    #[test]
-    fn validate_too_big_square() {
-        let mut dah = sample_dah();
-        dah.row_roots = dah
-            .row_roots
-            .into_iter()
-            .cycle()
-            .take(max_extended_square_width(AppVersion::V2))
-            .collect();
-        dah.column_roots = dah
-            .column_roots
-            .into_iter()
-            .cycle()
-            .take(max_extended_square_width(AppVersion::V2))
-            .collect();
-
-        dah.validate_basic(AppVersion::V2).unwrap();
-
-        dah.row_roots.push(dah.row_roots[0].clone());
-        dah.column_roots.push(dah.column_roots[0].clone());
-
-        dah.validate_basic(AppVersion::V2).unwrap_err();
+        dah.validate_basic().unwrap_err();
     }
 
     #[test]
@@ -699,6 +658,6 @@ mod tests {
             })
             .unzip();
 
-        DataAvailabilityHeader::new(row_roots, col_roots, AppVersion::V2).unwrap()
+        DataAvailabilityHeader::new(row_roots, col_roots).unwrap()
     }
 }

@@ -17,13 +17,11 @@ use tendermint_proto::Protobuf;
 #[cfg(all(feature = "wasm-bindgen", target_arch = "wasm32"))]
 use wasm_bindgen::prelude::*;
 
-use crate::consts::appconsts::AppVersion;
 use crate::hash::Hash;
 use crate::trust_level::DEFAULT_TRUST_LEVEL;
 use crate::validator_set::ValidatorSetExt;
 use crate::{
-    DataAvailabilityHeader, Error, Result, ValidateBasic, ValidateBasicWithAppVersion,
-    bail_validation, bail_verification,
+    DataAvailabilityHeader, Error, Result, ValidateBasic, bail_validation, bail_verification,
 };
 
 /// Information about a tendermint validator.
@@ -111,15 +109,8 @@ impl ExtendedHeader {
     }
 
     /// Get the app version.
-    ///
-    /// # Panics
-    ///
-    /// This method can panic if an app version is not supported. Make sure to call
-    /// [`ExtendedHeader::validate`] before (this is already done for headers deserialized via
-    /// serde).
-    pub fn app_version(&self) -> AppVersion {
-        let app_version = self.header.version.app;
-        AppVersion::from_u64(app_version).expect("header should be validated before calling")
+    pub fn app_version(&self) -> u64 {
+        self.header.version.app
     }
 
     /// Get the block chain id.
@@ -225,11 +216,7 @@ impl ExtendedHeader {
             &self.commit,
         )?;
 
-        let app_version = self.header.version.app;
-        let app_version =
-            AppVersion::from_u64(app_version).ok_or(Error::UnsupportedAppVersion(app_version))?;
-
-        self.dah.validate_basic(app_version)?;
+        self.dah.validate_basic()?;
 
         Ok(())
     }

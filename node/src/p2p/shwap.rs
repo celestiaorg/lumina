@@ -108,7 +108,6 @@ mod tests {
     use super::*;
     use crate::store::InMemoryStore;
     use bytes::BytesMut;
-    use celestia_types::consts::appconsts::AppVersion;
     use celestia_types::test_utils::{ExtendedHeaderGenerator, generate_dummy_eds};
     use celestia_types::{AxisType, DataAvailabilityHeader};
     use lumina_utils::test_utils::async_test;
@@ -117,7 +116,7 @@ mod tests {
     async fn hash() {
         let store = Arc::new(InMemoryStore::new());
 
-        let eds = generate_dummy_eds(4, AppVersion::V2);
+        let eds = generate_dummy_eds(4);
         let dah = DataAvailabilityHeader::from_eds(&eds);
 
         let mut generator = ExtendedHeaderGenerator::new();

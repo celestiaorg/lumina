@@ -14,7 +14,7 @@ use wasm_bindgen::prelude::*;
 use crate::consts::appconsts;
 use crate::nmt::{Namespace, NamespacedHashExt, NamespacedSha2Hasher, Nmt, RawNamespacedHash};
 use crate::state::{AccAddress, AddressTrait};
-use crate::{AppVersion, Error, Result};
+use crate::{Error, Result};
 use crate::{InfoByte, Share};
 
 /// A merkle hash used to identify the [`Blob`]s data.
@@ -75,24 +75,19 @@ impl Commitment {
         blob_data: &[u8],
         share_version: u8,
         signer: Option<&AccAddress>,
-        app_version: AppVersion,
     ) -> Result<Commitment> {
-        validate_blob(share_version, signer.is_some(), Some(app_version))?;
+        validate_blob(share_version, signer.is_some())?;
         let shares = split_blob_to_shares(namespace, share_version, blob_data, signer)?;
-        Self::from_shares(namespace, &shares, app_version)
+        Self::from_shares(namespace, &shares)
     }
 
     /// Generate the commitment from the given shares.
-    pub fn from_shares(
-        namespace: Namespace,
-        mut shares: &[Share],
-        app_version: AppVersion,
-    ) -> Result<Commitment> {
+    pub fn from_shares(namespace: Namespace, mut shares: &[Share]) -> Result<Commitment> {
         // the commitment is the root of a merkle mountain range with max tree size
         // determined by the number of roots required to create a share commitment
         // over that blob. The size of the tree is only increased if the number of
         // subtree roots surpasses a constant threshold.
-        let subtree_root_threshold = appconsts::subtree_root_threshold(app_version);
+        let subtree_root_threshold = appconsts::SUBTREE_ROOT_THRESHOLD;
         let subtree_width = subtree_width(shares.len() as u64, subtree_root_threshold);
         let tree_sizes = merkle_mountain_range_sizes(shares.len() as u64, subtree_width);
 
@@ -176,13 +171,9 @@ impl<'de> Deserialize<'de> for Commitment {
     }
 }
 
-/// Check if the combination of share_verison and signer (and app version, in case it's known in
-/// this context) is valid, and return appropriate error otherwise
-pub(crate) fn validate_blob(
-    share_version: u8,
-    has_signer: bool,
-    app_version: Option<AppVersion>,
-) -> Result<()> {
+/// Check if the combination of share_version and signer is valid, and return appropriate error
+/// otherwise
+pub(crate) fn validate_blob(share_version: u8, has_signer: bool) -> Result<()> {
     if ![appconsts::SHARE_VERSION_ZERO, appconsts::SHARE_VERSION_ONE].contains(&share_version) {
         return Err(Error::UnsupportedShareVersion(share_version));
     }
@@ -191,11 +182,6 @@ pub(crate) fn validate_blob(
     }
     if share_version == appconsts::SHARE_VERSION_ONE && !has_signer {
         return Err(Error::MissingSigner);
-    }
-    if app_version
-        .is_some_and(|app| share_version == appconsts::SHARE_VERSION_ONE && app < AppVersion::V3)
-    {
-        return Err(Error::UnsupportedShareVersion(share_version));
     }
     Ok(())
 }
@@ -601,10 +587,6 @@ mod tests {
 
     #[test]
     fn blob_validation() {
-        let app_signer_allowed = Some(AppVersion::V3);
-        let app_signer_forbidden = Some(AppVersion::V2);
-        let app_unknown = None;
-
         let share_signer_required = appconsts::SHARE_VERSION_ONE;
         let share_signer_forbidden = appconsts::SHARE_VERSION_ZERO;
         let share_version_unsupported = appconsts::MAX_SHARE_VERSION;
@@ -613,26 +595,18 @@ mod tests {
         let no_signer = false;
 
         // all good - no signer
-        validate_blob(share_signer_forbidden, no_signer, app_signer_allowed).unwrap();
-        validate_blob(share_signer_forbidden, no_signer, app_signer_forbidden).unwrap();
-        validate_blob(share_signer_forbidden, no_signer, app_unknown).unwrap();
+        validate_blob(share_signer_forbidden, no_signer).unwrap();
 
         // all good - with signer
-        validate_blob(share_signer_required, with_signer, app_signer_allowed).unwrap();
-        validate_blob(share_signer_required, with_signer, app_unknown).unwrap();
+        validate_blob(share_signer_required, with_signer).unwrap();
 
-        // unsupported app version
-        validate_blob(share_version_unsupported, no_signer, app_signer_allowed).unwrap_err();
+        // unsupported share version
+        validate_blob(share_version_unsupported, no_signer).unwrap_err();
 
         // no signer when required
-        validate_blob(share_signer_required, no_signer, app_signer_forbidden).unwrap_err();
-        validate_blob(share_signer_required, no_signer, app_signer_allowed).unwrap_err();
-        validate_blob(share_signer_required, no_signer, app_unknown).unwrap_err();
+        validate_blob(share_signer_required, no_signer).unwrap_err();
 
         // with signer when forbidden
-        validate_blob(share_signer_required, with_signer, app_signer_forbidden).unwrap_err();
-        validate_blob(share_signer_forbidden, with_signer, app_signer_forbidden).unwrap_err();
-        validate_blob(share_signer_forbidden, with_signer, app_signer_allowed).unwrap_err();
-        validate_blob(share_signer_forbidden, with_signer, app_unknown).unwrap_err();
+        validate_blob(share_signer_forbidden, with_signer).unwrap_err();
     }
 }

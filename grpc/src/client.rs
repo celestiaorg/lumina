@@ -42,7 +42,7 @@ use celestia_types::state::{
 use celestia_types::state::{
     AccAddress, Address, AddressTrait, BOND_DENOM, Coin, ErrorCode, TxResponse,
 };
-use celestia_types::{AppVersion, Blob, ExtendedHeader};
+use celestia_types::{Blob, ExtendedHeader};
 
 use crate::abci_proofs::ProofChain;
 use crate::boxed::BoxedTransport;
@@ -62,7 +62,6 @@ const SEQUENCE_ERROR_PAT: &str = "account sequence mismatch, expected ";
 
 #[derive(Debug, Clone)]
 struct ChainState {
-    app_version: AppVersion,
     chain_id: Id,
 }
 
@@ -423,7 +422,7 @@ impl GrpcClient {
     /// # async fn docs() {
     /// use celestia_grpc::{GrpcClient, TxConfig};
     /// use celestia_types::state::{Address, Coin};
-    /// use celestia_types::{AppVersion, Blob};
+    /// use celestia_types::Blob;
     /// use celestia_types::nmt::Namespace;
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
@@ -438,7 +437,7 @@ impl GrpcClient {
     ///     .unwrap();
     ///
     /// let ns = Namespace::new_v0(b"abcd").unwrap();
-    /// let blob = Blob::new(ns, "some data".into(), None, AppVersion::latest()).unwrap();
+    /// let blob = Blob::new(ns, "some data".into(), None).unwrap();
     ///
     /// tx_client
     ///     .submit_blobs(&[blob], TxConfig::default())
@@ -465,7 +464,7 @@ impl GrpcClient {
     /// # async fn docs() {
     /// use celestia_grpc::{GrpcClient, TxConfig};
     /// use celestia_types::state::{Address, Coin};
-    /// use celestia_types::{AppVersion, Blob};
+    /// use celestia_types::Blob;
     /// use celestia_types::nmt::Namespace;
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
@@ -480,7 +479,7 @@ impl GrpcClient {
     ///     .unwrap();
     ///
     /// let ns = Namespace::new_v0(b"abcd").unwrap();
-    /// let blob = Blob::new(ns, "some data".into(), None, AppVersion::V3).unwrap();
+    /// let blob = Blob::new(ns, "some data".into(), None).unwrap();
     ///
     /// let broadcasted_tx = tx_client
     ///     .broadcast_blobs(&[blob], TxConfig::default()).await.unwrap();
@@ -505,16 +504,6 @@ impl GrpcClient {
                 })
                 .context(&context),
             ))
-        })
-    }
-
-    /// Get client's app version
-    pub fn app_version(&self) -> AsyncGrpcCall<AppVersion> {
-        let this = self.clone();
-
-        AsyncGrpcCall::new(move |context| async move {
-            let ChainState { app_version, .. } = this.load_chain_state(&context).await?;
-            Ok(*app_version)
         })
     }
 
@@ -640,9 +629,8 @@ impl GrpcClient {
         if blobs.is_empty() {
             return Err(Error::TxEmptyBlobList);
         }
-        let app_version = self.app_version().await?;
         for blob in blobs {
-            blob.validate(app_version)?;
+            blob.validate()?;
         }
 
         self.sign_and_broadcast_blobs(blobs.to_vec(), cfg.clone(), context)
@@ -654,15 +642,9 @@ impl GrpcClient {
             .chain_state
             .get_or_try_init(|| async {
                 let block = self.get_latest_block().context(context).await?;
-                let app_version = block.header.version.app;
-                let app_version = AppVersion::from_u64(app_version)
-                    .ok_or(celestia_types::Error::UnsupportedAppVersion(app_version))?;
                 let chain_id = block.header.chain_id;
 
-                Ok::<_, Error>(ChainState {
-                    app_version,
-                    chain_id,
-                })
+                Ok::<_, Error>(ChainState { chain_id })
             })
             .await
     }
@@ -1066,9 +1048,9 @@ mod tests {
 
     use celestia_proto::cosmos::bank::v1beta1::MsgSend;
     use celestia_rpc::HeaderClient;
+    use celestia_types::Blob;
     use celestia_types::nmt::Namespace;
     use celestia_types::state::{Coin, ErrorCode};
-    use celestia_types::{AppVersion, Blob};
     use futures::FutureExt;
     use lumina_utils::test_utils::async_test;
     use lumina_utils::time::sleep;
@@ -1093,7 +1075,7 @@ mod tests {
             .unwrap();
 
         // Per-call metadata (.block_height) should be in call.context
-        let call = client.app_version().block_height(1234);
+        let call = client.chain_id().block_height(1234);
         assert!(call.context.metadata.contains_key("x-cosmos-block-height"));
         // The token metadata is not in the call.context, because it is merged at runtime whenever we decide which transport we use
     }
@@ -1621,7 +1603,7 @@ mod tests {
         rng.fill_bytes(&mut blob);
         blob.resize(len, 1);
 
-        Blob::new(namespace, blob, None, AppVersion::latest()).unwrap()
+        Blob::new(namespace, blob, None).unwrap()
     }
 
     fn random_transfer(client: &GrpcClient) -> MsgSend {

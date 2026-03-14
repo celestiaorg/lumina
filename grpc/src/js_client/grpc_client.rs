@@ -5,7 +5,6 @@ use wasm_bindgen::prelude::*;
 use celestia_types::any::{IntoProtobufAny, JsAny};
 use celestia_types::blob::BlobParams;
 use celestia_types::block::Block;
-use celestia_types::consts::appconsts::JsAppVersion;
 use celestia_types::state::auth::{JsAuthParams, JsBaseAccount};
 use celestia_types::state::{AbciQueryResponse, JsCoin, TxResponse};
 use celestia_types::{Blob, ExtendedHeader};
@@ -233,19 +232,13 @@ impl GrpcClient {
         Ok(self.client.chain_id().await?.to_string())
     }
 
-    /// AppVersion of the client
-    #[wasm_bindgen(js_name = appVersion, getter)]
-    pub async fn app_version(&self) -> Result<JsAppVersion> {
-        Ok(self.client.app_version().await?.into())
-    }
-
     /// Submit blobs to the celestia network.
     ///
     /// # Example
     /// ```js
     /// const ns = Namespace.newV0(new Uint8Array([97, 98, 99]));
     /// const data = new Uint8Array([100, 97, 116, 97]);
-    /// const blob = new Blob(ns, data, AppVersion.latest());
+    /// const blob = new Blob(ns, data);
     ///
     /// const txInfo = await txClient.submitBlobs([blob]);
     /// await txClient.submitBlobs([blob], { gasLimit: 100000n, gasPrice: 0.02, memo: "foo" });
@@ -347,7 +340,7 @@ impl GrpcClient {
     /// ```js
     /// const ns = Namespace.newV0(new Uint8Array([97, 98, 99]));
     /// const data = new Uint8Array([100, 97, 116, 97]);
-    /// const blob = new Blob(ns, data, AppVersion.latest());
+    /// const blob = new Blob(ns, data);
     ///
     /// const broadcastedTx = await txClient.broadcastBlobs([blob]);
     /// console.log("Tx hash:", broadcastedTx.hash);
@@ -382,7 +375,7 @@ impl GrpcClient {
     /// ```js
     /// const ns = Namespace.newV0(new Uint8Array([97, 98, 99]));
     /// const data = new Uint8Array([100, 97, 116, 97]);
-    /// const blob = new Blob(ns, data, AppVersion.latest());
+    /// const blob = new Blob(ns, data);
     ///
     /// const broadcastedTx = await txClient.broadcastBlobs([blob]);
     /// console.log("Tx hash:", broadcastedTx.hash);
