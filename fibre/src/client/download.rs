@@ -124,7 +124,10 @@ impl FibreClient {
         let mut futures: FuturesUnordered<
             BoxFuture<
                 'static,
-                (usize, Option<Result<Vec<rsema1d::RowInclusionProof>, FibreError>>),
+                (
+                    usize,
+                    Option<Result<Vec<rsema1d::RowInclusionProof>, FibreError>>,
+                ),
             >,
         > = FuturesUnordered::new();
 

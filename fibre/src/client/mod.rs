@@ -220,9 +220,7 @@ mod tests {
 
     #[test]
     fn builder_missing_set_getter_returns_error() {
-        let result = FibreClient::builder()
-            .connector(DummyConnector)
-            .build();
+        let result = FibreClient::builder().connector(DummyConnector).build();
 
         match result {
             Err(FibreError::Other(msg)) => {
@@ -238,9 +236,7 @@ mod tests {
 
     #[test]
     fn builder_missing_connector_returns_error() {
-        let result = FibreClient::builder()
-            .set_getter(DummySetGetter)
-            .build();
+        let result = FibreClient::builder().set_getter(DummySetGetter).build();
 
         match result {
             Err(FibreError::Other(msg)) => {

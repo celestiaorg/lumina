@@ -50,12 +50,7 @@ impl FibreApi {
 
         let prepared = self
             .fibre_client
-            .put(
-                signing_key,
-                namespace,
-                data,
-                &signer_address.to_string(),
-            )
+            .put(signing_key, namespace, data, &signer_address.to_string())
             .await
             .map_err(fibre_err)?;
 

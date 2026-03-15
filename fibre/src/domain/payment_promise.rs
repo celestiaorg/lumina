@@ -429,10 +429,7 @@ mod tests {
         offset += 4;
 
         // Height (8 bytes BE)
-        assert_eq!(
-            &stripped[offset..offset + 8],
-            &promise.height.to_be_bytes()
-        );
+        assert_eq!(&stripped[offset..offset + 8], &promise.height.to_be_bytes());
         offset += 8;
 
         // Timestamp (15 bytes)

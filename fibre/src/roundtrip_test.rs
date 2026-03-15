@@ -209,7 +209,13 @@ async fn upload_then_download_roundtrip() {
     let client = build_client(&validators, connector);
 
     // Upload.
-    let signed = client.upload(&k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng), &[0u8; 29], blob).await;
+    let signed = client
+        .upload(
+            &k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng),
+            &[0u8; 29],
+            blob,
+        )
+        .await;
     assert!(signed.is_ok(), "upload should succeed: {:?}", signed.err());
 
     let signed = signed.unwrap();
@@ -275,7 +281,13 @@ async fn roundtrip_with_partial_validator_failure() {
 
     // Total voting power = 800. 2/3 threshold = 533.
     // 3 good validators have 600 voting power > 533 → upload should succeed.
-    let signed = client.upload(&k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng), &[0u8; 29], blob).await;
+    let signed = client
+        .upload(
+            &k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng),
+            &[0u8; 29],
+            blob,
+        )
+        .await;
     assert!(
         signed.is_ok(),
         "upload should succeed with 3/5 validators: {:?}",

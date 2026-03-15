@@ -546,7 +546,10 @@ mod tests {
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
 
-        client.upload(&test_signing_key(), &namespace, blob).await.unwrap();
+        client
+            .upload(&test_signing_key(), &namespace, blob)
+            .await
+            .unwrap();
 
         // Verify each mock validator received some rows.
         for (_, info) in &validators {
