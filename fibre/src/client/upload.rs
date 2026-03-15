@@ -55,6 +55,7 @@ impl FibreClient {
     /// 8. Return the [`SignedPaymentPromise`].
     pub async fn upload(
         &self,
+        signing_key: &k256::ecdsa::SigningKey,
         namespace: &[u8],
         blob: &Blob,
     ) -> Result<SignedPaymentPromise, FibreError> {
@@ -74,10 +75,10 @@ impl FibreClient {
             blob_version: blob.config().blob_version as u32,
             commitment: blob.id().commitment(),
             creation_timestamp: std::time::SystemTime::now(),
-            signer_pubkey: *self.signing_key.verifying_key(),
+            signer_pubkey: *signing_key.verifying_key(),
             signature: None,
         };
-        promise.sign(&self.signing_key)?;
+        promise.sign(signing_key)?;
 
         // 3. Assign shards
         let shard_map = val_set.assign(
@@ -137,6 +138,7 @@ impl FibreClient {
     /// - Any error from blob encoding or upload.
     pub async fn put(
         &self,
+        signing_key: &k256::ecdsa::SigningKey,
         namespace: &[u8],
         data: &[u8],
         signer_address: &str,
@@ -149,7 +151,7 @@ impl FibreClient {
         let blob = Blob::new(data, BlobConfig::for_version(0)?)?;
 
         // 2. Upload to validators and collect signatures.
-        let signed_promise = self.upload(namespace, &blob).await?;
+        let signed_promise = self.upload(signing_key, namespace, &blob).await?;
 
         // 3. Map signatures to on-chain format, preserving positional alignment.
         // The on-chain code maps signatures[i] → validator[i], so we must keep
@@ -464,14 +466,16 @@ mod tests {
         val_set: ValidatorSet,
         connector: impl ValidatorConnector + 'static,
     ) -> FibreClient {
-        let signing_key = SigningKey::random(&mut OsRng);
         FibreClient::builder()
             .config(test_config())
-            .signing_key(signing_key)
             .set_getter(MockSetGetter { val_set })
             .connector(connector)
             .build()
             .unwrap()
+    }
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::random(&mut OsRng)
     }
 
     /// Create a MockValidatorConnector with connections for all validators.
@@ -511,9 +515,10 @@ mod tests {
         let client = build_client(val_set, connector);
         client.close();
 
+        let sk = test_signing_key();
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
-        let result = client.upload(&namespace, &blob).await;
+        let result = client.upload(&sk, &namespace, &blob).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             FibreError::ClientClosed => {}
@@ -539,11 +544,12 @@ mod tests {
             height: 42,
         };
 
+        let sk = test_signing_key();
         let client = build_client(val_set, connector);
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
 
-        let result = client.upload(&namespace, &blob).await;
+        let result = client.upload(&sk, &namespace, &blob).await;
         assert!(result.is_ok(), "upload should succeed: {:?}", result.err());
 
         let signed = result.unwrap();
@@ -586,7 +592,7 @@ mod tests {
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
 
-        client.upload(&namespace, &blob).await.unwrap();
+        client.upload(&test_signing_key(), &namespace, &blob).await.unwrap();
 
         // Verify each mock validator received some rows.
         for (_, info) in &validators {
@@ -645,7 +651,7 @@ mod tests {
 
         // Total voting power = 800. 2/3 threshold = 533.
         // 3 successful validators have 600 voting power > 533.
-        let result = client.upload(&namespace, &blob).await;
+        let result = client.upload(&test_signing_key(), &namespace, &blob).await;
         assert!(
             result.is_ok(),
             "upload should succeed with 3/5 validators: {:?}",
@@ -703,7 +709,7 @@ mod tests {
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
 
-        let result = client.upload(&namespace, &blob).await;
+        let result = client.upload(&test_signing_key(), &namespace, &blob).await;
         assert!(
             result.is_err(),
             "upload should fail when not enough signatures"
@@ -730,7 +736,8 @@ mod tests {
 
         let namespace = vec![0u8; 29];
         let data = vec![1u8; 100];
-        let result = client.put(&namespace, &data, "celestia1test").await;
+        let sk = test_signing_key();
+        let result = client.put(&sk, &namespace, &data, "celestia1test").await;
         assert!(result.is_err());
         match result.unwrap_err() {
             FibreError::ClientClosed => {}

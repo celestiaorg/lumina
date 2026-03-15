@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use celestia_fibre::{Blob, BlobID, FibreClient, FibreError, PreparedPut};
 use celestia_grpc::{SubmittedTx, TxConfig};
+use k256::ecdsa::SigningKey;
 
 use crate::Error;
 use crate::client::ClientInner;
@@ -38,6 +39,7 @@ impl FibreApi {
     /// Requires the client to have a gRPC endpoint and signer configured.
     pub async fn put(
         &self,
+        signing_key: &SigningKey,
         namespace: &[u8],
         data: &[u8],
     ) -> Result<(PreparedPut, SubmittedTx), Error> {
@@ -48,7 +50,12 @@ impl FibreApi {
 
         let prepared = self
             .fibre_client
-            .put(namespace, data, &signer_address.to_string())
+            .put(
+                signing_key,
+                namespace,
+                data,
+                &signer_address.to_string(),
+            )
             .await
             .map_err(fibre_err)?;
 

@@ -418,10 +418,8 @@ mod tests {
     }
 
     fn build_test_client(val_set: ValidatorSet, connector: MockConnector) -> FibreClient {
-        let signing_key = k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
         FibreClient::builder()
             .config(test_client_config())
-            .signing_key(signing_key)
             .set_getter(MockSetGetter { val_set })
             .connector(connector)
             .build()

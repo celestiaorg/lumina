@@ -13,7 +13,6 @@ pub(crate) mod upload;
 
 use std::sync::Arc;
 
-use k256::ecdsa::SigningKey;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::FibreClientConfig;
@@ -29,7 +28,6 @@ use crate::validator_client::ValidatorConnector;
 /// Constructed via [`FibreClientBuilder`].
 pub struct FibreClient {
     pub(crate) cfg: FibreClientConfig,
-    pub(crate) signing_key: SigningKey,
     pub(crate) set_getter: Arc<dyn SetGetter>,
     pub(crate) connector: Arc<dyn ValidatorConnector>,
     pub(crate) upload_semaphore: Arc<tokio::sync::Semaphore>,
@@ -81,11 +79,9 @@ impl FibreClient {
     /// # Arguments
     ///
     /// * `endpoint` - The consensus node gRPC endpoint.
-    /// * `signing_key` - secp256k1 key for signing payment promises.
     /// * `config` - Client configuration. Use [`FibreClientConfig::default()`] for defaults.
     pub fn from_endpoint(
         endpoint: impl Into<celestia_grpc::Endpoint>,
-        signing_key: SigningKey,
         config: FibreClientConfig,
     ) -> Result<Self, FibreError> {
         let grpc_client = celestia_grpc::GrpcClient::builder()
@@ -93,7 +89,7 @@ impl FibreClient {
             .build()
             .map_err(|e| FibreError::Other(format!("failed to build GrpcClient: {e}")))?;
 
-        Self::from_grpc_client(grpc_client, signing_key, config)
+        Self::from_grpc_client(grpc_client, config)
     }
 
     /// Construct a [`FibreClient`] from an existing [`GrpcClient`].
@@ -102,7 +98,6 @@ impl FibreClient {
     /// (e.g. with multiple endpoints, auth metadata, or a custom signer).
     pub fn from_grpc_client(
         grpc_client: celestia_grpc::GrpcClient,
-        signing_key: SigningKey,
         config: FibreClientConfig,
     ) -> Result<Self, FibreError> {
         let host_registry = Arc::new(crate::host_registry::GrpcHostRegistry::new(
@@ -112,7 +107,6 @@ impl FibreClient {
 
         Self::builder()
             .config(config)
-            .signing_key(signing_key)
             .set_getter(crate::validator::GrpcSetGetter::new(grpc_client))
             .connector(connector)
             .build()
@@ -121,11 +115,10 @@ impl FibreClient {
 
 /// Builder for [`FibreClient`].
 ///
-/// Required fields: `signing_key`, `set_getter`, `connector`.
+/// Required fields: `set_getter`, `connector`.
 /// Optional: `config` (defaults to [`FibreClientConfig::default()`]).
 pub struct FibreClientBuilder {
     config: Option<FibreClientConfig>,
-    signing_key: Option<SigningKey>,
     set_getter: Option<Arc<dyn SetGetter>>,
     connector: Option<Arc<dyn ValidatorConnector>>,
 }
@@ -135,7 +128,6 @@ impl FibreClientBuilder {
     pub fn new() -> Self {
         Self {
             config: None,
-            signing_key: None,
             set_getter: None,
             connector: None,
         }
@@ -146,12 +138,6 @@ impl FibreClientBuilder {
     /// If not called, [`FibreClientConfig::default()`] is used.
     pub fn config(mut self, config: FibreClientConfig) -> Self {
         self.config = Some(config);
-        self
-    }
-
-    /// Sets the secp256k1 signing key used to sign payment promises.
-    pub fn signing_key(mut self, key: SigningKey) -> Self {
-        self.signing_key = Some(key);
         self
     }
 
@@ -169,13 +155,10 @@ impl FibreClientBuilder {
 
     /// Builds the [`FibreClient`].
     ///
-    /// Returns an error if any required field (`signing_key`, `set_getter`,
-    /// `connector`) has not been set.
+    /// Returns an error if any required field (`set_getter`, `connector`)
+    /// has not been set.
     pub fn build(self) -> Result<FibreClient, FibreError> {
         let cfg = self.config.unwrap_or_default();
-        let signing_key = self
-            .signing_key
-            .ok_or_else(|| FibreError::Other("signing_key is required".into()))?;
         let set_getter = self
             .set_getter
             .ok_or_else(|| FibreError::Other("set_getter is required".into()))?;
@@ -187,7 +170,6 @@ impl FibreClientBuilder {
             upload_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.upload_concurrency)),
             download_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.download_concurrency)),
             cfg,
-            signing_key,
             set_getter,
             connector,
             cancel_token: CancellationToken::new(),
@@ -204,8 +186,6 @@ impl Default for FibreClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k256::ecdsa::SigningKey;
-    use rand::rngs::OsRng;
 
     struct DummySetGetter;
 
@@ -231,9 +211,8 @@ mod tests {
 
     #[tokio::test]
     async fn from_endpoint_with_valid_url() {
-        let sk = SigningKey::random(&mut OsRng);
         let result =
-            FibreClient::from_endpoint("http://localhost:9090", sk, FibreClientConfig::default());
+            FibreClient::from_endpoint("http://localhost:9090", FibreClientConfig::default());
         assert!(
             result.is_ok(),
             "from_endpoint with valid URL should succeed but got err: {}",
@@ -243,9 +222,8 @@ mod tests {
 
     #[tokio::test]
     async fn from_endpoint_with_invalid_url() {
-        let sk = SigningKey::random(&mut OsRng);
         let result =
-            FibreClient::from_endpoint("not a valid url \x00", sk, FibreClientConfig::default());
+            FibreClient::from_endpoint("not a valid url \x00", FibreClientConfig::default());
         assert!(
             result.is_err(),
             "from_endpoint with invalid URL should fail"
@@ -254,42 +232,20 @@ mod tests {
 
     #[tokio::test]
     async fn from_endpoint_sets_config_correctly() {
-        let sk = SigningKey::random(&mut OsRng);
         let config = FibreClientConfig {
             chain_id: "test-123".to_string(),
             ..Default::default()
         };
 
-        let client = FibreClient::from_endpoint("http://localhost:9090", sk, config)
+        let client = FibreClient::from_endpoint("http://localhost:9090", config)
             .expect("from_endpoint should succeed");
 
         assert_eq!(client.config().chain_id, "test-123");
     }
 
     #[test]
-    fn builder_missing_signing_key_returns_error() {
-        let result = FibreClient::builder()
-            .set_getter(DummySetGetter)
-            .connector(DummyConnector)
-            .build();
-
-        match result {
-            Err(FibreError::Other(msg)) => {
-                assert!(
-                    msg.contains("signing_key"),
-                    "error should mention signing_key, got: {msg}"
-                );
-            }
-            Err(other) => panic!("expected FibreError::Other mentioning signing_key, got: {other}"),
-            Ok(_) => panic!("expected an error but build() succeeded"),
-        }
-    }
-
-    #[test]
     fn builder_missing_set_getter_returns_error() {
-        let sk = SigningKey::random(&mut OsRng);
         let result = FibreClient::builder()
-            .signing_key(sk)
             .connector(DummyConnector)
             .build();
 
@@ -307,9 +263,7 @@ mod tests {
 
     #[test]
     fn builder_missing_connector_returns_error() {
-        let sk = SigningKey::random(&mut OsRng);
         let result = FibreClient::builder()
-            .signing_key(sk)
             .set_getter(DummySetGetter)
             .build();
 
@@ -327,9 +281,7 @@ mod tests {
 
     #[test]
     fn close_and_is_closed() {
-        let sk = SigningKey::random(&mut OsRng);
         let client = FibreClient::builder()
-            .signing_key(sk)
             .set_getter(DummySetGetter)
             .connector(DummyConnector)
             .build()
