@@ -262,8 +262,7 @@ mod tests {
     use crate::config::BlobConfig;
     use crate::error::FibreError;
     use crate::test_utils::{
-        build_test_client, make_validator, test_blob_config, MockConnector,
-        MockValidatorConnection,
+        MockConnector, MockValidatorConnection, build_test_client, make_validator, test_blob_config,
     };
     use crate::validator::ValidatorSet;
 

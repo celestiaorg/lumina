@@ -64,11 +64,9 @@ impl FibreClient {
         let upload_size = blob
             .upload_size()
             .ok_or_else(|| FibreError::Other("blob has no data to upload".into()))?;
-        let upload_size_u32 = u32::try_from(upload_size).map_err(|_| {
-            FibreError::BlobTooLarge {
-                size: upload_size,
-                max: u32::MAX as usize,
-            }
+        let upload_size_u32 = u32::try_from(upload_size).map_err(|_| FibreError::BlobTooLarge {
+            size: upload_size,
+            max: u32::MAX as usize,
         })?;
 
         let mut promise = PaymentPromise {
@@ -289,9 +287,7 @@ mod tests {
     use crate::blob::Blob;
     use crate::config::BlobConfig;
     use crate::error::FibreError;
-    use crate::test_utils::{
-        build_test_client, make_connector, make_validator, FailingConnector,
-    };
+    use crate::test_utils::{FailingConnector, build_test_client, make_connector, make_validator};
     use crate::validator::{ValidatorInfo, ValidatorSet};
 
     fn make_test_blob() -> Blob {

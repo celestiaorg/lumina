@@ -243,9 +243,7 @@ pub(crate) fn build_test_client(
 }
 
 /// Create a [`MockConnector`] with connections for each validator.
-pub(crate) fn make_connector(
-    validators: &[(Ed25519SigningKey, ValidatorInfo)],
-) -> MockConnector {
+pub(crate) fn make_connector(validators: &[(Ed25519SigningKey, ValidatorInfo)]) -> MockConnector {
     let mut connector = MockConnector::new();
     for (ed_key, info) in validators {
         connector.add(

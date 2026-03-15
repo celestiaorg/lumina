@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::blob::Blob;
 use crate::test_utils::{
-    build_test_client, make_connector, make_validator, test_blob_config, MockConnector,
-    MockValidatorConnection,
+    MockConnector, MockValidatorConnection, build_test_client, make_connector, make_validator,
+    test_blob_config,
 };
 
 #[tokio::test]
