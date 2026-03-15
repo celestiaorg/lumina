@@ -5,9 +5,9 @@
 //! transports (e.g. `tonic-web-wasm-client`) return `!Send` futures.
 //!
 //! This module provides:
-//! - [`CondSend`] — equals `Send` on native, no-op on wasm32.
-//! - [`BoxFuture`] — a boxed future that is `Send` on native, `!Send` on wasm32.
-//! - [`into_boxed`] — box a future into a [`BoxFuture`].
+//! - `CondSend` — equals `Send` on native, no-op on wasm32.
+//! - `BoxFuture` — a boxed future that is `Send` on native, `!Send` on wasm32.
+//! - `into_boxed` — box a future into a `BoxFuture`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -36,7 +36,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
-/// Box a future into a [`BoxFuture`].
+/// Box a future into a `BoxFuture`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn into_boxed<F, T>(fut: F) -> BoxFuture<'static, T>
 where
