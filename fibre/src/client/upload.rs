@@ -14,7 +14,9 @@ use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::{BoxFuture, into_boxed};
+use lumina_utils::cond_send::BoxFuture;
+
+use crate::client::task::spawn_task;
 
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
@@ -237,28 +239,20 @@ impl FibreClient {
                     let rlc_coeffs = Arc::clone(&rlc_coeffs);
                     let blob = Arc::clone(blob);
 
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    lumina_utils::executor::spawn(async move {
+                    spawn_task(&mut futures, val_idx, async move {
                         let _permit = permit;
-                        let result = async {
-                            // Generate row proofs in this task, parallelizing
-                            // proof generation across validators.
-                            let mut proofs = Vec::with_capacity(row_indices.len());
-                            for row_idx in &row_indices {
-                                proofs.push(blob.row(*row_idx)?);
-                            }
-
-                            let conn = connector.connect(&validator).await?;
-                            let resp =
-                                conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
-                            Ok(resp.validator_signature)
+                        // Generate row proofs in this task, parallelizing
+                        // proof generation across validators.
+                        let mut proofs = Vec::with_capacity(row_indices.len());
+                        for row_idx in &row_indices {
+                            proofs.push(blob.row(*row_idx)?);
                         }
-                        .await;
-                        let _ = tx.send(result);
+
+                        let conn = connector.connect(&validator).await?;
+                        let resp =
+                            conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
+                        Ok(resp.validator_signature)
                     });
-                    futures.push(into_boxed(async move {
-                        (val_idx, rx.await.ok())
-                    }));
                 }
                 task_result = futures.next(), if !futures.is_empty() => {
                     match task_result {

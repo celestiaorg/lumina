@@ -19,7 +19,9 @@
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::{BoxFuture, into_boxed};
+use lumina_utils::cond_send::BoxFuture;
+
+use crate::client::task::spawn_task;
 
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
@@ -170,23 +172,15 @@ impl FibreClient {
                     let validator = val_set.validators[val_idx].clone();
                     let blob_id = blob_id.clone();
 
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    lumina_utils::executor::spawn(async move {
+                    spawn_task(&mut futures, val_idx, async move {
                         let _global = global_permit;
-                        let result = async {
-                            let conn = connector.connect(&validator).await?;
-                            let resp = conn.download_shard(&blob_id).await?;
-                            if resp.rows.is_empty() {
-                                return Err(FibreError::EmptyShardResponse);
-                            }
-                            Ok(resp.rows.into_iter().map(|r| r.proof).collect())
+                        let conn = connector.connect(&validator).await?;
+                        let resp = conn.download_shard(&blob_id).await?;
+                        if resp.rows.is_empty() {
+                            return Err(FibreError::EmptyShardResponse);
                         }
-                        .await;
-                        let _ = tx.send(result);
+                        Ok(resp.rows.into_iter().map(|r| r.proof).collect())
                     });
-                    futures.push(into_boxed(async move {
-                        (val_idx, rx.await.ok())
-                    }));
                 }
                 task_result = futures.next(), if !futures.is_empty() => {
                     active -= 1;

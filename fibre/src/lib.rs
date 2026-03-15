@@ -14,7 +14,6 @@ pub use domain::error;
 
 // Compatibility aliases preserve historical crate-local paths so tests and
 // internals don't need broad path rewrites during this refactor.
-pub(crate) use client::task;
 pub(crate) use domain::{blob, blob_header, payment_promise};
 pub(crate) use transport::{grpc_validator_client, host_registry, proto_conv, validator_client};
 pub(crate) use validator::signature_set;

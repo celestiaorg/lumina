@@ -83,7 +83,7 @@ impl BlobHeaderV0 {
         }
 
         // Decode header from first row
-        let header = Self::decode(&rows[0])?;
+        let header = Self::decode(rows[0])?;
 
         // Validate blob size is within reasonable bounds
         if header.data_size == 0 {
