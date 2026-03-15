@@ -57,7 +57,7 @@ impl FibreClient {
         &self,
         signing_key: &k256::ecdsa::SigningKey,
         namespace: &[u8],
-        blob: &Blob,
+        blob: Blob,
     ) -> Result<SignedPaymentPromise, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
@@ -96,11 +96,12 @@ impl FibreClient {
             Arc::new(val_set.new_signature_set(self.cfg.safety_threshold, validator_sign_bytes));
 
         // 5. Fan-out upload
+        let blob = Arc::new(blob);
         self.upload_shards(
             &val_set,
             &shard_map,
             &promise,
-            blob,
+            &blob,
             &sig_set,
             &self.cancel_token,
         )
@@ -149,9 +150,10 @@ impl FibreClient {
 
         // 1. Encode data into a Blob.
         let blob = Blob::new(data, BlobConfig::for_version(0)?)?;
+        let blob_id = blob.id().clone();
 
         // 2. Upload to validators and collect signatures.
-        let signed_promise = self.upload(signing_key, namespace, &blob).await?;
+        let signed_promise = self.upload(signing_key, namespace, blob).await?;
 
         // 3. Map signatures to on-chain format, preserving positional alignment.
         // The on-chain code maps signatures[i] → validator[i], so we must keep
@@ -171,7 +173,7 @@ impl FibreClient {
         };
 
         Ok(PreparedPut {
-            blob_id: blob.id().clone(),
+            blob_id,
             msg,
             validator_signatures,
         })
@@ -179,10 +181,11 @@ impl FibreClient {
 
     /// Fan-out upload of row proofs to validators in the shard map.
     ///
+    /// Each spawned task generates its own row proofs and uploads them,
+    /// parallelizing both CPU (proof generation) and I/O (gRPC upload).
+    ///
     /// Uses a single select loop that interleaves task spawning (bounded by
-    /// `self.upload_semaphore`) with result collection. Each spawned task is a
-    /// pure upload — all orchestration (signature validation, threshold
-    /// checking, error logging) happens in this loop.
+    /// `self.upload_semaphore`) with result collection.
     ///
     /// Returns early when the signature threshold is met. Already-spawned tasks
     /// continue in the background via `lumina_utils::executor::spawn`.
@@ -193,35 +196,16 @@ impl FibreClient {
         val_set: &ValidatorSet,
         shard_map: &ShardMap,
         promise: &PaymentPromise,
-        blob: &Blob,
+        blob: &Arc<Blob>,
         sig_set: &Arc<SignatureSet>,
         cancel_token: &CancellationToken,
     ) -> Result<(), FibreError> {
-        // Pre-generate row proofs for each validator before spawning tasks,
-        // since `blob.row()` takes `&self` and `Blob` is not Send/Sync.
-        let mut validator_tasks: Vec<(usize, Vec<rsema1d::RowInclusionProof>)> = Vec::new();
-
-        for (&val_idx, row_indices) in shard_map.inner() {
-            let mut proofs = Vec::with_capacity(row_indices.len());
-            for &row_idx in row_indices {
-                match blob.row(row_idx) {
-                    Ok(proof) => proofs.push(proof),
-                    Err(e) => {
-                        tracing::warn!(
-                            validator_index = val_idx,
-                            row_index = row_idx,
-                            error = %e,
-                            "failed to generate row proof, skipping validator"
-                        );
-                        break;
-                    }
-                }
-            }
-            // Only include if we generated all proofs successfully
-            if proofs.len() == row_indices.len() {
-                validator_tasks.push((val_idx, proofs));
-            }
-        }
+        // Collect (validator_index, row_indices) pairs for iteration.
+        let validator_tasks: Vec<(usize, Vec<usize>)> = shard_map
+            .inner()
+            .iter()
+            .map(|(&val_idx, row_indices)| (val_idx, row_indices.clone()))
+            .collect();
 
         // Extract RLC coefficients once for all tasks (empty if unavailable).
         let rlc_coeffs: Arc<Vec<rsema1d::GF128>> =
@@ -245,17 +229,25 @@ impl FibreClient {
                 result = self.upload_semaphore.clone().acquire_owned(), if can_spawn => {
                     let permit = result
                         .map_err(|_| FibreError::Other("upload semaphore closed".into()))?;
-                    let (val_idx, proofs) = task_iter.next().unwrap();
+                    let (val_idx, row_indices) = task_iter.next().unwrap();
 
                     let connector = Arc::clone(&self.connector);
                     let validator = val_set.validators[val_idx].clone();
                     let promise = promise.clone();
                     let rlc_coeffs = Arc::clone(&rlc_coeffs);
+                    let blob = Arc::clone(blob);
 
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     lumina_utils::executor::spawn(async move {
                         let _permit = permit;
                         let result = async {
+                            // Generate row proofs in this task, parallelizing
+                            // proof generation across validators.
+                            let mut proofs = Vec::with_capacity(row_indices.len());
+                            for row_idx in &row_indices {
+                                proofs.push(blob.row(*row_idx)?);
+                            }
+
                             let conn = connector.connect(&validator).await?;
                             let resp =
                                 conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
@@ -518,7 +510,7 @@ mod tests {
         let sk = test_signing_key();
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
-        let result = client.upload(&sk, &namespace, &blob).await;
+        let result = client.upload(&sk, &namespace, blob).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             FibreError::ClientClosed => {}
@@ -549,7 +541,7 @@ mod tests {
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
 
-        let result = client.upload(&sk, &namespace, &blob).await;
+        let result = client.upload(&sk, &namespace, blob).await;
         assert!(result.is_ok(), "upload should succeed: {:?}", result.err());
 
         let signed = result.unwrap();
@@ -592,7 +584,7 @@ mod tests {
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
 
-        client.upload(&test_signing_key(), &namespace, &blob).await.unwrap();
+        client.upload(&test_signing_key(), &namespace, blob).await.unwrap();
 
         // Verify each mock validator received some rows.
         for (_, info) in &validators {
@@ -651,7 +643,7 @@ mod tests {
 
         // Total voting power = 800. 2/3 threshold = 533.
         // 3 successful validators have 600 voting power > 533.
-        let result = client.upload(&test_signing_key(), &namespace, &blob).await;
+        let result = client.upload(&test_signing_key(), &namespace, blob).await;
         assert!(
             result.is_ok(),
             "upload should succeed with 3/5 validators: {:?}",
@@ -709,7 +701,7 @@ mod tests {
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
 
-        let result = client.upload(&test_signing_key(), &namespace, &blob).await;
+        let result = client.upload(&test_signing_key(), &namespace, blob).await;
         assert!(
             result.is_err(),
             "upload should fail when not enough signatures"
