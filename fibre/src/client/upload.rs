@@ -45,16 +45,8 @@ pub struct PreparedPut {
 impl FibreClient {
     /// Upload a pre-encoded [`Blob`] and collect validator signatures.
     ///
-    /// The upload algorithm:
-    /// 1. Check if client is closed.
-    /// 2. Retrieve the current validator set via [`SetGetter::head()`].
-    /// 3. Create and sign a [`PaymentPromise`].
-    /// 4. Compute the shard assignment (which rows go to which validator).
-    /// 5. Create a [`SignatureSet`] for collecting validator signatures.
-    /// 6. Fan-out upload to all validators concurrently (semaphore-bounded).
-    /// 7. Return when the safety threshold of signatures is collected, or
-    ///    all validators have responded.
-    /// 8. Return the [`SignedPaymentPromise`].
+    /// Returns a [`SignedPaymentPromise`] once enough validator signatures
+    /// have been collected to meet the safety threshold.
     pub async fn upload(
         &self,
         signing_key: &k256::ecdsa::SigningKey,
@@ -120,25 +112,9 @@ impl FibreClient {
 
     /// Encode data, upload to validators, and build a `MsgPayForFibre`.
     ///
-    /// This is the high-level "put" operation that combines:
-    /// 1. Encoding the data into a [`Blob`].
-    /// 2. Uploading the blob to validators via [`FibreClient::upload()`].
-    /// 3. Constructing a `MsgPayForFibre` message ready for on-chain broadcast.
-    ///
     /// Returns a [`PreparedPut`] containing the blob ID, the message, and
     /// validator signatures. The caller is responsible for broadcasting the
     /// message on-chain.
-    ///
-    /// # Arguments
-    ///
-    /// * `namespace` - The namespace for the blob.
-    /// * `data` - The raw data to encode and upload.
-    /// * `signer_address` - The on-chain signer address for `MsgPayForFibre`.
-    ///
-    /// # Errors
-    ///
-    /// - [`FibreError::ClientClosed`] if the client has been closed.
-    /// - Any error from blob encoding or upload.
     pub async fn put(
         &self,
         signing_key: &k256::ecdsa::SigningKey,
@@ -183,16 +159,8 @@ impl FibreClient {
 
     /// Fan-out upload of row proofs to validators in the shard map.
     ///
-    /// Each spawned task generates its own row proofs and uploads them,
-    /// parallelizing both CPU (proof generation) and I/O (gRPC upload).
-    ///
-    /// Uses a single select loop that interleaves task spawning (bounded by
-    /// `self.upload_semaphore`) with result collection.
-    ///
-    /// Returns early when the signature threshold is met. Already-spawned tasks
-    /// continue in the background via `lumina_utils::executor::spawn`.
-    /// Individual upload failures are logged but not fatal — the method succeeds
-    /// as long as enough signatures are ultimately collected.
+    /// Returns early when the signature threshold is met. Individual upload
+    /// failures are logged but not fatal.
     async fn upload_shards(
         &self,
         val_set: &ValidatorSet,

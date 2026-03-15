@@ -1,9 +1,7 @@
 //! Protocol parameters and client configuration.
 //!
-//! This module defines the fundamental protocol constants from which all other
-//! configuration values are derived, providing a single source of truth for
-//! protocol parameterization. It mirrors the Go reference implementation in
-//! `celestia-app-fibre/fibre/protocol_params.go`.
+//! Defines the fundamental protocol constants from which all other
+//! configuration values are derived.
 
 /// Fraction represented as numerator/denominator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +38,7 @@ pub struct ProtocolParams {
     pub min_row_size: usize,
 }
 
-/// Compile-time default parameters matching Go's `DefaultProtocolParams`.
+/// Compile-time default protocol parameters.
 pub const DEFAULT_PROTOCOL_PARAMS: ProtocolParams = ProtocolParams {
     rows: 4096,           // 1 << 12
     encoding_ratio: 0.25, // 3x parity (12288 parity rows, 16384 total)
@@ -58,48 +56,31 @@ pub const DEFAULT_PROTOCOL_PARAMS: ProtocolParams = ProtocolParams {
     min_row_size: 64,       // 1 << 6
 };
 
-/// The blob header length in bytes: 1 byte version + 4 bytes data size.
-/// Matches the Go constant `blobHeaderLen`.
+/// The blob header length in bytes.
 const BLOB_HEADER_LEN: usize = 5;
 
 /// Maximum size of a PaymentPromise in bytes (excluding protobuf encoding overhead).
-///
-/// Computed as: signBytesFixedSize (125) + signatureSize (64) + maxChainIDSize (20) = 209.
-///
-/// Components of signBytesFixedSize:
-///   secp256k1 PubKeySize (33) + NamespaceSize (29) + blobSize (4) +
-///   commitment (32) + blobVersion (4) + height (8) + timestamp (15) = 125
 const MAX_PAYMENT_PROMISE_SIZE: usize = 209;
 
 impl ProtocolParams {
     /// Returns the total number of rows (K + N).
-    ///
-    /// Matches Go: `int(float64(p.Rows) / p.EncodingRatio)`.
-    /// For defaults: 4096 / 0.25 = 16384.
     pub fn total_rows(&self) -> usize {
         (self.rows as f64 / self.encoding_ratio) as usize
     }
 
     /// Returns the number of parity rows (N in rsema1d).
-    ///
-    /// For defaults: 16384 - 4096 = 12288.
     pub fn parity_rows(&self) -> usize {
         self.total_rows() - self.rows
     }
 
     /// Returns the maximum number of rows a single validator could receive.
-    ///
-    /// Based on max stake of `1 - SafetyThreshold`:
-    /// `ceil(Rows * (1 - SafetyThreshold) / LivenessThreshold)`.
-    ///
-    /// For defaults: ceil(4096 * (1/3) / (1/3)) = 4096.
     pub fn max_rows_per_validator(&self) -> usize {
-        // maxStake = 1 - SafetyThreshold = (denominator - numerator) / denominator
+        // maxStake = 1 - safety_threshold
         let max_stake_num =
             (self.safety_threshold.denominator - self.safety_threshold.numerator) as usize;
         let max_stake_den = self.safety_threshold.denominator as usize;
 
-        // rows = ceil(Rows * maxStakeNum * livenessDen / (maxStakeDen * livenessNum))
+        // rows = ceil(rows * max_stake / liveness_threshold)
         let num = self.rows * max_stake_num * self.liveness_threshold.denominator as usize;
         let den = max_stake_den * self.liveness_threshold.numerator as usize;
         ceil_div(num, den)
@@ -107,10 +88,6 @@ impl ProtocolParams {
 
     /// Returns the minimum number of rows each validator must receive for
     /// unique decodability security, regardless of their stake percentage.
-    ///
-    /// Computed as `max(unique_decode_samples, reconstruction_samples)`.
-    ///
-    /// For defaults: max(148, 121) = 148.
     pub fn min_rows_per_validator(&self) -> usize {
         // Constraint 1: Unique decoding security
         //
@@ -138,11 +115,7 @@ impl ProtocolParams {
         unique_decode_samples.max(reconstruction_samples)
     }
 
-    /// Returns the minimum number of validators needed to successfully
-    /// reconstruct the original data.
-    ///
-    /// Uses `max_validator_count` and returns at least 1.
-    /// For defaults: max(1, ceil(100 * 1 / 3)) = 34.
+    /// Returns the minimum number of validators needed to reconstruct the original data.
     pub fn validators_for_reconstruction(&self) -> usize {
         let num = self.liveness_threshold.numerator as usize;
         let den = self.liveness_threshold.denominator as usize;
@@ -151,8 +124,7 @@ impl ProtocolParams {
 
     /// Computes the row size for the given blob version and total length.
     ///
-    /// Row size is calculated as `ceil(total_len / rows)`, rounded up to the
-    /// nearest multiple of `min_row_size`. Returns 0 if `total_len` is 0.
+    /// Returns 0 if `total_len` is 0.
     ///
     /// # Panics
     ///
@@ -168,8 +140,6 @@ impl ProtocolParams {
     }
 
     /// Calculates the maximum size of a shard in bytes.
-    ///
-    /// A shard contains: RLC coefficients + (rows_per_validator * (row_index + row_data + merkle_proof)).
     pub fn max_shard_size(&self) -> usize {
         const ROW_INDEX_SIZE: usize = 4; // uint32 index per row
         const RLC_COEFF_SIZE: usize = 16; // uint128 coefficient per row
@@ -178,8 +148,7 @@ impl ProtocolParams {
         let max_row_size = self.max_row_size(0); // version 0 is the only supported version
         let rlc_coeffs_size = self.rows * RLC_COEFF_SIZE;
 
-        // calculate merkle tree depth for inclusion proofs: ceil(log2(total_rows))
-        // Go: bits.Len(uint(totalRows - 1))
+        // Merkle tree depth for inclusion proofs
         let tree_depth = usize::BITS as usize - (total_rows - 1).leading_zeros() as usize;
         let proof_size_per_row = tree_depth * 32; // sha256::Size = 32
 
@@ -188,8 +157,6 @@ impl ProtocolParams {
     }
 
     /// Returns the maximum gRPC message size for upload requests.
-    ///
-    /// Includes `max_shard_size()`, `MAX_PAYMENT_PROMISE_SIZE`, and 2% protobuf overhead.
     pub fn max_message_size(&self) -> usize {
         let msg_size = self.max_shard_size() + MAX_PAYMENT_PROMISE_SIZE;
         msg_size + (msg_size / 50) // add 2% protobuf overhead
@@ -217,9 +184,6 @@ pub struct FibreClientConfig {
 
 impl FibreClientConfig {
     /// Creates a `FibreClientConfig` from protocol parameters.
-    ///
-    /// Derives `min_rows_per_validator`, `max_message_size`, and concurrency
-    /// limits from the given parameters.
     pub fn from_params(params: &ProtocolParams) -> Self {
         Self {
             chain_id: String::new(),
@@ -293,9 +257,7 @@ impl BlobConfig {
     /// Computes the row size for the given data length.
     ///
     /// The data length is the raw data size (without header). The header length
-    /// (`BLOB_HEADER_LEN` = 5) is added internally before computing the row size,
-    /// matching Go's `BlobConfig.RowSize(dataLen)` which calls
-    /// `p.RowSize(blobVersion, dataLen + blobHeaderLen)`.
+    /// is added internally before computing the row size.
     pub fn row_size(&self, data_len: usize) -> usize {
         compute_row_size(data_len + BLOB_HEADER_LEN, self.rows, self.min_row_size)
     }
@@ -303,7 +265,6 @@ impl BlobConfig {
     /// Calculates the upload size of blob data with padding and without parity.
     ///
     /// This is the size included in the PaymentPromise and the one actually paid for.
-    /// Computed as `row_size(data_len) * original_rows`.
     pub fn upload_size(&self, data_len: usize) -> usize {
         self.row_size(data_len) * self.original_rows
     }
@@ -348,10 +309,7 @@ fn ceil_div(a: usize, b: usize) -> usize {
 }
 
 /// Computes the row size for a given total byte length, rounding up to
-/// `min_row_size` boundaries.
-///
-/// Returns 0 if `total_len` is 0. Used by both [`ProtocolParams::row_size`]
-/// and [`BlobConfig::row_size`] to avoid duplicating the rounding logic.
+/// `min_row_size` boundaries. Returns 0 if `total_len` is 0.
 fn compute_row_size(total_len: usize, rows: usize, min_row_size: usize) -> usize {
     if total_len == 0 {
         return 0;

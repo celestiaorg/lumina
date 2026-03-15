@@ -29,12 +29,10 @@ const SIGNATURE_SIZE: usize = 64;
 /// Maximum allowed chain ID length.
 const MAX_CHAIN_ID_SIZE: usize = 20;
 
-/// Size of the Go time.Time MarshalBinary output for UTC times (15 bytes).
-/// Format: 1 byte version + 8 bytes seconds + 4 bytes nanoseconds + 2 bytes timezone offset.
+/// Size of the Go time.Time MarshalBinary output for UTC times.
 const TIMESTAMP_BINARY_SIZE: usize = 15;
 
 /// Fixed-size portion of sign bytes (excluding prefix and variable-length chain_id).
-/// signerPubKey(33) + namespace(29) + blobSize(4) + commitment(32) + blobVersion(4) + height(8) + timestamp(15)
 const SIGN_BYTES_FIXED_SIZE: usize =
     PUBKEY_SIZE + NAMESPACE_SIZE + 4 + 32 + 4 + 8 + TIMESTAMP_BINARY_SIZE;
 
@@ -68,21 +66,9 @@ pub struct PaymentPromise {
 impl PaymentPromise {
     /// Compute the stripped sign bytes (payload only, no prefix or chain ID).
     ///
-    /// Format:
-    /// ```text
-    /// signer_bytes(33) || namespace(29) || blob_size(4 BE)
-    /// || commitment(32) || blob_version(4 BE) || height(8 BE)
-    /// || timestamp(15 binary)
-    /// ```
-    ///
-    /// The timestamp uses Go's `time.Time.MarshalBinary()` format:
-    /// - 1 byte: version (1)
-    /// - 8 bytes: seconds as big-endian int64
-    /// - 4 bytes: nanoseconds as big-endian int32
-    /// - 2 bytes: timezone offset as big-endian int16 (-1 for UTC)
-    ///
-    /// These bytes are suitable for wrapping with CometBFT domain separation
-    /// via [`raw_bytes_message_sign_bytes`].
+    /// Concatenates all promise fields in canonical order. The result is
+    /// suitable for wrapping with CometBFT domain separation via
+    /// [`raw_bytes_message_sign_bytes`].
     fn stripped_sign_bytes(&self) -> Result<Vec<u8>, FibreError> {
         let timestamp_bytes = marshal_binary_time(self.creation_timestamp)?;
 
@@ -117,19 +103,9 @@ impl PaymentPromise {
     /// Compute the canonical sign bytes for this payment promise.
     ///
     /// Wraps [`stripped_sign_bytes()`](Self::stripped_sign_bytes) with CometBFT's
-    /// `RawBytesMessageSignBytes` domain separation format:
-    ///
-    /// ```text
-    /// "COMET::RAW_BYTES::SIGN"
-    /// || varint(len(proto_bytes))
-    /// || proto_bytes(SignRawBytesRequest { chain_id, raw_bytes, unique_id })
-    /// ```
-    ///
-    /// Where `unique_id` is `"fibre/pp:v0"` and `raw_bytes` is the output of
-    /// [`stripped_sign_bytes()`](Self::stripped_sign_bytes).
+    /// `RawBytesMessageSignBytes` domain separation.
     ///
     /// Both the client signer and validators sign these same bytes.
-    /// This matches Go's `PaymentPromise.SignBytes()` in celestia-app.
     pub fn sign_bytes(&self) -> Result<Vec<u8>, FibreError> {
         let stripped = self.stripped_sign_bytes()?;
         Ok(raw_bytes_message_sign_bytes(
@@ -142,12 +118,7 @@ impl PaymentPromise {
     /// Sign this promise with the given signing key.
     ///
     /// Computes the sign bytes and signs them using secp256k1 ECDSA.
-    /// Sets `self.signature` to the 64-byte compact signature (r || s).
-    ///
-    /// The Go implementation uses `privKey.Sign(signBytes)` which internally
-    /// hashes the message with SHA-256 before ECDSA signing. The k256
-    /// `Signer::sign()` trait method does the same, so we pass the raw
-    /// sign bytes directly — no manual pre-hashing.
+    /// Sets `self.signature` to the 64-byte compact signature.
     pub fn sign(&mut self, signing_key: &SigningKey) -> Result<(), FibreError> {
         let sign_bytes = self.sign_bytes()?;
 
@@ -164,8 +135,6 @@ impl PaymentPromise {
             "signing payment promise"
         );
 
-        // k256's Signer::sign() internally computes SHA-256(sign_bytes)
-        // before ECDSA signing, matching Go's secp256k1.Sign() behavior.
         let signature: Signature = signing_key.sign(&sign_bytes);
         self.signature = Some(signature.to_bytes().to_vec());
 
@@ -241,8 +210,6 @@ impl PaymentPromise {
             FibreError::InvalidPaymentPromise(format!("invalid signature format: {}", e))
         })?;
 
-        // k256's Verifier::verify() internally computes SHA-256(sign_bytes)
-        // before ECDSA verification, matching Go's secp256k1.VerifySignature().
         use k256::ecdsa::signature::Verifier;
         self.signer_pubkey
             .verify(&sign_bytes, &signature)
@@ -281,16 +248,9 @@ pub struct SignedPaymentPromise {
 }
 
 /// CometBFT's domain separation prefix for raw-bytes signing.
-///
-/// Matches `RawBytesSignBytesPrefix` in celestia-core's `types/priv_validator.go`.
 const COMET_RAW_BYTES_PREFIX: &[u8] = b"COMET::RAW_BYTES::SIGN";
 
-/// Construct the bytes that celestia-core's `RawBytesMessageSignBytes` produces.
-///
-/// Format: `"COMET::RAW_BYTES::SIGN" || MarshalDelimited(SignRawBytesRequest)`
-///
-/// Uses the [`SignRawBytesRequest`] proto from celestia-core's `tendermint/privval/types.proto`,
-/// encoded with `prost::Message::encode_length_delimited` (matching Go's `protoio.MarshalDelimited`).
+/// Construct the CometBFT domain-separated sign bytes for raw byte messages.
 fn raw_bytes_message_sign_bytes(chain_id: &str, unique_id: &[u8], raw_bytes: &[u8]) -> Vec<u8> {
     use celestia_proto::tendermint_celestia_mods::privval::SignRawBytesRequest;
     use prost::Message;
@@ -310,25 +270,10 @@ fn raw_bytes_message_sign_bytes(chain_id: &str, unique_id: &[u8], raw_bytes: &[u
     result
 }
 
-/// Seconds between Go's internal epoch (January 1, year 1) and Unix epoch
-/// (January 1, 1970). Go's `time.Time.MarshalBinary()` encodes seconds since
-/// year 1, not Unix epoch.
-///
-/// Computed as: `(1969*365 + 1969/4 - 1969/100 + 1969/400) * 86400`
-/// This matches Go's `unixToInternal` constant in `time/time.go`.
+/// Seconds between Go's internal epoch (January 1, year 1) and Unix epoch (January 1, 1970).
 const UNIX_TO_INTERNAL: i64 = (1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400) * 86400;
 
 /// Marshal a `SystemTime` into Go's `time.Time.MarshalBinary()` format.
-///
-/// Go's binary time format (version 1, UTC):
-/// - Byte 0: version = 1
-/// - Bytes 1-8: seconds since January 1, year 1 as big-endian int64
-/// - Bytes 9-12: nanoseconds as big-endian int32
-/// - Bytes 13-14: timezone offset as big-endian int16 (-1 for UTC sentinel)
-///
-/// **Important**: Go's `MarshalBinary()` uses `t.sec()` which returns seconds
-/// since January 1, year 1 (Go's internal epoch), NOT Unix epoch seconds.
-/// The conversion adds `UNIX_TO_INTERNAL` (62135596800) to Unix seconds.
 fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
     let duration = t
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -358,10 +303,6 @@ fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
 }
 
 /// Unmarshal a timestamp from Go's `time.Time.MarshalBinary()` format back to `SystemTime`.
-///
-/// This is the inverse of `marshal_binary_time`. The seconds field represents
-/// seconds since January 1, year 1 (Go's internal epoch), so we subtract
-/// `UNIX_TO_INTERNAL` to convert back to Unix epoch.
 #[cfg(test)]
 fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
     if data.len() != TIMESTAMP_BINARY_SIZE {

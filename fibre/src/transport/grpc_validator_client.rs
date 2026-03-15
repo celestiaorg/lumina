@@ -21,10 +21,6 @@ use crate::validator_client::{
 };
 
 /// Factory that resolves validator hosts and caches gRPC connections.
-///
-/// Uses a [`HostRegistry`] to map validator addresses to network endpoints,
-/// then creates [`GrpcClient`] instances lazily and caches them by the 20-byte
-/// validator consensus address.
 pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
     connections: tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorConnection>>>,
@@ -78,9 +74,7 @@ impl ValidatorConnector for GrpcValidatorConnector {
     }
 }
 
-/// Normalise a host string that may be in gRPC name-resolution format
-/// (e.g. `"dns:///1.2.3.4:9091"`) into a standard `http://` URI that tonic
-/// can parse.
+/// Normalise a host string into a standard `http://` URI.
 fn normalize_host(raw: &str) -> String {
     // Strip the "dns:///" (or "dns://") prefix if present.
     if let Some(rest) = raw

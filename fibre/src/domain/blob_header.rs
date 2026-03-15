@@ -1,18 +1,16 @@
 //! Version 0 blob header encoding and decoding.
 //!
 //! The blob header is prepended to the original data before splitting into rows.
-//! Format: 1 byte version (always 0) + 4 bytes data size (big-endian u32).
 
 use crate::config::BlobConfig;
 use crate::error::FibreError;
 
-/// Total header size in bytes: 1 byte version + 4 bytes data size.
+/// Length of the version field in bytes.
 const BLOB_VERSION_LEN: usize = 1;
+/// Length of the data size field in bytes.
 const BLOB_DATA_SIZE_LEN: usize = 4;
 
 /// Version 0 blob header placed at the start of the first row.
-///
-/// Format: `[version: u8 = 0] [data_size: u32 big-endian]`
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BlobHeaderV0 {
     /// Size of the original data (excluding header).
@@ -20,7 +18,7 @@ pub struct BlobHeaderV0 {
 }
 
 impl BlobHeaderV0 {
-    /// Total header size in bytes (1 byte version + 4 bytes data size).
+    /// Total header size in bytes.
     pub const HEADER_SIZE: usize = BLOB_VERSION_LEN + BLOB_DATA_SIZE_LEN;
 
     /// Create a new version 0 blob header with the given data size.
@@ -50,22 +48,15 @@ impl BlobHeaderV0 {
         Ok(Self { data_size })
     }
 
-    /// Encode the header and data directly into a flat buffer.
+    /// Encode the header and data into a flat buffer.
     ///
-    /// Writes the 5-byte header at the start of `buf`, followed by `data`
-    /// contiguously. The caller must ensure `buf` is at least
-    /// `HEADER_SIZE + data.len()` bytes.
+    /// The caller must ensure `buf` is at least `HEADER_SIZE + data.len()` bytes.
     pub fn encode_into_buffer(&self, data: &[u8], buf: &mut [u8]) {
         self.encode(buf);
         buf[Self::HEADER_SIZE..Self::HEADER_SIZE + data.len()].copy_from_slice(data);
     }
 
     /// Decode the header and extract original data from rows.
-    ///
-    /// Reads the header from the first row, validates it, then concatenates data
-    /// from all rows (skipping the header in the first row) up to `data_size` bytes.
-    ///
-    /// This matches the Go `blobHeaderV0.decodeFromRows` method.
     pub fn decode_from_rows(
         rows: &[&[u8]],
         cfg: &BlobConfig,

@@ -65,21 +65,7 @@ impl FibreClient {
         &self.cancel_token
     }
 
-    /// Convenience constructor that builds a fully-wired [`FibreClient`] from a
-    /// single gRPC endpoint.
-    ///
-    /// Accepts anything that converts into a [`celestia_grpc::Endpoint`], such
-    /// as a URL string (`"http://localhost:9090"`) or a rich [`Endpoint`] with
-    /// metadata and timeout.
-    ///
-    /// Creates a [`GrpcClient`] for chain queries (validator sets via CometBFT
-    /// `BlockAPI` and host resolution via `x/valaddr`), wires up the production
-    /// [`GrpcSetGetter`], [`GrpcHostRegistry`], and [`GrpcValidatorConnector`].
-    ///
-    /// # Arguments
-    ///
-    /// * `endpoint` - The consensus node gRPC endpoint.
-    /// * `config` - Client configuration. Use [`FibreClientConfig::default()`] for defaults.
+    /// Build a [`FibreClient`] from a single gRPC endpoint.
     pub fn from_endpoint(
         endpoint: impl Into<celestia_grpc::Endpoint>,
         config: FibreClientConfig,
@@ -92,10 +78,7 @@ impl FibreClient {
         Self::from_grpc_client(grpc_client, config)
     }
 
-    /// Construct a [`FibreClient`] from an existing [`GrpcClient`].
-    ///
-    /// Use this when the caller already has a configured [`GrpcClient`]
-    /// (e.g. with multiple endpoints, auth metadata, or a custom signer).
+    /// Build a [`FibreClient`] from an existing [`GrpcClient`].
     pub fn from_grpc_client(
         grpc_client: celestia_grpc::GrpcClient,
         config: FibreClientConfig,
@@ -114,9 +97,6 @@ impl FibreClient {
 }
 
 /// Builder for [`FibreClient`].
-///
-/// Required fields: `set_getter`, `connector`.
-/// Optional: `config` (defaults to [`FibreClientConfig::default()`]).
 pub struct FibreClientBuilder {
     config: Option<FibreClientConfig>,
     set_getter: Option<Arc<dyn SetGetter>>,
@@ -134,8 +114,6 @@ impl FibreClientBuilder {
     }
 
     /// Sets the client configuration.
-    ///
-    /// If not called, [`FibreClientConfig::default()`] is used.
     pub fn config(mut self, config: FibreClientConfig) -> Self {
         self.config = Some(config);
         self
@@ -154,9 +132,6 @@ impl FibreClientBuilder {
     }
 
     /// Builds the [`FibreClient`].
-    ///
-    /// Returns an error if any required field (`set_getter`, `connector`)
-    /// has not been set.
     pub fn build(self) -> Result<FibreClient, FibreError> {
         let cfg = self.config.unwrap_or_default();
         let set_getter = self

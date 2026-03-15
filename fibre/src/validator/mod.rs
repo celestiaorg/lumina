@@ -186,10 +186,7 @@ pub trait SetGetter: Send + Sync {
     async fn head(&self) -> Result<ValidatorSet, FibreError>;
 }
 
-/// Production [`SetGetter`] backed by the CometBFT `BlockAPI` gRPC service.
-///
-/// Queries `ValidatorSet` with `height = 0` to retrieve the latest validator
-/// set, then converts the protobuf response into the domain [`ValidatorSet`].
+/// Production [`SetGetter`] backed by gRPC.
 pub struct GrpcSetGetter {
     client: GrpcClient,
 }

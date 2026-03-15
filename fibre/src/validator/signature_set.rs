@@ -15,12 +15,8 @@ use crate::validator::{ValidatorInfo, ValidatorSet};
 
 /// Collects and validates ed25519 signatures from validators.
 ///
-/// Thread-safe: the expensive signature verification happens *before* the lock
-/// is acquired, so the critical section is just a HashMap insert and an integer
-/// addition.
-///
-/// Signatures are returned in validator-set order by [`SignatureSet::signatures`],
-/// with `None` entries for validators that did not sign.
+/// Thread-safe. Signatures are returned in validator-set order by
+/// [`SignatureSet::signatures`], with `None` entries for validators that did not sign.
 pub struct SignatureSet {
     /// The bytes that each validator must have signed.
     required_bytes_signed: Vec<u8>,
@@ -71,15 +67,8 @@ impl SignatureSet {
 
     /// Validates and records a signature from the given validator.
     ///
-    /// The ed25519 signature is verified **before** the lock is acquired, since
-    /// verification is computationally expensive and should not block other
-    /// callers.
-    ///
-    /// Returns `Ok(true)` if the voting power threshold has been met (including
-    /// by this call), `Ok(false)` if more signatures are still needed.
-    ///
-    /// Returns `Err(FibreError::InvalidValidatorSignature)` if the signature
-    /// does not verify against the validator's public key and the required bytes.
+    /// Returns `Ok(true)` if the voting power threshold has been met,
+    /// `Ok(false)` if more signatures are still needed.
     pub fn add(&self, validator: &ValidatorInfo, signature: &[u8]) -> Result<bool, FibreError> {
         // Parse the raw signature bytes into an ed25519 Signature.
         let ed_sig = Ed25519Signature::from_slice(signature).map_err(|e| {

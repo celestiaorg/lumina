@@ -1,20 +1,7 @@
 //! Download flow orchestration.
 //!
-//! Adds a `download()` method to [`FibreClient`] that retrieves a blob from
-//! validators and reconstructs it using erasure coding.
-//!
-//! The download algorithm uses an adaptive fan-out strategy with two levels of
-//! concurrency control:
-//!
-//! - A **local semaphore** limits the initial fan-out to `download_target`
-//!   concurrent validator connections. When a validator fails, its permit is
-//!   released so a replacement validator can be tried.
-//! - A **global semaphore** (on the client) limits total concurrent downloads
-//!   across all in-flight `download()` calls.
-//!
-//! Each spawned task downloads proofs from a single validator and returns them.
-//! The main task collects proofs and applies them to the blob sequentially,
-//! avoiding the need for shared mutable state (`Arc<Mutex<Blob>>`).
+//! Retrieves a blob from validators and reconstructs it using erasure coding
+//! with an adaptive fan-out strategy.
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -116,15 +103,8 @@ impl FibreClient {
 
     /// Download row proofs from validators and apply them to the blob.
     ///
-    /// Uses a single select loop that interleaves task spawning with result
-    /// collection. An `active` counter replaces the local semaphore: at most
-    /// `download_target` tasks run concurrently. When a task fails, `active`
-    /// decrements, allowing a replacement validator to be tried on the next
-    /// iteration.
-    ///
-    /// `self.download_semaphore` limits total concurrent downloads globally.
-    /// Each spawned task is a pure download — all orchestration (row
-    /// application, success counting, replacement) happens in this loop.
+    /// Spawns up to `download_target` concurrent tasks, replacing failed
+    /// validators with the next in the ordered list.
     async fn download_blob(
         &self,
         val_set: &ValidatorSet,
