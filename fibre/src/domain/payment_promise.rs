@@ -102,7 +102,7 @@ impl PaymentPromise {
 
     /// Compute the canonical sign bytes for this payment promise.
     ///
-    /// Wraps [`stripped_sign_bytes()`](Self::stripped_sign_bytes) with CometBFT's
+    /// Wraps the stripped sign bytes with CometBFT's
     /// `RawBytesMessageSignBytes` domain separation.
     ///
     /// Both the client signer and validators sign these same bytes.

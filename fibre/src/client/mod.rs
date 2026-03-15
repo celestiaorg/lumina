@@ -78,7 +78,7 @@ impl FibreClient {
         Self::from_grpc_client(grpc_client, config)
     }
 
-    /// Build a [`FibreClient`] from an existing [`GrpcClient`].
+    /// Build a [`FibreClient`] from an existing [`celestia_grpc::GrpcClient`].
     pub fn from_grpc_client(
         grpc_client: celestia_grpc::GrpcClient,
         config: FibreClientConfig,

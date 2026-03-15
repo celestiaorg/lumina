@@ -125,10 +125,7 @@ impl SignatureSet {
 }
 
 impl ValidatorSet {
-    /// Creates a new [`SignatureSet`] from this validator set.
-    ///
-    /// This is a convenience method equivalent to calling
-    /// `SignatureSet::new(self.validators.clone(), target, bytes)`.
+    /// Creates a new signature set from this validator set.
     pub fn new_signature_set(
         &self,
         target_voting_power: Fraction,
