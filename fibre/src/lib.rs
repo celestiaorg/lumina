@@ -19,6 +19,8 @@ pub(crate) use transport::{grpc_validator_client, host_registry, proto_conv, val
 pub(crate) use validator::signature_set;
 
 #[cfg(test)]
+mod test_utils;
+#[cfg(test)]
 mod roundtrip_test;
 
 pub use celestia_grpc::Endpoint;

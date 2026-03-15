@@ -12,6 +12,21 @@ pub struct Fraction {
     pub denominator: u64,
 }
 
+impl Fraction {
+    /// Creates a new `Fraction`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `denominator` is zero.
+    pub const fn new(numerator: u64, denominator: u64) -> Self {
+        assert!(denominator != 0, "Fraction denominator must not be zero");
+        Self {
+            numerator,
+            denominator,
+        }
+    }
+}
+
 /// Root protocol constants from which all other values are derived.
 ///
 /// The design separates "root constants" (what we chose) from "derived values"
@@ -44,14 +59,8 @@ pub const DEFAULT_PROTOCOL_PARAMS: ProtocolParams = ProtocolParams {
     encoding_ratio: 0.25, // 3x parity (12288 parity rows, 16384 total)
     max_validator_count: 100,
     unique_decoding_security_bits: 100,
-    safety_threshold: Fraction {
-        numerator: 2,
-        denominator: 3,
-    },
-    liveness_threshold: Fraction {
-        numerator: 1,
-        denominator: 3,
-    },
+    safety_threshold: Fraction::new(2, 3),
+    liveness_threshold: Fraction::new(1, 3),
     max_blob_size: 1 << 27, // 128 MiB
     min_row_size: 64,       // 1 << 6
 };
@@ -455,6 +464,19 @@ mod tests {
         assert_eq!(cfg.min_rows_per_validator, 148);
         assert_eq!(cfg.upload_concurrency, 100);
         assert_eq!(cfg.download_concurrency, 100);
+    }
+
+    #[test]
+    fn fraction_new_valid() {
+        let f = Fraction::new(1, 3);
+        assert_eq!(f.numerator, 1);
+        assert_eq!(f.denominator, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Fraction denominator must not be zero")]
+    fn fraction_new_zero_denominator_panics() {
+        Fraction::new(1, 0);
     }
 
     #[test]

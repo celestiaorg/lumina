@@ -66,9 +66,13 @@ impl ValidatorConnector for GrpcValidatorConnector {
 
         let conn = Arc::new(GrpcValidatorConnection { client });
 
-        // Insert into cache.
+        // Re-check cache under lock: another task may have inserted a
+        // connection for this validator while we were resolving/building.
         let mut cache = self.connections.lock().await;
-        cache.insert(validator.address, conn.clone());
+        let conn = cache
+            .entry(validator.address)
+            .or_insert(conn)
+            .clone();
 
         Ok(conn as Arc<dyn ValidatorConnection>)
     }

@@ -118,15 +118,17 @@ impl ValidatorSet {
 
     /// Selects validators for shard download, ordered by priority.
     ///
-    /// Returns (ordered validator indices, minimum required count).
+    /// Returns ordered validator indices. Higher-stake validators come first
+    /// (priority group), followed by the tail group. Both groups are shuffled
+    /// weighted by stake.
     pub fn select(
         &self,
         original_rows: usize,
         min_rows: usize,
         liveness_threshold: Fraction,
-    ) -> (Vec<usize>, usize) {
+    ) -> Vec<usize> {
         if self.validators.is_empty() {
-            return (Vec::new(), 0);
+            return Vec::new();
         }
 
         let total_voting_power = self.total_voting_power();
@@ -157,22 +159,7 @@ impl ValidatorSet {
         shuffle_by_stake(&mut indexed[..split_idx], &mut rng);
         shuffle_by_stake(&mut indexed[split_idx..], &mut rng);
 
-        let liveness_num = total_voting_power * (liveness_threshold.numerator as i64);
-        let liveness_den = liveness_threshold.denominator as i64;
-        let liveness_stake = (liveness_num + liveness_den - 1) / liveness_den;
-
-        let mut min_required: usize = 0;
-        let mut covered_stake: i64 = 0;
-        for &(_, vp) in &indexed[..split_idx] {
-            min_required += 1;
-            covered_stake += vp;
-            if covered_stake >= liveness_stake {
-                break;
-            }
-        }
-
-        let ordered_indices: Vec<usize> = indexed.iter().map(|&(idx, _)| idx).collect();
-        (ordered_indices, min_required)
+        indexed.iter().map(|&(idx, _)| idx).collect()
     }
 }
 
@@ -556,21 +543,19 @@ mod selection_tests {
     #[test]
     fn empty_validators_returns_empty() {
         let set = ValidatorSet::new(vec![], 0);
-        let (indices, min_req) = set.select(100, 10, default_liveness());
+        let indices = set.select(100, 10, default_liveness());
         assert!(indices.is_empty());
-        assert_eq!(min_req, 0);
     }
 
     #[test]
-    fn single_validator_min_required_is_one() {
+    fn single_validator_returns_one() {
         let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
-        let (indices, min_req) = set.select(100, 10, default_liveness());
+        let indices = set.select(100, 10, default_liveness());
         assert_eq!(indices, vec![0]);
-        assert_eq!(min_req, 1);
     }
 
     #[test]
-    fn multiple_validators_min_required_covers_liveness() {
+    fn multiple_validators_returns_all() {
         let set = ValidatorSet::new(
             vec![
                 make_validator(100, 1),
@@ -579,9 +564,8 @@ mod selection_tests {
             ],
             0,
         );
-        let (indices, min_req) = set.select(100, 10, default_liveness());
+        let indices = set.select(100, 10, default_liveness());
         assert_eq!(indices.len(), 3);
-        assert_eq!(min_req, 1);
 
         let mut present = indices;
         present.sort();
@@ -598,17 +582,15 @@ mod selection_tests {
             ],
             0,
         );
-        let (indices, min_req) = set.select(100, 10, default_liveness());
+        let indices = set.select(100, 10, default_liveness());
         assert_eq!(indices.len(), 3);
-        assert!(min_req >= 1);
     }
 
     #[test]
     fn split_idx_with_high_min_rows() {
         let set = ValidatorSet::new((0..10).map(|i| make_validator(10, i as u8)).collect(), 0);
-        let (_indices, min_req) = set.select(100, 50, default_liveness());
-        assert!(min_req >= 1);
-        assert!(min_req <= 5);
+        let indices = set.select(100, 50, default_liveness());
+        assert_eq!(indices.len(), 10);
     }
 
     #[test]
@@ -621,7 +603,7 @@ mod selection_tests {
             ],
             0,
         );
-        let (indices, _) = set.select(100, 10, default_liveness());
+        let indices = set.select(100, 10, default_liveness());
 
         assert_eq!(indices.len(), 3);
         let mut sorted = indices;
@@ -643,7 +625,7 @@ mod selection_tests {
                 ],
                 0,
             );
-            let (indices, _) = set.select(100, 10, default_liveness());
+            let indices = set.select(100, 10, default_liveness());
             first_position_counts[indices[0]] += 1;
         }
 

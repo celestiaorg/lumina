@@ -31,7 +31,7 @@ impl FibreClient {
     ///
     /// - [`FibreError::ClientClosed`] if the client has been closed.
     /// - [`FibreError::NotFound`] if no validator returned any rows.
-    /// - [`FibreError::NotEnoughShards`] if too few validators succeeded.
+    /// - [`FibreError::NotEnoughShards`] if too few unique rows were collected.
     /// - Any error from reconstruction (commitment mismatch, encoding, etc.).
     pub async fn download(&self, id: &BlobID) -> Result<Blob, FibreError> {
         if self.cancel_token.is_cancelled() {
@@ -41,7 +41,15 @@ impl FibreClient {
         let val_set = self.set_getter.head().await?;
         let blob_cfg = BlobConfig::for_version(id.version())?;
 
-        let (ordered_indices, download_target) = val_set.select(
+        let ordered_indices = val_set.select(
+            blob_cfg.original_rows,
+            self.cfg.min_rows_per_validator,
+            self.cfg.liveness_threshold,
+        );
+
+        let shard_map = val_set.assign(
+            id.commitment(),
+            blob_cfg.total_rows(),
             blob_cfg.original_rows,
             self.cfg.min_rows_per_validator,
             self.cfg.liveness_threshold,
@@ -52,7 +60,8 @@ impl FibreClient {
         self.download_blob(
             &val_set,
             &ordered_indices,
-            download_target,
+            blob_cfg.original_rows,
+            &shard_map,
             &mut blob,
             &self.cancel_token,
         )
@@ -79,7 +88,15 @@ impl FibreClient {
 
         let val_set = self.set_getter.head().await?;
 
-        let (ordered_indices, download_target) = val_set.select(
+        let ordered_indices = val_set.select(
+            blob_cfg.original_rows,
+            self.cfg.min_rows_per_validator,
+            self.cfg.liveness_threshold,
+        );
+
+        let shard_map = val_set.assign(
+            id.commitment(),
+            blob_cfg.total_rows(),
             blob_cfg.original_rows,
             self.cfg.min_rows_per_validator,
             self.cfg.liveness_threshold,
@@ -90,7 +107,8 @@ impl FibreClient {
         self.download_blob(
             &val_set,
             &ordered_indices,
-            download_target,
+            blob.config().original_rows,
+            &shard_map,
             &mut blob,
             &self.cancel_token,
         )
@@ -103,13 +121,16 @@ impl FibreClient {
 
     /// Download row proofs from validators and apply them to the blob.
     ///
-    /// Spawns up to `download_target` concurrent tasks, replacing failed
-    /// validators with the next in the ordered list.
+    /// Maintains a dynamic concurrency invariant:
+    ///   `unique_rows + inflight_rows >= original_rows`
+    /// When a validator fails, the shortfall immediately triggers spawning
+    /// more validators to compensate.
     async fn download_blob(
         &self,
         val_set: &ValidatorSet,
         ordered_indices: &[usize],
-        download_target: usize,
+        original_rows: usize,
+        shard_map: &crate::validator::ShardMap,
         blob: &mut Blob,
         cancel_token: &CancellationToken,
     ) -> Result<(), FibreError> {
@@ -117,8 +138,12 @@ impl FibreClient {
             return Err(FibreError::NotFound);
         }
 
-        let download_target_u32 = download_target as u32;
         let blob_id = blob.id().clone();
+
+        // Build expected-rows-per-validator lookup from the shard map.
+        let expected_rows: Vec<usize> = (0..val_set.validators.len())
+            .map(|i| shard_map.get(i).map_or(0, |v| v.len()))
+            .collect();
 
         #[allow(clippy::type_complexity)]
         let mut futures: FuturesUnordered<
@@ -132,24 +157,23 @@ impl FibreClient {
         > = FuturesUnordered::new();
 
         let mut val_iter = ordered_indices.iter();
-        let mut active = 0u32;
-        let mut successes = 0u32;
+        let mut unique_rows: usize = 0;
+        let mut inflight_rows: usize = 0;
 
         loop {
-            let can_spawn = active < download_target_u32
-                && successes < download_target_u32
-                && val_iter.len() > 0;
+            // Spawn more validators while we need more rows covered.
+            let need_more = (unique_rows + inflight_rows) < original_rows && val_iter.len() > 0;
 
-            if !can_spawn && futures.is_empty() {
+            if !need_more && futures.is_empty() {
                 break;
             }
 
             tokio::select! {
-                result = self.download_semaphore.clone().acquire_owned(), if can_spawn => {
+                result = self.download_semaphore.clone().acquire_owned(), if need_more => {
                     let global_permit = result
                         .map_err(|_| FibreError::Other("global semaphore closed".into()))?;
                     let &val_idx = val_iter.next().unwrap();
-                    active += 1;
+                    inflight_rows += expected_rows[val_idx];
 
                     let connector = self.connector.clone();
                     let validator = val_set.validators[val_idx].clone();
@@ -166,9 +190,9 @@ impl FibreClient {
                     });
                 }
                 task_result = futures.next(), if !futures.is_empty() => {
-                    active -= 1;
                     match task_result {
                         Some((val_idx, Some(Ok(proofs)))) => {
+                            inflight_rows = inflight_rows.saturating_sub(expected_rows[val_idx]);
                             let total = proofs.len();
                             let mut applied = 0usize;
                             for proof in proofs {
@@ -176,6 +200,7 @@ impl FibreClient {
                                     applied += 1;
                                 }
                             }
+                            unique_rows += applied;
                             if applied == 0 && total > 0 {
                                 let validator = &val_set.validators[val_idx];
                                 tracing::warn!(
@@ -184,20 +209,22 @@ impl FibreClient {
                                     "no rows applied from validator response"
                                 );
                             }
-                            successes += 1;
-                            if successes >= download_target_u32 {
+                            if unique_rows >= original_rows {
                                 break;
                             }
                         }
                         Some((val_idx, Some(Err(e)))) => {
+                            inflight_rows = inflight_rows.saturating_sub(expected_rows[val_idx]);
                             let validator = &val_set.validators[val_idx];
                             tracing::warn!(
                                 validator = %hex::encode(validator.address),
                                 error = %e,
                                 "shard download failed"
                             );
+                            // Invariant violated — loop will spawn more validators.
                         }
                         Some((val_idx, None)) => {
+                            inflight_rows = inflight_rows.saturating_sub(expected_rows[val_idx]);
                             let validator = &val_set.validators[val_idx];
                             tracing::warn!(
                                 validator = %hex::encode(validator.address),
@@ -213,21 +240,14 @@ impl FibreClient {
             }
         }
 
-        if successes == 0 {
+        if unique_rows == 0 {
             return Err(FibreError::NotFound);
         }
-        if successes < download_target_u32 {
+        if unique_rows < original_rows {
             return Err(FibreError::NotEnoughShards {
-                got: successes as usize,
-                need: download_target,
+                got: unique_rows,
+                need: original_rows,
             });
-        }
-        if successes > download_target_u32 {
-            tracing::warn!(
-                downloaded = successes,
-                expected_target = download_target_u32,
-                "downloaded more shards than needed"
-            );
         }
 
         Ok(())
@@ -236,172 +256,16 @@ impl FibreClient {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-
-    use ed25519_dalek::SigningKey;
+    use std::sync::Arc;
 
     use crate::blob::{Blob, BlobID};
-    use crate::client::FibreClient;
-    use crate::config::{BlobConfig, FibreClientConfig, Fraction};
+    use crate::config::BlobConfig;
     use crate::error::FibreError;
-    use crate::validator::{SetGetter, ValidatorInfo, ValidatorSet};
-    use crate::validator_client::{
-        DownloadResponse, DownloadedRow, UploadResponse, ValidatorConnection, ValidatorConnector,
+    use crate::test_utils::{
+        build_test_client, make_validator, test_blob_config, MockConnector,
+        MockValidatorConnection,
     };
-
-    /// Test blob configuration with small K=4, N=4 for fast tests.
-    fn test_blob_config() -> BlobConfig {
-        BlobConfig::new_test(0, 4, 4, 4096, 4, 64)
-    }
-
-    /// Test client configuration with small parameters matching the test blob config.
-    fn test_client_config() -> FibreClientConfig {
-        FibreClientConfig {
-            chain_id: "test-chain".to_string(),
-            safety_threshold: Fraction {
-                numerator: 2,
-                denominator: 3,
-            },
-            liveness_threshold: Fraction {
-                numerator: 1,
-                denominator: 3,
-            },
-            min_rows_per_validator: 1,
-            max_message_size: 1024 * 1024,
-            upload_concurrency: 10,
-            download_concurrency: 10,
-        }
-    }
-
-    /// Create a ValidatorInfo with the given voting power and seed.
-    fn make_validator(power: i64, seed: u8) -> ValidatorInfo {
-        let mut key_bytes = [0u8; 32];
-        key_bytes[0] = seed;
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        ValidatorInfo {
-            address: [seed; 20],
-            pubkey: signing_key.verifying_key(),
-            voting_power: power,
-        }
-    }
-
-    struct MockSetGetter {
-        val_set: ValidatorSet,
-    }
-
-    #[async_trait::async_trait]
-    impl SetGetter for MockSetGetter {
-        async fn head(&self) -> Result<ValidatorSet, FibreError> {
-            Ok(self.val_set.clone())
-        }
-    }
-
-    /// A mock connection that stores uploaded row proofs and returns them on download.
-    struct MockValidatorConnection {
-        /// Stored row proofs keyed by commitment.
-        stored: Mutex<HashMap<[u8; 32], Vec<rsema1d::RowInclusionProof>>>,
-        /// If true, all operations return an error.
-        fail: bool,
-    }
-
-    impl MockValidatorConnection {
-        fn new() -> Self {
-            Self {
-                stored: Mutex::new(HashMap::new()),
-                fail: false,
-            }
-        }
-
-        fn new_failing() -> Self {
-            Self {
-                stored: Mutex::new(HashMap::new()),
-                fail: true,
-            }
-        }
-
-        fn store_proofs(&self, commitment: [u8; 32], proofs: Vec<rsema1d::RowInclusionProof>) {
-            self.stored
-                .lock()
-                .unwrap()
-                .entry(commitment)
-                .or_default()
-                .extend(proofs);
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ValidatorConnection for MockValidatorConnection {
-        async fn upload_shard(
-            &self,
-            _promise: &crate::payment_promise::PaymentPromise,
-            _rows: &[rsema1d::RowInclusionProof],
-            _rlc_coeffs: &[rsema1d::GF128],
-        ) -> Result<UploadResponse, FibreError> {
-            Ok(UploadResponse {
-                validator_signature: vec![0u8; 64],
-            })
-        }
-
-        async fn download_shard(&self, blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
-            if self.fail {
-                return Err(FibreError::Other("mock connection failure".into()));
-            }
-
-            let stored = self.stored.lock().unwrap();
-            let proofs = stored
-                .get(&blob_id.commitment())
-                .ok_or(FibreError::NotFound)?;
-
-            Ok(DownloadResponse {
-                rows: proofs
-                    .iter()
-                    .map(|p| DownloadedRow { proof: p.clone() })
-                    .collect(),
-            })
-        }
-    }
-
-    /// A connector that returns pre-configured connections by validator address.
-    struct MockConnector {
-        connections: HashMap<[u8; 20], Arc<MockValidatorConnection>>,
-    }
-
-    impl MockConnector {
-        fn new() -> Self {
-            Self {
-                connections: HashMap::new(),
-            }
-        }
-
-        fn add(&mut self, address: [u8; 20], conn: Arc<MockValidatorConnection>) {
-            self.connections.insert(address, conn);
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ValidatorConnector for MockConnector {
-        async fn connect(
-            &self,
-            validator: &ValidatorInfo,
-        ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
-            let conn = self
-                .connections
-                .get(&validator.address)
-                .ok_or_else(|| FibreError::HostNotFound(hex::encode(validator.address)))?
-                .clone();
-            Ok(conn)
-        }
-    }
-
-    fn build_test_client(val_set: ValidatorSet, connector: MockConnector) -> FibreClient {
-        FibreClient::builder()
-            .config(test_client_config())
-            .set_getter(MockSetGetter { val_set })
-            .connector(connector)
-            .build()
-            .unwrap()
-    }
+    use crate::validator::ValidatorSet;
 
     /// Encode a blob, extract all row proofs, and store them on each mock
     /// validator connection. Returns the BlobID.
@@ -430,29 +294,30 @@ mod tests {
         let cfg = test_blob_config();
         let data: Vec<u8> = (0u8..=199).collect();
 
-        let validators = vec![
+        let validators = [
             make_validator(100, 1),
             make_validator(100, 2),
             make_validator(100, 3),
         ];
+        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
         let val_set = ValidatorSet {
-            validators: validators.clone(),
+            validators: val_infos.clone(),
             height: 1,
         };
 
         let conns: Vec<Arc<MockValidatorConnection>> = validators
             .iter()
-            .map(|_| Arc::new(MockValidatorConnection::new()))
+            .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
             .collect();
 
         let blob_id = prepare_blob_and_distribute(&data, &conns, &cfg);
 
         let mut connector = MockConnector::new();
-        for (i, v) in validators.iter().enumerate() {
+        for (i, (_, v)) in validators.iter().enumerate() {
             connector.add(v.address, conns[i].clone());
         }
 
-        let client = build_test_client(val_set, connector);
+        let client = build_test_client(val_set, connector, "test-chain");
         let blob = client.download_with_config(&blob_id, cfg).await.unwrap();
 
         assert_eq!(blob.data().unwrap(), &data);
@@ -464,22 +329,28 @@ mod tests {
         let data: Vec<u8> = (0u8..=199).collect();
 
         // 5 validators; validator 0 and 1 will fail
-        let validators = vec![
+        let validators = [
             make_validator(100, 1),
             make_validator(100, 2),
             make_validator(100, 3),
             make_validator(100, 4),
             make_validator(100, 5),
         ];
+        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
         let val_set = ValidatorSet {
-            validators: validators.clone(),
+            validators: val_infos.clone(),
             height: 1,
         };
 
-        let failing_conn_0 = Arc::new(MockValidatorConnection::new_failing());
-        let failing_conn_1 = Arc::new(MockValidatorConnection::new_failing());
-        let good_conns: Vec<Arc<MockValidatorConnection>> = (2..5)
-            .map(|_| Arc::new(MockValidatorConnection::new()))
+        let failing_conn_0 = Arc::new(MockValidatorConnection::new_failing(
+            validators[0].0.clone(),
+        ));
+        let failing_conn_1 = Arc::new(MockValidatorConnection::new_failing(
+            validators[1].0.clone(),
+        ));
+        let good_conns: Vec<Arc<MockValidatorConnection>> = validators[2..]
+            .iter()
+            .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
             .collect();
 
         let blob = Blob::new(&data, cfg.clone()).unwrap();
@@ -495,13 +366,13 @@ mod tests {
         }
 
         let mut connector = MockConnector::new();
-        connector.add(validators[0].address, failing_conn_0);
-        connector.add(validators[1].address, failing_conn_1);
+        connector.add(val_infos[0].address, failing_conn_0);
+        connector.add(val_infos[1].address, failing_conn_1);
         for (i, conn) in good_conns.iter().enumerate() {
-            connector.add(validators[i + 2].address, conn.clone());
+            connector.add(val_infos[i + 2].address, conn.clone());
         }
 
-        let client = build_test_client(val_set, connector);
+        let client = build_test_client(val_set, connector, "test-chain");
         let result = client.download_with_config(&blob_id, cfg).await.unwrap();
 
         assert_eq!(result.data().unwrap(), &data);
@@ -513,20 +384,23 @@ mod tests {
         let data: Vec<u8> = (0u8..=99).collect();
 
         // Single validator that fails
-        let validators = vec![make_validator(100, 1)];
+        let validators = [make_validator(100, 1)];
+        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
         let val_set = ValidatorSet {
-            validators: validators.clone(),
+            validators: val_infos.clone(),
             height: 1,
         };
 
-        let failing_conn = Arc::new(MockValidatorConnection::new_failing());
+        let failing_conn = Arc::new(MockValidatorConnection::new_failing(
+            validators[0].0.clone(),
+        ));
         let mut connector = MockConnector::new();
-        connector.add(validators[0].address, failing_conn);
+        connector.add(val_infos[0].address, failing_conn);
 
         let blob = Blob::new(&data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
 
-        let client = build_test_client(val_set, connector);
+        let client = build_test_client(val_set, connector, "test-chain");
         let result = client.download_with_config(&blob_id, cfg).await;
 
         assert!(
@@ -538,17 +412,17 @@ mod tests {
     #[tokio::test]
     async fn download_fails_when_client_closed() {
         let cfg = test_blob_config();
-        let validators = vec![make_validator(100, 1)];
+        let (key, val) = make_validator(100, 1);
         let val_set = ValidatorSet {
-            validators: validators.clone(),
+            validators: vec![val.clone()],
             height: 1,
         };
 
-        let conn = Arc::new(MockValidatorConnection::new());
+        let conn = Arc::new(MockValidatorConnection::new(key));
         let mut connector = MockConnector::new();
-        connector.add(validators[0].address, conn);
+        connector.add(val.address, conn);
 
-        let client = build_test_client(val_set, connector);
+        let client = build_test_client(val_set, connector, "test-chain");
         client.close();
 
         let blob_id = BlobID::new(0, [0u8; 32]);
@@ -565,13 +439,14 @@ mod tests {
         let cfg = test_blob_config();
         let original_data: Vec<u8> = (0u8..=249).collect();
 
-        let validators = vec![
+        let validators = [
             make_validator(100, 10),
             make_validator(100, 20),
             make_validator(100, 30),
         ];
+        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
         let val_set = ValidatorSet {
-            validators: validators.clone(),
+            validators: val_infos.clone(),
             height: 42,
         };
 
@@ -581,7 +456,7 @@ mod tests {
 
         let conns: Vec<Arc<MockValidatorConnection>> = validators
             .iter()
-            .map(|_| Arc::new(MockValidatorConnection::new()))
+            .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
             .collect();
 
         for conn in &conns {
@@ -593,11 +468,11 @@ mod tests {
         }
 
         let mut connector = MockConnector::new();
-        for (i, v) in validators.iter().enumerate() {
+        for (i, (_, v)) in validators.iter().enumerate() {
             connector.add(v.address, conns[i].clone());
         }
 
-        let client = build_test_client(val_set, connector);
+        let client = build_test_client(val_set, connector, "test-chain");
         let downloaded = client.download_with_config(&blob_id, cfg).await.unwrap();
 
         assert_eq!(downloaded.data().unwrap(), &original_data);
@@ -610,13 +485,14 @@ mod tests {
         let data: Vec<u8> = (0u8..=149).collect();
 
         // 3 validators; validator 0 returns NotFound (no proofs stored)
-        let validators = vec![
+        let validators = [
             make_validator(100, 1),
             make_validator(100, 2),
             make_validator(100, 3),
         ];
+        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
         let val_set = ValidatorSet {
-            validators: validators.clone(),
+            validators: val_infos.clone(),
             height: 1,
         };
 
@@ -625,12 +501,13 @@ mod tests {
         let total_rows = cfg.total_rows();
 
         // Validator 0 has an empty store (returns NotFound)
-        let empty_conn = Arc::new(MockValidatorConnection::new());
+        let empty_conn = Arc::new(MockValidatorConnection::new(validators[0].0.clone()));
 
         // Validators 1 and 2 have proofs
-        let good_conns: Vec<Arc<MockValidatorConnection>> = (0..2)
-            .map(|_| {
-                let conn = Arc::new(MockValidatorConnection::new());
+        let good_conns: Vec<Arc<MockValidatorConnection>> = validators[1..]
+            .iter()
+            .map(|(k, _)| {
+                let conn = Arc::new(MockValidatorConnection::new(k.clone()));
                 let mut proofs = Vec::new();
                 for i in 0..total_rows {
                     proofs.push(blob.row(i).unwrap());
@@ -641,11 +518,11 @@ mod tests {
             .collect();
 
         let mut connector = MockConnector::new();
-        connector.add(validators[0].address, empty_conn);
-        connector.add(validators[1].address, good_conns[0].clone());
-        connector.add(validators[2].address, good_conns[1].clone());
+        connector.add(val_infos[0].address, empty_conn);
+        connector.add(val_infos[1].address, good_conns[0].clone());
+        connector.add(val_infos[2].address, good_conns[1].clone());
 
-        let client = build_test_client(val_set, connector);
+        let client = build_test_client(val_set, connector, "test-chain");
         let downloaded = client.download_with_config(&blob_id, cfg).await.unwrap();
 
         assert_eq!(downloaded.data().unwrap(), &data);

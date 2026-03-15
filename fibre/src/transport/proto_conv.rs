@@ -203,11 +203,20 @@ fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
             nanos: d.subsec_nanos() as i32,
         },
         Err(e) => {
-            // Before epoch — negative seconds
+            // Before epoch — use protobuf convention where nanos is
+            // always non-negative: seconds = -(secs+1), nanos = 1e9 - subsec.
             let d = e.duration();
-            Timestamp {
-                seconds: -(d.as_secs() as i64),
-                nanos: d.subsec_nanos() as i32,
+            let subsec = d.subsec_nanos();
+            if subsec == 0 {
+                Timestamp {
+                    seconds: -(d.as_secs() as i64),
+                    nanos: 0,
+                }
+            } else {
+                Timestamp {
+                    seconds: -(d.as_secs() as i64) - 1,
+                    nanos: (1_000_000_000 - subsec) as i32,
+                }
             }
         }
     }
@@ -221,7 +230,14 @@ pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> Result<SystemTime, Fibr
             .checked_add(d)
             .ok_or_else(|| FibreError::Other("timestamp overflow".into()))
     } else {
-        let d = Duration::new((-t.seconds) as u64, t.nanos as u32);
+        // Reverse the protobuf convention: if nanos > 0 the actual
+        // duration is (|seconds| - 1) seconds + (1e9 - nanos) subsec nanos.
+        let (secs, nanos) = if t.nanos > 0 {
+            ((-t.seconds - 1) as u64, (1_000_000_000 - t.nanos) as u32)
+        } else {
+            ((-t.seconds) as u64, 0u32)
+        };
+        let d = Duration::new(secs, nanos);
         UNIX_EPOCH
             .checked_sub(d)
             .ok_or_else(|| FibreError::Other("timestamp underflow".into()))
@@ -366,6 +382,40 @@ mod tests {
             .or_else(|_| back.duration_since(now))
             .unwrap();
         assert!(diff < Duration::from_micros(1));
+    }
+
+    #[test]
+    fn pre_epoch_timestamp_roundtrip() {
+        // 1969-06-15 00:00:00.500 UTC → 0.5s before some whole-second boundary
+        let t = UNIX_EPOCH - Duration::new(10, 500_000_000);
+        let ts = system_time_to_timestamp(t);
+
+        // Protobuf convention: nanos must be non-negative
+        assert!(ts.nanos >= 0, "nanos must be non-negative: {}", ts.nanos);
+        assert_eq!(ts.seconds, -11);
+        assert_eq!(ts.nanos, 500_000_000);
+
+        let back = timestamp_to_system_time(&ts).unwrap();
+        let diff = t
+            .duration_since(back)
+            .or_else(|_| back.duration_since(t))
+            .unwrap();
+        assert_eq!(diff.as_nanos(), 0, "pre-epoch roundtrip lost precision");
+    }
+
+    #[test]
+    fn pre_epoch_timestamp_exact_second() {
+        let t = UNIX_EPOCH - Duration::new(5, 0);
+        let ts = system_time_to_timestamp(t);
+        assert_eq!(ts.seconds, -5);
+        assert_eq!(ts.nanos, 0);
+
+        let back = timestamp_to_system_time(&ts).unwrap();
+        let diff = t
+            .duration_since(back)
+            .or_else(|_| back.duration_since(t))
+            .unwrap();
+        assert_eq!(diff.as_nanos(), 0);
     }
 
     #[test]

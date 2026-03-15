@@ -70,6 +70,14 @@ impl PaymentPromise {
     /// suitable for wrapping with CometBFT domain separation via
     /// [`raw_bytes_message_sign_bytes`].
     fn stripped_sign_bytes(&self) -> Result<Vec<u8>, FibreError> {
+        if self.namespace.len() != NAMESPACE_SIZE {
+            return Err(FibreError::InvalidPaymentPromise(format!(
+                "namespace must be {} bytes, got {}",
+                NAMESPACE_SIZE,
+                self.namespace.len()
+            )));
+        }
+
         let timestamp_bytes = marshal_binary_time(self.creation_timestamp)?;
 
         let mut buf = Vec::with_capacity(SIGN_BYTES_FIXED_SIZE);
@@ -164,6 +172,15 @@ impl PaymentPromise {
                 "chain id length {} exceeds maximum {}",
                 self.chain_id.len(),
                 MAX_CHAIN_ID_SIZE
+            )));
+        }
+
+        // Namespace must be exactly NAMESPACE_SIZE bytes
+        if self.namespace.len() != NAMESPACE_SIZE {
+            return Err(FibreError::InvalidPaymentPromise(format!(
+                "namespace must be {} bytes, got {}",
+                NAMESPACE_SIZE,
+                self.namespace.len()
             )));
         }
 
@@ -473,6 +490,20 @@ mod tests {
         promise.chain_id = String::new();
         promise.sign(&signing_key).unwrap();
         assert!(promise.validate().is_err());
+    }
+
+    #[test]
+    fn validate_fails_with_wrong_namespace_length() {
+        let (signing_key, mut promise) = make_test_promise();
+        promise.namespace = vec![0u8; 10]; // wrong length
+        promise.sign(&signing_key).unwrap_err(); // stripped_sign_bytes fails
+    }
+
+    #[test]
+    fn stripped_sign_bytes_fails_with_wrong_namespace_length() {
+        let (_, mut promise) = make_test_promise();
+        promise.namespace = vec![0u8; 30]; // wrong length
+        assert!(promise.sign_bytes().is_err());
     }
 
     #[test]

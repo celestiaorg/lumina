@@ -215,31 +215,23 @@ impl Blob {
         self.rlc_coeffs.as_deref()
     }
 
-    /// Returns the size of each row in bytes.
-    ///
-    /// Returns 0 if no original data is available to determine row size.
-    pub fn row_size(&self) -> usize {
-        match &self.data {
-            Some(d) => self.cfg.row_size(d.len()),
-            None => 0,
-        }
+    /// Returns the size of each row in bytes, or `None` if no data is available.
+    pub fn row_size(&self) -> Option<usize> {
+        self.data.as_ref().map(|d| self.cfg.row_size(d.len()))
     }
 
-    /// Returns the size of the original data (without header).
-    ///
-    /// Returns 0 if no original data is available.
-    pub fn data_size(&self) -> usize {
-        match &self.data {
-            Some(d) => d.len(),
-            None => 0,
-        }
+    /// Returns the size of the original data (without header), or `None` if
+    /// no data is available.
+    pub fn data_size(&self) -> Option<usize> {
+        self.data.as_ref().map(|d| d.len())
     }
 
-    /// Returns the upload size (data with padding, without parity).
+    /// Returns the upload size (data with padding, without parity), or `None`
+    /// if no data is available.
     ///
     /// This is the size included in the `PaymentPromise` and the one actually paid for.
-    pub fn upload_size(&self) -> usize {
-        self.cfg.upload_size(self.data_size())
+    pub fn upload_size(&self) -> Option<usize> {
+        self.data_size().map(|s| self.cfg.upload_size(s))
     }
 
     /// Returns the original data (without header), if available.
@@ -263,7 +255,7 @@ impl Blob {
     /// Add and verify a row inclusion proof.
     ///
     /// The row is verified against the blob's commitment before being stored.
-    /// It is safe to call this method concurrently only for disjoint indices.
+    /// Takes `&mut self`, so concurrent calls require external synchronisation.
     pub fn set_row(&mut self, proof: rsema1d::RowInclusionProof) -> Result<(), FibreError> {
         let row_size = proof.row.len();
         let params =
@@ -428,11 +420,11 @@ mod tests {
         let data = vec![1u8; 200];
         let blob = Blob::new(&data, cfg).unwrap();
 
-        assert_eq!(blob.data_size(), 200);
+        assert_eq!(blob.data_size(), Some(200));
         assert!(blob.data().is_some());
         assert_eq!(blob.data().unwrap(), &data);
-        assert!(blob.row_size() > 0);
-        assert!(blob.upload_size() > 0);
+        assert!(blob.row_size().unwrap() > 0);
+        assert!(blob.upload_size().unwrap() > 0);
         assert!(blob.rlc_coeffs().is_some());
         assert!(blob.id().validate().is_ok());
     }

@@ -4,192 +4,13 @@
 //! data matches. Mock validators store rows on upload and return them on download,
 //! with valid ed25519 signatures so the upload signature collection succeeds.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
-
-use crate::blob::{Blob, BlobID};
-use crate::client::FibreClient;
-use crate::config::{BlobConfig, FibreClientConfig, Fraction};
-use crate::error::FibreError;
-use crate::payment_promise::PaymentPromise;
-use crate::validator::{SetGetter, ValidatorInfo, ValidatorSet};
-use crate::validator_client::{
-    DownloadResponse, DownloadedRow, UploadResponse, ValidatorConnection, ValidatorConnector,
+use crate::blob::Blob;
+use crate::test_utils::{
+    build_test_client, make_connector, make_validator, test_blob_config, MockConnector,
+    MockValidatorConnection,
 };
-
-struct MockSetGetter {
-    val_set: ValidatorSet,
-}
-
-#[async_trait::async_trait]
-impl SetGetter for MockSetGetter {
-    async fn head(&self) -> Result<ValidatorSet, FibreError> {
-        Ok(self.val_set.clone())
-    }
-}
-
-/// A mock validator connection that stores rows on upload and returns them on
-/// download. Produces valid ed25519 signatures so the upload flow's
-/// `SignatureSet` accepts them.
-struct MockValidatorConnection {
-    ed_signing_key: Ed25519SigningKey,
-    /// Rows stored by commitment hash.
-    stored: Mutex<HashMap<[u8; 32], Vec<rsema1d::RowInclusionProof>>>,
-    /// If true, all operations return an error.
-    fail: bool,
-}
-
-impl MockValidatorConnection {
-    fn new(ed_signing_key: Ed25519SigningKey) -> Self {
-        Self {
-            ed_signing_key,
-            stored: Mutex::new(HashMap::new()),
-            fail: false,
-        }
-    }
-
-    fn new_failing(ed_signing_key: Ed25519SigningKey) -> Self {
-        Self {
-            ed_signing_key,
-            stored: Mutex::new(HashMap::new()),
-            fail: true,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ValidatorConnection for MockValidatorConnection {
-    async fn upload_shard(
-        &self,
-        promise: &PaymentPromise,
-        rows: &[rsema1d::RowInclusionProof],
-        _rlc_coeffs: &[rsema1d::GF128],
-    ) -> Result<UploadResponse, FibreError> {
-        if self.fail {
-            return Err(FibreError::Other("mock connection failure".into()));
-        }
-
-        // Store uploaded rows keyed by commitment.
-        self.stored
-            .lock()
-            .unwrap()
-            .entry(promise.commitment)
-            .or_default()
-            .extend(rows.to_vec());
-
-        // Sign the promise's sign bytes (CometBFT-wrapped, same for client and validators).
-        use ed25519_dalek::Signer;
-        let sign_bytes = promise.sign_bytes()?;
-        let signature = self.ed_signing_key.sign(&sign_bytes);
-
-        Ok(UploadResponse {
-            validator_signature: signature.to_bytes().to_vec(),
-        })
-    }
-
-    async fn download_shard(&self, blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
-        if self.fail {
-            return Err(FibreError::Other("mock connection failure".into()));
-        }
-
-        let stored = self.stored.lock().unwrap();
-        let proofs = stored
-            .get(&blob_id.commitment())
-            .ok_or(FibreError::NotFound)?;
-
-        Ok(DownloadResponse {
-            rows: proofs
-                .iter()
-                .map(|p| DownloadedRow { proof: p.clone() })
-                .collect(),
-        })
-    }
-}
-
-struct MockConnector {
-    connections: HashMap<[u8; 20], Arc<MockValidatorConnection>>,
-}
-
-#[async_trait::async_trait]
-impl ValidatorConnector for MockConnector {
-    async fn connect(
-        &self,
-        validator: &ValidatorInfo,
-    ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
-        self.connections
-            .get(&validator.address)
-            .cloned()
-            .map(|c| c as Arc<dyn ValidatorConnection>)
-            .ok_or_else(|| FibreError::HostNotFound(hex::encode(validator.address)))
-    }
-}
-
-fn test_blob_config() -> BlobConfig {
-    BlobConfig::new_test(0, 4, 4, 4096, 4, 64)
-}
-
-fn test_client_config() -> FibreClientConfig {
-    FibreClientConfig {
-        chain_id: "roundtrip-test".to_string(),
-        safety_threshold: Fraction {
-            numerator: 2,
-            denominator: 3,
-        },
-        liveness_threshold: Fraction {
-            numerator: 1,
-            denominator: 3,
-        },
-        min_rows_per_validator: 1,
-        max_message_size: 1 << 20,
-        upload_concurrency: 10,
-        download_concurrency: 10,
-    }
-}
-
-fn make_validator(power: i64, seed: u8) -> (Ed25519SigningKey, ValidatorInfo) {
-    let mut key_bytes = [0u8; 32];
-    key_bytes[0] = seed;
-    let ed_key = Ed25519SigningKey::from_bytes(&key_bytes);
-    (
-        ed_key.clone(),
-        ValidatorInfo {
-            address: [seed; 20],
-            pubkey: ed_key.verifying_key(),
-            voting_power: power,
-        },
-    )
-}
-
-fn build_client(
-    validators: &[(Ed25519SigningKey, ValidatorInfo)],
-    connector: MockConnector,
-) -> FibreClient {
-    let val_infos: Vec<ValidatorInfo> = validators.iter().map(|(_, v)| v.clone()).collect();
-    let val_set = ValidatorSet {
-        validators: val_infos,
-        height: 42,
-    };
-
-    FibreClient::builder()
-        .config(test_client_config())
-        .set_getter(MockSetGetter { val_set })
-        .connector(connector)
-        .build()
-        .unwrap()
-}
-
-fn make_connector(validators: &[(Ed25519SigningKey, ValidatorInfo)]) -> MockConnector {
-    let mut connections = HashMap::new();
-    for (ed_key, info) in validators {
-        connections.insert(
-            info.address,
-            Arc::new(MockValidatorConnection::new(ed_key.clone())),
-        );
-    }
-    MockConnector { connections }
-}
 
 #[tokio::test]
 async fn upload_then_download_roundtrip() {
@@ -206,7 +27,13 @@ async fn upload_then_download_roundtrip() {
     ];
 
     let connector = make_connector(&validators);
-    let client = build_client(&validators, connector);
+    let val_infos = validators.iter().map(|(_, v)| v.clone()).collect();
+    let val_set = crate::validator::ValidatorSet {
+        validators: val_infos,
+        height: 42,
+    };
+
+    let client = build_test_client(val_set, connector, "roundtrip-test");
 
     // Upload.
     let signed = client
@@ -261,23 +88,29 @@ async fn roundtrip_with_partial_validator_failure() {
     let v4 = make_validator(100, 4);
     let v5 = make_validator(100, 5);
 
-    let all_validators = vec![v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
+    let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
 
-    let mut connections: HashMap<[u8; 20], Arc<MockValidatorConnection>> = HashMap::new();
+    let mut connector = MockConnector::new();
     for (ed_key, info) in &[v1, v2, v3] {
-        connections.insert(
+        connector.add(
             info.address,
             Arc::new(MockValidatorConnection::new(ed_key.clone())),
         );
     }
     for (ed_key, info) in &[v4, v5] {
-        connections.insert(
+        connector.add(
             info.address,
             Arc::new(MockValidatorConnection::new_failing(ed_key.clone())),
         );
     }
-    let connector = MockConnector { connections };
-    let client = build_client(&all_validators, connector);
+
+    let val_infos = all_validators.iter().map(|(_, v)| v.clone()).collect();
+    let val_set = crate::validator::ValidatorSet {
+        validators: val_infos,
+        height: 42,
+    };
+
+    let client = build_test_client(val_set, connector, "roundtrip-test");
 
     // Total voting power = 800. 2/3 threshold = 533.
     // 3 good validators have 600 voting power > 533 → upload should succeed.
