@@ -196,7 +196,7 @@ impl FibreClient {
                             let total = proofs.len();
                             let mut applied = 0usize;
                             for proof in proofs {
-                                if blob.set_row(proof).is_ok() {
+                                if matches!(blob.set_row(proof), Ok(true)) {
                                     applied += 1;
                                 }
                             }

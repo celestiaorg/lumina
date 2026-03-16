@@ -87,8 +87,6 @@ fn fibre_err(e: FibreError) -> Error {
         FibreError::GrpcClient(grpc_err) => Error::Grpc(grpc_err),
         #[cfg(not(target_arch = "wasm32"))]
         FibreError::Transport(t) => Error::Grpc(celestia_grpc::Error::from(t)),
-        other => Error::Grpc(celestia_grpc::Error::TonicError(Box::new(
-            tonic::Status::internal(other.to_string()),
-        ))),
+        other => Error::Fibre(other),
     }
 }

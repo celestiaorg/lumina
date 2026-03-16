@@ -144,6 +144,10 @@ pub enum Error {
     /// gRPC endpoint is not set.
     #[error("Signer is set but gRPC endpoint is not")]
     GrpcEndpointNotSet,
+
+    /// An error from the Fibre client library.
+    #[error("Fibre error: {0}")]
+    Fibre(celestia_fibre::FibreError),
 }
 
 impl From<jsonrpsee_core::ClientError> for Error {

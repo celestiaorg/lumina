@@ -255,8 +255,12 @@ impl Blob {
     /// Add and verify a row inclusion proof.
     ///
     /// The row is verified against the blob's commitment before being stored.
+    /// If the row index was already filled, the proof is verified but not stored
+    /// and the method returns `Ok(false)`.
+    /// Returns `Ok(true)` when a genuinely new row is stored.
+    ///
     /// Takes `&mut self`, so concurrent calls require external synchronisation.
-    pub fn set_row(&mut self, proof: rsema1d::RowInclusionProof) -> Result<(), FibreError> {
+    pub fn set_row(&mut self, proof: rsema1d::RowInclusionProof) -> Result<bool, FibreError> {
         let row_size = proof.row.len();
         let params =
             rsema1d::Parameters::new(self.cfg.original_rows, self.cfg.parity_rows, row_size)?;
@@ -265,6 +269,9 @@ impl Blob {
 
         if let Some(ref mut rows) = self.rows {
             if proof.index < rows.len() {
+                if rows[proof.index].is_some() {
+                    return Ok(false);
+                }
                 rows[proof.index] = Some(proof.row);
             } else {
                 return Err(FibreError::Other(format!(
@@ -279,7 +286,7 @@ impl Blob {
             ));
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Reconstruct the original data from accumulated rows.
@@ -479,5 +486,80 @@ mod tests {
             }
             other => panic!("expected BlobTooLarge error, got {:?}", other.err()),
         }
+    }
+
+    #[test]
+    fn set_row_returns_true_for_new_row() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+
+        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+
+        let proof = blob.row(0).unwrap();
+        assert!(matches!(empty.set_row(proof), Ok(true)));
+    }
+
+    #[test]
+    fn set_row_returns_false_for_duplicate_row() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+
+        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+
+        let proof1 = blob.row(0).unwrap();
+        let proof2 = blob.row(0).unwrap();
+
+        assert!(matches!(empty.set_row(proof1), Ok(true)));
+        assert!(matches!(empty.set_row(proof2), Ok(false)));
+    }
+
+    #[test]
+    fn set_row_duplicate_does_not_overwrite() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+
+        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+
+        // Set all K rows needed for reconstruction.
+        for i in 0..4 {
+            let proof = blob.row(i).unwrap();
+            assert!(matches!(empty.set_row(proof), Ok(true)));
+        }
+
+        // Re-set the same rows — all should return false.
+        for i in 0..4 {
+            let proof = blob.row(i).unwrap();
+            assert!(matches!(empty.set_row(proof), Ok(false)));
+        }
+
+        // Reconstruction should still succeed with the original rows.
+        empty.reconstruct().unwrap();
+        assert_eq!(empty.data().unwrap(), &data);
+    }
+
+    #[test]
+    fn set_row_count_only_new_rows() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+
+        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+
+        // Simulate download with overlapping assignments: rows [0,1,2] + [2,3].
+        // Only 4 unique rows should be counted, not 5.
+        let mut unique = 0usize;
+        for i in [0, 1, 2, 2, 3] {
+            let proof = blob.row(i).unwrap();
+            if matches!(empty.set_row(proof), Ok(true)) {
+                unique += 1;
+            }
+        }
+
+        assert_eq!(unique, 4, "only genuinely new rows should be counted");
+        empty.reconstruct().unwrap();
+        assert_eq!(empty.data().unwrap(), &data);
     }
 }
