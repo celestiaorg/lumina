@@ -97,16 +97,17 @@ impl FibreClient {
         let sig_set =
             Arc::new(val_set.new_signature_set(self.cfg.safety_threshold, validator_sign_bytes));
 
-        // 5. Fan-out upload (child token so we can cancel stragglers early)
+        // 5. Fan-out upload to all validators. Returns when the signature
+        //    threshold is met, but spawned tasks continue uploading in the
+        //    background so that every validator eventually receives its shard.
         let blob = Arc::new(blob);
-        let upload_token = self.cancel_token.child_token();
         self.upload_shards(
             &val_set,
             &shard_map,
             &promise,
             &blob,
             &sig_set,
-            &upload_token,
+            &self.cancel_token,
         )
         .await?;
 
@@ -168,8 +169,10 @@ impl FibreClient {
 
     /// Fan-out upload of row proofs to validators in the shard map.
     ///
-    /// Returns early when the signature threshold is met. Individual upload
-    /// failures are logged but not fatal.
+    /// Returns early when the signature threshold is met, but spawned upload
+    /// tasks continue running in the background so that every validator
+    /// eventually receives its shard. Individual upload failures are logged
+    /// but not fatal.
     async fn upload_shards(
         &self,
         val_set: &ValidatorSet,
@@ -238,7 +241,6 @@ impl FibreClient {
                             match sig_set.add(validator, &signature) {
                                 Ok(threshold_met) => {
                                     if threshold_met {
-                                        cancel_token.cancel();
                                         return Ok(());
                                     }
                                 }
@@ -281,13 +283,18 @@ impl FibreClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
     use crate::blob::Blob;
     use crate::config::BlobConfig;
     use crate::error::FibreError;
-    use crate::test_utils::{FailingConnector, build_test_client, make_connector, make_validator};
+    use crate::test_utils::{
+        FailingConnector, MockConnector, MockValidatorConnection, build_test_client,
+        make_connector, make_validator,
+    };
     use crate::validator::{ValidatorInfo, ValidatorSet};
 
     fn make_test_blob() -> Blob {
@@ -367,17 +374,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_assigns_rows_to_each_validator() {
+    async fn upload_delivers_to_all_validators() {
         let validators = vec![
             make_validator(100, 1),
             make_validator(100, 2),
             make_validator(100, 3),
+            make_validator(100, 4),
+            make_validator(100, 5),
         ];
 
         let val_infos: Vec<ValidatorInfo> =
             validators.iter().map(|(_, info)| info.clone()).collect();
 
-        let connector = make_connector(&validators);
+        // Build the connector manually so we can inspect each connection after upload.
+        let mut connector = MockConnector::new();
+        let mut connections: Vec<Arc<MockValidatorConnection>> = Vec::new();
+        for (ed_key, info) in &validators {
+            let conn = Arc::new(MockValidatorConnection::new(ed_key.clone()));
+            connections.push(conn.clone());
+            connector.add(info.address, conn);
+        }
 
         let val_set = ValidatorSet {
             validators: val_infos,
@@ -388,14 +404,19 @@ mod tests {
         let blob = make_test_blob();
         let namespace = vec![0u8; 29];
 
+        // Upload returns once signature threshold is met.
         client
             .upload(&test_signing_key(), &namespace, blob)
             .await
             .unwrap();
 
-        // Note: with shared mocks, we cannot inspect uploaded data directly
-        // because make_connector owns the connections. The upload succeeding
-        // already proves that rows were sent and signed.
+        // Background tasks continue delivering to remaining validators.
+        // Wait for every connection to receive at least one upload.
+        for (i, conn) in connections.iter().enumerate() {
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), conn.wait_for_upload())
+                .await
+                .unwrap_or_else(|_| panic!("validator {i} did not receive upload data in time"));
+        }
     }
 
     #[tokio::test]

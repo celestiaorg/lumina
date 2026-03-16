@@ -39,25 +39,31 @@ pub(crate) struct MockValidatorConnection {
     stored: Mutex<HashMap<[u8; 32], Vec<rsema1d::RowInclusionProof>>>,
     /// Record of what was uploaded (each call appends a list of row proofs).
     uploaded: Mutex<Vec<Vec<rsema1d::RowInclusionProof>>>,
+    /// Watch channel incremented on each upload, for awaiting uploads in tests.
+    upload_tx: tokio::sync::watch::Sender<usize>,
     /// If true, all operations return an error.
     fail: bool,
 }
 
 impl MockValidatorConnection {
     pub fn new(ed_signing_key: Ed25519SigningKey) -> Self {
+        let (tx, _) = tokio::sync::watch::channel(0usize);
         Self {
             ed_signing_key,
             stored: Mutex::new(HashMap::new()),
             uploaded: Mutex::new(Vec::new()),
+            upload_tx: tx,
             fail: false,
         }
     }
 
     pub fn new_failing(ed_signing_key: Ed25519SigningKey) -> Self {
+        let (tx, _) = tokio::sync::watch::channel(0usize);
         Self {
             ed_signing_key,
             stored: Mutex::new(HashMap::new()),
             uploaded: Mutex::new(Vec::new()),
+            upload_tx: tx,
             fail: true,
         }
     }
@@ -77,6 +83,17 @@ impl MockValidatorConnection {
     pub fn uploaded(&self) -> Vec<Vec<rsema1d::RowInclusionProof>> {
         self.uploaded.lock().unwrap().clone()
     }
+
+    /// Wait until at least one upload has been received.
+    pub async fn wait_for_upload(&self) {
+        let mut rx = self.upload_tx.subscribe();
+        // If already uploaded, return immediately.
+        if *rx.borrow() > 0 {
+            return;
+        }
+        // Otherwise wait for the next change.
+        let _ = rx.changed().await;
+    }
 }
 
 #[async_trait::async_trait]
@@ -91,8 +108,9 @@ impl ValidatorConnection for MockValidatorConnection {
             return Err(FibreError::Other("mock connection failure".into()));
         }
 
-        // Record what was uploaded.
+        // Record what was uploaded and notify waiters.
         self.uploaded.lock().unwrap().push(rows.to_vec());
+        self.upload_tx.send_modify(|n| *n += 1);
 
         // Store uploaded rows keyed by commitment.
         self.stored
