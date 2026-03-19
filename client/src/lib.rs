@@ -6,6 +6,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 mod blob;
 mod blobstream;
 mod client;
+mod fibre;
 mod fraud;
 mod header;
 mod share;
@@ -18,6 +19,7 @@ mod utils;
 pub mod api {
     pub use crate::blob::BlobApi;
     pub use crate::blobstream::BlobstreamApi;
+    pub use crate::fibre::FibreApi;
     pub use crate::fraud::FraudApi;
     pub use crate::header::HeaderApi;
     pub use crate::share::ShareApi;
@@ -27,6 +29,15 @@ pub mod api {
     pub mod blob {
         #[doc(inline)]
         pub use celestia_rpc::blob::BlobsAtHeight;
+    }
+
+    /// Fibre API related types.
+    pub mod fibre {
+        #[doc(inline)]
+        pub use celestia_fibre::{
+            Blob as FibreBlob, BlobID, FibreClient, FibreClientConfig, FibreError, PaymentPromise,
+            PreparedPut, SignedPaymentPromise,
+        };
     }
 
     /// Share API related types.
@@ -55,7 +66,9 @@ pub mod tx {
     #[doc(inline)]
     pub use celestia_grpc::grpc::{GasEstimate, TxPriority};
     #[doc(inline)]
-    pub use celestia_grpc::{DocSigner, IntoProtobufAny, SignDoc, TxConfig, TxInfo};
+    pub use celestia_grpc::{
+        BroadcastedTx, DocSigner, IntoProtobufAny, SignDoc, SubmittedTx, TxConfig, TxInfo,
+    };
     #[doc(inline)]
     pub use k256::ecdsa::signature::{Error as SignatureError, Keypair};
     #[doc(inline)]
@@ -131,6 +144,10 @@ pub enum Error {
     /// gRPC endpoint is not set.
     #[error("Signer is set but gRPC endpoint is not")]
     GrpcEndpointNotSet,
+
+    /// An error from the Fibre client library.
+    #[error("Fibre error: {0}")]
+    Fibre(celestia_fibre::FibreError),
 }
 
 impl From<jsonrpsee_core::ClientError> for Error {

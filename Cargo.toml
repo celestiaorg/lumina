@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "cli",
   "client",
+  "fibre",
   "grpc",
   "grpc/grpc-macros",
   "node",
@@ -32,6 +33,8 @@ celestia-grpc = { version = "=1.0.0-rc.2", path = "grpc", default-features = fal
 celestia-grpc-macros = { version = "=1.0.0-rc.2", path = "grpc/grpc-macros" }
 celestia-rpc = { version = "=1.0.0-rc.2", path = "rpc", default-features = false }
 celestia-types = { version = "=1.0.0-rc.2", path = "types", default-features = false }
+celestia-fibre = { version = "=1.0.0-rc.2", path = "fibre" }
+rsema1d = { version = "=1.0.0-rc.2", path = "rsema1d" }
 
 anyhow = "1.0.40"
 async-stream = "0.3.5"

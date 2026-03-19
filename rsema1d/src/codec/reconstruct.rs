@@ -4,25 +4,20 @@ use crate::params::Parameters;
 use reed_solomon_simd::engine::DefaultEngine;
 use reed_solomon_simd::rate::{HighRateDecoder, RateDecoder};
 
-/// Reconstruct original data from any K rows
+/// Reconstruct original data from any K sampled rows.
+///
+/// `rows` are the raw row byte slices and `indices` are their corresponding
+/// positions in the original+parity matrix.
 pub fn reconstruct_data(
-    rows: &RowMatrix,
+    rows: &[&[u8]],
     indices: &[usize],
     params: &Parameters,
 ) -> Result<RowMatrix> {
-    if rows.row_size() != params.row_size {
-        return Err(Error::InvalidParameters(format!(
-            "row size mismatch: expected {}, got {}",
-            params.row_size,
-            rows.row_size()
-        )));
-    }
-
-    if rows.rows() != indices.len() {
+    if rows.len() != indices.len() {
         return Err(Error::InvalidParameters(format!(
             "rows count mismatch: expected {}, got {}",
             indices.len(),
-            rows.rows(),
+            rows.len(),
         )));
     }
 
@@ -44,6 +39,17 @@ pub fn reconstruct_data(
 
     let row_size = params.row_size;
 
+    for (i, row) in rows.iter().enumerate() {
+        if row.len() != row_size {
+            return Err(Error::InvalidParameters(format!(
+                "row {} size mismatch: expected {}, got {}",
+                i,
+                row_size,
+                row.len()
+            )));
+        }
+    }
+
     let engine = DefaultEngine::new();
     let mut decoder: HighRateDecoder<DefaultEngine> =
         RateDecoder::new(params.k, params.n, row_size, engine, None)
@@ -54,7 +60,7 @@ pub fn reconstruct_data(
             return Err(Error::InvalidIndex(index, params.k + params.n));
         }
 
-        let row = rows.row(i)?;
+        let row = rows[i];
         if index < params.k {
             decoder.add_original_shard(index, row).map_err(|e| {
                 Error::ReedSolomon(format!("Failed to add original shard: {:?}", e))
@@ -77,9 +83,8 @@ pub fn reconstruct_data(
 
     for (i, &index) in indices.iter().enumerate() {
         if index < params.k {
-            let src = rows.row(i)?;
             let dst = all_original.row_mut(index)?;
-            dst.copy_from_slice(src);
+            dst.copy_from_slice(rows[i]);
         }
     }
 
@@ -109,7 +114,10 @@ mod tests {
             RowMatrix::with_shape(original.clone(), params.k, params.row_size).unwrap();
         let commitment = ExtendedData::generate(&original_rows, &params).unwrap();
         let indices = vec![0usize, 1, 2, 3];
-        let rows = commitment.rows().sample(&indices).unwrap();
+        let rows: Vec<&[u8]> = indices
+            .iter()
+            .map(|&i| commitment.rows().row(i).unwrap())
+            .collect();
         let reconstructed = reconstruct_data(&rows, &indices, &params).unwrap();
 
         assert_eq!(reconstructed.as_row_major(), original.as_slice());
