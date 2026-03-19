@@ -3,7 +3,6 @@
 use std::future::Future;
 use std::marker::{Send, Sync};
 
-use celestia_types::consts::appconsts::AppVersion;
 use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::Namespace;
 use celestia_types::sample::{RawSample, Sample, SampleId};
@@ -128,12 +127,9 @@ mod rpc {
 /// Client implementation for the `Share` RPC API.
 pub trait ShareClient: ClientT {
     /// GetEDS gets the full EDS identified at the specified height.
-    ///
-    /// [`AppVersion`] is required for proper verification.
     fn share_get_eds<'a, 'fut>(
         &'a self,
         height: u64,
-        app_version: AppVersion,
     ) -> impl Future<Output = Result<ExtendedDataSquare, Error>> + Send + 'fut
     where
         'a: 'fut,
@@ -142,19 +138,16 @@ pub trait ShareClient: ClientT {
         async move {
             let raw_eds = rpc::ShareClient::share_get_eds(self, height).await?;
             // Correct `Share` construction and validation is done inside `ExtendedDataSquare::from_raw`
-            ExtendedDataSquare::from_raw(raw_eds, app_version).map_err(custom_client_error)
+            ExtendedDataSquare::from_raw(raw_eds).map_err(custom_client_error)
         }
     }
 
     /// Retrieves a list of shares and their corresponding proof.
     ///
     /// The start and end index ignores parity shares and corresponds to ODS.
-    ///
-    /// [`AppVersion`] is required for the shares verification.
     fn share_get_range<'a, 'fut>(
         &'a self,
         height: u64,
-        app_version: AppVersion,
         start: u64,
         end: u64,
     ) -> impl Future<Output = Result<GetRangeResponse, Error>> + Send + 'fut
@@ -162,15 +155,7 @@ pub trait ShareClient: ClientT {
         'a: 'fut,
         Self: Sized + Sync + 'fut,
     {
-        async move {
-            let resp = rpc::ShareClient::share_get_range(self, height, start, end).await?;
-
-            for share in &resp.shares {
-                share.validate(app_version).map_err(custom_client_error)?;
-            }
-
-            Ok(resp)
-        }
+        rpc::ShareClient::share_get_range(self, height, start, end)
     }
     /// Retrieves multiple shares from the [`ExtendedDataSquare`] at the given height
     /// at the given sample coordinates.
@@ -179,7 +164,6 @@ pub trait ShareClient: ClientT {
     fn share_get_samples<'a, 'fut, I, C>(
         &'a self,
         height: u64,
-        app_version: AppVersion,
         coordinates: I,
     ) -> impl Future<Output = Result<Vec<Sample>, Error>> + Send + 'fut
     where
@@ -205,10 +189,6 @@ pub trait ShareClient: ClientT {
                 // Correct `Share` construction is done inside `Sample::from_raw`
                 let sample =
                     Sample::from_raw(sample_id, raw_sample).map_err(custom_client_error)?;
-                sample
-                    .share
-                    .validate(app_version)
-                    .map_err(custom_client_error)?;
 
                 samples.push(sample);
             }
@@ -221,7 +201,6 @@ pub trait ShareClient: ClientT {
     fn share_get_row<'a, 'fut>(
         &'a self,
         height: u64,
-        app_version: AppVersion,
         square_width: u16,
         row: u16,
     ) -> impl Future<Output = Result<GetRowResponse, Error>> + Send + 'fut
@@ -265,8 +244,6 @@ pub trait ShareClient: ClientT {
                     }
                     .map_err(custom_client_error)?;
 
-                    share.validate(app_version).map_err(custom_client_error)?;
-
                     Ok(share)
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -282,7 +259,6 @@ pub trait ShareClient: ClientT {
     fn share_get_share<'a, 'fut>(
         &'a self,
         height: u64,
-        app_version: AppVersion,
         square_width: u16,
         row: u16,
         col: u16,
@@ -300,8 +276,6 @@ pub trait ShareClient: ClientT {
             }
             .map_err(custom_client_error)?;
 
-            share.validate(app_version).map_err(custom_client_error)?;
-
             Ok(share)
         }
     }
@@ -314,23 +288,13 @@ pub trait ShareClient: ClientT {
     fn share_get_namespace_data<'a, 'fut>(
         &'a self,
         height: u64,
-        app_version: AppVersion,
         namespace: Namespace,
     ) -> impl Future<Output = Result<NamespaceData, Error>> + Send + 'fut
     where
         'a: 'fut,
         Self: Sized + Sync + 'fut,
     {
-        async move {
-            let ns_data =
-                rpc::ShareClient::share_get_namespace_data(self, height, namespace).await?;
-
-            for shr in ns_data.rows().iter().flat_map(|row| &row.shares) {
-                shr.validate(app_version).map_err(custom_client_error)?;
-            }
-
-            Ok(ns_data)
-        }
+        rpc::ShareClient::share_get_namespace_data(self, height, namespace)
     }
 
     /// SharesAvailable subjectively validates if Shares committed to the given Root are available on the Network.

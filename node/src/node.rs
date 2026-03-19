@@ -486,7 +486,7 @@ where
     ) -> Result<Vec<Blob>> {
         Ok(self
             .p2p()
-            .get_all_blobs(namespace, block_height, timeout, self.store())
+            .get_all_blobs(namespace, block_height, timeout)
             .await?)
     }
 

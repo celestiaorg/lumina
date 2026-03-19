@@ -345,7 +345,6 @@ impl From<SampleId> for CidGeneric<SAMPLE_ID_SIZE> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consts::appconsts::AppVersion;
     use crate::test_utils::generate_dummy_eds;
 
     #[test]
@@ -363,7 +362,7 @@ mod tests {
 
     #[test]
     fn index_calculation() {
-        let eds = generate_dummy_eds(8, AppVersion::V2);
+        let eds = generate_dummy_eds(8);
 
         Sample::new(0, 0, AxisType::Row, &eds).unwrap();
         Sample::new(7, 6, AxisType::Row, &eds).unwrap();
@@ -434,7 +433,7 @@ mod tests {
     #[test]
     fn test_roundtrip_verify() {
         for _ in 0..5 {
-            let eds = generate_dummy_eds(2 << (rand::random::<usize>() % 8), AppVersion::V2);
+            let eds = generate_dummy_eds(2 << (rand::random::<usize>() % 8));
             let dah = DataAvailabilityHeader::from_eds(&eds);
 
             let row_index = rand::random::<u16>() % eds.square_width();

@@ -1,7 +1,6 @@
 use std::slice;
 
 use celestia_types::Blob;
-use celestia_types::consts::appconsts::AppVersion;
 use lumina_utils::test_utils::async_test;
 
 pub mod utils;
@@ -19,7 +18,7 @@ const CELESTIA_BRIDGE_RPC_URL: &str = "http://localhost:36658";
 async fn blob_submit_using_bridge_node() {
     let namespace = random_ns();
     let data = random_bytes(5);
-    let blob = Blob::new(namespace, data, None, AppVersion::V2).unwrap();
+    let blob = Blob::new(namespace, data, None).unwrap();
 
     for auth_level in [
         AuthLevel::Skip,

@@ -1,6 +1,6 @@
 use celestia_rpc::TxConfig;
 use celestia_rpc::prelude::*;
-use celestia_types::{AppVersion, Blob};
+use celestia_types::Blob;
 use lumina_utils::test_utils::async_test;
 
 pub mod utils;
@@ -37,7 +37,7 @@ async fn submit_pay_for_blob() {
     let client = new_test_client(AuthLevel::Skip).await.unwrap();
     let namespace = random_ns();
     let data = random_bytes(5);
-    let blob = Blob::new(namespace, data, None, AppVersion::V2).unwrap();
+    let blob = Blob::new(namespace, data, None).unwrap();
 
     let tx_response = client
         .state_submit_pay_for_blob(vec![blob.clone().into()], TxConfig::default())
@@ -49,6 +49,6 @@ async fn submit_pay_for_blob() {
         .await
         .unwrap();
 
-    received_blob.validate(AppVersion::V2).unwrap();
+    received_blob.validate().unwrap();
     assert_eq!(received_blob.data, blob.data);
 }

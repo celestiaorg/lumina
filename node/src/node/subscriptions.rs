@@ -45,7 +45,7 @@ fn reconstruct_blobs(
         .rows()
         .iter()
         .flat_map(|row| row.shares.iter());
-    let blobs = Blob::reconstruct_all(shares, header.app_version())?;
+    let blobs = Blob::reconstruct_all(shares)?;
     Ok(BlobsAtHeight {
         height: header.height(),
         blobs,
