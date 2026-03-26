@@ -24,9 +24,21 @@ rand_chacha = "0.3.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+commonware-coding = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca89d4a4" }
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca89d4a4" }
+commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca89d4a4" }
+commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca89d4a4" }
 
 [[bench]]
 name = "codec_bench"
+harness = false
+
+[[bench]]
+name = "zoda_bench"
+harness = false
+
+[[bench]]
+name = "full_bench"
 harness = false
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
