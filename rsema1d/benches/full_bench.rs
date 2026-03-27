@@ -10,7 +10,14 @@ use rsema1d::{encode, encode_in_place, reconstruct, ExtendedData, Parameters, Ro
 
 type S = Zoda<Sha256>;
 
-const DATA_SIZES: [usize; 2] = [8_388_608, 16_777_216];
+const DATA_SIZES: [usize; 6] = [
+    16_777_216,   // 16MB
+    33_554_432,   // 32MB
+    67_108_864,   // 64MB
+    134_217_728,  // 128MB
+    268_435_456,  // 256MB
+    536_870_912,  // 512MB
+];
 const CHUNKS: [u16; 2] = [50, 100];
 const CONCS: [usize; 2] = [4, 8];
 
@@ -25,8 +32,12 @@ fn generate_test_data(size: usize) -> Vec<u8> {
 
 fn size_label(bytes: usize) -> &'static str {
     match bytes {
-        8_388_608 => "8MB",
         16_777_216 => "16MB",
+        33_554_432 => "32MB",
+        67_108_864 => "64MB",
+        134_217_728 => "128MB",
+        268_435_456 => "256MB",
+        536_870_912 => "512MB",
         _ => "unknown",
     }
 }
@@ -63,12 +74,16 @@ fn bench_full_encode(c: &mut Criterion) {
         }
     }
 
-    // --- rsema1d encode: n=3*k redundancy, matching data sizes ---
-    // (k, n, row_size) configs that produce 8MB and 16MB of original data
-    let rsema1d_configs: Vec<(&str, usize, usize, usize)> = vec![
-        ("rsema1d_8MB_k4096_n12288", 4096, 12288, 2048),  // 4096*2048 = 8MB
-        ("rsema1d_16MB_k4096_n12288", 4096, 12288, 4096), // 4096*4096 = 16MB
-    ];
+    // --- rsema1d encode: k=4096, n=12288, row_size = data_size/k ---
+    let rsema1d_configs: Vec<(String, usize, usize, usize)> = DATA_SIZES
+        .iter()
+        .map(|&sz| {
+            let k = 4096;
+            let n = 12288;
+            let row_size = sz / k;
+            (format!("rsema1d_{}_k{}_n{}", size_label(sz), k, n), k, n, row_size)
+        })
+        .collect();
 
     for (name, k, n, row_size) in rsema1d_configs {
         let params = Parameters::new(k, n, row_size).unwrap();
@@ -87,10 +102,15 @@ fn bench_full_encode(c: &mut Criterion) {
 fn bench_full_encode_in_place(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_encode_in_place");
 
-    let rsema1d_configs: Vec<(&str, usize, usize, usize)> = vec![
-        ("rsema1d_8MB_k4096_n12288", 4096, 12288, 2048),  // 4096*2048 = 8MB
-        ("rsema1d_16MB_k4096_n12288", 4096, 12288, 4096), // 4096*4096 = 16MB
-    ];
+    let rsema1d_configs: Vec<(String, usize, usize, usize)> = DATA_SIZES
+        .iter()
+        .map(|&sz| {
+            let k = 4096;
+            let n = 12288;
+            let row_size = sz / k;
+            (format!("rsema1d_{}_k{}_n{}", size_label(sz), k, n), k, n, row_size)
+        })
+        .collect();
 
     for (name, k, n, row_size) in rsema1d_configs {
         let params = Parameters::new(k, n, row_size).unwrap();
@@ -276,10 +296,15 @@ fn bench_full_decode(c: &mut Criterion) {
     }
 
     // --- rsema1d reconstruct: recover k original rows from k sampled rows ---
-    let rsema1d_configs: Vec<(&str, usize, usize, usize)> = vec![
-        ("rsema1d_8MB_k4096_n12288", 4096, 12288, 2048),
-        ("rsema1d_16MB_k4096_n12288", 4096, 12288, 4096),
-    ];
+    let rsema1d_configs: Vec<(String, usize, usize, usize)> = DATA_SIZES
+        .iter()
+        .map(|&sz| {
+            let k = 4096;
+            let n = 12288;
+            let row_size = sz / k;
+            (format!("rsema1d_{}_k{}_n{}", size_label(sz), k, n), k, n, row_size)
+        })
+        .collect();
 
     for (name, k, n, row_size) in rsema1d_configs {
         let params = Parameters::new(k, n, row_size).unwrap();
