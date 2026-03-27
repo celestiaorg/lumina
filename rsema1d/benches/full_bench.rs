@@ -11,7 +11,7 @@ use rsema1d::{encode, encode_in_place, reconstruct, ExtendedData, Parameters, Ro
 type S = Zoda<Sha256>;
 
 const DATA_SIZES: [usize; 2] = [8_388_608, 16_777_216];
-const CHUNKS: [u16; 2] = [50, 100];
+const BLOBS: [u16; 5] = [32, 64, 128, 256, 512];
 const CONCS: [usize; 2] = [4, 8];
 
 fn generate_test_data(size: usize) -> Vec<u8> {
@@ -31,23 +31,49 @@ fn size_label(bytes: usize) -> &'static str {
     }
 }
 
+/// Generate rsema1d configs for all blob counts at a given data size.
+/// blob_count = k + n, with n = 3*k => k = blob_count/4, row_size = data_size/k
+fn rsema1d_configs(data_sizes: &[usize]) -> Vec<(String, usize, usize, usize)> {
+    let mut configs = Vec::new();
+    for &data_size in data_sizes {
+        for &blobs in &BLOBS {
+            let k = blobs as usize / 4;
+            let n = 3 * k;
+            let row_size = data_size / k;
+            configs.push((
+                format!(
+                    "rsema1d_{}_blobs{}_k{}_n{}",
+                    size_label(data_size),
+                    blobs,
+                    k,
+                    n
+                ),
+                k,
+                n,
+                row_size,
+            ));
+        }
+    }
+    configs
+}
+
 fn bench_full_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_encode");
 
-    // --- Zoda encode: 1/3 ratio, chunks [50, 100], conc [4, 8], sizes [8MB, 16MB] ---
+    // --- Zoda encode: 1/3 ratio, blobs [32..512], conc [4, 8], sizes [8MB, 16MB] ---
     for &data_length in &DATA_SIZES {
-        for &chunks in &CHUNKS {
+        for &blobs in &BLOBS {
             for &conc in &CONCS {
-                let min = chunks / 3;
+                let min = blobs / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min),
-                    extra_shards: NZU16!(chunks - min),
+                    extra_shards: NZU16!(blobs - min),
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 let name = format!(
-                    "zoda_{}_chunks{}_conc{}",
+                    "zoda_{}_blobs{}_conc{}",
                     size_label(data_length),
-                    chunks,
+                    blobs,
                     conc
                 );
 
@@ -63,20 +89,14 @@ fn bench_full_encode(c: &mut Criterion) {
         }
     }
 
-    // --- rsema1d encode: n=3*k redundancy, matching data sizes ---
-    // (k, n, row_size) configs that produce 8MB and 16MB of original data
-    let rsema1d_configs: Vec<(&str, usize, usize, usize)> = vec![
-        ("rsema1d_8MB_k4096_n12288", 4096, 12288, 2048),  // 4096*2048 = 8MB
-        ("rsema1d_16MB_k4096_n12288", 4096, 12288, 4096), // 4096*4096 = 16MB
-    ];
-
-    for (name, k, n, row_size) in rsema1d_configs {
+    // --- rsema1d encode: n=3*k redundancy, matching data sizes and blob counts ---
+    for (name, k, n, row_size) in rsema1d_configs(&DATA_SIZES) {
         let params = Parameters::new(k, n, row_size).unwrap();
         let data = RowMatrix::with_shape(generate_test_data(k * row_size), k, row_size).unwrap();
         let total_bytes = k * row_size;
 
         group.throughput(Throughput::Bytes(total_bytes as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(name), &data, |b, data| {
+        group.bench_with_input(BenchmarkId::from_parameter(&name), &data, |b, data| {
             b.iter(|| encode(black_box(data), black_box(&params)).unwrap());
         });
     }
@@ -87,12 +107,7 @@ fn bench_full_encode(c: &mut Criterion) {
 fn bench_full_encode_in_place(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_encode_in_place");
 
-    let rsema1d_configs: Vec<(&str, usize, usize, usize)> = vec![
-        ("rsema1d_8MB_k4096_n12288", 4096, 12288, 2048),  // 4096*2048 = 8MB
-        ("rsema1d_16MB_k4096_n12288", 4096, 12288, 4096), // 4096*4096 = 16MB
-    ];
-
-    for (name, k, n, row_size) in rsema1d_configs {
+    for (name, k, n, row_size) in rsema1d_configs(&DATA_SIZES) {
         let params = Parameters::new(k, n, row_size).unwrap();
         let data = RowMatrix::with_shape(generate_test_data(k * row_size), k, row_size).unwrap();
         let total_bytes = k * row_size;
@@ -101,7 +116,7 @@ fn bench_full_encode_in_place(c: &mut Criterion) {
         let mut extended = Some(RowMatrix::with_shape(prefilled, k + n, row_size).unwrap());
 
         group.throughput(Throughput::Bytes(total_bytes as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(name), &params, |b, params| {
+        group.bench_with_input(BenchmarkId::from_parameter(&name), &params, |b, params| {
             b.iter(|| {
                 let buffer = extended.take().expect("buffer must be available");
                 let (ext_data, _commitment, _rlc_orig) =
@@ -192,26 +207,26 @@ fn rsema1d_roundtrip(k: usize, n: usize, row_size: usize) {
 fn bench_full_decode(c: &mut Criterion) {
     // Verify correctness before running benchmarks
     eprintln!("Verifying decode correctness...");
-    zoda_roundtrip(1_048_576, 50, 4);
-    rsema1d_roundtrip(256, 768, 4096);
+    zoda_roundtrip(1_048_576, 32, 4);
+    rsema1d_roundtrip(8, 24, 4096);
     eprintln!("Decode correctness verified for both Zoda and rsema1d.");
 
     let mut group = c.benchmark_group("full_decode");
 
-    // --- Zoda decode: 1/3 ratio, chunks [50, 100], conc [4, 8], sizes [8MB, 16MB] ---
+    // --- Zoda decode: 1/3 ratio, blobs [32..512], conc [4, 8], sizes [8MB, 16MB] ---
     for &data_length in &DATA_SIZES {
-        for &chunks in &CHUNKS {
+        for &blobs in &BLOBS {
             for &conc in &CONCS {
-                let min = chunks / 3;
+                let min = blobs / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min),
-                    extra_shards: NZU16!(chunks - min),
+                    extra_shards: NZU16!(blobs - min),
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 let name = format!(
-                    "zoda_{}_chunks{}_conc{}",
+                    "zoda_{}_blobs{}_conc{}",
                     size_label(data_length),
-                    chunks,
+                    blobs,
                     conc
                 );
 
@@ -224,7 +239,7 @@ fn bench_full_decode(c: &mut Criterion) {
                                 S::encode(&config, data.as_slice(), &strategy).unwrap();
 
                             let my_shard = shards.pop().unwrap();
-                            let my_index = chunks - 1;
+                            let my_index = blobs - 1;
 
                             // "Best" shard selection: first min indices
                             let mut opt_shards: Vec<Option<_>> =
@@ -276,23 +291,18 @@ fn bench_full_decode(c: &mut Criterion) {
     }
 
     // --- rsema1d reconstruct: recover k original rows from k sampled rows ---
-    let rsema1d_configs: Vec<(&str, usize, usize, usize)> = vec![
-        ("rsema1d_8MB_k4096_n12288", 4096, 12288, 2048),
-        ("rsema1d_16MB_k4096_n12288", 4096, 12288, 4096),
-    ];
-
-    for (name, k, n, row_size) in rsema1d_configs {
+    for (name, k, n, row_size) in rsema1d_configs(&DATA_SIZES) {
         let params = Parameters::new(k, n, row_size).unwrap();
         let original =
             RowMatrix::with_shape(generate_test_data(k * row_size), k, row_size).unwrap();
         let ext_data = ExtendedData::generate(&original, &params).unwrap();
 
-        // Sample k parity rows (indices k..2k) — actual recovery, not a no-op
+        // Sample k parity rows (indices k..2k) -- actual recovery, not a no-op
         let indices: Vec<usize> = (k..k + k).collect();
         let total_bytes = k * row_size;
 
         group.throughput(Throughput::Bytes(total_bytes as u64));
-        group.bench_function(BenchmarkId::from_parameter(name), |b| {
+        group.bench_function(BenchmarkId::from_parameter(&name), |b| {
             b.iter(|| {
                 let rows: Vec<&[u8]> = indices
                     .iter()
