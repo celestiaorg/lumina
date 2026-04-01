@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.4](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.0.0-rc.2...celestia-proto-v1.0.0-rc.4) - 2026-04-01
+
+### Added
+
+- add tonic-server feature for server generation in tonic build ([#932](https://github.com/celestiaorg/lumina/pull/932))
+- update protos from celestia-app ([#931](https://github.com/celestiaorg/lumina/pull/931))
+
+### Other
+
+- release v1.0.0-rc.3 ([#946](https://github.com/celestiaorg/lumina/pull/946))
+
 ## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.0.0-rc.2...celestia-proto-v1.0.0-rc.3) - 2026-03-19
 
 ### Added

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.4](https://github.com/celestiaorg/lumina/compare/rsema1d-v1.0.0-rc.3...rsema1d-v1.0.0-rc.4) - 2026-04-01
+
+### Added
+
+- update rsema1d import path to celestia-app/v8/pkg/rsema1d ([#937](https://github.com/celestiaorg/lumina/pull/937))
+- implement rsema1d ([#933](https://github.com/celestiaorg/lumina/pull/933))
+
+### Other
+
+- release v1.0.0-rc.3 ([#946](https://github.com/celestiaorg/lumina/pull/946))
+
 ## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/rsema1d-v1.0.0-rc.2...rsema1d-v1.0.0-rc.3) - 2026-03-19
 
 ### Added

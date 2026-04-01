@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.4](https://github.com/celestiaorg/lumina/compare/celestia-client-v1.0.0-rc.2...celestia-client-v1.0.0-rc.4) - 2026-04-01
+
+### Added
+
+- [**breaking**] remove app version ([#940](https://github.com/celestiaorg/lumina/pull/940))
+
+### Other
+
+- release v1.0.0-rc.3 ([#946](https://github.com/celestiaorg/lumina/pull/946))
+
 ## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/celestia-client-v1.0.0-rc.2...celestia-client-v1.0.0-rc.3) - 2026-03-19
 
 ### Added
