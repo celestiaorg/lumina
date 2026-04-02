@@ -14,7 +14,8 @@ use cid::{Cid, CidGeneric};
 use lumina_node::NodeError;
 use lumina_node::blockstore::InMemoryBlockstore;
 use lumina_node::events::NodeEvent;
-use lumina_node::node::P2pError;
+use lumina_node::node::{Node, P2pError};
+use lumina_node::store::Store;
 use lumina_node::test_utils::test_node_builder;
 use rand::RngCore;
 use tokio::sync::{Mutex, mpsc};
@@ -29,6 +30,23 @@ mod utils;
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Wait for the node to sync a header at the given height.
+async fn wait_for_header<B: Blockstore + 'static, S: Store + 'static>(
+    node: &Node<B, S>,
+    height: u64,
+) -> ExtendedHeader {
+    timeout(Duration::from_secs(60), async {
+        loop {
+            match node.get_header_by_height(height).await {
+                Ok(header) => return header,
+                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    })
+    .await
+    .expect("Timed out waiting for header to sync")
 }
 
 #[tokio::test]
@@ -133,15 +151,18 @@ async fn shwap_sampling_backward() {
 #[tokio::test]
 async fn shwap_request_sample() {
     let _guard = test_lock().lock().await;
-    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
     let blob_len = rand::random::<usize>() % 4096 + 1;
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
+    // Submit before creating the node so the bridge has time to index
+    // the block for shrex serving before the node requests it.
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+
+    let (node, _) = new_connected_node().await;
+    let header = wait_for_header(&node, height).await;
     let square_width = header.square_width();
 
     // check existing sample
@@ -171,7 +192,6 @@ async fn shwap_request_sample() {
 #[tokio::test]
 async fn shwap_request_row() {
     let _guard = test_lock().lock().await;
-    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
@@ -179,7 +199,9 @@ async fn shwap_request_row() {
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+
+    let (node, _) = new_connected_node().await;
+    let header = wait_for_header(&node, height).await;
     let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
@@ -201,7 +223,6 @@ async fn shwap_request_row() {
 #[tokio::test]
 async fn shwap_request_row_namespace_data() {
     let _guard = test_lock().lock().await;
-    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
@@ -209,7 +230,9 @@ async fn shwap_request_row_namespace_data() {
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+
+    let (node, _) = new_connected_node().await;
+    let header = wait_for_header(&node, height).await;
     let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
@@ -264,7 +287,6 @@ async fn shwap_request_row_namespace_data() {
 #[tokio::test]
 async fn shwap_request_all_blobs() {
     let _guard = test_lock().lock().await;
-    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
@@ -276,6 +298,9 @@ async fn shwap_request_all_blobs() {
         .collect();
 
     let height = blob_submit(&client, &blobs).await;
+
+    let (node, _) = new_connected_node().await;
+    wait_for_header(&node, height).await;
 
     // check existing namespace
     let received = node
@@ -372,6 +397,73 @@ async fn shwap_request_sample_should_cleanup_unneeded_samples() {
 
     // it shouldn't be removed from blockstore within pruning window
     removed_receiver.try_recv().unwrap_err();
+}
+
+/// Diagnostic test: submit blobs one at a time (each in its own block),
+/// then try to fetch a sample from each height via bitswap.
+/// Node is created BEFORE submitting — the failing pattern.
+#[tokio::test]
+async fn shwap_bitswap_reachability() {
+    let _guard = test_lock().lock().await;
+    let (node, _) = new_connected_node().await;
+    let client = bridge_client().await;
+
+    let num_blobs = 5;
+    let mut heights = Vec::new();
+
+    // Submit blobs one per block so each lands at a different height
+    for i in 0..num_blobs {
+        let ns = Namespace::const_v0(rand::random());
+        let blob = Blob::new(ns, random_bytes(256), None).unwrap();
+        let h = blob_submit(&client, &[blob]).await;
+        eprintln!("blob {i} submitted at height {h}");
+        heights.push(h);
+    }
+
+    // Wait for all headers to sync
+    for &h in &heights {
+        wait_for_header(&node, h).await;
+        eprintln!("header {h} synced");
+    }
+
+    // Small extra delay to give the bridge time to finish EDS storage
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Try to fetch sample (0,0) from each height with a short timeout
+    let mut ok = Vec::new();
+    let mut failed = Vec::new();
+
+    for &h in &heights {
+        match node
+            .request_sample(0, 0, h, Some(Duration::from_secs(10)))
+            .await
+        {
+            Ok(_) => {
+                eprintln!("height {h}: OK");
+                ok.push(h);
+            }
+            Err(e) => {
+                eprintln!("height {h}: FAILED — {e}");
+                failed.push(h);
+            }
+        }
+    }
+
+    eprintln!(
+        "\n=== results: {}/{} succeeded, {}/{} failed ===",
+        ok.len(),
+        num_blobs,
+        failed.len(),
+        num_blobs,
+    );
+    eprintln!("  ok:     {ok:?}");
+    eprintln!("  failed: {failed:?}");
+
+    assert!(
+        failed.is_empty(),
+        "{} out of {num_blobs} bitswap requests failed: {failed:?}",
+        failed.len(),
+    );
 }
 
 struct TestBlockstore {
