@@ -17,7 +17,7 @@ use lumina_utils::time::Interval;
 use multihash_codetable::{Code, MultihashDigest};
 use tokio::select;
 use tokio::sync::watch;
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::events::{EventPublisher, NodeEvent};
 use crate::p2p::Result;
@@ -588,7 +588,7 @@ where
         self.peer_tracker.remove_connection(peer_id, connection_id);
 
         if !self.peer_tracker.is_connected(peer_id) {
-            debug!("Peer disconnected: {peer_id}");
+            info!("Peer disconnected: {peer_id}");
             self.unprotect(peer_id, FULL_PROTECT_TAG);
             self.unprotect(peer_id, ARCHIVAL_PROTECT_TAG);
         }
@@ -657,7 +657,7 @@ where
                 ev.peer, ev.connection, dur
             ),
             Err(e) => {
-                debug!(
+                info!(
                     "Ping failure: peer: {}, connection_id: {}, error: {}",
                     &ev.peer, &ev.connection, e
                 );
