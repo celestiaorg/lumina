@@ -338,6 +338,8 @@ where
         debug!("Entering connected_event_loop");
 
         let mut report_interval = Interval::new(Duration::from_secs(60));
+        // Periodic head check as fallback when gossipsub header-sub misses headers
+        let mut head_check_interval = Interval::new(Duration::from_secs(5));
         let mut peer_tracker_info_watcher = self.p2p.peer_tracker_info_watcher();
 
         // Check if connection status changed before creating the watcher
@@ -362,6 +364,9 @@ where
                 }
                 _ = report_interval.tick() => {
                     self.report().await?;
+                }
+                _ = head_check_interval.tick() => {
+                    self.check_for_new_head().await?;
                 }
                 res = header_sub_recv(self.header_sub_rx.as_mut()) => {
                     let header = res?;
@@ -456,6 +461,29 @@ where
         Ok(())
     }
 
+    /// Periodically check for new network head via header-ex as a fallback
+    /// when gossipsub header-sub misses headers.
+    async fn check_for_new_head(&mut self) -> Result<()> {
+        let network_head = match self.p2p.get_head_header().await {
+            Ok(head) => head,
+            Err(e) => {
+                debug!("Failed to check network head: {e}");
+                return Ok(());
+            }
+        };
+
+        let network_height = network_head.height();
+        let current = self.subjective_head_height.unwrap_or(0);
+
+        if network_height > current {
+            info!("Network head advanced to {network_height} (was {current}), syncing forward");
+            self.on_header_sub_message(network_head).await?;
+            self.fetch_next_batch().await?;
+        }
+
+        Ok(())
+    }
+
     fn set_subjective_head_height(&mut self, height: u64) {
         if self
             .subjective_head_height
@@ -527,6 +555,10 @@ where
             // Do not fetch next batch if we have more headers than the threshold.
             if available_for_sampling > threshold {
                 // NOTE: Recheck will happen when we receive a header from header sub (~6 secs).
+                info!(
+                    "Slow sync: skipping fetch, {available_for_sampling} headers awaiting sampling \
+                     (threshold={threshold})"
+                );
                 return Ok(());
             }
         }
@@ -535,6 +567,11 @@ where
         match self.store.get_by_height(next_batch.end() + 1).await {
             Ok(known_header) => {
                 if !self.in_sampling_window(&known_header) {
+                    info!(
+                        "Skipping fetch: batch {}..={} outside sampling window",
+                        next_batch.start(),
+                        next_batch.end()
+                    );
                     return Ok(());
                 }
             }
