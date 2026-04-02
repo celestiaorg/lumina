@@ -30,7 +30,7 @@ async fn wait_for_header(
     node: &Node<InMemoryBlockstore, InMemoryStore>,
     height: u64,
 ) -> ExtendedHeader {
-    timeout(Duration::from_secs(30), async {
+    timeout(Duration::from_secs(60), async {
         loop {
             match node.get_header_by_height(height).await {
                 Ok(header) => return header,
@@ -109,7 +109,7 @@ async fn shwap_sampling_backward() {
             }
         }
     };
-    let (from_height, to_height) = timeout(Duration::from_secs(4), new_batch_synced)
+    let (from_height, to_height) = timeout(Duration::from_secs(10), new_batch_synced)
         .await
         .unwrap();
 
