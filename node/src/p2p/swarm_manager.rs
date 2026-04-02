@@ -245,7 +245,7 @@ where
         if let Err(e) = self.swarm.dial(dial_opts)
             && !matches!(e, DialError::DialPeerConditionFalse(_))
         {
-            warn!("Failed to dial on {addresses:?}: {e}");
+            warn!("Failed to dial on {addresses:?}: {e:?}");
         }
     }
 
