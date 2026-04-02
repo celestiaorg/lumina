@@ -399,82 +399,36 @@ async fn shwap_request_sample_should_cleanup_unneeded_samples() {
     removed_receiver.try_recv().unwrap_err();
 }
 
-/// Diagnostic test: creates node FIRST (flaky pattern), then submits blobs,
-/// and instruments header sync events to understand why headers may not arrive.
+fn init_tracing() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let level = std::env::var("RUST_LOG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(tracing::Level::WARN);
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(level)
+            .try_init();
+    });
+}
+
+/// Diagnostic test: submit blobs one at a time, then try to fetch each
+/// from bitswap.  Reports which heights succeed / fail so we can see the
+/// pattern.  Node is created BEFORE submitting (the flaky pattern).
 #[tokio::test]
-async fn shwap_header_sync_diagnostic() {
+async fn shwap_bitswap_reachability() {
+    init_tracing();
     let _guard = test_lock().lock().await;
+    // Create the node AFTER submitting — it will receive the latest head
+    // via header-sub and sync backward
+    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
-    // Create the node FIRST — this is the flaky pattern
-    let (node, _) = new_connected_node().await;
-
-    let local_head = node.get_local_head_header().await.unwrap().height();
-    let network_head = node
-        .get_network_head_header()
-        .await
-        .unwrap()
-        .map(|h| h.height());
-    eprintln!("node ready: local_head={local_head}, network_head={network_head:?}");
-
-    // Spawn a task to log all header-related events
-    let event_node = node.event_subscriber();
-    let _event_log = tokio::spawn(async move {
-        let mut sub = event_node;
-        let mut header_sub_heights = Vec::new();
-        let mut batch_events = Vec::new();
-
-        loop {
-            let Ok(ev) = sub.recv().await else { break };
-            match &ev.event {
-                NodeEvent::AddedHeaderFromHeaderSub { height } => {
-                    eprintln!("[event] AddedHeaderFromHeaderSub height={height}");
-                    header_sub_heights.push(*height);
-                }
-                NodeEvent::FetchingHeadersStarted {
-                    from_height,
-                    to_height,
-                } => {
-                    eprintln!("[event] FetchingHeadersStarted {from_height}..={to_height}");
-                    batch_events.push(format!("start {from_height}..={to_height}"));
-                }
-                NodeEvent::FetchingHeadersFinished {
-                    from_height,
-                    to_height,
-                    took,
-                    ..
-                } => {
-                    eprintln!(
-                        "[event] FetchingHeadersFinished {from_height}..={to_height} took={took:?}"
-                    );
-                    batch_events.push(format!("done {from_height}..={to_height}"));
-                }
-                NodeEvent::FetchingHeadersFailed {
-                    from_height,
-                    to_height,
-                    error,
-                    ..
-                } => {
-                    eprintln!(
-                        "[event] FetchingHeadersFailed {from_height}..={to_height} err={error}"
-                    );
-                    batch_events.push(format!("fail {from_height}..={to_height}"));
-                }
-                NodeEvent::FetchingHeadHeaderFinished { height, took } => {
-                    eprintln!("[event] FetchingHeadHeaderFinished height={height} took={took:?}");
-                }
-                _ => {}
-            }
-        }
-        (header_sub_heights, batch_events)
-    });
-
-    // Wait a moment for the event logger to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Submit blobs AFTER node is created
-    let num_blobs = 3;
+    let num_blobs = 5;
     let mut heights = Vec::new();
+
+    // Submit blobs first so we know the heights
     for i in 0..num_blobs {
         let ns = Namespace::const_v0(rand::random());
         let blob = Blob::new(ns, random_bytes(256), None).unwrap();
@@ -483,51 +437,46 @@ async fn shwap_header_sync_diagnostic() {
         heights.push(h);
     }
 
-    eprintln!("\nwaiting for headers...");
-
-    // Try to get each header with a generous timeout
+    // Wait for all headers to be available in the store
     for &h in &heights {
-        match timeout(Duration::from_secs(30), async {
-            loop {
-                match node.get_header_by_height(h).await {
-                    Ok(_) => return,
-                    Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
-                }
-            }
-        })
-        .await
+        wait_for_header(&node, h).await;
+        eprintln!("header {h} synced");
+    }
+
+    // Try to fetch sample (0,0) from each height with a per-request timeout
+    let mut ok = Vec::new();
+    let mut failed = Vec::new();
+
+    for &h in &heights {
+        match node
+            .request_sample(0, 0, h, Some(Duration::from_secs(10)))
+            .await
         {
-            Ok(()) => eprintln!("header {h}: synced OK"),
-            Err(_) => {
-                let local_head = node.get_local_head_header().await.unwrap().height();
-                let network_head = node
-                    .get_network_head_header()
-                    .await
-                    .unwrap()
-                    .map(|h| h.height());
-                eprintln!(
-                    "header {h}: TIMEOUT (local_head={local_head}, network_head={network_head:?})"
-                );
+            Ok(_) => {
+                eprintln!("height {h}: OK");
+                ok.push(h);
+            }
+            Err(e) => {
+                eprintln!("height {h}: FAILED — {e}");
+                failed.push(h);
             }
         }
     }
 
-    // Check which heights are actually in the store
-    eprintln!("\nstore check:");
-    let local_head = node.get_local_head_header().await.unwrap().height();
-    eprintln!("  local_head = {local_head}");
-    let mut missing = Vec::new();
-    for &h in &heights {
-        let has = node.get_header_by_height(h).await.is_ok();
-        eprintln!("  height {h}: {}", if has { "present" } else { "MISSING" });
-        if !has {
-            missing.push(h);
-        }
-    }
+    eprintln!(
+        "\n=== results: {}/{} succeeded, {}/{} failed ===",
+        ok.len(),
+        num_blobs,
+        failed.len(),
+        num_blobs,
+    );
+    eprintln!("  ok:     {ok:?}");
+    eprintln!("  failed: {failed:?}");
 
     assert!(
-        missing.is_empty(),
-        "headers missing from store: {missing:?}"
+        failed.is_empty(),
+        "{} out of {num_blobs} bitswap requests failed: {failed:?}",
+        failed.len(),
     );
 }
 
