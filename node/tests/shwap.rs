@@ -13,7 +13,8 @@ use cid::{Cid, CidGeneric};
 use lumina_node::NodeError;
 use lumina_node::blockstore::InMemoryBlockstore;
 use lumina_node::events::NodeEvent;
-use lumina_node::node::P2pError;
+use lumina_node::node::{Node, P2pError};
+use lumina_node::store::InMemoryStore;
 use lumina_node::test_utils::test_node_builder;
 use rand::RngCore;
 use tokio::sync::mpsc;
@@ -23,6 +24,23 @@ use utils::new_connected_node_with_builder;
 use crate::utils::{blob_submit, bridge_client, new_connected_node};
 
 mod utils;
+
+/// Wait for the node to sync a header at the given height, with a generous timeout.
+async fn wait_for_header(
+    node: &Node<InMemoryBlockstore, InMemoryStore>,
+    height: u64,
+) -> ExtendedHeader {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match node.get_header_by_height(height).await {
+                Ok(header) => return header,
+                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    })
+    .await
+    .expect("Timed out waiting for header to sync")
+}
 
 #[tokio::test]
 async fn shwap_sampling_forward() {
@@ -131,7 +149,7 @@ async fn shwap_request_sample() {
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_header(&node, height).await;
     let square_width = header.square_width();
 
     // check existing sample
@@ -168,7 +186,7 @@ async fn shwap_request_row() {
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_header(&node, height).await;
     let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
@@ -197,7 +215,7 @@ async fn shwap_request_row_namespace_data() {
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_header(&node, height).await;
     let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
