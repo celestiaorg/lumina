@@ -367,9 +367,14 @@ where
                             // we should consider penalizing our peers for that behaviour
                             true
                         }
-                        // we already have the header here, so pool should be validated in a
-                        // moment, leave this request to be rescheduled on next tick
-                        Err(GetPoolError::CandidatesNotValidated) => false,
+                        Err(GetPoolError::CandidatesNotValidated) => {
+                            // Pool exists but hasn't been validated yet. The header is already
+                            // in the store (verified by common_req_init), so schedule the request
+                            // with generic peers rather than blocking until validation completes.
+                            // Pool validation depends on poll() driving wait_height futures in the
+                            // same event loop, so deferring can cause unnecessary delays.
+                            true
+                        }
                     }
                 })
                 .filter(|(_, req)| !req.is_respond_channel_closed())
