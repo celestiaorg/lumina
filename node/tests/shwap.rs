@@ -420,6 +420,9 @@ fn init_tracing() {
 async fn shwap_bitswap_reachability() {
     init_tracing();
     let _guard = test_lock().lock().await;
+    // Create the node AFTER submitting — it will receive the latest head
+    // via header-sub and sync backward
+    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let num_blobs = 5;
@@ -433,10 +436,6 @@ async fn shwap_bitswap_reachability() {
         eprintln!("blob {i} submitted at height {h}");
         heights.push(h);
     }
-
-    // Create the node AFTER submitting — it will receive the latest head
-    // via header-sub and sync backward
-    let (node, _) = new_connected_node().await;
 
     // Wait for all headers to be available in the store
     for &h in &heights {
