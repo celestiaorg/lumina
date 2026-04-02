@@ -14,8 +14,7 @@ use cid::{Cid, CidGeneric};
 use lumina_node::NodeError;
 use lumina_node::blockstore::InMemoryBlockstore;
 use lumina_node::events::NodeEvent;
-use lumina_node::node::{Node, P2pError};
-use lumina_node::store::InMemoryStore;
+use lumina_node::node::P2pError;
 use lumina_node::test_utils::test_node_builder;
 use rand::RngCore;
 use tokio::sync::{Mutex, mpsc};
@@ -30,23 +29,6 @@ mod utils;
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-/// Wait for the node to sync a header at the given height, with a generous timeout.
-async fn wait_for_header(
-    node: &Node<InMemoryBlockstore, InMemoryStore>,
-    height: u64,
-) -> ExtendedHeader {
-    timeout(Duration::from_secs(60), async {
-        loop {
-            match node.get_header_by_height(height).await {
-                Ok(header) => return header,
-                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
-            }
-        }
-    })
-    .await
-    .expect("Timed out waiting for header to sync")
 }
 
 #[tokio::test]
@@ -88,7 +70,7 @@ async fn shwap_sampling_forward() {
                 }
             }
         };
-        timeout(Duration::from_secs(5), wait_height_sampled)
+        timeout(Duration::from_secs(1), wait_height_sampled)
             .await
             .unwrap();
     }
@@ -118,7 +100,7 @@ async fn shwap_sampling_backward() {
             }
         }
     };
-    let (from_height, to_height) = timeout(Duration::from_secs(10), new_batch_synced)
+    let (from_height, to_height) = timeout(Duration::from_secs(4), new_batch_synced)
         .await
         .unwrap();
 
@@ -151,17 +133,15 @@ async fn shwap_sampling_backward() {
 #[tokio::test]
 async fn shwap_request_sample() {
     let _guard = test_lock().lock().await;
+    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
     let blob_len = rand::random::<usize>() % 4096 + 1;
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
-    // submit blob before creating the node so it syncs through this height
     let height = blob_submit(&client, &[blob]).await;
-
-    let (node, _) = new_connected_node().await;
-    let header = wait_for_header(&node, height).await;
+    let header = node.get_header_by_height(height).await.unwrap();
     let square_width = header.square_width();
 
     // check existing sample
@@ -170,7 +150,7 @@ async fn shwap_request_sample() {
         .await
         .unwrap();
     let sample = node
-        .request_sample(0, 0, height, Some(Duration::from_secs(5)))
+        .request_sample(0, 0, height, Some(Duration::from_millis(500)))
         .await
         .unwrap();
     assert_eq!(expected, sample.share);
@@ -191,23 +171,21 @@ async fn shwap_request_sample() {
 #[tokio::test]
 async fn shwap_request_row() {
     let _guard = test_lock().lock().await;
+    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
     let blob_len = rand::random::<usize>() % 4096 + 1;
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
-    // submit blob before creating the node so it syncs through this height
     let height = blob_submit(&client, &[blob]).await;
-
-    let (node, _) = new_connected_node().await;
-    let header = wait_for_header(&node, height).await;
+    let header = node.get_header_by_height(height).await.unwrap();
     let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
     // check existing row
     let row = node
-        .request_row(0, height, Some(Duration::from_secs(5)))
+        .request_row(0, height, Some(Duration::from_secs(1)))
         .await
         .unwrap();
     assert_eq!(eds.row(0).unwrap(), row.shares);
@@ -223,17 +201,15 @@ async fn shwap_request_row() {
 #[tokio::test]
 async fn shwap_request_row_namespace_data() {
     let _guard = test_lock().lock().await;
+    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
     let blob_len = rand::random::<usize>() % 4096 + 1;
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
-    // submit blob before creating the node so it syncs through this height
     let height = blob_submit(&client, &[blob]).await;
-
-    let (node, _) = new_connected_node().await;
-    let header = wait_for_header(&node, height).await;
+    let header = node.get_header_by_height(height).await.unwrap();
     let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
@@ -252,7 +228,7 @@ async fn shwap_request_row_namespace_data() {
 
     for (n, &row) in rows_with_ns.iter().enumerate() {
         let row_ns_data = node
-            .request_row_namespace_data(ns, row, height, Some(Duration::from_secs(5)))
+            .request_row_namespace_data(ns, row, height, Some(Duration::from_secs(1)))
             .await
             .unwrap();
         assert_eq!(eds_ns_data[n].1, row_ns_data);
@@ -270,7 +246,7 @@ async fn shwap_request_row_namespace_data() {
     // PFB (0x04) < 0x05 < Primary ns padding (0x255)
     let unknown_ns = Namespace::const_v0([0, 0, 0, 0, 0, 0, 0, 0, 0, 5]);
     let row = node
-        .request_row_namespace_data(unknown_ns, 0, height, Some(Duration::from_secs(5)))
+        .request_row_namespace_data(unknown_ns, 0, height, Some(Duration::from_secs(1)))
         .await
         .unwrap();
     assert!(row.shares.is_empty());
@@ -288,6 +264,7 @@ async fn shwap_request_row_namespace_data() {
 #[tokio::test]
 async fn shwap_request_all_blobs() {
     let _guard = test_lock().lock().await;
+    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
@@ -298,15 +275,11 @@ async fn shwap_request_all_blobs() {
         })
         .collect();
 
-    // submit blobs before creating the node so it syncs through this height
     let height = blob_submit(&client, &blobs).await;
-
-    let (node, _) = new_connected_node().await;
-    wait_for_header(&node, height).await;
 
     // check existing namespace
     let received = node
-        .request_all_blobs(ns, height, Some(Duration::from_secs(5)))
+        .request_all_blobs(ns, height, Some(Duration::from_secs(2)))
         .await
         .unwrap();
 
@@ -315,7 +288,7 @@ async fn shwap_request_all_blobs() {
     // check nonexisting namespace
     let ns = Namespace::const_v0(rand::random());
     let received = node
-        .request_all_blobs(ns, height, Some(Duration::from_secs(5)))
+        .request_all_blobs(ns, height, Some(Duration::from_secs(2)))
         .await
         .unwrap();
 

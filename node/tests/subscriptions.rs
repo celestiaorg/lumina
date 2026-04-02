@@ -1,24 +1,15 @@
-use std::sync::OnceLock;
 use std::{array::from_ref, time::Duration};
 
 use celestia_types::{Blob, blob::BlobsAtHeight, nmt::Namespace};
 use futures::stream::StreamExt;
 use lumina_utils::time::sleep;
-use tokio::sync::Mutex;
 
 use crate::utils::{blob_submit, bridge_client, new_connected_node};
 
 mod utils;
 
-/// Serialize tests so only one node connects to the bridge at a time.
-fn test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 #[tokio::test]
 async fn header_subscription() {
-    let _guard = test_lock().lock().await;
     let (node, _) = new_connected_node().await;
 
     let mut header_stream = node.header_subscribe().await.unwrap();
@@ -43,7 +34,6 @@ async fn header_subscription() {
 
 #[tokio::test]
 async fn blob_subscription() {
-    let _guard = test_lock().lock().await;
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
