@@ -399,19 +399,18 @@ async fn shwap_request_sample_should_cleanup_unneeded_samples() {
     removed_receiver.try_recv().unwrap_err();
 }
 
-/// Diagnostic test: submit blobs one at a time (each in its own block),
-/// then try to fetch a sample from each height via bitswap.
-/// Node is created BEFORE submitting — the failing pattern.
+/// Diagnostic test: submit blobs one at a time, then try to fetch each
+/// from bitswap.  Reports which heights succeed / fail so we can see the
+/// pattern.  Node is created BEFORE submitting (the flaky pattern).
 #[tokio::test]
 async fn shwap_bitswap_reachability() {
     let _guard = test_lock().lock().await;
-    let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
     let num_blobs = 5;
     let mut heights = Vec::new();
 
-    // Submit blobs one per block so each lands at a different height
+    // Submit blobs first so we know the heights
     for i in 0..num_blobs {
         let ns = Namespace::const_v0(rand::random());
         let blob = Blob::new(ns, random_bytes(256), None).unwrap();
@@ -420,16 +419,17 @@ async fn shwap_bitswap_reachability() {
         heights.push(h);
     }
 
-    // Wait for all headers to sync
+    // Create the node AFTER submitting — it will receive the latest head
+    // via header-sub and sync backward
+    let (node, _) = new_connected_node().await;
+
+    // Wait for all headers to be available in the store
     for &h in &heights {
         wait_for_header(&node, h).await;
         eprintln!("header {h} synced");
     }
 
-    // Small extra delay to give the bridge time to finish EDS storage
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Try to fetch sample (0,0) from each height with a short timeout
+    // Try to fetch sample (0,0) from each height with a per-request timeout
     let mut ok = Vec::new();
     let mut failed = Vec::new();
 
