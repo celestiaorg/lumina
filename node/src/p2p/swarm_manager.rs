@@ -311,8 +311,11 @@ where
             .collect::<Vec<_>>();
 
         if bootnodes.is_empty() {
+            info!("All bootnodes already connected");
             return;
         }
+
+        info!("Connecting to {} bootnode(s)", bootnodes.len());
 
         // We produce this event only if we are going to connect to at least
         // one bootnode.
@@ -569,7 +572,7 @@ where
     }
 
     fn on_peer_connected(&mut self, peer_id: &PeerId, connection_id: ConnectionId) {
-        debug!("Peer connected: {peer_id}");
+        info!("Peer connected: {peer_id}");
         self.peer_tracker.add_connection(peer_id, connection_id);
 
         if self.peer_tracker.is_protected(peer_id) {
@@ -593,6 +596,11 @@ where
             info!("Peer disconnected: {peer_id}");
             self.unprotect(peer_id, FULL_PROTECT_TAG);
             self.unprotect(peer_id, ARCHIVAL_PROTECT_TAG);
+        }
+
+        if self.peer_tracker.info().num_connected_peers == 0 {
+            warn!("All peers disconnected, reconnecting to bootnodes immediately");
+            self.bootstrap();
         }
     }
 
