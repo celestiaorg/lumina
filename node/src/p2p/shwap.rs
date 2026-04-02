@@ -12,6 +12,8 @@ use cid::{Cid, CidGeneric};
 use libp2p::multihash::Multihash;
 use prost::Message;
 
+use tracing::info;
+
 use crate::p2p::{MAX_MH_SIZE, P2pError, Result};
 use crate::store::Store;
 
@@ -65,6 +67,12 @@ where
                 container
                     .verify(id, &header.dah)
                     .map_err(MultihasherError::custom_fatal)?;
+
+                info!(
+                    "Verified {} block at height {}",
+                    stringify!($container_type),
+                    id.block_height(),
+                );
 
                 Ok(hash)
             }};
