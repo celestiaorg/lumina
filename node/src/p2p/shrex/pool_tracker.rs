@@ -17,7 +17,7 @@ use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered}
 use libp2p::PeerId;
 use lumina_utils::time::{Elapsed, timeout};
 use prost::Message;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::p2p::shrex::{EMPTY_EDS_DATA_HASH, Event};
 use crate::store::{Store, StoreError};
@@ -185,6 +185,7 @@ where
             PeerPool::Candidates((voted, candidates)) => {
                 if !voted.insert(peer_id) {
                     // duplicate vote
+                    info!("Blocking peer {peer_id} for duplicate vote at height {height}");
                     self.pending_events
                         .push_back(Event::BlockPeers(vec![peer_id]));
                     return;
@@ -203,6 +204,10 @@ where
                     self.pending_events
                         .push_back(Event::AddPeers(vec![peer_id]));
                 } else {
+                    info!(
+                        "Blocking peer {peer_id} for wrong hash at validated height {height}: \
+                         got {data_hash:?}, expected {validated_hash:?}"
+                    );
                     self.pending_events
                         .push_back(Event::BlockPeers(vec![peer_id]));
                 }
@@ -305,6 +310,10 @@ where
                     // should be tiny
                     if let Some(PeerPool::Candidates((peers, _))) = self.hash_pools.remove(&height)
                     {
+                        info!(
+                            "Blocking {} peers for timeout waiting for header at height {height}",
+                            peers.len()
+                        );
                         let bad_peers = peers.into_iter().collect();
                         self.pending_events.push_back(Event::BlockPeers(bad_peers));
                     }
@@ -350,14 +359,19 @@ where
                         .flat_map(|pool| pool.iter().cloned())
                         .collect();
 
-                    trace!(
-                        "Promoted valid pool for {height} with {} peers, {} peers blacklisted",
-                        validated_peers.len(),
-                        bad_peers.len()
-                    );
-
                     if !bad_peers.is_empty() {
+                        info!(
+                            "Blocking {} peers for wrong hash at height {height} \
+                             (validated with {} correct peers)",
+                            bad_peers.len(),
+                            validated_peers.len()
+                        );
                         self.pending_events.push_back(Event::BlockPeers(bad_peers));
+                    } else {
+                        trace!(
+                            "Promoted valid pool for {height} with {} peers",
+                            validated_peers.len(),
+                        );
                     }
 
                     self.validated_pools.insert(data_hash, validated_peers);
