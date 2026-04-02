@@ -546,7 +546,9 @@ impl P2p {
             None => rx.await??,
         };
 
-        get_block_container(&cid, &data)
+        let container = get_block_container(&cid, &data)?;
+        info!("Got shwap CID {cid}, container size={}", container.len());
+        Ok(container)
     }
 
     /// Request a [`Row`] on bitswap protocol.
@@ -556,11 +558,13 @@ impl P2p {
         block_height: u64,
         timeout: Option<Duration>,
     ) -> Result<Row> {
+        info!("Requesting row={row_index} height={block_height}");
         let id = RowId::new(row_index, block_height)?;
         let cid = convert_cid(&id.into())?;
 
         let data = self.get_shwap_cid(cid, timeout).await?;
         let row = Row::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
+        info!("Got row={row_index} height={block_height}");
         Ok(row)
     }
 
@@ -572,11 +576,13 @@ impl P2p {
         block_height: u64,
         timeout: Option<Duration>,
     ) -> Result<Sample> {
+        info!("Requesting sample row={row_index} col={column_index} height={block_height}");
         let id = SampleId::new(row_index, column_index, block_height)?;
         let cid = convert_cid(&id.into())?;
 
         let data = self.get_shwap_cid(cid, timeout).await?;
         let sample = Sample::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
+        info!("Got sample row={row_index} col={column_index} height={block_height}");
         Ok(sample)
     }
 
@@ -609,12 +615,14 @@ impl P2p {
         block_height: u64,
         timeout: Option<Duration>,
     ) -> Result<RowNamespaceData> {
+        info!("Requesting row_namespace_data namespace={namespace:?} row={row_index} height={block_height}");
         let id = RowNamespaceDataId::new(namespace, row_index, block_height)?;
         let cid = convert_cid(&id.into())?;
 
         let data = self.get_shwap_cid(cid, timeout).await?;
         let row_namespace_data =
             RowNamespaceData::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
+        info!("Got row_namespace_data namespace={namespace:?} row={row_index} height={block_height}");
         Ok(row_namespace_data)
     }
 
@@ -1047,7 +1055,7 @@ where
 
     #[instrument(level = "trace", skip_all)]
     fn on_get_shwap_cid(&mut self, cid: Cid, respond_to: OneshotResultSender<Vec<u8>, P2pError>) {
-        trace!("Requesting CID {cid} from bitswap");
+        info!("Requesting CID {cid} from bitswap");
         let query_id = self.swarm.context().behaviour.bitswap.get(&cid);
         self.bitswap_queries.insert(query_id, respond_to);
     }
@@ -1056,11 +1064,13 @@ where
     async fn on_bitswap_event(&mut self, ev: beetswap::Event) {
         match ev {
             beetswap::Event::GetQueryResponse { query_id, data } => {
+                info!("Bitswap query {query_id:?} responded with {} bytes", data.len());
                 if let Some(respond_to) = self.bitswap_queries.remove(&query_id) {
                     respond_to.maybe_send_ok(data);
                 }
             }
             beetswap::Event::GetQueryError { query_id, error } => {
+                info!("Bitswap query {query_id:?} failed: {error}");
                 if let Some(respond_to) = self.bitswap_queries.remove(&query_id) {
                     let error: P2pError = error.into();
                     respond_to.maybe_send_err(error);
@@ -1147,7 +1157,7 @@ where
             return gossipsub::MessageAcceptance::Ignore;
         }
 
-        trace!("New header from header-sub ({header})");
+        info!("New header from header-sub ({header})");
 
         state.known_head = header.clone();
         // We intentionally do not `send().await` to avoid blocking `P2p`

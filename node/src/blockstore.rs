@@ -3,6 +3,7 @@
 use blockstore::{Blockstore, Result};
 use celestia_types::sample::SAMPLE_ID_CODEC;
 use cid::CidGeneric;
+use tracing::info;
 
 use crate::p2p::MAX_MH_SIZE;
 
@@ -45,6 +46,7 @@ where
 
     async fn put_keyed<const S: usize>(&self, cid: &CidGeneric<S>, data: &[u8]) -> Result<()> {
         if cid.codec() == SAMPLE_ID_CODEC {
+            info!("Storing sample CID {cid}");
             self.blockstore.put_keyed(cid, data).await
         } else {
             Ok(())
@@ -52,6 +54,7 @@ where
     }
 
     async fn remove<const S: usize>(&self, cid: &CidGeneric<S>) -> Result<()> {
+        info!("Removing CID {cid}");
         self.blockstore.remove(cid).await
     }
 
