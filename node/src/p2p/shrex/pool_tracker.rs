@@ -5,7 +5,7 @@
 //! Once a header is received and validated, the pool is promoted and peers are added to the
 //! general discovered peers pool.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::slice::Iter;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
@@ -46,14 +46,15 @@ pub struct PoolTracker<S> {
 #[derive(Debug, Clone, PartialEq)]
 enum PeerPool {
     /// Candidates: height hasn't been validated yet, stores potential matches by hash
-    Candidates((HashSet<PeerId>, HashMap<Hash, Vec<PeerId>>)),
+    /// The HashMap<PeerId, Hash> tracks each peer's vote to detect conflicting votes.
+    Candidates((HashMap<PeerId, Hash>, HashMap<Hash, Vec<PeerId>>)),
     /// Validated: hash for this height has been accepted, all peers moved to discovered
     Validated(Hash),
 }
 
 impl Default for PeerPool {
     fn default() -> Self {
-        PeerPool::Candidates((HashSet::new(), HashMap::new()))
+        PeerPool::Candidates((HashMap::new(), HashMap::new()))
     }
 }
 
@@ -183,13 +184,22 @@ where
 
         match pool {
             PeerPool::Candidates((voted, candidates)) => {
-                if !voted.insert(peer_id) {
-                    // duplicate vote
-                    info!("Blocking peer {peer_id} for duplicate vote at height {height}");
-                    self.pending_events
-                        .push_back(Event::BlockPeers(vec![peer_id]));
-                    return;
+                match voted.get(&peer_id) {
+                    Some(previous_hash) if *previous_hash == data_hash => {
+                        // Same hash again (e.g. gossipsub re-delivery), ignore
+                        trace!("Ignoring duplicate notification from {peer_id} at height {height}");
+                        return;
+                    }
+                    Some(_) => {
+                        // Voted for a different hash — misbehaviour
+                        info!("Blocking peer {peer_id} for conflicting vote at height {height}");
+                        self.pending_events
+                            .push_back(Event::BlockPeers(vec![peer_id]));
+                        return;
+                    }
+                    None => {}
                 }
+                voted.insert(peer_id, data_hash);
                 candidates
                     .entry(data_hash)
                     .or_insert_with(Vec::new)
@@ -314,7 +324,7 @@ where
                             "Blocking {} peers for timeout waiting for header at height {height}",
                             peers.len()
                         );
-                        let bad_peers = peers.into_iter().collect();
+                        let bad_peers = peers.into_keys().collect();
                         self.pending_events.push_back(Event::BlockPeers(bad_peers));
                     }
                     continue;
@@ -415,6 +425,8 @@ fn stale_height_threshold(subjective_head: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::store::InMemoryStore;
     use crate::test_utils::gen_filled_store;
