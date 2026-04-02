@@ -1131,19 +1131,22 @@ where
     #[instrument(skip_all)]
     fn on_header_sub_message(&mut self, data: &[u8]) -> gossipsub::MessageAcceptance {
         let Ok(header) = ExtendedHeader::decode_and_validate(data) else {
-            trace!("Malformed or invalid header from header-sub");
+            info!("Malformed or invalid header from header-sub");
             return gossipsub::MessageAcceptance::Reject;
         };
 
-        trace!("Received header from header-sub ({header})");
+        info!("Received header from header-sub ({header})");
 
         let Some(ref mut state) = self.header_sub_state else {
-            debug!("header-sub not initialized yet");
+            info!("header-sub not initialized yet, ignoring {header}");
             return gossipsub::MessageAcceptance::Ignore;
         };
 
-        if state.known_head.verify(&header).is_err() {
-            trace!("Failed to verify HeaderSub header. Ignoring {header}");
+        if let Err(e) = state.known_head.verify(&header) {
+            info!(
+                "Failed to verify header-sub header {header} against known_head {}: {e}",
+                state.known_head
+            );
             return gossipsub::MessageAcceptance::Ignore;
         }
 

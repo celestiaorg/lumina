@@ -357,10 +357,8 @@ where
                     let (height, timed_out) = res?;
 
                     if timed_out {
-                        info!("Sampling timed out for height={height}");
                         self.timed_out.insert_relaxed(height..=height).expect("invalid height");
                     } else {
-                        info!("Sampling succeeded for height={height}");
                         self.store.mark_as_sampled(height).await?;
                     }
 
@@ -493,11 +491,6 @@ where
             .map(|(row, col)| sample_cid(*row, *col, height))
             .collect::<Result<Vec<_>, _>>()?;
         self.store.update_sampling_metadata(height, cids).await?;
-
-        info!(
-            "Scheduling sampling for height={height} square_width={square_width} shares={}",
-            share_indexes.len(),
-        );
 
         let p2p = self.p2p.clone();
         let event_pub = self.event_pub.clone();
