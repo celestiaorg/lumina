@@ -539,8 +539,10 @@ where
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 connection_id,
+                cause,
                 ..
             } => {
+                info!("Connection closed: peer={peer_id}, cause={cause:?}");
                 self.on_peer_disconnected(&peer_id, connection_id);
             }
             _ => {}
