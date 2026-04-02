@@ -445,16 +445,30 @@ where
 
         self.set_subjective_head_height(new_head_height);
 
-        if let Ok(store_head_height) = self.store.head_height().await {
-            // If our new header is adjacent to the HEAD of the store
-            if store_head_height + 1 == new_head_height {
-                // Header is already verified by HeaderSub and will be validated against previous
-                // head on insert
-                if self.store.announce_insert(vec![new_head]).await.is_ok() {
-                    self.event_pub.send(NodeEvent::AddedHeaderFromHeaderSub {
-                        height: new_head_height,
-                    });
+        match self.store.head_height().await {
+            Ok(store_head_height) => {
+                if store_head_height + 1 == new_head_height {
+                    match self.store.announce_insert(vec![new_head]).await {
+                        Ok(_) => {
+                            self.event_pub.send(NodeEvent::AddedHeaderFromHeaderSub {
+                                height: new_head_height,
+                            });
+                        }
+                        Err(e) => {
+                            info!(
+                                "Failed to insert header-sub header at {new_head_height}: {e}"
+                            );
+                        }
+                    }
+                } else {
+                    info!(
+                        "Header-sub header at {new_head_height} not adjacent to store head \
+                         {store_head_height}"
+                    );
                 }
+            }
+            Err(e) => {
+                info!("Failed to get store head height: {e}");
             }
         }
 
