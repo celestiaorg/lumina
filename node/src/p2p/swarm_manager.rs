@@ -564,7 +564,7 @@ where
         if !self.swarm.behaviour_mut().blacklist.block_peer(*peer_id) {
             return false;
         }
-        debug!("Peer blacklisted: {peer_id}");
+        info!("Peer blacklisted: {peer_id}");
         true
     }
 

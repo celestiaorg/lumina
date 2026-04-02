@@ -1114,7 +1114,7 @@ where
                     .filter(|peer| self.swarm.blacklist_peer(peer))
                     .count();
 
-                debug!("Blocked {blocked} peers for shrex missbehaviour");
+                info!("Blocked {blocked} peers for shrex misbehaviour");
             }
         }
     }
