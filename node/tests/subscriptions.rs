@@ -1,15 +1,24 @@
+use std::sync::OnceLock;
 use std::{array::from_ref, time::Duration};
 
 use celestia_types::{Blob, blob::BlobsAtHeight, nmt::Namespace};
 use futures::stream::StreamExt;
 use lumina_utils::time::sleep;
+use tokio::sync::Mutex;
 
 use crate::utils::{blob_submit, bridge_client, new_connected_node};
 
 mod utils;
 
+/// Serialize tests so only one node connects to the bridge at a time.
+fn test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[tokio::test]
 async fn header_subscription() {
+    let _guard = test_lock().lock().await;
     let (node, _) = new_connected_node().await;
 
     let mut header_stream = node.header_subscribe().await.unwrap();
@@ -34,6 +43,7 @@ async fn header_subscription() {
 
 #[tokio::test]
 async fn blob_subscription() {
+    let _guard = test_lock().lock().await;
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -48,18 +58,12 @@ async fn blob_subscription() {
     let submitted_at = blob_submit(&client, from_ref(&blob)).await;
 
     let blobs = loop {
-        let result = blob_stream.next().await.unwrap();
-        match result {
-            Ok(BlobsAtHeight { height, blobs }) => {
-                if height == submitted_at {
-                    break blobs;
-                }
-                assert!(height < submitted_at);
-                assert!(blobs.is_empty());
-            }
-            // Namespace data fetch may time out under load, skip and continue
-            Err(_) => continue,
+        let BlobsAtHeight { height, blobs } = blob_stream.next().await.unwrap().unwrap();
+        if height == submitted_at {
+            break blobs;
         }
+        assert!(height < submitted_at);
+        assert!(blobs.is_empty());
     };
 
     assert_eq!(&blobs, from_ref(&blob));
