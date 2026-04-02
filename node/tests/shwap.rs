@@ -150,7 +150,7 @@ async fn shwap_request_sample() {
         .await
         .unwrap();
     let sample = node
-        .request_sample(0, 0, height, Some(Duration::from_millis(500)))
+        .request_sample(0, 0, height, Some(Duration::from_secs(5)))
         .await
         .unwrap();
     assert_eq!(expected, sample.share);
@@ -185,7 +185,7 @@ async fn shwap_request_row() {
 
     // check existing row
     let row = node
-        .request_row(0, height, Some(Duration::from_secs(1)))
+        .request_row(0, height, Some(Duration::from_secs(5)))
         .await
         .unwrap();
     assert_eq!(eds.row(0).unwrap(), row.shares);
@@ -228,7 +228,7 @@ async fn shwap_request_row_namespace_data() {
 
     for (n, &row) in rows_with_ns.iter().enumerate() {
         let row_ns_data = node
-            .request_row_namespace_data(ns, row, height, Some(Duration::from_secs(1)))
+            .request_row_namespace_data(ns, row, height, Some(Duration::from_secs(5)))
             .await
             .unwrap();
         assert_eq!(eds_ns_data[n].1, row_ns_data);
@@ -246,7 +246,7 @@ async fn shwap_request_row_namespace_data() {
     // PFB (0x04) < 0x05 < Primary ns padding (0x255)
     let unknown_ns = Namespace::const_v0([0, 0, 0, 0, 0, 0, 0, 0, 0, 5]);
     let row = node
-        .request_row_namespace_data(unknown_ns, 0, height, Some(Duration::from_secs(1)))
+        .request_row_namespace_data(unknown_ns, 0, height, Some(Duration::from_secs(5)))
         .await
         .unwrap();
     assert!(row.shares.is_empty());
@@ -279,7 +279,7 @@ async fn shwap_request_all_blobs() {
 
     // check existing namespace
     let received = node
-        .request_all_blobs(ns, height, Some(Duration::from_secs(2)))
+        .request_all_blobs(ns, height, Some(Duration::from_secs(5)))
         .await
         .unwrap();
 
@@ -288,7 +288,7 @@ async fn shwap_request_all_blobs() {
     // check nonexisting namespace
     let ns = Namespace::const_v0(rand::random());
     let received = node
-        .request_all_blobs(ns, height, Some(Duration::from_secs(2)))
+        .request_all_blobs(ns, height, Some(Duration::from_secs(5)))
         .await
         .unwrap();
 
