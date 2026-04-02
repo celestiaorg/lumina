@@ -399,11 +399,26 @@ async fn shwap_request_sample_should_cleanup_unneeded_samples() {
     removed_receiver.try_recv().unwrap_err();
 }
 
+fn init_tracing() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let level = std::env::var("RUST_LOG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(tracing::Level::WARN);
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(level)
+            .try_init();
+    });
+}
+
 /// Diagnostic test: submit blobs one at a time, then try to fetch each
 /// from bitswap.  Reports which heights succeed / fail so we can see the
 /// pattern.  Node is created BEFORE submitting (the flaky pattern).
 #[tokio::test]
 async fn shwap_bitswap_reachability() {
+    init_tracing();
     let _guard = test_lock().lock().await;
     let client = bridge_client().await;
 

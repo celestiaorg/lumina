@@ -64,6 +64,7 @@ tokio-stream = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 void = "1"
 uniffi = { workspace = true, optional = true }
+tracing-subscriber = "0.3.23"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 backoff = { version = "0.4.0", features = ["tokio"] }
