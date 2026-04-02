@@ -1,6 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use beetswap::utils::convert_cid;
@@ -17,13 +18,19 @@ use lumina_node::node::{Node, P2pError};
 use lumina_node::store::InMemoryStore;
 use lumina_node::test_utils::test_node_builder;
 use rand::RngCore;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
 use utils::new_connected_node_with_builder;
 
 use crate::utils::{blob_submit, bridge_client, new_connected_node};
 
 mod utils;
+
+/// Serialize tests so only one node connects to the bridge at a time.
+fn test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Wait for the node to sync a header at the given height, with a generous timeout.
 async fn wait_for_header(
@@ -44,6 +51,7 @@ async fn wait_for_header(
 
 #[tokio::test]
 async fn shwap_sampling_forward() {
+    let _guard = test_lock().lock().await;
     let (node, _) = new_connected_node().await;
 
     // create new events sub to ignore all previous events
@@ -88,6 +96,7 @@ async fn shwap_sampling_forward() {
 
 #[tokio::test]
 async fn shwap_sampling_backward() {
+    let _guard = test_lock().lock().await;
     let (node, mut events) = new_connected_node().await;
 
     let current_head = node.get_local_head_header().await.unwrap().height();
@@ -141,6 +150,7 @@ async fn shwap_sampling_backward() {
 
 #[tokio::test]
 async fn shwap_request_sample() {
+    let _guard = test_lock().lock().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
@@ -180,6 +190,7 @@ async fn shwap_request_sample() {
 
 #[tokio::test]
 async fn shwap_request_row() {
+    let _guard = test_lock().lock().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
@@ -211,6 +222,7 @@ async fn shwap_request_row() {
 
 #[tokio::test]
 async fn shwap_request_row_namespace_data() {
+    let _guard = test_lock().lock().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
@@ -275,6 +287,7 @@ async fn shwap_request_row_namespace_data() {
 
 #[tokio::test]
 async fn shwap_request_all_blobs() {
+    let _guard = test_lock().lock().await;
     let client = bridge_client().await;
 
     let ns = Namespace::const_v0(rand::random());
@@ -311,6 +324,7 @@ async fn shwap_request_all_blobs() {
 
 #[tokio::test]
 async fn shwap_request_sample_should_cleanup_unneeded_samples() {
+    let _guard = test_lock().lock().await;
     // submit some blobs to celestia to get bigger square, so that daser
     // doesn't sample whole block
     let ns = Namespace::const_v0(rand::random());
