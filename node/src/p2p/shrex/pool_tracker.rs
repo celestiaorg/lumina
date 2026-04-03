@@ -192,7 +192,7 @@ where
                     }
                     Some(_) => {
                         // Voted for a different hash — misbehaviour
-                        info!("Blocking peer {peer_id} for conflicting vote at height {height}");
+                        trace!("Blocking peer {peer_id} for conflicting vote at height {height}");
                         self.pending_events
                             .push_back(Event::BlockPeers(vec![peer_id]));
                         return;
@@ -316,10 +316,6 @@ where
                     // should be tiny
                     if let Some(PeerPool::Candidates((peers, _))) = self.hash_pools.remove(&height)
                     {
-                        info!(
-                            "Blocking {} peers for timeout waiting for header at height {height}",
-                            peers.len()
-                        );
                         let bad_peers = peers.into_keys().collect();
                         self.pending_events.push_back(Event::BlockPeers(bad_peers));
                     }
