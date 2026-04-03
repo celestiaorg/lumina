@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.4](https://github.com/celestiaorg/lumina/compare/lumina-node-v1.0.0-rc.3...lumina-node-v1.0.0-rc.4) - 2026-04-03
+
+### Added
+
+- prepare for v8 release ([#949](https://github.com/celestiaorg/lumina/pull/949))
+
 ## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/lumina-node-v1.0.0-rc.2...lumina-node-v1.0.0-rc.3) - 2026-03-19
 
 ### Added
