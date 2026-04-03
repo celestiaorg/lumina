@@ -422,7 +422,8 @@ async fn shwap_bitswap_reachability() {
     let _guard = test_lock().lock().await;
     // Create the node AFTER submitting — it will receive the latest head
     // via header-sub and sync backward
-    let (node, _) = new_connected_node().await;
+    let builder = test_node_builder().pruning_window(Duration::from_secs(60 * 60));
+    let (node, _) = new_connected_node_with_builder(builder).await;
     let client = bridge_client().await;
 
     let num_blobs = 5;

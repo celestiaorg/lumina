@@ -555,10 +555,17 @@ where
             return Ok(());
         }
 
-        // If all heights of next batch is within the slow sync range
-        if self
-            .highest_slow_sync_height
-            .is_some_and(|height| *next_batch.end() <= height)
+        // If all heights of next batch is within the slow sync range AND
+        // the batch is purely backward (below the store head), throttle to
+        // let sampling catch up. Never throttle forward sync toward the
+        // network head.
+        let store_head = store_ranges.head().unwrap_or(0);
+        let is_forward_sync = *next_batch.end() > store_head;
+
+        if !is_forward_sync
+            && self
+                .highest_slow_sync_height
+                .is_some_and(|height| *next_batch.end() <= height)
         {
             // Threshold is the half of batch size but it should be at least 50.
             let threshold = (self.batch_size / 2).max(SLOW_SYNC_MIN_THRESHOLD);
@@ -570,10 +577,6 @@ where
             // Do not fetch next batch if we have more headers than the threshold.
             if available_for_sampling > threshold {
                 // NOTE: Recheck will happen when we receive a header from header sub (~6 secs).
-                info!(
-                    "Slow sync: skipping fetch, {available_for_sampling} headers awaiting sampling \
-                     (threshold={threshold})"
-                );
                 return Ok(());
             }
         }
