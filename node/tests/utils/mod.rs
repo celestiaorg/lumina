@@ -74,7 +74,7 @@ where
 }
 
 pub async fn new_connected_node() -> (Node<InMemoryBlockstore, InMemoryStore>, EventSubscriber) {
-    new_connected_node_with_builder(test_node_builder()).await
+    new_connected_node_with_builder(test_node_builder().pruning_window(Duration::from_secs(60 * 60))).await
 }
 
 pub async fn blob_submit(client: &Client, blobs: &[Blob]) -> u64 {
