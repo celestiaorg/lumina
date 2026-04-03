@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use utils::new_connected_node_with_builder;
 
-use crate::utils::{blob_submit, bridge_client, new_connected_node};
+use crate::utils::{blob_submit, bridge_client, new_connected_node, wait_for_header};
 
 mod utils;
 
@@ -131,7 +131,7 @@ async fn shwap_request_sample() {
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_header(&node, height).await;
     let square_width = header.square_width();
 
     // check existing sample
@@ -168,7 +168,7 @@ async fn shwap_request_row() {
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_header(&node, height).await;
     let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
@@ -197,7 +197,7 @@ async fn shwap_request_row_namespace_data() {
     let blob = Blob::new(ns, random_bytes(blob_len), None).unwrap();
 
     let height = blob_submit(&client, &[blob]).await;
-    let header = node.get_header_by_height(height).await.unwrap();
+    let header = wait_for_header(&node, height).await;
     let eds = client.share_get_eds(header.height()).await.unwrap();
     let square_width = header.square_width();
 
