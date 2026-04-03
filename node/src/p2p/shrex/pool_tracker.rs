@@ -17,7 +17,7 @@ use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered}
 use libp2p::PeerId;
 use lumina_utils::time::{Elapsed, timeout};
 use prost::Message;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::p2p::shrex::{EMPTY_EDS_DATA_HASH, Event};
 use crate::store::{Store, StoreError};
