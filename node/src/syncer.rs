@@ -450,6 +450,7 @@ where
                 if store_head_height + 1 == new_head_height {
                     match self.store.announce_insert(vec![new_head]).await {
                         Ok(_) => {
+                            info!("Inserted header-sub header at {new_head_height} into store");
                             self.event_pub.send(NodeEvent::AddedHeaderFromHeaderSub {
                                 height: new_head_height,
                             });
