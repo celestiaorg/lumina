@@ -74,8 +74,8 @@ mod rpc {
 
     #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct RawGetRowResponse {
-        pub(crate) shares: Vec<RawShare>,
-        pub(crate) side: RowSide,
+        pub shares: Vec<RawShare>,
+        pub side: RowSide,
     }
 
     /// Share RPC methods.
@@ -323,3 +323,5 @@ pub trait ShareServer: rpc::ShareServer {}
 impl<T> ShareServer for T where T: rpc::ShareServer {}
 
 pub use rpc::ShareServer as ShareRpcServer;
+
+pub use rpc::RawGetRowResponse;
