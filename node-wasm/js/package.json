@@ -5,7 +5,7 @@
         "Celestia <contact@celestia.org>"
     ],
     "description": "Lumina node for Celestia, running in browser",
-    "version": "1.0.0-rc.5",
+    "version": "1.0.0",
     "license": "Apache-2.0",
     "repository": {
         "type": "git",
