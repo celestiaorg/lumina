@@ -10,8 +10,10 @@ use lumina_utils::cond_send::BoxFuture;
 
 use crate::client::task::spawn_task;
 
+use crate::ValidatorInfo;
 use crate::blob::{Blob, BlobID};
 use crate::client::FibreClient;
+#[cfg(test)]
 use crate::config::BlobConfig;
 use crate::error::FibreError;
 use crate::validator::ValidatorSet;
@@ -39,36 +41,9 @@ impl FibreClient {
         }
 
         let val_set = self.set_getter.head().await?;
-        let blob_cfg = BlobConfig::for_version(id.version())?;
-
-        let ordered_indices = val_set.select(
-            blob_cfg.original_rows,
-            self.cfg.min_rows_per_validator,
-            self.cfg.liveness_threshold,
-        );
-
-        let shard_map = val_set.assign(
-            id.commitment(),
-            blob_cfg.total_rows(),
-            blob_cfg.original_rows,
-            self.cfg.min_rows_per_validator,
-            self.cfg.liveness_threshold,
-        );
-
         let mut blob = Blob::empty(id.clone())?;
-
-        self.download_blob(
-            &val_set,
-            &ordered_indices,
-            blob_cfg.original_rows,
-            &shard_map,
-            &mut blob,
-            &self.cancel_token,
-        )
-        .await?;
-
+        self.select_and_download(&val_set, &mut blob).await?;
         blob.reconstruct()?;
-
         Ok(blob)
     }
 
@@ -87,36 +62,30 @@ impl FibreClient {
         }
 
         let val_set = self.set_getter.head().await?;
-
-        let ordered_indices = val_set.select(
-            blob_cfg.original_rows,
-            self.cfg.min_rows_per_validator,
-            self.cfg.liveness_threshold,
-        );
-
-        let shard_map = val_set.assign(
-            id.commitment(),
-            blob_cfg.total_rows(),
-            blob_cfg.original_rows,
-            self.cfg.min_rows_per_validator,
-            self.cfg.liveness_threshold,
-        );
-
         let mut blob = Blob::empty_with_config(id.clone(), blob_cfg);
+        self.select_and_download(&val_set, &mut blob).await?;
+        blob.reconstruct()?;
+        Ok(blob)
+    }
+
+    async fn select_and_download(
+        &self,
+        val_set: &ValidatorSet,
+        blob: &mut Blob,
+    ) -> Result<(), FibreError> {
+        let selected = val_set.select(
+            blob.config().original_rows,
+            self.cfg.min_rows_per_validator,
+            self.cfg.liveness_threshold,
+        );
 
         self.download_blob(
-            &val_set,
-            &ordered_indices,
+            &selected,
             blob.config().original_rows,
-            &shard_map,
-            &mut blob,
+            blob,
             &self.cancel_token,
         )
-        .await?;
-
-        blob.reconstruct()?;
-
-        Ok(blob)
+        .await
     }
 
     /// Download row proofs from validators and apply them to the blob.
@@ -127,24 +96,16 @@ impl FibreClient {
     /// more validators to compensate.
     async fn download_blob(
         &self,
-        val_set: &ValidatorSet,
-        ordered_indices: &[usize],
+        selected: &[(usize, &ValidatorInfo)],
         original_rows: usize,
-        shard_map: &crate::validator::ShardMap,
         blob: &mut Blob,
         cancel_token: &CancellationToken,
     ) -> Result<(), FibreError> {
-        if ordered_indices.is_empty() {
+        if selected.is_empty() {
             return Err(FibreError::NotFound);
         }
 
         let blob_id = blob.id().clone();
-
-        // Build expected-rows-per-validator lookup from the shard map.
-        let expected_rows: Vec<usize> = (0..val_set.validators.len())
-            .map(|i| shard_map.get(i).map_or(0, |v| v.len()))
-            .collect();
-
         #[allow(clippy::type_complexity)]
         let mut futures: FuturesUnordered<
             BoxFuture<
@@ -156,13 +117,14 @@ impl FibreClient {
             >,
         > = FuturesUnordered::new();
 
-        let mut val_iter = ordered_indices.iter();
+        let mut cur_idx = 0;
         let mut unique_rows: usize = 0;
         let mut inflight_rows: usize = 0;
 
         loop {
             // Spawn more validators while we need more rows covered.
-            let need_more = (unique_rows + inflight_rows) < original_rows && val_iter.len() > 0;
+            let need_more =
+                (unique_rows + inflight_rows) < original_rows && cur_idx < selected.len();
 
             if !need_more && futures.is_empty() {
                 break;
@@ -172,11 +134,13 @@ impl FibreClient {
                 result = self.download_semaphore.clone().acquire_owned(), if need_more => {
                     let global_permit = result
                         .map_err(|_| FibreError::Other("global semaphore closed".into()))?;
-                    let &val_idx = val_iter.next().unwrap();
-                    inflight_rows += expected_rows[val_idx];
+                    let val_idx = cur_idx;
+                    cur_idx += 1;
+                    let (rows, info) = selected[val_idx];
+                    inflight_rows += rows;
 
                     let connector = self.connector.clone();
-                    let validator = val_set.validators[val_idx].clone();
+                    let validator = info.clone();
                     let blob_id = blob_id.clone();
 
                     spawn_task(&mut futures, val_idx, async move {
@@ -192,7 +156,8 @@ impl FibreClient {
                 task_result = futures.next(), if !futures.is_empty() => {
                     match task_result {
                         Some((val_idx, Some(Ok(proofs)))) => {
-                            inflight_rows = inflight_rows.saturating_sub(expected_rows[val_idx]);
+                            let (rows, info) = selected[val_idx];
+                            inflight_rows = inflight_rows.saturating_sub(rows);
                             let total = proofs.len();
                             let mut applied = 0usize;
                             for proof in proofs {
@@ -202,9 +167,8 @@ impl FibreClient {
                             }
                             unique_rows += applied;
                             if applied == 0 && total > 0 {
-                                let validator = &val_set.validators[val_idx];
                                 tracing::warn!(
-                                    validator = %hex::encode(validator.address),
+                                    validator = %hex::encode(info.address),
                                     total,
                                     "no rows applied from validator response"
                                 );
@@ -214,20 +178,20 @@ impl FibreClient {
                             }
                         }
                         Some((val_idx, Some(Err(e)))) => {
-                            inflight_rows = inflight_rows.saturating_sub(expected_rows[val_idx]);
-                            let validator = &val_set.validators[val_idx];
+                            let (rows, info) = selected[val_idx];
+                            inflight_rows = inflight_rows.saturating_sub(rows);
                             tracing::warn!(
-                                validator = %hex::encode(validator.address),
+                                validator = %hex::encode(info.address),
                                 error = %e,
                                 "shard download failed"
                             );
                             // Invariant violated — loop will spawn more validators.
                         }
                         Some((val_idx, None)) => {
-                            inflight_rows = inflight_rows.saturating_sub(expected_rows[val_idx]);
-                            let validator = &val_set.validators[val_idx];
+                            let (rows, info) = selected[val_idx];
+                            inflight_rows = inflight_rows.saturating_sub(rows);
                             tracing::warn!(
-                                validator = %hex::encode(validator.address),
+                                validator = %hex::encode(info.address),
                                 "download task dropped unexpectedly"
                             );
                         }

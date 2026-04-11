@@ -72,6 +72,27 @@ impl ValidatorSet {
         self.validators.iter().map(|v| v.voting_power).sum()
     }
 
+    /// Computes the number of rows each validator should store based on stake.
+    fn rows_per_validator(
+        &self,
+        original_rows: usize,
+        min_rows: usize,
+        liveness_threshold: Fraction,
+    ) -> Vec<(usize, &ValidatorInfo)> {
+        let total_voting_power = self.total_voting_power();
+        self.validators
+            .iter()
+            .map(|v| {
+                let num = (original_rows as i64)
+                    * v.voting_power
+                    * (liveness_threshold.denominator as i64);
+                let den = total_voting_power * (liveness_threshold.numerator as i64);
+                let rows = ((num + den - 1) / den) as usize;
+                (rows.max(min_rows).min(original_rows), v)
+            })
+            .collect()
+    }
+
     /// Deterministically assigns row indices to validators based on their stake.
     pub fn assign(
         &self,
@@ -85,19 +106,8 @@ impl ValidatorSet {
             return ShardMap::new(HashMap::new());
         }
 
-        let total_voting_power = self.total_voting_power();
-        let rows_per_validator: Vec<usize> = self
-            .validators
-            .iter()
-            .map(|v| {
-                let num = (original_rows as i64)
-                    * v.voting_power
-                    * (liveness_threshold.denominator as i64);
-                let den = total_voting_power * (liveness_threshold.numerator as i64);
-                let rows = ((num + den - 1) / den) as usize;
-                rows.max(min_rows).min(original_rows)
-            })
-            .collect();
+        let rows_per_validator =
+            self.rows_per_validator(original_rows, min_rows, liveness_threshold);
 
         let mut rng = ChaCha8Rand::new(&commitment);
         let mut row_indices: Vec<usize> = (0..total_rows).collect();
@@ -105,8 +115,8 @@ impl ValidatorSet {
 
         let mut shard_map = HashMap::with_capacity(self.validators.len());
         let mut offset: usize = 0;
-        for (i, &row_count) in rows_per_validator.iter().enumerate() {
-            let rows: Vec<usize> = (0..row_count)
+        for (i, (row_count, _)) in rows_per_validator.iter().enumerate() {
+            let rows: Vec<usize> = (0..*row_count)
                 .map(|j| row_indices[(offset + j) % total_rows])
                 .collect();
             shard_map.insert(i, rows);
@@ -118,27 +128,22 @@ impl ValidatorSet {
 
     /// Selects validators for shard download, ordered by priority.
     ///
-    /// Returns ordered validator indices. Higher-stake validators come first
-    /// (priority group), followed by the tail group. Both groups are shuffled
-    /// weighted by stake.
+    /// Returns ordered `(validator_index, expected_rows)` pairs. Higher-stake
+    /// validators come first (priority group), followed by the tail group.
+    /// Both groups are shuffled weighted by stake.
     pub fn select(
         &self,
         original_rows: usize,
         min_rows: usize,
         liveness_threshold: Fraction,
-    ) -> Vec<usize> {
+    ) -> Vec<(usize, &ValidatorInfo)> {
         if self.validators.is_empty() {
             return Vec::new();
         }
 
-        let total_voting_power = self.total_voting_power();
-        let mut indexed: Vec<(usize, i64)> = self
-            .validators
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i, v.voting_power))
-            .collect();
+        let mut rpv = self.rows_per_validator(original_rows, min_rows, liveness_threshold);
 
+        let total_voting_power = self.total_voting_power();
         let total_distributed_rows = (original_rows as i64)
             * (liveness_threshold.denominator as i64)
             / (liveness_threshold.numerator as i64);
@@ -146,9 +151,9 @@ impl ValidatorSet {
             / total_distributed_rows;
 
         let mut accumulated: i64 = 0;
-        let mut split_idx = indexed.len();
-        for (i, &(_, vp)) in indexed.iter().enumerate() {
-            accumulated += vp.max(min_stake);
+        let mut split_idx = self.validators.len();
+        for (i, validator) in self.validators.iter().enumerate() {
+            accumulated += validator.voting_power.max(min_stake);
             if accumulated > total_voting_power {
                 split_idx = i;
                 break;
@@ -156,10 +161,9 @@ impl ValidatorSet {
         }
 
         let mut rng = rand::thread_rng();
-        shuffle_by_stake(&mut indexed[..split_idx], &mut rng);
-        shuffle_by_stake(&mut indexed[split_idx..], &mut rng);
-
-        indexed.iter().map(|&(idx, _)| idx).collect()
+        shuffle_by_stake(&mut rpv[..split_idx], &mut rng);
+        shuffle_by_stake(&mut rpv[split_idx..], &mut rng);
+        rpv
     }
 }
 
@@ -232,14 +236,14 @@ fn mul_u64_full(a: u64, b: u64) -> (u64, u64) {
     ((full >> 64) as u64, full as u64)
 }
 
-fn shuffle_by_stake(validators: &mut [(usize, i64)], rng: &mut impl Rng) {
-    let n = validators.len();
+fn shuffle_by_stake(selected: &mut [(usize, &ValidatorInfo)], rng: &mut impl Rng) {
+    let n = selected.len();
     if n <= 1 {
         return;
     }
 
     for i in 0..n - 1 {
-        let total_weight: i64 = validators[i..].iter().map(|(_, vp)| vp).sum();
+        let total_weight: i64 = selected[i..].iter().map(|(_, val)| val.voting_power).sum();
         if total_weight <= 0 {
             break;
         }
@@ -248,9 +252,9 @@ fn shuffle_by_stake(validators: &mut [(usize, i64)], rng: &mut impl Rng) {
 
         let mut cumul: i64 = 0;
         for j in i..n {
-            cumul += validators[j].1;
+            cumul += selected[j].1.voting_power;
             if point < cumul {
-                validators.swap(i, j);
+                selected.swap(i, j);
                 break;
             }
         }
@@ -543,15 +547,17 @@ mod selection_tests {
     #[test]
     fn empty_validators_returns_empty() {
         let set = ValidatorSet::new(vec![], 0);
-        let indices = set.select(100, 10, default_liveness());
-        assert!(indices.is_empty());
+        let selected = set.select(100, 10, default_liveness());
+        assert!(selected.is_empty());
     }
 
     #[test]
     fn single_validator_returns_one() {
         let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
-        let indices = set.select(100, 10, default_liveness());
-        assert_eq!(indices, vec![0]);
+        let selected = set.select(100, 10, default_liveness());
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].0 > 0);
+        assert_eq!(selected[0].1.address, [1u8; 20]);
     }
 
     #[test]
@@ -564,12 +570,12 @@ mod selection_tests {
             ],
             0,
         );
-        let indices = set.select(100, 10, default_liveness());
-        assert_eq!(indices.len(), 3);
+        let selected = set.select(100, 10, default_liveness());
+        assert_eq!(selected.len(), 3);
 
-        let mut present = indices;
-        present.sort();
-        assert_eq!(present, vec![0, 1, 2]);
+        let mut seeds: Vec<u8> = selected.iter().map(|(_, info)| info.address[0]).collect();
+        seeds.sort();
+        assert_eq!(seeds, vec![1, 2, 3]);
     }
 
     #[test]
@@ -582,19 +588,19 @@ mod selection_tests {
             ],
             0,
         );
-        let indices = set.select(100, 10, default_liveness());
-        assert_eq!(indices.len(), 3);
+        let selected = set.select(100, 10, default_liveness());
+        assert_eq!(selected.len(), 3);
     }
 
     #[test]
     fn split_idx_with_high_min_rows() {
         let set = ValidatorSet::new((0..10).map(|i| make_validator(10, i as u8)).collect(), 0);
-        let indices = set.select(100, 50, default_liveness());
-        assert_eq!(indices.len(), 10);
+        let selected = set.select(100, 50, default_liveness());
+        assert_eq!(selected.len(), 10);
     }
 
     #[test]
-    fn all_indices_present_in_result() {
+    fn all_validators_present_in_result() {
         let set = ValidatorSet::new(
             vec![
                 make_validator(50, 1),
@@ -603,12 +609,12 @@ mod selection_tests {
             ],
             0,
         );
-        let indices = set.select(100, 10, default_liveness());
+        let selected = set.select(100, 10, default_liveness());
 
-        assert_eq!(indices.len(), 3);
-        let mut sorted = indices;
-        sorted.sort();
-        assert_eq!(sorted, vec![0, 1, 2]);
+        assert_eq!(selected.len(), 3);
+        let mut seeds: Vec<u8> = selected.iter().map(|(_, info)| info.address[0]).collect();
+        seeds.sort();
+        assert_eq!(seeds, vec![1, 2, 3]);
     }
 
     #[test]
@@ -625,11 +631,39 @@ mod selection_tests {
                 ],
                 0,
             );
-            let indices = set.select(100, 10, default_liveness());
-            first_position_counts[indices[0]] += 1;
+            let selected = set.select(100, 10, default_liveness());
+            // address[0] is the seed: 1, 2, or 3
+            first_position_counts[selected[0].1.address[0] as usize - 1] += 1;
         }
 
         assert!(first_position_counts[0] > first_position_counts[1]);
         assert!(first_position_counts[0] > first_position_counts[2]);
+    }
+
+    #[test]
+    fn select_expected_rows_match_assign() {
+        let set = ValidatorSet::new(
+            vec![
+                make_validator(300, 1),
+                make_validator(200, 2),
+                make_validator(100, 3),
+            ],
+            0,
+        );
+        let liveness = default_liveness();
+        let original_rows = 100;
+        let min_rows = 10;
+
+        let selected = set.select(original_rows, min_rows, liveness);
+        let shard_map = set.assign([0u8; 32], 200, original_rows, min_rows, liveness);
+
+        for (expected_rows, info) in &selected {
+            let idx = set
+                .validators
+                .iter()
+                .position(|v| v.address == info.address)
+                .unwrap();
+            assert_eq!(*expected_rows, shard_map.get(idx).unwrap().len());
+        }
     }
 }
