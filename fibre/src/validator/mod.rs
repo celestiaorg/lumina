@@ -168,13 +168,13 @@ impl ValidatorSet {
 }
 
 /// Trait for retrieving the current validator set.
-///
-/// The client only needs the latest set; height-specific lookups are server-side only.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait SetGetter: Send + Sync {
     /// Get the latest validator set.
     async fn head(&self) -> Result<ValidatorSet, FibreError>;
+    /// Get the validator set at a specific height.
+    async fn get_by_height(&self, height: u64) -> Result<ValidatorSet, FibreError>;
 }
 
 /// Production [`SetGetter`] backed by gRPC.
@@ -187,13 +187,9 @@ impl GrpcSetGetter {
     pub fn new(client: GrpcClient) -> Self {
         Self { client }
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl SetGetter for GrpcSetGetter {
-    async fn head(&self) -> Result<ValidatorSet, FibreError> {
-        let resp = self.client.get_fibre_validator_set(0).await?;
+    async fn get_by_height_inner(&self, height: i64) -> Result<ValidatorSet, FibreError> {
+        let resp = self.client.get_fibre_validator_set(height).await?;
 
         let height = resp.height as u64;
 
@@ -202,6 +198,23 @@ impl SetGetter for GrpcSetGetter {
         })?;
 
         (&proto_set, height).try_into()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl SetGetter for GrpcSetGetter {
+    async fn head(&self) -> Result<ValidatorSet, FibreError> {
+        self.get_by_height_inner(0).await
+    }
+
+    async fn get_by_height(&self, height: u64) -> Result<ValidatorSet, FibreError> {
+        if height == 0 {
+            return Err(FibreError::Other(
+                "get_by_height requires height > 0".into(),
+            ));
+        }
+        self.get_by_height_inner(height as i64).await
     }
 }
 

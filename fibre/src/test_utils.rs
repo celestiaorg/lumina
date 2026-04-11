@@ -28,6 +28,10 @@ impl SetGetter for MockSetGetter {
     async fn head(&self) -> Result<ValidatorSet, FibreError> {
         Ok(self.val_set.clone())
     }
+
+    async fn get_by_height(&self, _height: u64) -> Result<ValidatorSet, FibreError> {
+        Ok(self.val_set.clone())
+    }
 }
 
 /// A mock validator connection that signs upload responses and stores/returns

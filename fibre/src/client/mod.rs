@@ -169,6 +169,13 @@ mod tests {
         async fn head(&self) -> Result<crate::validator::ValidatorSet, FibreError> {
             unimplemented!()
         }
+
+        async fn get_by_height(
+            &self,
+            _height: u64,
+        ) -> Result<crate::validator::ValidatorSet, FibreError> {
+            unimplemented!()
+        }
     }
 
     struct DummyConnector;

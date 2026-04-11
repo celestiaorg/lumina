@@ -18,11 +18,18 @@ use crate::config::BlobConfig;
 use crate::error::FibreError;
 use crate::validator::ValidatorSet;
 
+/// Options for configuring blob download behavior.
+#[derive(Default)]
+pub struct DownloadOptions {
+    /// When set, use the validator set at this height instead of head.
+    pub height: Option<u64>,
+}
+
 impl FibreClient {
     /// Download and reconstruct a blob by its [`BlobID`].
     ///
     /// The method:
-    /// 1. Fetches the current validator set.
+    /// 1. Fetches the current validator set (or at a specific height via `opts`).
     /// 2. Selects validators ordered by download priority.
     /// 3. Downloads row inclusion proofs from validators using adaptive fan-out.
     /// 4. Reconstructs the original data from collected proofs.
@@ -35,12 +42,19 @@ impl FibreClient {
     /// - [`FibreError::NotFound`] if no validator returned any rows.
     /// - [`FibreError::NotEnoughShards`] if too few unique rows were collected.
     /// - Any error from reconstruction (commitment mismatch, encoding, etc.).
-    pub async fn download(&self, id: &BlobID) -> Result<Blob, FibreError> {
+    pub async fn download(
+        &self,
+        id: &BlobID,
+        opts: DownloadOptions,
+    ) -> Result<Blob, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
 
-        let val_set = self.set_getter.head().await?;
+        let val_set = match opts.height {
+            Some(h) => self.set_getter.get_by_height(h).await?,
+            None => self.set_getter.head().await?,
+        };
         let mut blob = Blob::empty(id.clone())?;
         self.select_and_download(&val_set, &mut blob).await?;
         blob.reconstruct()?;

@@ -66,7 +66,9 @@ impl FibreApi {
     /// Fetches row proofs from validators and reconstructs the original data
     /// using erasure coding.
     pub async fn download(&self, id: &BlobID) -> Result<Blob, FibreError> {
-        self.fibre_client.download(id).await
+        self.fibre_client
+            .download(id, Default::default())
+            .await
     }
 
     /// Returns `true` if the underlying fibre client has been closed.
