@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use celestia_fibre::{Blob, BlobID, FibreClient, FibreError, PreparedPut};
+use celestia_fibre::{
+    Blob, BlobID, DownloadOptions, FibreClient, FibreError, SignedPaymentPromise,
+};
 use celestia_grpc::{SubmittedTx, TxConfig};
 use k256::ecdsa::SigningKey;
 
@@ -29,12 +31,25 @@ impl FibreApi {
         }
     }
 
+    /// Upload a pre-encoded [`Blob`] and collect validator signatures.
+    ///
+    /// Returns a [`SignedPaymentPromise`] once enough validator signatures
+    /// have been collected to meet the safety threshold.
+    pub async fn upload(
+        &self,
+        signing_key: &SigningKey,
+        namespace: &[u8],
+        blob: Blob,
+    ) -> Result<SignedPaymentPromise, FibreError> {
+        self.fibre_client.upload(signing_key, namespace, blob).await
+    }
+
     /// Upload data and broadcast `MsgPayForFibre` on-chain.
     ///
     /// Encodes the data into a blob, distributes it to validators via the
     /// Fibre protocol, collects signatures, and broadcasts a `MsgPayForFibre`
-    /// transaction. Returns the prepared put data and a [`SubmittedTx`] handle
-    /// that can be used to confirm the transaction.
+    /// transaction. Returns a [`SubmittedTx`] handle that can be used to
+    /// confirm the transaction.
     ///
     /// Requires the client to have a gRPC endpoint and signer configured.
     pub async fn put(
@@ -42,33 +57,29 @@ impl FibreApi {
         signing_key: &SigningKey,
         namespace: &[u8],
         data: &[u8],
-    ) -> Result<(PreparedPut, SubmittedTx), Error> {
+    ) -> Result<SubmittedTx, Error> {
         let grpc = self.inner.grpc()?;
         let signer_address = grpc
             .get_account_address()
             .ok_or(Error::NoAssociatedAddress)?;
 
-        let prepared = self
+        let msg = self
             .fibre_client
             .put(signing_key, namespace, data, &signer_address.to_string())
             .await
             .map_err(fibre_err)?;
 
-        let submitted = grpc
-            .broadcast_message(prepared.msg.clone(), TxConfig::default())
-            .await?;
+        let submitted = grpc.broadcast_message(msg, TxConfig::default()).await?;
 
-        Ok((prepared, submitted))
+        Ok(submitted)
     }
 
     /// Download and reconstruct a blob by its [`BlobID`].
     ///
     /// Fetches row proofs from validators and reconstructs the original data
     /// using erasure coding.
-    pub async fn download(&self, id: &BlobID) -> Result<Blob, FibreError> {
-        self.fibre_client
-            .download(id, Default::default())
-            .await
+    pub async fn download(&self, id: &BlobID, opts: DownloadOptions) -> Result<Blob, FibreError> {
+        self.fibre_client.download(id, opts).await
     }
 
     /// Returns `true` if the underlying fibre client has been closed.

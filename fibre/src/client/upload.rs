@@ -5,8 +5,7 @@
 //! [`SignedPaymentPromise`].
 //!
 //! The [`FibreClient::put()`] method encodes a blob, uploads it to validators,
-//! and returns a [`PreparedPut`] containing the `MsgPayForFibre` ready for
-//! broadcast by the caller.
+//! and returns a `MsgPayForFibre` ready for broadcast by the caller.
 
 use std::sync::Arc;
 
@@ -18,29 +17,13 @@ use lumina_utils::cond_send::BoxFuture;
 
 use crate::client::task::spawn_task;
 
-use crate::blob::{Blob, BlobID};
+use crate::blob::Blob;
 use crate::client::FibreClient;
 use crate::config::BlobConfig;
 use crate::error::FibreError;
 use crate::payment_promise::{PaymentPromise, SignedPaymentPromise};
 use crate::signature_set::SignatureSet;
 use crate::validator::{ShardMap, ValidatorSet};
-
-/// Result of a successful [`FibreClient::put()`] operation.
-///
-/// Contains the blob identifier, the constructed `MsgPayForFibre` message
-/// ready for on-chain broadcast, and the collected validator signatures.
-#[derive(Debug)]
-pub struct PreparedPut {
-    /// The unique identifier of the uploaded blob.
-    pub blob_id: BlobID,
-    /// The `MsgPayForFibre` message ready for on-chain broadcast.
-    pub msg: MsgPayForFibre,
-    /// Validator signatures confirming they received and stored the blob.
-    /// Positionally aligned with the validator set: `signatures[i]` corresponds
-    /// to `validator[i]`. Missing signatures are empty `Vec<u8>`.
-    pub validator_signatures: Vec<Vec<u8>>,
-}
 
 impl FibreClient {
     /// Upload a pre-encoded [`Blob`] and collect validator signatures.
@@ -122,23 +105,21 @@ impl FibreClient {
 
     /// Encode data, upload to validators, and build a `MsgPayForFibre`.
     ///
-    /// Returns a [`PreparedPut`] containing the blob ID, the message, and
-    /// validator signatures. The caller is responsible for broadcasting the
-    /// message on-chain.
+    /// Returns a [`MsgPayForFibre`] ready for on-chain broadcast.
+    /// The caller is responsible for broadcasting the message on-chain.
     pub async fn put(
         &self,
         signing_key: &k256::ecdsa::SigningKey,
         namespace: &[u8],
         data: &[u8],
         signer_address: &str,
-    ) -> Result<PreparedPut, FibreError> {
+    ) -> Result<MsgPayForFibre, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
 
         // 1. Encode data into a Blob.
         let blob = Blob::new(data, BlobConfig::for_version(0)?)?;
-        let blob_id = blob.id().clone();
 
         // 2. Upload to validators and collect signatures.
         let signed_promise = self.upload(signing_key, namespace, blob).await?;
@@ -154,15 +135,9 @@ impl FibreClient {
             .collect();
 
         // 4. Construct the MsgPayForFibre proto message.
-        let msg = MsgPayForFibre {
+        Ok(MsgPayForFibre {
             signer: signer_address.to_string(),
             payment_promise: Some((&signed_promise.promise).into()),
-            validator_signatures: validator_signatures.clone(),
-        };
-
-        Ok(PreparedPut {
-            blob_id,
-            msg,
             validator_signatures,
         })
     }

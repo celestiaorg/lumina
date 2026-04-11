@@ -42,11 +42,7 @@ impl FibreClient {
     /// - [`FibreError::NotFound`] if no validator returned any rows.
     /// - [`FibreError::NotEnoughShards`] if too few unique rows were collected.
     /// - Any error from reconstruction (commitment mismatch, encoding, etc.).
-    pub async fn download(
-        &self,
-        id: &BlobID,
-        opts: DownloadOptions,
-    ) -> Result<Blob, FibreError> {
+    pub async fn download(&self, id: &BlobID, opts: DownloadOptions) -> Result<Blob, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }

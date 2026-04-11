@@ -25,7 +25,6 @@ mod test_utils;
 
 pub use celestia_grpc::Endpoint;
 pub use client::download::DownloadOptions;
-pub use client::upload::PreparedPut;
 pub use client::{FibreClient, FibreClientBuilder};
 pub use config::{
     BlobConfig, DEFAULT_PROTOCOL_PARAMS, FibreClientConfig, Fraction, ProtocolParams,
