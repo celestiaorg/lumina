@@ -19,8 +19,6 @@ use crate::signer::BoxedDocSigner;
 use crate::utils::CondSend;
 use crate::{DocSigner, GrpcClient, GrpcClientBuilderError};
 
-use imp::build_transport;
-
 /// A URL endpoint with per-endpoint configuration.
 ///
 /// This includes HTTP/2 headers (metadata) and timeout that will be applied
@@ -291,7 +289,7 @@ impl GrpcClientBuilder {
                     let (url, endpoint_context) = endpoint.into_parts()?;
                     let mut context = base_context.clone();
                     context.extend(&endpoint_context);
-                    build_transport(url, context)
+                    imp::build_transport(url, context)
                 }
                 TransportEntry::BoxedTransport(mut transport) => {
                     let mut context = base_context.clone();

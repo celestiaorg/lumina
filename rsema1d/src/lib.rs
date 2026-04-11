@@ -50,8 +50,11 @@ mod tests {
         }
 
         let indices = vec![0usize, 2, 5, 7];
-        let sampled = ext_data.rows().sample(&indices).unwrap();
-        let reconstructed = reconstruct(&sampled, &indices, &params).unwrap();
+        let rows: Vec<&[u8]> = indices
+            .iter()
+            .map(|&i| ext_data.rows().row(i).unwrap())
+            .collect();
+        let reconstructed = reconstruct(&rows, &indices, &params).unwrap();
         assert_eq!(reconstructed.as_row_major(), original.as_row_major());
     }
 
