@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use crate::boxed::{BoxedTransport, TransportMetadata, boxed};
 use crate::client::AccountState;
 use crate::grpc::Context;
-use crate::signer::BoxedDocSigner;
+use crate::signer::{AccountSigner, BoxedDocSigner};
 use crate::utils::CondSend;
 use crate::{DocSigner, GrpcClient, GrpcClientBuilderError};
 
@@ -248,6 +248,12 @@ impl GrpcClientBuilder {
     {
         let pubkey = signer.verifying_key();
         self.pubkey_and_signer(pubkey, signer)
+    }
+
+    /// Add signer from an existing [`AccountSigner`].
+    pub fn account_signer(mut self, signer: AccountSigner) -> GrpcClientBuilder {
+        self.signer_kind = Some(SignerKind::Signer((signer.pubkey, signer.signer)));
+        self
     }
 
     /// Set signer from a raw private key.
