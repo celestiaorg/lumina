@@ -452,10 +452,7 @@ async fn sign_with_client(
     };
     let fee = (gas_limit as f64 * gas_price).ceil() as u64;
 
-    let tx = sign_tx(
-        tx_body, chain_id, &account, pubkey, signer, gas_limit, fee,
-    )
-    .await?;
+    let tx = sign_tx(tx_body, chain_id, &account, pubkey, signer, gas_limit, fee).await?;
     let bytes = match blobs {
         Some(blobs) => {
             let blob_tx = RawBlobTx {

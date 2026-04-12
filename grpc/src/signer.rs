@@ -109,7 +109,9 @@ impl AccountSigner {
     }
 
     /// Create a new `AccountSigner` from a keypair that implements both signing and key extraction.
-    pub fn from_keypair(signer: impl DocSigner + signature::Keypair<VerifyingKey = VerifyingKey> + 'static) -> Self {
+    pub fn from_keypair(
+        signer: impl DocSigner + signature::Keypair<VerifyingKey = VerifyingKey> + 'static,
+    ) -> Self {
         let pubkey = signer.verifying_key();
         Self::new(pubkey, signer)
     }
