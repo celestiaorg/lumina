@@ -414,7 +414,14 @@ async fn sign_with_client(
             };
             (tx_body, Some(blobs))
         }
-        TxPayload::Tx(body) => (body.clone(), None),
+        TxPayload::Message(any) => {
+            let tx_body = RawTxBody {
+                messages: vec![any.clone()],
+                memo: cfg.memo.clone().unwrap_or_default(),
+                ..RawTxBody::default()
+            };
+            (tx_body, None)
+        }
     };
 
     let (gas_limit, gas_price) = match cfg.gas_limit {
