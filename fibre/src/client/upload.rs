@@ -173,43 +173,47 @@ impl FibreClient {
             BoxFuture<'static, (usize, Option<Result<Vec<u8>, FibreError>>)>,
         > = FuturesUnordered::new();
 
-        let mut task_iter = validator_tasks.into_iter();
+        // Phase 1: Spawn all upload tasks up-front so that every validator is
+        // contacted regardless of how quickly the signature threshold is met.
+        for (val_idx, row_indices) in validator_tasks {
+            let permit = self
+                .upload_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| FibreError::Other("upload semaphore closed".into()))?;
 
+            let connector = Arc::clone(&self.connector);
+            let validator = val_set.validators[val_idx].clone();
+            let promise = promise.clone();
+            let rlc_coeffs = Arc::clone(&rlc_coeffs);
+            let blob = Arc::clone(blob);
+
+            spawn_task(&mut futures, val_idx, async move {
+                let _permit = permit;
+                // Generate row proofs in this task, parallelizing
+                // proof generation across validators.
+                let mut proofs = Vec::with_capacity(row_indices.len());
+                for row_idx in &row_indices {
+                    proofs.push(blob.row(*row_idx)?);
+                }
+
+                let conn = connector.connect(&validator).await?;
+                let resp = conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
+                Ok(resp.validator_signature)
+            });
+        }
+
+        // Phase 2: Collect results until the signature threshold is met.
+        // Already-spawned tasks continue uploading in the background after
+        // this function returns.
         loop {
-            let can_spawn = task_iter.len() > 0;
-
-            if !can_spawn && futures.is_empty() {
+            if futures.is_empty() {
                 break;
             }
 
             tokio::select! {
-                result = self.upload_semaphore.clone().acquire_owned(), if can_spawn => {
-                    let permit = result
-                        .map_err(|_| FibreError::Other("upload semaphore closed".into()))?;
-                    let (val_idx, row_indices) = task_iter.next().unwrap();
-
-                    let connector = Arc::clone(&self.connector);
-                    let validator = val_set.validators[val_idx].clone();
-                    let promise = promise.clone();
-                    let rlc_coeffs = Arc::clone(&rlc_coeffs);
-                    let blob = Arc::clone(blob);
-
-                    spawn_task(&mut futures, val_idx, async move {
-                        let _permit = permit;
-                        // Generate row proofs in this task, parallelizing
-                        // proof generation across validators.
-                        let mut proofs = Vec::with_capacity(row_indices.len());
-                        for row_idx in &row_indices {
-                            proofs.push(blob.row(*row_idx)?);
-                        }
-
-                        let conn = connector.connect(&validator).await?;
-                        let resp =
-                            conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
-                        Ok(resp.validator_signature)
-                    });
-                }
-                task_result = futures.next(), if !futures.is_empty() => {
+                task_result = futures.next() => {
                     match task_result {
                         Some((val_idx, Some(Ok(signature)))) => {
                             let validator = &val_set.validators[val_idx];
