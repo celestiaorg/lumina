@@ -451,14 +451,7 @@ impl<S: TxServer> NodeManager<S> {
                     SubmitError::SequenceMismatch { expected } => {
                         let stop_error: StopErrorFor<S> =
                             StopError::SubmitError(failure.original_error.clone());
-                        on_sequence_mismatch::<S>(
-                            node,
-                            sequence,
-                            expected,
-                            stop_error,
-                            txs,
-                            Some(self.delay),
-                        );
+                        on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
                     }
                     SubmitError::MempoolIsFull | SubmitError::NetworkError => {
                         node.shared_mut().submit_delay = Some(self.delay);
@@ -906,7 +899,6 @@ fn on_sequence_mismatch<S: TxServer>(
     expected: u64,
     stop_error: StopErrorFor<S>,
     txs: &NodeBuffer<S>,
-    delay: Option<Duration>,
 ) {
     let mut recover_target = None;
     let mut stop_seq = None;
@@ -921,7 +913,7 @@ fn on_sequence_mismatch<S: TxServer>(
         return;
     }
     // if our sequence is less than expected, we need to confirm
-    // that the transaction with higher sequence nubmer is transaction
+    // that the transaction with higher sequence number is transaction
     // made by our client and not from outside the system
     if sequence < expected {
         let target = expected.saturating_sub(1);
@@ -931,10 +923,6 @@ fn on_sequence_mismatch<S: TxServer>(
             return;
         };
         if tx.id.is_none() {
-            if let Some(value) = delay {
-                node.shared_mut().submit_delay = Some(value);
-                return;
-            }
             let stop_seq = stop_seq_from_last_good(shared.last_submitted, shared.last_confirmed);
             node.apply_stop_error(stop_seq, stop_error);
             return;
@@ -1073,7 +1061,7 @@ fn process_status_batch<S: TxServer>(
         }
     }
     if let Some((sequence, expected, stop_error)) = seq_mismatch {
-        on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs, None);
+        on_sequence_mismatch::<S>(node, sequence, expected, stop_error, txs);
     }
     if let Some((sequence, status)) = fatal {
         node.apply_stop_error(sequence, StopError::ConfirmError(status));
@@ -1387,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn sequence_mismatch_missing_id_resubmits_with_delay() {
+    fn sequence_mismatch_missing_id_stops_node() {
         let node_id: NodeId = Arc::from("node-1");
         let mut manager = NodeManager::<DummyServer>::new(vec![node_id.clone()], Some(0));
         let mut txs = TestBuffer::new(Some(0));
@@ -1406,10 +1394,10 @@ mod tests {
             &txs,
         );
 
-        let NodeState::Active(state) = manager.nodes.get(&node_id).unwrap() else {
-            panic!("node should be active");
-        };
-        assert!(state.shared.submit_delay.is_some());
+        assert!(matches!(
+            manager.nodes.get(&node_id).unwrap(),
+            NodeState::Stopped(_)
+        ));
     }
 
     #[test]
