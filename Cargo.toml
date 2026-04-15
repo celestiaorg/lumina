@@ -97,6 +97,10 @@ wasm-bindgen-test = "0.3"
 web-sys = "0.3.70"
 
 [patch.crates-io]
+# All versions of core2 have been yanked from crates.io, which breaks
+# `cargo minimal-versions`. Patch it from git until cid drops the dependency.
+core2 = { git = "https://github.com/bbqsrc/core2", rev = "545e84bc" }
+
 # Uncomment to apply local changes
 # beetswap = { path = "../beetswap" }
 # blockstore = { path = "../blockstore" }

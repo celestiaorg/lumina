@@ -77,6 +77,7 @@ static CUSTOM_TYPE_ATTRIBUTES: &[(&str, &str)] = &[
     (".header.pb.ExtendedHeader", SERIALIZED_DEFAULT),
     (".proof.pb.Proof", SERIALIZED_DEFAULT),
     (".proto.blob.v2.BlobProto", SERIALIZED),
+    (".proto.blob.v4.BlobProto", SERIALIZED),
     (".shwap.AxisType", SERIALIZED),
     (".shwap.Row", SERIALIZED),
     (".shwap.RowNamespaceData", SERIALIZED_DEFAULT),
@@ -118,6 +119,10 @@ static CUSTOM_FIELD_ATTRIBUTES: &[(&str, &str)] = &[
     (".proto.blob.v2.BlobProto.namespace_id", BASE64STRING),
     (".proto.blob.v2.BlobProto.signer", VEC_SKIP_IF_EMPTY),
     (".proto.blob.v2.BlobProto.signer", BASE64STRING),
+    (".proto.blob.v4.BlobProto.data", BASE64STRING),
+    (".proto.blob.v4.BlobProto.namespace_id", BASE64STRING),
+    (".proto.blob.v4.BlobProto.signer", VEC_SKIP_IF_EMPTY),
+    (".proto.blob.v4.BlobProto.signer", BASE64STRING),
     (".shwap.RowNamespaceData.shares", NULL_DEFAULT),
     (".shwap.Share", BASE64STRING),
 
@@ -173,13 +178,18 @@ const PROTO_FILES: &[&str] = &[
     "vendor/cosmos/tx/v1beta1/service.proto",
     "vendor/cosmos/tx/v1beta1/tx.proto",
     "vendor/go-header/p2p/pb/header_request.proto",
-    "vendor/go-square/blob/v2/blob.proto",
+    "vendor/go-square/blob/v4/blob.proto",
+    "vendor/celestia/fibre/v1/service.proto",
+    "vendor/celestia/fibre/v1/fibre.proto",
+    "vendor/celestia/fibre/v1/tx.proto",
+    "vendor/celestia/valaddr/v1/query.proto",
     "vendor/header/pb/extended_header.proto",
     "vendor/share/eds/byzantine/pb/share.proto",
     "vendor/share/shwap/p2p/bitswap/pb/bitswap.proto",
     "vendor/share/shwap/p2p/shrex/pb/shrex.proto",
     "vendor/share/shwap/p2p/shrex/shrexsub/pb/notification.proto",
     "vendor/share/shwap/pb/shwap.proto",
+    "vendor/tendermint-celestia-mods/privval/types.proto",
     "vendor/tendermint-celestia-mods/abci/types.proto",
     "vendor/tendermint-celestia-mods/blocksync/types.proto",
     "vendor/tendermint-celestia-mods/mempool/types.proto",
@@ -306,6 +316,43 @@ fn tonic_build(fds: FileDescriptorSet) {
     tonic_config
         .compile_fds_with_config(prost_config, fds)
         .expect("should be able to compile protobuf using tonic");
+
+    fix_grpc_service_paths();
+}
+
+/// Fix gRPC service paths in generated tonic code.
+///
+/// The `tendermint_celestia_mods` package renaming avoids conflicts with the external
+/// `tendermint-proto` crate for message types. However, for gRPC services the package name
+/// is part of the service path on the wire, so the Go server (celestia-core) registers
+/// services under `tendermint.rpc.grpc` while the generated Rust client uses
+/// `tendermint_celestia_mods.rpc.grpc`. This post-processing step fixes the wire paths.
+#[cfg(feature = "tonic")]
+fn fix_grpc_service_paths() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let path = std::path::Path::new(&out_dir).join("tendermint_celestia_mods.rpc.grpc.rs");
+
+    if !path.exists() {
+        return;
+    }
+
+    let content = std::fs::read_to_string(&path).expect("failed to read generated grpc file");
+
+    let content = content
+        .replace(
+            "tendermint_celestia_mods.rpc.grpc.BlockAPI",
+            "tendermint.rpc.grpc.BlockAPI",
+        )
+        .replace(
+            "tendermint_celestia_mods.rpc.grpc.BroadcastAPI",
+            "tendermint.rpc.grpc.BroadcastAPI",
+        )
+        .replace(
+            "tendermint_celestia_mods.rpc.grpc.BlobstreamAPI",
+            "tendermint.rpc.grpc.BlobstreamAPI",
+        );
+
+    std::fs::write(&path, content).expect("failed to write fixed grpc file");
 }
 
 /// Create a list of Tentermint messages that needs to be replaced with Celestia's modifications.
