@@ -15,11 +15,9 @@ use zeroize::Zeroizing;
 use crate::boxed::{BoxedTransport, TransportMetadata, boxed};
 use crate::client::AccountState;
 use crate::grpc::Context;
-use crate::signer::BoxedDocSigner;
+use crate::signer::{AccountSigner, BoxedDocSigner};
 use crate::utils::CondSend;
 use crate::{DocSigner, GrpcClient, GrpcClientBuilderError};
-
-use imp::build_transport;
 
 /// A URL endpoint with per-endpoint configuration.
 ///
@@ -252,6 +250,12 @@ impl GrpcClientBuilder {
         self.pubkey_and_signer(pubkey, signer)
     }
 
+    /// Add signer from an existing [`AccountSigner`].
+    pub fn account_signer(mut self, signer: AccountSigner) -> GrpcClientBuilder {
+        self.signer_kind = Some(SignerKind::Signer((signer.pubkey, signer.signer)));
+        self
+    }
+
     /// Set signer from a raw private key.
     pub fn private_key(mut self, bytes: &[u8]) -> GrpcClientBuilder {
         self.signer_kind = Some(SignerKind::PrivKeyBytes(Zeroizing::new(bytes.to_vec())));
@@ -291,7 +295,7 @@ impl GrpcClientBuilder {
                     let (url, endpoint_context) = endpoint.into_parts()?;
                     let mut context = base_context.clone();
                     context.extend(&endpoint_context);
-                    build_transport(url, context)
+                    imp::build_transport(url, context)
                 }
                 TransportEntry::BoxedTransport(mut transport) => {
                     let mut context = base_context.clone();
