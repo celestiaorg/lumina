@@ -496,17 +496,17 @@ fn go_fuzzy_vectors_match_rust() {
         additional_parity.truncate(extra_parity);
 
         let mut indices = Vec::with_capacity(params.k + extra_parity);
-        let mut sampled = Vec::with_capacity((params.k + extra_parity) * params.row_size);
+        let mut sampled_rows: Vec<Vec<u8>> = Vec::with_capacity(params.k + extra_parity);
         for idx in 0..params.k {
             if removed_originals.binary_search(&idx).is_ok() {
                 continue;
             }
             indices.push(idx);
-            sampled.extend_from_slice(row_at(&original, params.row_size, idx));
+            sampled_rows.push(row_at(&original, params.row_size, idx).to_vec());
         }
         for parity in selected_parity.iter().chain(additional_parity.iter()) {
             indices.push(parity.index);
-            sampled.extend_from_slice(&decode_hex_row(&parity.row_data, params.row_size));
+            sampled_rows.push(decode_hex_row(&parity.row_data, params.row_size));
         }
         assert!(
             indices.len() >= params.k,
@@ -521,8 +521,7 @@ fn go_fuzzy_vectors_match_rust() {
             case.name
         );
 
-        let rows = RowMatrix::with_shape(sampled, indices.len(), params.row_size)
-            .unwrap_or_else(|e| panic!("{}: sampled rows shape failed: {}", case.name, e));
+        let rows: Vec<&[u8]> = sampled_rows.iter().map(|r| r.as_slice()).collect();
         let reconstructed = reconstruct(&rows, &indices, &params)
             .unwrap_or_else(|e| panic!("{}: reconstruct failed: {}", case.name, e));
         assert_eq!(
