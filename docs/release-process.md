@@ -5,14 +5,14 @@
 Releases are managed by [release-plz](https://release-plz.dev/), split into two GitHub Actions workflows:
 
 - **`.github/workflows/release-plz.yml`** — Creates/updates the release PR on every push to `main`.
-- **`.github/workflows/release-plz-release.yml`** — Publishes crates, npm packages and ios/android libraries when the release PR is merged.
+- **`.github/workflows/release-plz-release.yml`** — Publishes crates and npm packages when the release PR is merged.
 
 ### How it works
 
 1. A push to `main` triggers the PR workflow, which runs `release-plz release-pr`.
 2. release-plz compares the workspace version in `Cargo.toml` against what's published on crates.io. If they differ, it creates (or updates) a PR with changelog entries.
 3. A follow-up job builds the WASM package, bumps the npm version in `package.json`, and pushes a commit to the release PR.
-4. When the release PR is merged, the release workflow runs `release-plz release`, which publishes all crates to crates.io, npm packages to the npm registry, and builds UniFFI artifacts for iOS/Android.
+4. When the release PR is merged, the release workflow runs `release-plz release`, which publishes all crates to crates.io and npm packages to the npm registry.
 
 ### Version progression
 
@@ -41,6 +41,8 @@ The npm package `lumina-node` follows the same version as the Rust crate `lumina
 
 For pre-release versions (e.g. `1.0.0-rc.1`), npm publish uses `--tag rc` so that `npm install lumina-node` continues to install the last stable release. Users opt into the RC with `npm install lumina-node@rc` or `npm install lumina-node@1.0.0-rc.1`.
 
-## UniFFI (iOS/Android)
+## UniFFI (iOS/Android) — Discontinued
 
-When a release includes `lumina-node-uniffi`, the release workflow builds native libraries for iOS (`aarch64-apple-ios`, `aarch64-apple-ios-sim`) and Android (`aarch64`, `armv7`, `x86_64`, `i686`). The built artifacts are packaged as tarballs and uploaded to the corresponding GitHub release along with SHA256 checksums.
+iOS and Android build automation has been removed. The only production consumer (Leap wallet) is
+sunsetting on May 28, 2026, and no other production consumers were identified. The `node-uniffi`
+crate remains in the repository but the builds will be removed in future versions.
