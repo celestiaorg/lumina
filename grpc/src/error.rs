@@ -1,4 +1,5 @@
 use celestia_types::hash::Hash;
+use celestia_types::state::AccAddress;
 use celestia_types::state::ErrorCode;
 use k256::ecdsa::signature::Error as SignatureError;
 use tonic::Status;
@@ -105,6 +106,10 @@ pub enum Error {
     /// Invalid parameter provided
     #[error("Invalid BroadcastedTx parameter provided: {0}")]
     InvalidBroadcastedTx(String),
+
+    /// No account registered for the given address
+    #[error("Unknown account: {0}")]
+    UnknownAccount(AccAddress),
 }
 
 /// Representation of all the errors that can occur when building [`GrpcClient`] using
