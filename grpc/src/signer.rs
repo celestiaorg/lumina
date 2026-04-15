@@ -16,6 +16,8 @@ use celestia_proto::cosmos::crypto::secp256k1;
 use celestia_types::state::auth::BaseAccount;
 use celestia_types::state::{AuthInfo, Fee, ModeInfo, RawTx, RawTxBody, SignerInfo, Sum};
 
+use celestia_types::state::AccAddress;
+
 use crate::Result;
 
 /// ECDSA/secp256k1 signature used for signing transactions
@@ -84,6 +86,68 @@ where
 impl fmt::Debug for BoxedDocSigner {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("BoxedDocSigner { .. }")
+    }
+}
+
+/// A signer bundling a verifying key and a signing implementation.
+///
+/// This type decouples signing from the gRPC transport layer, allowing a single
+/// [`GrpcClient`](crate::GrpcClient) connection to be shared without carrying account state.
+#[derive(Clone)]
+pub struct AccountSigner {
+    pub(crate) pubkey: VerifyingKey,
+    pub(crate) signer: BoxedDocSigner,
+}
+
+impl AccountSigner {
+    /// Create a new `AccountSigner` from a verifying key and a signer implementation.
+    pub fn new(pubkey: VerifyingKey, signer: impl DocSigner + 'static) -> Self {
+        Self {
+            pubkey,
+            signer: BoxedDocSigner::new(signer),
+        }
+    }
+
+    /// Create a new `AccountSigner` from a keypair that implements both signing and key extraction.
+    pub fn from_keypair(
+        signer: impl DocSigner + signature::Keypair<VerifyingKey = VerifyingKey> + 'static,
+    ) -> Self {
+        let pubkey = signer.verifying_key();
+        Self::new(pubkey, signer)
+    }
+
+    /// Create a new `AccountSigner` from raw private key bytes.
+    pub fn from_private_key(bytes: &[u8]) -> std::result::Result<Self, k256::ecdsa::Error> {
+        let signing_key = k256::ecdsa::SigningKey::from_slice(bytes)?;
+        let pubkey = *signing_key.verifying_key();
+        Ok(Self {
+            pubkey,
+            signer: BoxedDocSigner::new(signing_key),
+        })
+    }
+
+    /// Create a new `AccountSigner` from a hex-encoded private key.
+    pub fn from_private_key_hex(hex_str: &str) -> std::result::Result<Self, k256::ecdsa::Error> {
+        let bytes = hex::decode(hex_str.trim()).map_err(|_| k256::ecdsa::Error::new())?;
+        Self::from_private_key(&bytes)
+    }
+
+    /// Get a reference to the verifying key.
+    pub fn verifying_key(&self) -> &VerifyingKey {
+        &self.pubkey
+    }
+
+    /// Get the account address derived from the verifying key.
+    pub fn address(&self) -> AccAddress {
+        AccAddress::from(self.pubkey)
+    }
+}
+
+impl fmt::Debug for AccountSigner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("AccountSigner")
+            .field("address", &self.address())
+            .finish_non_exhaustive()
     }
 }
 
