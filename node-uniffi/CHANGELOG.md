@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/celestiaorg/lumina/compare/lumina-node-uniffi-v1.0.0...lumina-node-uniffi-v2.0.0) - 2026-04-15
+
+### Other
+
+- [**breaking**] remove iOS, Android, and uniffi binding CI jobs ([#960](https://github.com/celestiaorg/lumina/pull/960))
+
 ### Deprecated
 
 - iOS/Android CI jobs, release automation, and binary artifact builds have been removed ([#960](https://github.com/celestiaorg/lumina/pull/960)). The builds will be removed in future versions.
