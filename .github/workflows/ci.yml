@@ -33,7 +33,6 @@ jobs:
           - celestia-grpc-macros
           - celestia-client
           - lumina-node
-          - lumina-node-uniffi
           - lumina-node-wasm
           - lumina-utils
           - lumina-cli
@@ -71,7 +70,6 @@ jobs:
           - celestia-grpc-macros
           - celestia-client
           - lumina-node
-          - lumina-node-uniffi
           - lumina-node-wasm
           - lumina-utils
           - lumina-cli
@@ -89,30 +87,6 @@ jobs:
 
     - name: Run tests
       run: cargo test --all-features -p ${{ matrix.crate }}
-
-
-  test-bindings:
-    runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        bindings:
-          - name: uniffi-kotlin
-            run: ./node-uniffi/tests/kotlin/run.sh
-          - name: uniffi-swift
-            run: ./node-uniffi/tests/swift/run.sh
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache-key: ${{ matrix.crate.name }}
-
-      - name: Run ${{ matrix.bindings.name }} tests
-        run: ${{ matrix.bindings.run }}
 
 
   test-wasm:
@@ -226,113 +200,6 @@ jobs:
       run: npm test
 
 
-  build-ios:
-    runs-on: macos-latest
-
-    steps:
-    - uses: actions/checkout@v4
-
-    # remove heavy processes from github macos runner
-    - uses: bitwarden/ios/.github/actions/macos-runner-tuneup@5dc773e7530566702e672b6795bbed0baca51926
-
-    - name: Setup toolchain
-      uses: actions-rust-lang/setup-rust-toolchain@v1
-      with:
-        target: 'aarch64-apple-ios aarch64-apple-ios-sim'
-
-    - uses: mxcl/xcodebuild@v3
-      with:
-        action: none
-        xcode: ^16
-
-    - name: build and copy bindings
-      run: |
-        ./node-uniffi/build-ios.sh
-        ./examples/ios/LuminaDemo/copy_bindings.sh
-
-    # bitwarden's boot-simulator requires gtimeout
-    - name: install brew dependencies
-      run: brew install coreutils
-
-    # booting the simulator often hangs, so it needs to be killed and restarted
-    # https://github.com/actions/runner-images/issues/12777#issuecomment-3431315347
-    - name: boot simulator
-      uses: bitwarden/ios/.github/actions/boot-simulator@5dc773e7530566702e672b6795bbed0baca51926
-      id: boot-simulator
-      with:
-        simulator-name: iPhone 16
-        simulator-version: 26.1
-
-    - name: xcode clean build
-      working-directory: examples/ios/LuminaDemo
-      env:
-        NSUnbufferedIO: "YES"
-        SIMULATOR_ID: ${{ steps.boot-simulator.outputs.simulator-id }}
-      run: |
-        xcrun xcodebuild build-for-testing \
-          -scheme LuminaDemo \
-          -destination "id=${SIMULATOR_ID}" \
-          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-          -quiet
-
-    - name: xcode sim test
-      working-directory: examples/ios/LuminaDemo
-      env:
-        NSUnbufferedIO: "YES"
-        SIMULATOR_ID: ${{ steps.boot-simulator.outputs.simulator-id }}
-      run: |
-        # `-parallel-testing-enabled NO` avoids creating clones of the simulator
-        xcrun xcodebuild test-without-building \
-          -scheme LuminaDemo \
-          -sdk iphonesimulator \
-          -destination "id=${SIMULATOR_ID}" \
-          -destination-timeout 360 \
-          -parallel-testing-enabled NO \
-          -skip-testing LuminaDemoTests/GrpcClientTest \
-          -quiet
-
-
-  build-android:
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Setup Java JDK
-      uses: actions/setup-java@v4.0.0
-      with:
-        java-version: '21'
-        distribution: 'adopt'
-
-    - name: Setup toolchain
-      uses: actions-rust-lang/setup-rust-toolchain@v1
-      with:
-        target: 'aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android'
-
-    - name: Install cargo-ndk
-      uses: taiki-e/cache-cargo-install-action@v2
-      with:
-        tool: cargo-ndk@3.5.4
-
-    - name: build and copy bindings
-      run: |
-        ./node-uniffi/build-android.sh
-        ./examples/android/LuminaDemo/copy_bindings.sh
-
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v4
-      with:
-        gradle-version: 'current'
-
-    - name: Gradle build
-      working-directory: examples/android/LuminaDemo
-      run: gradle build
-
-    - name: Gradle test
-      working-directory: examples/android/LuminaDemo
-      run: gradle test
-
-
   fmt:
     runs-on: ubuntu-latest
 
@@ -440,8 +307,6 @@ jobs:
             dir: client
           - name: lumina-node
             dir: node
-          - name: lumina-node-uniffi
-            dir: node-uniffi
           - name: lumina-node-wasm
             dir: node-wasm
           - name: lumina-node
@@ -484,10 +349,7 @@ jobs:
     - test
     - test-wasm
     - test-js
-    - test-bindings
     - build-wasm
-    - build-android
-    - build-ios
     - fmt
     - docs
     - unused-deps
