@@ -73,7 +73,7 @@ pub fn encode_parity(
 }
 
 /// Reconstruct original rows from any K sampled rows.
-pub fn reconstruct(rows: &RowMatrix, indices: &[usize], params: &Parameters) -> Result<RowMatrix> {
+pub fn reconstruct(rows: &[&[u8]], indices: &[usize], params: &Parameters) -> Result<RowMatrix> {
     reconstruct_data(rows, indices, params)
 }
 
@@ -279,19 +279,28 @@ mod tests {
             let (ext_data, _, _) = encode(&original, &params).unwrap();
 
             let original_indices: Vec<usize> = (0..params.k).collect();
-            let original_rows = ext_data.rows().sample(&original_indices).unwrap();
+            let original_rows: Vec<&[u8]> = original_indices
+                .iter()
+                .map(|&i| ext_data.rows().row(i).unwrap())
+                .collect();
             let reconstructed = reconstruct(&original_rows, &original_indices, &params).unwrap();
             assert_eq!(reconstructed.as_row_major(), original.as_row_major());
 
             if params.n >= params.k {
                 let parity_indices: Vec<usize> = (params.k..(params.k + params.k)).collect();
-                let parity_rows = ext_data.rows().sample(&parity_indices).unwrap();
+                let parity_rows: Vec<&[u8]> = parity_indices
+                    .iter()
+                    .map(|&i| ext_data.rows().row(i).unwrap())
+                    .collect();
                 let reconstructed = reconstruct(&parity_rows, &parity_indices, &params).unwrap();
                 assert_eq!(reconstructed.as_row_major(), original.as_row_major());
             }
 
             let mixed = mixed_indices(&params);
-            let mixed_rows = ext_data.rows().sample(&mixed).unwrap();
+            let mixed_rows: Vec<&[u8]> = mixed
+                .iter()
+                .map(|&i| ext_data.rows().row(i).unwrap())
+                .collect();
             let reconstructed = reconstruct(&mixed_rows, &mixed, &params).unwrap();
             assert_eq!(reconstructed.as_row_major(), original.as_row_major());
         }
@@ -629,12 +638,19 @@ mod tests {
         }
 
         let bad_indices = vec![0usize, 1];
-        let sampled = extended.sample(&bad_indices).unwrap();
-        assert!(reconstruct(&sampled, &bad_indices, &params).is_err());
+        let bad_rows: Vec<&[u8]> = bad_indices
+            .iter()
+            .map(|&i| extended.row(i).unwrap())
+            .collect();
+        assert!(reconstruct(&bad_rows, &bad_indices, &params).is_err());
 
         let mut indices: Vec<usize> = (0..params.k).collect();
         indices[0] = params.total_rows();
-        let sampled = extended.sample(&[0, 1, 2, 3]).unwrap();
+        let sampled_indices = vec![0usize, 1, 2, 3];
+        let sampled: Vec<&[u8]> = sampled_indices
+            .iter()
+            .map(|&i| extended.row(i).unwrap())
+            .collect();
         assert!(reconstruct(&sampled, &indices, &params).is_err());
     }
 

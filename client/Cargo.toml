@@ -20,6 +20,7 @@ categories = [
 ]
 
 [dependencies]
+celestia-fibre.workspace = true
 celestia-grpc.workspace = true
 celestia-proto.workspace  = true
 celestia-rpc = { workspace = true, default-features = false }

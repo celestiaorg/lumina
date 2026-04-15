@@ -1,0 +1,47 @@
+[package]
+name = "celestia-fibre"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+description = "Client library for the Celestia Fibre data availability protocol"
+authors = ["Celestia <contact@celestia.org>"]
+homepage = "https://www.celestia.org"
+repository = "https://github.com/celestiaorg/lumina"
+rust-version = "1.88"
+
+[dependencies]
+celestia-grpc.workspace = true
+celestia-proto = { workspace = true, features = ["tonic"] }
+celestia-types.workspace = true
+rsema1d.workspace = true
+
+# Crypto
+k256 = { workspace = true, features = ["ecdsa"] }
+ed25519-dalek = { version = "2.1", features = ["digest"] }
+sha2 = "0.10.8"
+rand.workspace = true
+chacha8rand = "0.1.2"
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "macros"] }
+tokio-util.workspace = true
+futures.workspace = true
+lumina-utils = { workspace = true, features = ["executor"] }
+
+# gRPC
+tonic = { workspace = true, features = ["codegen"] }
+prost.workspace = true
+tendermint-proto.workspace = true
+
+# Error handling and utilities
+thiserror.workspace = true
+tracing.workspace = true
+hex.workspace = true
+async-trait.workspace = true
+bech32 = "0.11"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tonic = { workspace = true, features = ["transport"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
