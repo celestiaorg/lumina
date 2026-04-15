@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/celestiaorg/lumina/compare/celestia-types-v1.0.0...celestia-types-v2.0.0) - 2026-04-15
+
+### Added
+
+- add fibre and valaddr proto definitions ([#954](https://github.com/celestiaorg/lumina/pull/954))
+
 ## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/celestia-types-v1.0.0-rc.2...celestia-types-v1.0.0-rc.3) - 2026-03-19
 
 ### Added
