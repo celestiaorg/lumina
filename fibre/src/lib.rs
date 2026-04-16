@@ -10,10 +10,8 @@ pub mod validator;
 pub use domain::config;
 pub use domain::error;
 
-// Compatibility aliases preserve historical crate-local paths so tests and
-// internals don't need broad path rewrites during this refactor.
-pub(crate) use domain::{blob, blob_header, payment_promise};
-pub(crate) use validator::signature_set;
+// Compatibility aliases so domain submodules can use `crate::blob`, etc.
+pub(crate) use domain::{blob, blob_header};
 
 pub use config::{
     BlobConfig, DEFAULT_PROTOCOL_PARAMS, FibreClientConfig, Fraction, ProtocolParams,

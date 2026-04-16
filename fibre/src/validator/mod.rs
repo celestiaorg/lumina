@@ -218,6 +218,70 @@ impl SetGetter for GrpcSetGetter {
     }
 }
 
+impl TryFrom<(&tendermint_proto::v0_38::types::ValidatorSet, u64)> for ValidatorSet {
+    type Error = FibreError;
+
+    fn try_from(
+        (proto_set, height): (&tendermint_proto::v0_38::types::ValidatorSet, u64),
+    ) -> Result<Self, Self::Error> {
+        let validators = proto_set
+            .validators
+            .iter()
+            .map(ValidatorInfo::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ValidatorSet { validators, height })
+    }
+}
+
+impl TryFrom<&tendermint_proto::v0_38::types::Validator> for ValidatorInfo {
+    type Error = FibreError;
+
+    fn try_from(
+        proto_val: &tendermint_proto::v0_38::types::Validator,
+    ) -> Result<Self, Self::Error> {
+        use tendermint_proto::v0_38::crypto::public_key::Sum as CryptoKeySum;
+
+        let pubkey_bytes = match proto_val.pub_key.as_ref() {
+            Some(pk) => match &pk.sum {
+                Some(CryptoKeySum::Ed25519(bytes)) => bytes.clone(),
+                _ => {
+                    return Err(FibreError::Other(
+                        "expected ed25519 public key for validator".into(),
+                    ));
+                }
+            },
+            None => {
+                return Err(FibreError::Other("validator missing public key".into()));
+            }
+        };
+
+        let pubkey =
+            Ed25519PublicKey::from_bytes(pubkey_bytes.as_slice().try_into().map_err(|_| {
+                FibreError::InvalidData(format!(
+                    "ed25519 key has invalid length {}, expected 32",
+                    pubkey_bytes.len()
+                ))
+            })?)
+            .map_err(|e| FibreError::Other(format!("invalid ed25519 key: {e}")))?;
+
+        // CometBFT address = first 20 bytes of SHA-256(pubkey)
+        let address: [u8; 20] = {
+            use sha2::{Digest, Sha256};
+            let hash = Sha256::digest(pubkey.as_bytes());
+            hash[..20]
+                .try_into()
+                .expect("sha256 output is always 32 bytes")
+        };
+
+        Ok(ValidatorInfo {
+            address,
+            pubkey,
+            voting_power: proto_val.voting_power,
+        })
+    }
+}
+
 fn go_shuffle<T>(rng: &mut ChaCha8Rand, slice: &mut [T]) {
     let n = slice.len();
     for i in (1..n).rev() {
