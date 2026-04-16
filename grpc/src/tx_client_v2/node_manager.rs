@@ -982,7 +982,7 @@ fn process_status_batch<S: TxServer>(
         .into_iter()
         .filter_map(|(tx_id, status)| txs.get_by_id(&tx_id).map(|tx| (tx.sequence, status)))
         .collect::<Vec<_>>();
-    collected.sort_by(|first, second| first.0.cmp(&second.0));
+    collected.sort_by_key(|first| first.0);
     if collected.is_empty() {
         return effects;
     }
