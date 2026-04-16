@@ -28,7 +28,7 @@ Supported features:
 - Backward and forward Data Availability Sampling
 - Native and browser persistent storage
 - Streaming events happening on the node
-- Native, Wasm and UniFFI libraries, embed the node anywhere
+- Native and Wasm libraries (UniFFI/mobile bindings are deprecated)
 - Integration tests with Go implementation
 
 ## Installing the node
