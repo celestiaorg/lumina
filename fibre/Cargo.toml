@@ -17,8 +17,10 @@ rsema1d.workspace = true
 
 # Crypto
 k256 = { workspace = true, features = ["ecdsa"] }
+ed25519-dalek = { version = "2.1", features = ["digest"] }
 sha2 = "0.10.8"
 rand.workspace = true
+chacha8rand = "0.1.2"
 
 # Async runtime
 tokio = { workspace = true, features = ["sync", "macros"] }
@@ -32,6 +34,7 @@ tendermint-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 hex.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
