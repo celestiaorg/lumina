@@ -1054,7 +1054,7 @@ pub mod tests {
 
         let final_headers = original_headers
             .into_iter()
-            .chain(new_headers.into_iter())
+            .chain(new_headers)
             .collect::<Vec<_>>();
 
         let reopened_store = IndexedDbStore::new(&store_name)
