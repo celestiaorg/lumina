@@ -182,7 +182,7 @@ pub trait ShareClient: ClientT {
                 rpc::ShareClient::share_get_samples(self, height, coordinates.clone()).await?;
             let mut samples = Vec::with_capacity(raw_samples.len());
 
-            for (coords, raw_sample) in coordinates.iter().zip(raw_samples.into_iter()) {
+            for (coords, raw_sample) in coordinates.iter().zip(raw_samples) {
                 let sample_id = SampleId::new(coords.row, coords.column, height)
                     .map_err(custom_client_error)?;
 
