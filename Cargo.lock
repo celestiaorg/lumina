@@ -769,6 +769,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "celestia-fibre"
+version = "1.0.0"
+dependencies = [
+ "celestia-grpc",
+ "celestia-proto",
+ "celestia-types",
+ "hex",
+ "k256",
+ "prost",
+ "rand 0.8.5",
+ "rsema1d",
+ "sha2 0.10.9",
+ "tendermint-proto",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "celestia-grpc"
 version = "1.0.0"
 dependencies = [

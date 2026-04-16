@@ -646,7 +646,7 @@ mod tests {
 
         let mut indices: Vec<usize> = (0..params.k).collect();
         indices[0] = params.total_rows();
-        let sampled_indices = vec![0usize, 1, 2, 3];
+        let sampled_indices = [0usize, 1, 2, 3];
         let sampled: Vec<&[u8]> = sampled_indices
             .iter()
             .map(|&i| extended.row(i).unwrap())

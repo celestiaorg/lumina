@@ -96,7 +96,7 @@ async fn get_shares_range() {
 
     for ((share, received), proven) in shares
         .into_iter()
-        .zip(shares_range.shares.into_iter())
+        .zip(shares_range.shares)
         .zip(shares_range.proof.shares().iter())
     {
         assert_eq!(share, received);
