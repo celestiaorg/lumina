@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/celestiaorg/lumina/compare/lumina-utils-v1.0.0...lumina-utils-v2.0.0) - 2026-04-16
+
+### Added
+
+- add CondSend trait and update rsema1d codec API ([#955](https://github.com/celestiaorg/lumina/pull/955))
+
 ## [1.0.0-rc.2](https://github.com/celestiaorg/lumina/compare/lumina-utils-v0.5.2...lumina-utils-v1.0.0-rc.2) - 2026-02-25
 
 ### Added

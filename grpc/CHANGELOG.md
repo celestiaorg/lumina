@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v1.0.0...celestia-grpc-v2.0.0) - 2026-04-16
+
+### Added
+
+- add fibre crate with domain types ([#959](https://github.com/celestiaorg/lumina/pull/959))
+- add fibre gRPC service client and account signer ([#958](https://github.com/celestiaorg/lumina/pull/958))
+
 ## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v1.0.0-rc.2...celestia-grpc-v1.0.0-rc.3) - 2026-03-19
 
 ### Added
