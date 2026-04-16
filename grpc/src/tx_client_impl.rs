@@ -16,7 +16,7 @@ use celestia_types::state::RawTxBody;
 use celestia_types::state::auth::BaseAccount;
 
 use crate::grpc::{BroadcastMode, GasEstimate, TxStatus as GrpcTxStatus, TxStatusResponse};
-use crate::signer::sign_tx;
+use crate::signer::{AccountSigner, sign_tx};
 
 use crate::tx_client_v2::{
     ConfirmResult, NodeId, RejectionReason, SigningError, SigningFailure, StopError, SubmitError,
@@ -54,7 +54,10 @@ impl ConfirmHandle<TxConfirmInfo, TxStatusResponse> {
 /// Warning: [`TransactionService`] is experimental and not recommended for use yet.
 pub struct TxServiceConfig {
     /// List of nodes (id, client) to submit and confirm transactions through.
+    /// These clients are used for transport only (queries, broadcasting).
     pub nodes: Vec<(NodeId, GrpcClient)>,
+    /// The account signer used for signing transactions.
+    pub signer: AccountSigner,
     /// Interval between confirmation polling attempts.
     pub confirm_interval: Duration,
     /// Maximum number of transactions to query in a single status batch.
@@ -64,10 +67,11 @@ pub struct TxServiceConfig {
 }
 
 impl TxServiceConfig {
-    /// Create a new config with defaults and the given node list.
-    pub fn new(nodes: Vec<(NodeId, GrpcClient)>) -> Self {
+    /// Create a new config with defaults and the given node list and signer.
+    pub fn new(nodes: Vec<(NodeId, GrpcClient)>, signer: AccountSigner) -> Self {
         Self {
             nodes,
+            signer,
             confirm_interval: Duration::from_millis(TxConfig::default().confirmation_interval_ms),
             max_status_batch: DEFAULT_MAX_STATUS_BATCH,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
@@ -91,6 +95,7 @@ struct TransactionServiceInner {
     worker: Mutex<Option<WorkerHandle>>,
     clients: HashMap<NodeId, GrpcClient>,
     primary_client: GrpcClient,
+    signer: AccountSigner,
     account: BaseAccount,
     confirm_interval: Duration,
     max_status_batch: usize,
@@ -120,7 +125,8 @@ impl TransactionService {
             ));
         };
         let client = client.clone();
-        let address = client.get_account_address().ok_or(Error::MissingSigner)?;
+        let signer = config.signer;
+        let address = signer.address();
         let account = client.get_account(&address).await?;
         let account = BaseAccount::from(account);
 
@@ -129,6 +135,7 @@ impl TransactionService {
             account.clone(),
             &clients,
             client.clone(),
+            &signer,
             config.confirm_interval,
             config.max_status_batch,
             config.queue_capacity,
@@ -141,6 +148,7 @@ impl TransactionService {
                 worker: Mutex::new(Some(worker_handle)),
                 clients,
                 primary_client: client,
+                signer,
                 account,
                 confirm_interval: config.confirm_interval,
                 max_status_batch: config.max_status_batch,
@@ -201,6 +209,7 @@ impl TransactionService {
             self.inner.account.clone(),
             &self.inner.clients,
             self.inner.primary_client.clone(),
+            &self.inner.signer,
             self.inner.confirm_interval,
             self.inner.max_status_batch,
             self.inner.queue_capacity,
@@ -218,6 +227,7 @@ impl TransactionService {
         account: BaseAccount,
         clients: &HashMap<NodeId, GrpcClient>,
         primary_client: GrpcClient,
+        account_signer: &AccountSigner,
         confirm_interval: Duration,
         max_status_batch: usize,
         queue_capacity: usize,
@@ -225,7 +235,9 @@ impl TransactionService {
         TxSubmitter<Hash, TxConfirmInfo, TxStatusResponse, Arc<Error>, TxRequest>,
         WorkerHandle,
     )> {
-        let next_sequence = current_sequence(&primary_client).await?;
+        let address = account_signer.address();
+        let next_account = primary_client.get_account(&address).await?;
+        let next_sequence = next_account.sequence;
         let confirmed_sequence = next_sequence.checked_sub(1);
         let nodes = clients
             .iter()
@@ -236,6 +248,7 @@ impl TransactionService {
                         node_id: node_id.clone(),
                         client: client.clone(),
                         account: account.clone(),
+                        account_signer: account_signer.clone(),
                     }),
                 )
             })
@@ -264,6 +277,7 @@ struct NodeClient {
     node_id: NodeId,
     client: GrpcClient,
     account: BaseAccount,
+    account_signer: AccountSigner,
 }
 
 #[async_trait]
@@ -351,7 +365,9 @@ impl TxServer for NodeClient {
     }
 
     async fn current_sequence(&self) -> Result<u64> {
-        current_sequence(&self.client).await
+        let address = self.account_signer.address();
+        let account = self.client.get_account(&address).await?;
+        Ok(account.sequence)
     }
 
     async fn simulate_and_sign(
@@ -362,19 +378,27 @@ impl TxServer for NodeClient {
         Transaction<Self::TxId, Self::ConfirmInfo, Self::ConfirmResponse, Self::SubmitError>,
         SigningFailure<Self::SubmitError>,
     > {
-        sign_with_client(self.account.clone(), &self.client, req.as_ref(), sequence)
-            .await
-            .map_err(map_signing_failure)
+        sign_with_client(
+            self.account.clone(),
+            &self.client,
+            &self.account_signer,
+            req.as_ref(),
+            sequence,
+        )
+        .await
+        .map_err(map_signing_failure)
     }
 }
 
 async fn sign_with_client(
     mut account: BaseAccount,
     client: &GrpcClient,
+    account_signer: &AccountSigner,
     request: &TxRequest,
     sequence: u64,
 ) -> Result<Transaction<Hash, TxConfirmInfo, TxStatusResponse, Arc<Error>>> {
-    let (pubkey, signer) = client.signer()?;
+    let pubkey = &account_signer.pubkey;
+    let signer = &account_signer.signer;
     account.sequence = sequence;
 
     let chain_id = client.chain_id().await?;
@@ -390,7 +414,14 @@ async fn sign_with_client(
             };
             (tx_body, Some(blobs))
         }
-        TxPayload::Tx(body) => (body.clone(), None),
+        TxPayload::Message(any) => {
+            let tx_body = RawTxBody {
+                messages: vec![any.clone()],
+                memo: cfg.memo.clone().unwrap_or_default(),
+                ..RawTxBody::default()
+            };
+            (tx_body, None)
+        }
     };
 
     let (gas_limit, gas_price) = match cfg.gas_limit {
@@ -406,8 +437,8 @@ async fn sign_with_client(
                 tx_body.clone(),
                 chain_id.clone(),
                 &account,
-                &pubkey,
-                &signer,
+                pubkey,
+                signer,
                 0,
                 1,
             )
@@ -421,10 +452,7 @@ async fn sign_with_client(
     };
     let fee = (gas_limit as f64 * gas_price).ceil() as u64;
 
-    let tx = sign_tx(
-        tx_body, chain_id, &account, &pubkey, &signer, gas_limit, fee,
-    )
-    .await?;
+    let tx = sign_tx(tx_body, chain_id, &account, pubkey, signer, gas_limit, fee).await?;
     let bytes = match blobs {
         Some(blobs) => {
             let blob_tx = RawBlobTx {
@@ -512,12 +540,6 @@ fn map_status_response(
         GrpcTxStatus::Pending => Ok(TxStatus::new(TxStatusKind::Pending, original_response)),
         GrpcTxStatus::Unknown => Ok(TxStatus::new(TxStatusKind::Unknown, original_response)),
     }
-}
-
-async fn current_sequence(client: &GrpcClient) -> Result<u64> {
-    let address = client.get_account_address().ok_or(Error::MissingSigner)?;
-    let account = client.get_account(&address).await?;
-    Ok(account.sequence)
 }
 
 fn map_submit_error(code: ErrorCode, message: &str) -> SubmitError {
@@ -653,16 +675,18 @@ mod tests {
     async fn submit_with_worker_and_confirm() {
         let (_lock, _client) = new_tx_client().await;
         let account = load_account();
+        let signer = AccountSigner::from_keypair(account.signing_key);
         let client = GrpcClient::builder()
             .url(CELESTIA_GRPC_URL)
-            .signer_keypair(account.signing_key)
             .build()
             .unwrap();
 
-        let service =
-            TransactionService::new(TxServiceConfig::new(vec![(Arc::from("default"), client)]))
-                .await
-                .unwrap();
+        let service = TransactionService::new(TxServiceConfig::new(
+            vec![(Arc::from("default"), client)],
+            signer,
+        ))
+        .await
+        .unwrap();
         let handle = service
             .submit(TxRequest::blobs(
                 vec![random_blob(10..=1000)],

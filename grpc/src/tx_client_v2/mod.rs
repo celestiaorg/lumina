@@ -129,8 +129,8 @@ impl<T> TxIdT for T where T: Clone + std::fmt::Debug {}
 pub enum TxPayload {
     /// Pay-for-blobs transaction.
     Blobs(Vec<celestia_types::Blob>),
-    /// Raw Cosmos transaction body with arbitrary messages.
-    Tx(celestia_types::state::RawTxBody),
+    /// A single cosmos message (e.g. MsgPayForFibre, MsgSend).
+    Message(tendermint_proto::google::protobuf::Any),
 }
 
 /// A transaction request combining payload and configuration.
@@ -261,10 +261,10 @@ where
 }
 
 impl TxRequest {
-    /// Create a request for a raw transaction body.
-    pub fn tx(body: celestia_types::state::RawTxBody, cfg: TxConfig) -> Self {
+    /// Create a request for a single cosmos message.
+    pub fn message(msg: impl celestia_types::any::IntoProtobufAny, cfg: TxConfig) -> Self {
         Self {
-            tx: TxPayload::Tx(body),
+            tx: TxPayload::Message(msg.into_any()),
             cfg,
         }
     }
