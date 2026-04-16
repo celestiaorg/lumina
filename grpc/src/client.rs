@@ -653,11 +653,6 @@ impl GrpcClient {
         self.inner.account.as_ref().ok_or(Error::MissingSigner)
     }
 
-    pub(crate) fn signer(&self) -> Result<(VerifyingKey, BoxedDocSigner)> {
-        let account = self.account()?;
-        Ok((account.pubkey, account.signer.clone()))
-    }
-
     async fn lock_account(&self, context: &Context) -> Result<AccountGuard<'_>> {
         let account = self.account()?;
 
