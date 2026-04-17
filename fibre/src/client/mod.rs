@@ -7,6 +7,7 @@
 //! Use [`FibreClientBuilder`] (via [`FibreClient::builder()`]) to construct
 //! an instance.
 
+pub(crate) mod download;
 pub(crate) mod task;
 pub(crate) mod upload;
 
@@ -30,6 +31,7 @@ pub struct FibreClient {
     pub(crate) set_getter: Arc<dyn SetGetter>,
     pub(crate) connector: Arc<dyn ValidatorConnector>,
     pub(crate) upload_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) download_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) cancel_token: CancellationToken,
 }
 
@@ -141,6 +143,7 @@ impl FibreClientBuilder {
 
         Ok(FibreClient {
             upload_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.upload_concurrency)),
+            download_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.download_concurrency)),
             cfg,
             set_getter,
             connector,
