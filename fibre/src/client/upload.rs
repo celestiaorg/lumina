@@ -4,7 +4,7 @@
 //! signatures until the safety threshold is met, then returns a
 //! [`SignedPaymentPromise`].
 //!
-//! The [`FibreClient::put()`] method encodes a blob, uploads it to validators,
+//! The [`FibreClient::upload_and_prepare()`] method encodes a blob, uploads it to validators,
 //! and returns a `MsgPayForFibre` ready for broadcast by the caller.
 
 use std::sync::Arc;
@@ -107,7 +107,7 @@ impl FibreClient {
     ///
     /// Returns a [`MsgPayForFibre`] ready for on-chain broadcast.
     /// The caller is responsible for broadcasting the message on-chain.
-    pub async fn put(
+    pub async fn upload_and_prepare(
         &self,
         signing_key: &k256::ecdsa::SigningKey,
         namespace: &[u8],
