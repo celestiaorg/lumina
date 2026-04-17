@@ -153,7 +153,8 @@ mod tests {
         call_count: AtomicUsize,
     }
 
-    #[async_trait::async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl HostRegistry for MockHostRegistry {
         async fn get_host(&self, validator: &ValidatorInfo) -> Result<Host, FibreError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);

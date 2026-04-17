@@ -7,7 +7,6 @@
 //! Use [`FibreClientBuilder`] (via [`FibreClient::builder()`]) to construct
 //! an instance.
 
-pub(crate) mod download;
 pub(crate) mod task;
 pub(crate) mod upload;
 
@@ -31,7 +30,6 @@ pub struct FibreClient {
     pub(crate) set_getter: Arc<dyn SetGetter>,
     pub(crate) connector: Arc<dyn ValidatorConnector>,
     pub(crate) upload_semaphore: Arc<tokio::sync::Semaphore>,
-    pub(crate) download_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) cancel_token: CancellationToken,
 }
 
@@ -143,7 +141,6 @@ impl FibreClientBuilder {
 
         Ok(FibreClient {
             upload_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.upload_concurrency)),
-            download_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.download_concurrency)),
             cfg,
             set_getter,
             connector,
@@ -164,7 +161,8 @@ mod tests {
 
     struct DummySetGetter;
 
-    #[async_trait::async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl crate::validator::SetGetter for DummySetGetter {
         async fn head(&self) -> Result<crate::validator::ValidatorSet, FibreError> {
             unimplemented!()
@@ -180,7 +178,8 @@ mod tests {
 
     struct DummyConnector;
 
-    #[async_trait::async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl crate::validator_client::ValidatorConnector for DummyConnector {
         async fn connect(
             &self,

@@ -772,11 +772,17 @@ dependencies = [
 name = "celestia-fibre"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
+ "bech32",
  "celestia-grpc",
  "celestia-proto",
  "celestia-types",
+ "chacha8rand",
+ "ed25519-dalek",
+ "futures",
  "hex",
  "k256",
+ "lumina-utils",
  "prost",
  "rand 0.8.5",
  "rsema1d",
@@ -784,6 +790,7 @@ dependencies = [
  "tendermint-proto",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tonic",
  "tracing",
 ]
@@ -982,6 +989,12 @@ dependencies = [
  "poly1305",
  "zeroize",
 ]
+
+[[package]]
+name = "chacha8rand"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cdfe312a490977049cd14af9af1e893bbc1bd94b489265801564921dd04f92d"
 
 [[package]]
 name = "ciborium"
@@ -1571,6 +1584,7 @@ dependencies = [
  "ed25519",
  "serde",
  "sha2 0.10.9",
+ "signature",
  "subtle",
  "zeroize",
 ]

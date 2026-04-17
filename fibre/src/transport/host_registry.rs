@@ -243,7 +243,8 @@ mod tests {
         hosts: HashMap<[u8; 20], Host>,
     }
 
-    #[async_trait::async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl HostRegistry for MapRegistry {
         async fn get_host(&self, validator: &ValidatorInfo) -> Result<Host, FibreError> {
             self.hosts
