@@ -9,6 +9,7 @@ mod error;
 pub mod grpc;
 #[cfg(all(target_arch = "wasm32", feature = "wasm-bindgen"))]
 mod js_client;
+mod multi_account_tx;
 pub mod signer;
 #[cfg(test)]
 mod test_utils;
@@ -23,8 +24,9 @@ pub use crate::boxed::BoxedTransport;
 pub use crate::builder::{Endpoint, GrpcClientBuilder};
 pub use crate::client::GrpcClient;
 pub use crate::error::{Error, GrpcClientBuilderError, Result};
+pub use crate::multi_account_tx::{MultiAccountTxService, MultiAccountTxServiceConfig};
 pub use crate::signer::{AccountSigner, DocSigner};
-pub use crate::tx::{SignDoc, TxConfig, TxInfo};
+pub use crate::tx::{BroadcastedTx, SignDoc, SubmittedTx, TxConfig, TxInfo};
 /// Warning: [`TransactionService`] is experimental and not recommended for use yet.
 pub use crate::tx_client_impl::{ConfirmHandle, TransactionService, TxServiceConfig};
 pub use crate::tx_client_v2::{NodeId, TxHandle, TxRequest};

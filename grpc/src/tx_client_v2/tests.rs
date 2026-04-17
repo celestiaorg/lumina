@@ -1,6 +1,5 @@
 use super::*;
 use async_trait::async_trait;
-use celestia_types::state::RawTxBody;
 use prost::Message;
 use std::collections::VecDeque;
 use std::sync::Once;
@@ -791,13 +790,13 @@ impl Harness {
         oneshot::Receiver<Result<TestTxId>>,
         oneshot::Receiver<TestConfirmResult>,
     ) {
-        let body = RawTxBody {
-            memo: format!("test-bytes:{:?}", bytes),
-            ..RawTxBody::default()
+        let any = tendermint_proto::google::protobuf::Any {
+            type_url: "test".to_string(),
+            value: bytes,
         };
         let handle = self
             .manager
-            .add_tx(TxRequest::tx(body, TxConfig::default()))
+            .add_tx(TxRequest::message(any, TxConfig::default()))
             .await
             .expect("add tx");
         (handle.signed, handle.submitted, handle.confirmed)
@@ -824,7 +823,7 @@ async fn test_eviction() {
                         ..
                     } => {
                         let bytes = match &request.as_ref().tx {
-                            TxPayload::Tx(body) => body.encode_to_vec(),
+                            TxPayload::Message(any) => any.encode_to_vec(),
                             TxPayload::Blobs(_) => Vec::new(),
                         };
                         ActionResult {
@@ -1015,7 +1014,7 @@ async fn test_recovering() {
                         ..
                     } => {
                         let bytes = match &request.as_ref().tx {
-                            TxPayload::Tx(body) => body.encode_to_vec(),
+                            TxPayload::Message(any) => any.encode_to_vec(),
                             TxPayload::Blobs(_) => Vec::new(),
                         };
                         ActionResult {
