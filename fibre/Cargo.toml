@@ -24,6 +24,9 @@ chacha8rand = "0.1.2"
 
 # Async runtime
 tokio = { workspace = true, features = ["sync", "macros"] }
+tokio-util.workspace = true
+futures.workspace = true
+lumina-utils = { workspace = true, features = ["executor"] }
 
 # gRPC
 tonic = { workspace = true, features = ["codegen"] }
@@ -35,6 +38,10 @@ thiserror.workspace = true
 tracing.workspace = true
 hex.workspace = true
 async-trait.workspace = true
+bech32 = "0.11"
 
-[dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tonic = { workspace = true, features = ["transport"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
