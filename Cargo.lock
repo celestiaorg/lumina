@@ -743,6 +743,7 @@ dependencies = [
  "async-stream",
  "blockstore",
  "bytes",
+ "celestia-fibre",
  "celestia-grpc",
  "celestia-proto",
  "celestia-rpc",
