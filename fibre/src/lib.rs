@@ -5,6 +5,7 @@
 //! small payment receipt (`MsgPayForFibre`) goes on-chain.
 
 pub mod domain;
+pub mod validator;
 
 pub use domain::config;
 pub use domain::error;
@@ -18,3 +19,4 @@ pub use config::{
 pub use domain::blob::{Blob, BlobID, Commitment};
 pub use domain::payment_promise::{PaymentPromise, SignedPaymentPromise};
 pub use error::{FibreError, Result};
+pub use validator::{GrpcSetGetter, SetGetter, ValidatorInfo, ValidatorSet};
