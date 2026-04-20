@@ -5,14 +5,13 @@ permissions:
   contents: write
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   release-plz:
     name: Release-plz
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
 
     outputs:
       pr: ${{ steps.release-plz.outputs.pr }}
