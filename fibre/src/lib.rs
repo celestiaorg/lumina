@@ -17,7 +17,13 @@ pub use domain::error;
 pub(crate) use domain::{blob, blob_header, payment_promise};
 pub(crate) use transport::{grpc_validator_client, host_registry, proto_conv, validator_client};
 
+#[cfg(test)]
+mod roundtrip_test;
+#[cfg(test)]
+mod test_utils;
+
 pub use celestia_grpc::Endpoint;
+pub use client::download::DownloadOptions;
 pub use client::{FibreClient, FibreClientBuilder};
 pub use config::{
     BlobConfig, DEFAULT_PROTOCOL_PARAMS, FibreClientConfig, Fraction, ProtocolParams,

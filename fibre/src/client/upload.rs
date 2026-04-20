@@ -259,3 +259,268 @@ impl FibreClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use k256::ecdsa::SigningKey;
+    use rand::rngs::OsRng;
+
+    use crate::blob::Blob;
+    use crate::config::BlobConfig;
+    use crate::error::FibreError;
+    use crate::test_utils::{
+        FailingConnector, MockConnector, MockValidatorConnection, build_test_client,
+        make_connector, make_validator,
+    };
+    use crate::validator::{ValidatorInfo, ValidatorSet};
+
+    fn make_test_blob() -> Blob {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..200).collect();
+        Blob::new(&data, cfg).unwrap()
+    }
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::random(&mut OsRng)
+    }
+
+    #[tokio::test]
+    async fn upload_fails_when_client_closed() {
+        let (_, val) = make_validator(100, 1);
+        let validators = vec![make_validator(100, 1)];
+        let connector = make_connector(&validators);
+
+        let val_set = ValidatorSet {
+            validators: vec![val],
+            height: 1,
+        };
+
+        let client = build_test_client(val_set, connector, "test-chain");
+        client.close();
+
+        let sk = test_signing_key();
+        let blob = make_test_blob();
+        let namespace = vec![0u8; 29];
+        let result = client.upload(&sk, &namespace, blob).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FibreError::ClientClosed => {}
+            other => panic!("expected ClientClosed, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_collects_signatures() {
+        let validators = vec![
+            make_validator(100, 1),
+            make_validator(100, 2),
+            make_validator(100, 3),
+        ];
+
+        let val_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|(_, info)| info.clone()).collect();
+
+        let connector = make_connector(&validators);
+
+        let val_set = ValidatorSet {
+            validators: val_infos,
+            height: 42,
+        };
+
+        let sk = test_signing_key();
+        let client = build_test_client(val_set, connector, "test-chain");
+        let blob = make_test_blob();
+        let namespace = vec![0u8; 29];
+
+        let result = client.upload(&sk, &namespace, blob).await;
+        assert!(result.is_ok(), "upload should succeed: {:?}", result.err());
+
+        let signed = result.unwrap();
+        assert_eq!(signed.promise.height, 42);
+        assert_eq!(signed.promise.chain_id, "test-chain");
+
+        let sig_count = signed
+            .validator_signatures
+            .iter()
+            .filter(|s| s.is_some())
+            .count();
+        assert!(
+            sig_count >= 2,
+            "expected at least 2 signatures, got {sig_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_delivers_to_all_validators() {
+        let validators = vec![
+            make_validator(100, 1),
+            make_validator(100, 2),
+            make_validator(100, 3),
+            make_validator(100, 4),
+            make_validator(100, 5),
+        ];
+
+        let val_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|(_, info)| info.clone()).collect();
+
+        // Build the connector manually so we can inspect each connection after upload.
+        let mut connector = MockConnector::new();
+        let mut connections: Vec<Arc<MockValidatorConnection>> = Vec::new();
+        for (ed_key, info) in &validators {
+            let conn = Arc::new(MockValidatorConnection::new(ed_key.clone()));
+            connections.push(conn.clone());
+            connector.add(info.address, conn);
+        }
+
+        let val_set = ValidatorSet {
+            validators: val_infos,
+            height: 1,
+        };
+
+        let client = build_test_client(val_set, connector, "test-chain");
+        let blob = make_test_blob();
+        let namespace = vec![0u8; 29];
+
+        // Upload returns once signature threshold is met.
+        client
+            .upload(&test_signing_key(), &namespace, blob)
+            .await
+            .unwrap();
+
+        // Background tasks continue delivering to remaining validators.
+        // Wait for every connection to receive at least one upload.
+        for (i, conn) in connections.iter().enumerate() {
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), conn.wait_for_upload())
+                .await
+                .unwrap_or_else(|_| panic!("validator {i} did not receive upload data in time"));
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_returns_when_threshold_met() {
+        let v1 = make_validator(200, 1);
+        let v2 = make_validator(200, 2);
+        let v3 = make_validator(200, 3);
+        let v4 = make_validator(100, 4);
+        let v5 = make_validator(100, 5);
+
+        let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
+        let val_infos: Vec<ValidatorInfo> = all_validators
+            .iter()
+            .map(|(_, info)| info.clone())
+            .collect();
+
+        let successful = vec![v1, v2, v3];
+        let inner = make_connector(&successful);
+        let fail_addresses = vec![val_infos[3].address, val_infos[4].address];
+
+        let failing_connector = FailingConnector {
+            inner,
+            fail_addresses,
+        };
+
+        let val_set = ValidatorSet {
+            validators: val_infos,
+            height: 10,
+        };
+
+        let client = build_test_client(val_set, failing_connector, "test-chain");
+        let blob = make_test_blob();
+        let namespace = vec![0u8; 29];
+
+        let result = client.upload(&test_signing_key(), &namespace, blob).await;
+        assert!(
+            result.is_ok(),
+            "upload should succeed with 3/5 validators: {:?}",
+            result.err()
+        );
+
+        let signed = result.unwrap();
+        let sig_count = signed
+            .validator_signatures
+            .iter()
+            .filter(|s| s.is_some())
+            .count();
+        assert!(
+            sig_count >= 2,
+            "expected at least 2 signatures, got {sig_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_fails_when_not_enough_signatures() {
+        let v1 = make_validator(100, 1);
+        let v2 = make_validator(100, 2);
+        let v3 = make_validator(100, 3);
+        let v4 = make_validator(100, 4);
+        let v5 = make_validator(100, 5);
+
+        let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
+        let val_infos: Vec<ValidatorInfo> = all_validators
+            .iter()
+            .map(|(_, info)| info.clone())
+            .collect();
+
+        let successful = vec![v1];
+        let inner = make_connector(&successful);
+        let fail_addresses = vec![
+            val_infos[1].address,
+            val_infos[2].address,
+            val_infos[3].address,
+            val_infos[4].address,
+        ];
+
+        let failing_connector = FailingConnector {
+            inner,
+            fail_addresses,
+        };
+
+        let val_set = ValidatorSet {
+            validators: val_infos,
+            height: 10,
+        };
+
+        let client = build_test_client(val_set, failing_connector, "test-chain");
+        let blob = make_test_blob();
+        let namespace = vec![0u8; 29];
+
+        let result = client.upload(&test_signing_key(), &namespace, blob).await;
+        assert!(
+            result.is_err(),
+            "upload should fail when not enough signatures"
+        );
+        match result.unwrap_err() {
+            FibreError::NotEnoughSignatures { .. } => {}
+            other => panic!("expected NotEnoughSignatures, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn put_fails_when_client_closed() {
+        let (_, val) = make_validator(100, 1);
+        let validators = vec![make_validator(100, 1)];
+        let connector = make_connector(&validators);
+
+        let val_set = ValidatorSet {
+            validators: vec![val],
+            height: 1,
+        };
+
+        let client = build_test_client(val_set, connector, "test-chain");
+        client.close();
+
+        let namespace = vec![0u8; 29];
+        let data = vec![1u8; 100];
+        let sk = test_signing_key();
+        let result = client
+            .upload_and_prepare(&sk, &namespace, &data, "celestia1test")
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FibreError::ClientClosed => {}
+            other => panic!("expected ClientClosed, got: {other}"),
+        }
+    }
+}
