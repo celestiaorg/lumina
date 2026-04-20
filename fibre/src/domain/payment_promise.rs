@@ -751,33 +751,8 @@ mod tests {
 
         let original_sign_bytes = promise.sign_bytes().unwrap();
 
-        // Convert to proto and encode (inline conversion to avoid dependency on transport layer)
-        use celestia_proto::cosmos::crypto::secp256k1::PubKey as ProtoPubKey;
-        use tendermint_proto::google::protobuf::Timestamp;
-        let ts_dur = promise
-            .creation_timestamp
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap();
-        let proto_pp = celestia_proto::celestia::fibre::v1::PaymentPromise {
-            chain_id: promise.chain_id.clone(),
-            height: promise.height as i64,
-            namespace: promise.namespace.clone(),
-            blob_size: promise.upload_size,
-            blob_version: promise.blob_version,
-            commitment: promise.commitment.to_vec(),
-            creation_timestamp: Some(Timestamp {
-                seconds: ts_dur.as_secs() as i64,
-                nanos: ts_dur.subsec_nanos() as i32,
-            }),
-            signer_public_key: Some(ProtoPubKey {
-                key: promise
-                    .signer_pubkey
-                    .to_encoded_point(true)
-                    .as_bytes()
-                    .to_vec(),
-            }),
-            signature: promise.signature.clone().unwrap_or_default(),
-        };
+        // Convert to proto and encode
+        let proto_pp = celestia_proto::celestia::fibre::v1::PaymentPromise::from(&promise);
         let proto_bytes = proto_pp.encode_to_vec();
 
         // Print the raw proto bytes for cross-language decoding

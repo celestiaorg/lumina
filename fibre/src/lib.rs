@@ -4,19 +4,28 @@
 //! blob data on-chain, Fibre distributes it directly to validators via gRPC. Only a
 //! small payment receipt (`MsgPayForFibre`) goes on-chain.
 
+pub mod client;
 pub mod domain;
+pub mod transport;
 pub mod validator;
 
 pub use domain::config;
 pub use domain::error;
 
-// Compatibility aliases so domain submodules can use `crate::blob`, etc.
-pub(crate) use domain::{blob, blob_header};
+// Compatibility aliases preserve historical crate-local paths so tests and
+// internals don't need broad path rewrites during this refactor.
+pub(crate) use domain::{blob, blob_header, payment_promise};
+pub(crate) use transport::{grpc_validator_client, host_registry, proto_conv, validator_client};
 
+pub use celestia_grpc::Endpoint;
+pub use client::{FibreClient, FibreClientBuilder};
 pub use config::{
     BlobConfig, DEFAULT_PROTOCOL_PARAMS, FibreClientConfig, Fraction, ProtocolParams,
 };
 pub use domain::blob::{Blob, BlobID, Commitment};
 pub use domain::payment_promise::{PaymentPromise, SignedPaymentPromise};
 pub use error::{FibreError, Result};
+pub use transport::grpc_validator_client::GrpcValidatorConnector;
+pub use transport::host_registry::{GrpcHostRegistry, Host, HostRegistry};
+pub use transport::validator_client::{ValidatorConnection, ValidatorConnector};
 pub use validator::{GrpcSetGetter, SetGetter, ValidatorInfo, ValidatorSet};
