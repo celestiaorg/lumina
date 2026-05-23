@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use celestia_rpc::{HeaderClient, StateClient};
+use celestia_types::hash::Hash;
 
 use crate::Error;
 use crate::client::ClientInner;
@@ -8,7 +9,7 @@ use crate::proto::cosmos::bank::v1beta1::MsgSend;
 use crate::proto::cosmos::staking::v1beta1::{
     MsgBeginRedelegate, MsgCancelUnbondingDelegation, MsgDelegate, MsgUndelegate,
 };
-use crate::tx::{GasEstimate, IntoProtobufAny, TxConfig, TxInfo, TxPriority};
+use crate::tx::{GasEstimate, GetTxResponse, IntoProtobufAny, TxConfig, TxInfo, TxPriority};
 use crate::types::Blob;
 use crate::types::state::{
     AccAddress, Address, Coin, PageRequest, QueryDelegationResponse, QueryRedelegationsResponse,
@@ -264,6 +265,53 @@ impl StateApi {
                 .submit_blobs(&blobs, cfg)
                 .context(&context)
                 .await?)
+        })
+    }
+
+    /// Fetches a transaction by its hash, returning both the decoded
+    /// `Tx` (with auth info, messages, fee) and the `TxResponse`
+    /// (gas used, raw log, etc.).
+    ///
+    /// Useful for callers that need to inspect what a previously
+    /// broadcast transaction actually paid in fees or consumed in
+    /// gas. The `submit_*` helpers on this struct return [`TxInfo`]
+    /// which only carries the hash and block height; this is the
+    /// follow-up call to get everything else.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use celestia_client::{Client, Result};
+    /// # use celestia_client::tx::TxConfig;
+    /// # async fn docs() -> Result<()> {
+    /// use celestia_types::nmt::Namespace;
+    /// use celestia_types::Blob;
+    ///
+    /// let client = Client::builder()
+    ///     .rpc_url("ws://localhost:26658")
+    ///     .grpc_url("http://localhost:9090")
+    ///     .private_key_hex("393fdb5def075819de55756b45c9e2c8531a8c78dd6eede483d3440e9457d839")
+    ///     .build()
+    ///     .await?;
+    ///
+    /// let ns = Namespace::new_v0(b"abcd").unwrap();
+    /// let blob = Blob::new(ns, "some data".into(), None).unwrap();
+    ///
+    /// let info = client
+    ///     .state()
+    ///     .submit_pay_for_blob(&[blob], TxConfig::default())
+    ///     .await?;
+    ///
+    /// let resp = client.state().get_tx(info.hash).await?;
+    /// println!("gas used: {}", resp.tx_response.gas_used);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn get_tx(&self, hash: Hash) -> AsyncGrpcCall<GetTxResponse> {
+        let inner = self.inner.clone();
+
+        AsyncGrpcCall::new(move |context| async move {
+            Ok(inner.grpc()?.get_tx(hash).context(&context).await?)
         })
     }
 
