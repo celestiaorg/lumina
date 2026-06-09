@@ -580,7 +580,9 @@ mod tests {
             connect_timeout: Some(builder_wide),
             ..Default::default()
         };
-        let (_, plain) = Endpoint::from("http://localhost:9090").into_parts().unwrap();
+        let (_, plain) = Endpoint::from("http://localhost:9090")
+            .into_parts()
+            .unwrap();
         base.extend(&plain);
         assert_eq!(base.connect_timeout, Some(builder_wide));
 

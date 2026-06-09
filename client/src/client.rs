@@ -381,7 +381,8 @@ impl ClientBuilder {
             (None, None)
         };
 
-        let rpc = RpcClient::new(rpc_url, rpc_auth_token, self.connect_timeout, self.timeout).await?;
+        let rpc =
+            RpcClient::new(rpc_url, rpc_auth_token, self.connect_timeout, self.timeout).await?;
 
         let head = rpc.header_network_head().await?;
         head.validate()?;
