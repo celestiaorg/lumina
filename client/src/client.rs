@@ -95,6 +95,7 @@ pub struct ClientBuilder {
     rpc_url: Option<String>,
     rpc_auth_token: Option<String>,
     timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
     grpc_builder: Option<GrpcClientBuilder>,
     fibre_client: Option<celestia_fibre::FibreClient>,
 }
@@ -108,6 +109,7 @@ impl fmt::Debug for ClientBuilder {
                 &self.rpc_auth_token.as_ref().map(|_| "***"),
             )
             .field("timeout", &self.timeout)
+            .field("connect_timeout", &self.connect_timeout)
             .field("grpc_builder", &self.grpc_builder)
             .field(
                 "fibre_client",
@@ -251,8 +253,32 @@ impl ClientBuilder {
     }
 
     /// Set the request timeout for both RPC and gRPC endpoints.
+    ///
+    /// This bounds the duration of individual requests only. To bound how long
+    /// connection establishment may take, use [`ClientBuilder::connect_timeout`].
+    ///
+    /// # Note
+    ///
+    /// Unlike previous versions, this no longer doubles as the WebSocket RPC
+    /// connection timeout; that is now controlled solely by
+    /// [`ClientBuilder::connect_timeout`].
     pub fn timeout(mut self, timeout: Duration) -> ClientBuilder {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Set the connection establishment timeout for RPC (WebSocket) and gRPC endpoints.
+    ///
+    /// This is independent of [`ClientBuilder::timeout`] (the request timeout): a low
+    /// connect timeout lets a down/unreachable host be detected faster than a merely
+    /// slow one.
+    ///
+    /// # Note
+    ///
+    /// Not supported for HTTP(S) RPC, WASM RPC, or WASM (gRPC-Web) gRPC transports,
+    /// where it is ignored.
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> ClientBuilder {
+        self.connect_timeout = Some(connect_timeout);
         self
     }
 
@@ -345,6 +371,9 @@ impl ClientBuilder {
             if let Some(timeout) = self.timeout {
                 grpc_builder = grpc_builder.timeout(timeout)
             };
+            if let Some(connect_timeout) = self.connect_timeout {
+                grpc_builder = grpc_builder.connect_timeout(connect_timeout)
+            };
             let client = grpc_builder.build()?;
             let pubkey = client.get_account_pubkey();
             (Some(client), pubkey)
@@ -352,7 +381,7 @@ impl ClientBuilder {
             (None, None)
         };
 
-        let rpc = RpcClient::new(rpc_url, rpc_auth_token, self.timeout, self.timeout).await?;
+        let rpc = RpcClient::new(rpc_url, rpc_auth_token, self.connect_timeout, self.timeout).await?;
 
         let head = rpc.header_network_head().await?;
         head.validate()?;
@@ -410,5 +439,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(e, Error::GrpcEndpointNotSet))
+    }
+
+    #[test]
+    fn connect_timeout_is_independent_of_timeout() {
+        // opt-in: defaults to None
+        assert!(ClientBuilder::default().connect_timeout.is_none());
+
+        // request timeout does not set the connect timeout
+        let builder = ClientBuilder::default().timeout(Duration::from_secs(30));
+        assert_eq!(builder.timeout, Some(Duration::from_secs(30)));
+        assert!(builder.connect_timeout.is_none());
+
+        // connect timeout is set independently
+        let builder = ClientBuilder::default().connect_timeout(Duration::from_secs(2));
+        assert_eq!(builder.connect_timeout, Some(Duration::from_secs(2)));
+        assert!(builder.timeout.is_none());
     }
 }

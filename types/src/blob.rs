@@ -189,7 +189,7 @@ impl Blob {
         )?;
 
         if self.commitment != computed_commitment {
-            bail_validation!("blob commitment != localy computed commitment")
+            bail_validation!("blob commitment != locally computed commitment")
         }
 
         Ok(())

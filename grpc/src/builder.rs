@@ -48,6 +48,8 @@ pub struct Endpoint {
     metadata_map: Option<MetadataMap>,
     /// Request timeout for this endpoint.
     timeout: Option<Duration>,
+    /// Connection establishment timeout for this endpoint.
+    connect_timeout: Option<Duration>,
 }
 
 impl Endpoint {
@@ -59,6 +61,7 @@ impl Endpoint {
             binary_metadata: Vec::new(),
             metadata_map: None,
             timeout: None,
+            connect_timeout: None,
         }
     }
 
@@ -88,9 +91,20 @@ impl Endpoint {
         self
     }
 
+    /// Sets the connection establishment (TCP/TLS) timeout for this endpoint.
+    ///
+    /// This is independent of the request timeout: a low value lets a
+    /// down/unreachable host fail fast, distinct from a slow-but-reachable one.
+    /// Not supported on WASM (gRPC-Web) transports, where it is ignored.
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = Some(connect_timeout);
+        self
+    }
+
     pub(crate) fn into_parts(self) -> Result<(String, Context), GrpcClientBuilderError> {
         let mut context = Context {
             timeout: self.timeout,
+            connect_timeout: self.connect_timeout,
             ..Default::default()
         };
         for (key, value) in self.ascii_metadata {
@@ -127,6 +141,7 @@ enum TransportEntry {
 pub struct GrpcClientBuilder {
     transports: Vec<TransportEntry>,
     timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
     signer_kind: Option<SignerKind>,
 }
 
@@ -208,6 +223,9 @@ impl GrpcClientBuilder {
     ///
     /// When multiple endpoints are configured, the client will automatically
     /// fall back to the next endpoint if a network-related error occurs.
+    ///
+    /// Note: any configured connect timeout does not apply to custom transports,
+    /// since the caller owns the channel.
     pub fn transport<B, T>(mut self, transport: T) -> Self
     where
         B: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
@@ -274,6 +292,17 @@ impl GrpcClientBuilder {
         self
     }
 
+    /// Sets the connection establishment (TCP/TLS) timeout for all endpoints.
+    ///
+    /// This is independent of the request timeout: a low value lets a
+    /// down/unreachable host fail fast, distinct from a slow-but-reachable one.
+    /// An individual [`Endpoint`] may override this via [`Endpoint::connect_timeout`].
+    /// Ignored for custom transports and on WASM (gRPC-Web).
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> GrpcClientBuilder {
+        self.connect_timeout = Some(connect_timeout);
+        self
+    }
+
     /// Build [`GrpcClient`]
     ///
     /// Returns error if no transports were configured.
@@ -284,6 +313,7 @@ impl GrpcClientBuilder {
 
         let base_context = Context {
             timeout: self.timeout,
+            connect_timeout: self.connect_timeout,
             ..Default::default()
         };
 
@@ -373,10 +403,13 @@ mod imp {
     ) -> Result<BoxedTransport, GrpcClientBuilderError> {
         let tls_config = ClientTlsConfig::new().with_enabled_roots();
 
-        let channel = TonicEndpoint::from_shared(url.clone())?
+        let mut endpoint = TonicEndpoint::from_shared(url.clone())?
             .user_agent("celestia-grpc")?
-            .tls_config(tls_config)?
-            .connect_lazy();
+            .tls_config(tls_config)?;
+        if let Some(connect_timeout) = context.connect_timeout {
+            endpoint = endpoint.connect_timeout(connect_timeout);
+        }
+        let channel = endpoint.connect_lazy();
 
         Ok(boxed(
             channel,
@@ -403,9 +436,11 @@ mod imp {
             return Err(GrpcClientBuilderError::TlsNotSupported);
         }
 
-        let channel = TonicEndpoint::from_shared(url.clone())?
-            .user_agent("celestia-grpc")?
-            .connect_lazy();
+        let mut endpoint = TonicEndpoint::from_shared(url.clone())?.user_agent("celestia-grpc")?;
+        if let Some(connect_timeout) = context.connect_timeout {
+            endpoint = endpoint.connect_timeout(connect_timeout);
+        }
+        let channel = endpoint.connect_lazy();
 
         Ok(boxed(
             channel,
@@ -421,6 +456,8 @@ mod imp {
         url: String,
         context: Context,
     ) -> Result<BoxedTransport, GrpcClientBuilderError> {
+        // `context.connect_timeout` is unsupported on gRPC-Web (browser fetch has
+        // no separate connection-establishment phase to bound) and is ignored here.
         let client = tonic_web_wasm_client::Client::new(url.clone());
         Ok(boxed(
             client,
@@ -507,6 +544,7 @@ mod tests {
         assert!(endpoint.binary_metadata.is_empty());
         assert!(endpoint.metadata_map.is_none());
         assert!(endpoint.timeout.is_none());
+        assert!(endpoint.connect_timeout.is_none());
     }
 
     #[test]
@@ -518,5 +556,54 @@ mod tests {
         assert!(endpoint.binary_metadata.is_empty());
         assert!(endpoint.metadata_map.is_none());
         assert!(endpoint.timeout.is_none());
+        assert!(endpoint.connect_timeout.is_none());
+    }
+
+    #[test]
+    fn endpoint_connect_timeout_flows_into_context() {
+        let connect_timeout = Duration::from_millis(250);
+        let endpoint = Endpoint::from("http://localhost:9090").connect_timeout(connect_timeout);
+
+        let (url, context) = endpoint.into_parts().unwrap();
+
+        assert_eq!(url, "http://localhost:9090");
+        assert_eq!(context.connect_timeout, Some(connect_timeout));
+    }
+
+    #[test]
+    fn endpoint_connect_timeout_overrides_builder_wide() {
+        let builder_wide = Duration::from_secs(5);
+        let per_endpoint = Duration::from_millis(250);
+
+        // builder-wide value with no per-endpoint override is used as-is
+        let mut base = Context {
+            connect_timeout: Some(builder_wide),
+            ..Default::default()
+        };
+        let (_, plain) = Endpoint::from("http://localhost:9090").into_parts().unwrap();
+        base.extend(&plain);
+        assert_eq!(base.connect_timeout, Some(builder_wide));
+
+        // per-endpoint value wins over the builder-wide one
+        let mut base = Context {
+            connect_timeout: Some(builder_wide),
+            ..Default::default()
+        };
+        let (_, overridden) = Endpoint::from("http://localhost:9090")
+            .connect_timeout(per_endpoint)
+            .into_parts()
+            .unwrap();
+        base.extend(&overridden);
+        assert_eq!(base.connect_timeout, Some(per_endpoint));
+    }
+
+    #[async_test]
+    async fn builder_connect_timeout_builds_successfully() {
+        let result = GrpcClientBuilder::new()
+            .url("http://localhost:9090")
+            .connect_timeout(Duration::from_millis(250))
+            .build();
+
+        assert!(result.is_ok());
     }
 }
