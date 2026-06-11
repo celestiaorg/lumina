@@ -35,7 +35,6 @@ import uniffi.celestia_grpc.UniffiSignature
 import uniffi.celestia_grpc.UniffiSigner
 import uniffi.celestia_grpc.protoEncodeSignDoc
 import uniffi.celestia_proto.SignDoc
-import uniffi.celestia_types.AppVersion
 import uniffi.celestia_types.Blob
 import uniffi.celestia_types.Namespace
 import java.security.MessageDigest
@@ -150,7 +149,7 @@ fun GrpcBlobSubmit(modifier: Modifier = Modifier, grpcClient: GrpcClient, corout
                 )
                 val ns = Namespace.newV0(namespace.text.toString().toByteArray(Charsets.UTF_8))
                 val blobData = blobData.text.toString().toByteArray(Charsets.UTF_8)
-                val blob = Blob.create(ns, blobData, AppVersion.V3)
+                val blob = Blob.create(ns, blobData)
 
                 try {
                     val submit = grpcClient.submitBlobs(blobs = listOf(blob), config = null)

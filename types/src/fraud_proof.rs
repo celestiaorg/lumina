@@ -152,7 +152,6 @@ impl Serialize for Proof {
 
 #[cfg(test)]
 mod tests {
-    use crate::consts::appconsts::AppVersion;
     use crate::test_utils::{ExtendedHeaderGenerator, corrupt_eds, generate_dummy_eds};
 
     use super::*;
@@ -160,7 +159,7 @@ mod tests {
     #[test]
     fn befp_serde() {
         let mut generator = ExtendedHeaderGenerator::new();
-        let mut eds = generate_dummy_eds(8, AppVersion::V2);
+        let mut eds = generate_dummy_eds(8);
         let (_, proof) = corrupt_eds(&mut generator, &mut eds);
 
         let proof = Proof::BadEncoding(proof);

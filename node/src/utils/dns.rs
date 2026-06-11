@@ -26,7 +26,7 @@ pub(crate) async fn resolve_bootnode_addresses(addrs: Vec<Multiaddr>) -> Vec<Mul
 
     for addr in addrs {
         match resolve_dnsaddr_multiaddress(&addr, DEFAULT_DNS_ADDR).await {
-            Ok(resolved_addrs) => bootnodes.extend(resolved_addrs.into_iter()),
+            Ok(resolved_addrs) => bootnodes.extend(resolved_addrs),
             Err(e) => warn!("Failed to resolve {addr}: {e}"),
         }
     }

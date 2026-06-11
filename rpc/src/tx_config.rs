@@ -1,12 +1,24 @@
 use celestia_types::state::AccAddress;
 use serde::{
-    Serialize,
+    Deserialize, Serialize,
     ser::{SerializeStruct, Serializer},
 };
-use serde_repr::Serialize_repr;
+use serde_repr::{Deserialize_repr, Serialize_repr};
 
 /// Transaction priority for gas price estimation.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize_repr)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    Default,
+    Serialize_repr,
+    Deserialize_repr,
+)]
 #[repr(u8)]
 pub enum TxPriority {
     /// Estimated gas price is the value at the end of the lowest 10% of gas prices from the last 5 blocks.
@@ -24,7 +36,7 @@ pub enum TxPriority {
 /// Read more about the mechanisms of fees and gas usage in [`submitting data blobs`].
 ///
 /// [`submitting data blobs`]: https://docs.celestia.org/developers/submit-data#fees-and-gas-limits
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize)]
 pub struct TxConfig {
     /// Specifies the address from the keystore that will sign transactions.
     ///

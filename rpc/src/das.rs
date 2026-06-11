@@ -1,6 +1,6 @@
 //! celestia-node rpc types and methods related to DAS (Data Availability Sampling)
 
-use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
 
 /// Represents a worker responsible for DAS (Data Availability Sampling) jobs.
@@ -36,13 +36,13 @@ pub struct SamplingStats {
 }
 
 /// The `Das` RPC trait provides methods for interacting with Data Availability Sampling.
-#[rpc(client, namespace = "das", namespace_separator = ".")]
+#[rpc(client, server, namespace = "das", namespace_separator = ".")]
 pub trait Das {
     /// Retrieves the current statistics over the DA sampling process.
     #[method(name = "SamplingStats")]
-    async fn das_sampling_stats(&self) -> Result<SamplingStats, Error>;
+    async fn das_sampling_stats(&self) -> RpcResult<SamplingStats>;
 
     /// Blocks until DASer finishes catching up to the network head.
     #[method(name = "WaitCatchUp")]
-    async fn das_wait_catch_up(&self) -> Result<(), Error>;
+    async fn das_wait_catch_up(&self) -> RpcResult<()>;
 }

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "cli",
   "client",
+  "fibre",
   "grpc",
   "grpc/grpc-macros",
   "node",
@@ -12,23 +13,27 @@ members = [
   "rpc",
   "types",
   "utils",
+  "rsema1d",
 ]
 
 [workspace.package]
+version = "1.0.0"
 edition = "2024"
 
 [workspace.dependencies]
 blockstore = "0.8"
 leopard-codec = "0.2"
-lumina-node = { version = "0.18.2", path = "node" }
-lumina-node-wasm = { version = "0.13.2", path = "node-wasm" }
-lumina-utils = { version = "0.5.2", path = "utils" }
-celestia-client = { version = "0.5.0", path = "client" }
-celestia-proto = { version = "0.12.1", path = "proto" }
-celestia-grpc = { version = "0.12.0", path = "grpc", default-features = false }
-celestia-grpc-macros = { version = "0.7.0", path = "grpc/grpc-macros" }
-celestia-rpc = { version = "0.16.2", path = "rpc", default-features = false }
-celestia-types = { version = "0.20.0", path = "types", default-features = false }
+lumina-node = { version = "=1.0.0", path = "node" }
+lumina-node-wasm = { version = "=1.0.0", path = "node-wasm" }
+lumina-utils = { version = "=1.0.0", path = "utils" }
+celestia-client = { version = "=1.0.0", path = "client" }
+celestia-proto = { version = "=1.0.0", path = "proto" }
+celestia-grpc = { version = "=1.0.0", path = "grpc", default-features = false }
+celestia-grpc-macros = { version = "=1.0.0", path = "grpc/grpc-macros" }
+celestia-rpc = { version = "=1.0.0", path = "rpc", default-features = false }
+celestia-types = { version = "=1.0.0", path = "types", default-features = false }
+celestia-fibre = { version = "=1.0.0", path = "fibre" }
+rsema1d = { version = "=1.0.0", path = "rsema1d" }
 
 anyhow = "1.0.40"
 async-stream = "0.3.5"
@@ -45,7 +50,9 @@ futures-util = "0.3"
 # See <https://docs.rs/getrandom/0.3.3/getrandom/#webassembly-support>
 # libp2p 0.56 has dependency on both rand 0.8.5 and 0.9.2, which means we need both
 getrandom_02 = { package = "getrandom", version = "0.2.10", features = ["js"] }
-getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3.4", features = [
+  "wasm_js",
+] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 hex = "0.4.3"
 http = "1"
@@ -92,6 +99,10 @@ wasm-bindgen-test = "0.3"
 web-sys = "0.3.70"
 
 [patch.crates-io]
+# All versions of core2 have been yanked from crates.io, which breaks
+# `cargo minimal-versions`. Patch it from git until cid drops the dependency.
+core2 = { git = "https://github.com/bbqsrc/core2", rev = "545e84bc" }
+
 # Uncomment to apply local changes
 # blockstore = { path = "../blockstore" }
 # nmt-rs = { path = "../nmt-rs" }

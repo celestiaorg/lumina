@@ -7,46 +7,60 @@ use celestia_types::hash::Hash;
 use celestia_types::{ExtendedHeader, SyncState};
 use futures_util::{Stream, StreamExt};
 use jsonrpsee::core::client::{ClientT, Error, SubscriptionClientT};
+
 use jsonrpsee::proc_macros::rpc;
 
 use crate::custom_client_error;
 
 mod rpc {
+    use jsonrpsee::core::{RpcResult, SubscriptionResult};
+
     use super::*;
 
-    #[rpc(client, namespace = "header", namespace_separator = ".")]
+    /// Header RPC methods.
+    #[rpc(client, server, namespace = "header", namespace_separator = ".")]
     pub trait Header {
+        /// See [`crate::HeaderClient::header_get_by_hash`].
         #[method(name = "GetByHash")]
-        async fn header_get_by_hash(&self, hash: Hash) -> Result<ExtendedHeader, Error>;
+        async fn header_get_by_hash(&self, hash: Hash) -> RpcResult<ExtendedHeader>;
 
+        /// See [`crate::HeaderClient::header_get_by_height`].
         #[method(name = "GetByHeight")]
-        async fn header_get_by_height(&self, height: u64) -> Result<ExtendedHeader, Error>;
+        async fn header_get_by_height(&self, height: u64) -> RpcResult<ExtendedHeader>;
 
+        /// See [`crate::HeaderClient::header_get_range_by_height`].
         #[method(name = "GetRangeByHeight")]
         async fn header_get_range_by_height(
             &self,
-            from: &ExtendedHeader,
+            from: ExtendedHeader,
             to: u64,
-        ) -> Result<Vec<ExtendedHeader>, Error>;
+        ) -> RpcResult<Vec<ExtendedHeader>>;
 
+        /// See [`crate::HeaderClient::header_local_head`].
         #[method(name = "LocalHead")]
-        async fn header_local_head(&self) -> Result<ExtendedHeader, Error>;
+        async fn header_local_head(&self) -> RpcResult<ExtendedHeader>;
 
+        /// See [`crate::HeaderClient::header_network_head`].
         #[method(name = "NetworkHead")]
-        async fn header_network_head(&self) -> Result<ExtendedHeader, Error>;
+        async fn header_network_head(&self) -> RpcResult<ExtendedHeader>;
 
+        /// See [`crate::HeaderClient::header_sync_state`].
         #[method(name = "SyncState")]
-        async fn header_sync_state(&self) -> Result<SyncState, Error>;
+        async fn header_sync_state(&self) -> RpcResult<SyncState>;
 
+        /// See [`crate::HeaderClient::header_sync_wait`].
         #[method(name = "SyncWait")]
-        async fn header_sync_wait(&self) -> Result<(), Error>;
+        async fn header_sync_wait(&self) -> RpcResult<()>;
 
+        /// See [`crate::HeaderClient::header_wait_for_height`].
         #[method(name = "WaitForHeight")]
-        async fn header_wait_for_height(&self, height: u64) -> Result<ExtendedHeader, Error>;
+        async fn header_wait_for_height(&self, height: u64) -> RpcResult<ExtendedHeader>;
     }
 
-    #[rpc(client, namespace = "header", namespace_separator = ".")]
+    /// Header subscription RPC methods.
+    #[rpc(client, server, namespace = "header", namespace_separator = ".")]
     pub trait HeaderSubscription {
+        /// See [`crate::HeaderClient::header_subscribe`].
         #[subscription(name = "Subscribe", unsubscribe = "Unsubscribe", item = ExtendedHeader)]
         async fn header_subscribe(&self) -> SubscriptionResult;
     }
@@ -81,7 +95,7 @@ pub trait HeaderClient: ClientT {
     /// GetRangeByHeight returns the given range (from:to) of ExtendedHeaders from the node's header store and verifies that the returned headers are adjacent to each other.
     fn header_get_range_by_height<'a, 'b, 'fut>(
         &'a self,
-        from: &'b ExtendedHeader,
+        from: ExtendedHeader,
         to: u64,
     ) -> impl Future<Output = Result<Vec<ExtendedHeader>, Error>> + Send + 'fut
     where
@@ -189,3 +203,11 @@ pub trait HeaderClient: ClientT {
 }
 
 impl<T> HeaderClient for T where T: ClientT {}
+
+/// Server trait for Header RPC endpoints.
+pub trait HeaderServer: rpc::HeaderServer + rpc::HeaderSubscriptionServer {}
+
+impl<T> HeaderServer for T where T: rpc::HeaderServer + rpc::HeaderSubscriptionServer {}
+
+pub use rpc::HeaderServer as HeaderRpcServer;
+pub use rpc::HeaderSubscriptionServer as HeaderSubscriptionRpcServer;

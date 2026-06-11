@@ -39,16 +39,25 @@ type BoxedError = Box<dyn StdError + Sync + Send + 'static>;
 type BoxedResponseFuture =
     Pin<Box<dyn ConditionalSendFuture<Output = Result<BoxedResponse, BoxedError>> + 'static>>;
 
-pub(crate) struct BoxedTransport {
+/// A type-erased gRPC transport that works on both native and wasm32.
+///
+/// On native, wraps a `tonic::transport::Channel`.
+/// On wasm32, wraps a `tonic_web_wasm_client::Client`.
+///
+/// Implements `Service<http::Request<TonicBody>>` so it can be passed directly
+/// to tonic-generated clients.
+pub struct BoxedTransport {
     inner: Box<dyn AbstractTransport + Send + Sync>,
     pub(crate) metadata: Arc<TransportMetadata>,
 }
 
-pub(crate) struct BoxedBody {
+/// Opaque response body type used by [`BoxedTransport`].
+pub struct BoxedBody {
     inner: Box<dyn AbstractBody + Unpin + Send + 'static>,
 }
 
-pub(crate) trait ConditionalSendFuture: Future + CondSend {}
+/// A future that is conditionally `Send` (via [`CondSend`]).
+pub trait ConditionalSendFuture: Future + CondSend {}
 
 trait AbstractBody {
     fn poll_frame_inner(

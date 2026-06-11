@@ -1,0 +1,6 @@
+# Generated vectors and binaries
+fuzzy_test_vectors.json
+
+# IDE/OS noise
+.DS_Store
+.idea/

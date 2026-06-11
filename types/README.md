@@ -7,14 +7,13 @@ and [`celestia-proto`](https://github.com/eigerco/lumina/proto) and support the 
 protobuf and serde to the format understood by nodes in celestia network.
 
 ```rust
-use celestia_types::{AppVersion, Blob, nmt::Namespace};
+use celestia_types::{Blob, nmt::Namespace};
 
 let my_namespace = Namespace::new_v0(&[1, 2, 3, 4, 5]).expect("Invalid namespace");
 let blob = Blob::new(
     my_namespace,
     b"some data to store on blockchain".to_vec(),
     None,
-    AppVersion::latest(),
 )
     .expect("Failed to create a blob");
 

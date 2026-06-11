@@ -2,7 +2,7 @@ import { assert, afterEach, beforeEach, test } from "vitest";
 import { server } from "@vitest/browser/context"
 import { secp256k1 } from "@noble/curves/secp256k1";
 
-import { AppVersion, Blob, GrpcClient, Namespace, SignDoc, protoEncodeSignDoc } from "../pkg/celestia_grpc";
+import { Blob, GrpcClient, Namespace, SignDoc, protoEncodeSignDoc } from "../pkg/celestia_grpc";
 import { FileLock } from "./utils/file_lock";
 
 // tests in the file are ran sequentially, but all browsers run in parallel, so
@@ -30,7 +30,7 @@ test("submit blob", async () => {
 
   const ns = Namespace.newV0(new Uint8Array([97, 98, 99]));
   const data = new Uint8Array([100, 97, 116, 97]);
-  const blob = new Blob(ns, data, AppVersion.latest());
+  const blob = new Blob(ns, data);
 
   const txInfo = await client.submitBlobs([blob]);
 

@@ -79,6 +79,7 @@ pub struct Client {
     share: ShareApi,
     fraud: FraudApi,
     blobstream: BlobstreamApi,
+    fibre: Option<crate::fibre::FibreApi>,
 }
 
 pub(crate) struct ClientInner {
@@ -89,12 +90,31 @@ pub(crate) struct ClientInner {
 }
 
 /// A builder for [`Client`].
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ClientBuilder {
     rpc_url: Option<String>,
     rpc_auth_token: Option<String>,
     timeout: Option<Duration>,
     grpc_builder: Option<GrpcClientBuilder>,
+    fibre_client: Option<celestia_fibre::FibreClient>,
+}
+
+impl fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientBuilder")
+            .field("rpc_url", &self.rpc_url)
+            .field(
+                "rpc_auth_token",
+                &self.rpc_auth_token.as_ref().map(|_| "***"),
+            )
+            .field("timeout", &self.timeout)
+            .field("grpc_builder", &self.grpc_builder)
+            .field(
+                "fibre_client",
+                &self.fibre_client.as_ref().map(|_| "FibreClient { .. }"),
+            )
+            .finish()
+    }
 }
 
 impl ClientInner {
@@ -167,6 +187,14 @@ impl Client {
     /// Returns fraud API accessor.
     pub fn fraud(&self) -> &FraudApi {
         &self.fraud
+    }
+
+    /// Returns fibre API accessor.
+    ///
+    /// Returns `None` if the client was not configured with a fibre client.
+    /// Use [`ClientBuilder::fibre_client()`] to provide one.
+    pub fn fibre(&self) -> Option<&crate::fibre::FibreApi> {
+        self.fibre.as_ref()
     }
 }
 
@@ -295,6 +323,19 @@ impl ClientBuilder {
         self
     }
 
+    /// Set a pre-built [`FibreClient`](celestia_fibre::FibreClient) for the Fibre
+    /// data availability protocol.
+    ///
+    /// When set, the client exposes a [`FibreApi`](crate::fibre::FibreApi) via
+    /// [`Client::fibre()`].
+    ///
+    /// Use [`FibreClient::from_endpoint()`](celestia_fibre::FibreClient::from_endpoint) for
+    /// convenient construction from a gRPC endpoint URL.
+    pub fn fibre_client(mut self, fibre_client: celestia_fibre::FibreClient) -> Self {
+        self.fibre_client = Some(fibre_client);
+        self
+    }
+
     /// Build [`Client`].
     pub async fn build(self) -> Result<Client> {
         let rpc_url = self.rpc_url.as_ref().ok_or(Error::RpcEndpointNotSet)?;
@@ -329,6 +370,10 @@ impl ClientBuilder {
             chain_id: head.chain_id().to_owned(),
         });
 
+        let fibre = self
+            .fibre_client
+            .map(|fc| crate::fibre::FibreApi::new(inner.clone(), fc));
+
         Ok(Client {
             inner: inner.clone(),
             blob: BlobApi::new(inner.clone()),
@@ -337,6 +382,7 @@ impl ClientBuilder {
             fraud: FraudApi::new(inner.clone()),
             blobstream: BlobstreamApi::new(inner.clone()),
             state: StateApi::new(inner.clone()),
+            fibre,
         })
     }
 }

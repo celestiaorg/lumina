@@ -138,8 +138,8 @@ impl Peer {
 
     pub(crate) fn best_ping(&self) -> Option<Duration> {
         self.connections
-            .iter()
-            .flat_map(|(_, conn_info)| conn_info.ping)
+            .values()
+            .flat_map(|conn_info| conn_info.ping)
             .min()
     }
 }

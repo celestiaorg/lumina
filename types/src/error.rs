@@ -20,10 +20,6 @@ pub enum Error {
     #[error("Unsupported namespace version: {0}")]
     UnsupportedNamespaceVersion(u8),
 
-    /// Unsupported app version.
-    #[error("Unsupported app version: {0}")]
-    UnsupportedAppVersion(u64),
-
     /// Invalid namespace size.
     #[error("Invalid namespace size")]
     InvalidNamespaceSize,
@@ -468,10 +464,6 @@ pub enum UniffiError {
     #[error("Unsupported namespace version: {0}")]
     UnsupportedNamespaceVersion(u8),
 
-    /// Unsupported app version.
-    #[error("Unsupported app version: {0}")]
-    UnsupportedAppVersion(u64),
-
     /// Invalid namespace size.
     #[error("Invalid namespace size")]
     InvalidNamespaceSize,
@@ -752,7 +744,6 @@ impl From<Error> for UniffiError {
     fn from(value: Error) -> Self {
         match value {
             Error::UnsupportedNamespaceVersion(v) => UniffiError::UnsupportedNamespaceVersion(v),
-            Error::UnsupportedAppVersion(v) => UniffiError::UnsupportedAppVersion(v),
             Error::InvalidNamespaceSize => UniffiError::InvalidNamespaceSize,
             Error::Tendermint(e) => UniffiError::Tendermint(e.to_string()),
             Error::Protobuf(e) => UniffiError::Protobuf(e.to_string()),

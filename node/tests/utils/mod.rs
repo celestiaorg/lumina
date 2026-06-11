@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use blockstore::Blockstore;
 use celestia_rpc::{Client, TxConfig, prelude::*};
-use celestia_types::Blob;
+use celestia_types::{Blob, ExtendedHeader};
 use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 use lumina_node::NodeBuilder;
 use lumina_node::blockstore::InMemoryBlockstore;
@@ -14,7 +14,7 @@ use lumina_node::node::Node;
 use lumina_node::store::{InMemoryStore, Store};
 use lumina_node::test_utils::test_node_builder;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 const WS_URL: &str = "ws://localhost:26658";
 
@@ -74,7 +74,10 @@ where
 }
 
 pub async fn new_connected_node() -> (Node<InMemoryBlockstore, InMemoryStore>, EventSubscriber) {
-    new_connected_node_with_builder(test_node_builder()).await
+    new_connected_node_with_builder(
+        test_node_builder().pruning_window(Duration::from_secs(60 * 60)),
+    )
+    .await
 }
 
 pub async fn blob_submit(client: &Client, blobs: &[Blob]) -> u64 {
@@ -84,4 +87,26 @@ pub async fn blob_submit(client: &Client, blobs: &[Blob]) -> u64 {
         .blob_submit(blobs, TxConfig::default())
         .await
         .unwrap()
+}
+
+/// Wait for a header at the given height to appear in the node's store.
+///
+/// blob_submit returns the height from the bridge node RPC, but the light node
+/// syncs headers over p2p asynchronously. On slow machines the header may not
+/// have arrived yet, so we poll with a timeout instead of assuming it's there.
+pub async fn wait_for_header<B, S>(node: &Node<B, S>, height: u64) -> ExtendedHeader
+where
+    B: Blockstore + 'static,
+    S: Store + 'static,
+{
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match node.get_header_by_height(height).await {
+                Ok(header) => return header,
+                Err(_) => sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timed out waiting for header at height {height}"))
 }

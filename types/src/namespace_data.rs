@@ -71,7 +71,7 @@ impl NamespaceData {
             );
         }
 
-        for (row, row_index) in self.rows.iter().zip(row_idxs.into_iter()) {
+        for (row, row_index) in self.rows.iter().zip(row_idxs) {
             let ns_row_id = RowNamespaceDataId::new(id.namespace, row_index, id.block_height())?;
             row.verify(ns_row_id, dah)?;
         }

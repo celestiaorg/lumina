@@ -6,7 +6,7 @@ This crate builds on top of the [`jsonrpsee`](https://docs.rs/jsonrpsee) clients
 
 ```rust,no_run,ignore-wasm32
 use celestia_rpc::{BlobClient, Client, TxConfig};
-use celestia_types::{AppVersion, Blob, nmt::Namespace};
+use celestia_types::{Blob, nmt::Namespace};
 
 async fn submit_blob() {
     // create a client to the celestia node
@@ -21,7 +21,6 @@ async fn submit_blob() {
         my_namespace,
         b"some data to store on blockchain".to_vec(),
         None,
-        AppVersion::latest(),
     )
         .expect("Failed to create a blob");
 

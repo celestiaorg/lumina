@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use celestia_types::consts::HASH_SIZE;
-use celestia_types::consts::appconsts::AppVersion;
 use celestia_types::fraud_proof::BadEncodingFraudProof;
 use celestia_types::hash::Hash;
 use celestia_types::test_utils::{ExtendedHeaderGenerator, corrupt_eds, generate_dummy_eds};
@@ -172,7 +171,7 @@ async fn stops_services_when_network_is_compromised() {
         .unwrap();
 
     // create a corrupted block and insert it
-    let mut eds = generate_dummy_eds(8, AppVersion::V2);
+    let mut eds = generate_dummy_eds(8);
     let (header, befp) = corrupt_eds(&mut generator, &mut eds);
 
     store.insert(header).await.unwrap();

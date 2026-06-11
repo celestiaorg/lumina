@@ -1,5 +1,7 @@
 //! Utilities providing platform abstraction used across lumina project
 
+/// Conditional `Send` bound and boxed future abstractions for wasm32 compatibility.
+pub mod cond_send;
 /// async executor platform independent utilities
 #[cfg(feature = "executor")]
 pub mod executor;

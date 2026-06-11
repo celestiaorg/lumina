@@ -3,106 +3,103 @@ use celestia_types::state::{
     AccAddress, Address, Coin, QueryDelegationResponse, QueryRedelegationsResponse,
     QueryUnbondingDelegationResponse, RawTxResponse, ValAddress,
 };
+use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 
 use crate::TxConfig;
 
-#[rpc(client, namespace = "state", namespace_separator = ".")]
+/// State RPC methods.
+#[rpc(client, server, namespace = "state", namespace_separator = ".")]
 pub trait State {
-    /// AccountAddress retrieves the address of the node's account/signer
+    /// Returns the default account address for the node.
     #[method(name = "AccountAddress")]
-    async fn state_account_address(&self) -> Result<Address, Error>;
+    async fn state_account_address(&self) -> RpcResult<Address>;
 
-    /// Balance retrieves the Celestia coin balance for the node's account/signer and verifies it against the corresponding block's AppHash.
+    /// Returns the balance for the node's default account.
     #[method(name = "Balance")]
-    async fn state_balance(&self) -> Result<Coin, Error>;
+    async fn state_balance(&self) -> RpcResult<Coin>;
 
-    /// BalanceForAddress retrieves the Celestia coin balance for the given address and verifies the returned balance against the corresponding block's AppHash.
-    ///
-    /// # NOTE
-    ///
-    /// The balance returned is the balance reported by the block right before the node's current head (head-1). This is due to the fact that for block N, the block's `AppHash` is the result of applying the previous block's transaction list.
+    /// Retrieves the Celestia coin balance for a specific address.
+    /// Verifies the returned balance against the corresponding block's AppHash.
     #[method(name = "BalanceForAddress")]
-    async fn state_balance_for_address(&self, addr: &Address) -> Result<Coin, Error>;
+    async fn state_balance_for_address(&self, addr: Address) -> RpcResult<Coin>;
 
-    /// BeginRedelegate sends a user's delegated tokens to a new validator for redelegation.
+    /// Begins a redelegation from one validator to another.
     #[method(name = "BeginRedelegate")]
     async fn state_begin_redelegate(
         &self,
-        src: &ValAddress,
-        dest: &ValAddress,
+        src: ValAddress,
+        dest: ValAddress,
         amount: u64,
         config: TxConfig,
-    ) -> Result<RawTxResponse, Error>;
+    ) -> RpcResult<RawTxResponse>;
 
-    /// CancelUnbondingDelegation cancels a user's pending undelegation from a validator.
+    /// Cancels an unbonding delegation at a specific height.
     #[method(name = "CancelUnbondingDelegation")]
     async fn state_cancel_unbonding_delegation(
         &self,
-        addr: &ValAddress,
+        addr: ValAddress,
         amount: u64,
         height: u64,
         config: TxConfig,
-    ) -> Result<RawTxResponse, Error>;
+    ) -> RpcResult<RawTxResponse>;
 
-    /// Delegate sends a user's liquid tokens to a validator for delegation.
+    /// Delegates tokens to a validator.
     #[method(name = "Delegate")]
     async fn state_delegate(
         &self,
-        addr: &ValAddress,
+        addr: ValAddress,
         amount: u64,
         config: TxConfig,
-    ) -> Result<RawTxResponse, Error>;
+    ) -> RpcResult<RawTxResponse>;
 
-    /// IsStopped checks if the Module's context has been stopped.
+    /// Checks whether the state service is stopped.
     #[method(name = "IsStopped")]
-    async fn state_is_stopped(&self) -> Result<bool, Error>;
+    async fn state_is_stopped(&self) -> RpcResult<bool>;
 
-    /// QueryDelegation retrieves the delegation information between a delegator and a validator.
+    /// Queries delegation details for the given validator address.
     #[method(name = "QueryDelegation")]
-    async fn state_query_delegation(
-        &self,
-        addr: &ValAddress,
-    ) -> Result<QueryDelegationResponse, Error>;
+    async fn state_query_delegation(&self, addr: ValAddress) -> RpcResult<QueryDelegationResponse>;
+    //
 
-    /// QueryRedelegations retrieves the status of the redelegations between a delegator and a validator.
+    /// Queries redelegations between the given validators.
     #[method(name = "QueryRedelegations")]
     async fn state_query_redelegations(
         &self,
-        src: &ValAddress,
-        dest: &ValAddress,
-    ) -> Result<QueryRedelegationsResponse, Error>;
+        src: ValAddress,
+        dest: ValAddress,
+    ) -> RpcResult<QueryRedelegationsResponse>;
 
-    /// QueryUnbonding retrieves the unbonding status between a delegator and a validator.
+    /// Queries unbonding delegations for the given validator address.
     #[method(name = "QueryUnbonding")]
     async fn state_query_unbonding(
         &self,
-        addr: &ValAddress,
-    ) -> Result<QueryUnbondingDelegationResponse, Error>;
+        addr: ValAddress,
+    ) -> RpcResult<QueryUnbondingDelegationResponse>;
 
-    /// SubmitPayForBlob builds, signs and submits a PayForBlob transaction.
+    /// Submits a pay-for-blob transaction for the provided blobs.
     #[method(name = "SubmitPayForBlob")]
     async fn state_submit_pay_for_blob(
         &self,
-        blobs: &[RawBlob],
+        blobs: Vec<RawBlob>,
         config: TxConfig,
-    ) -> Result<RawTxResponse, Error>;
+    ) -> RpcResult<RawTxResponse>;
 
-    /// Transfer sends the given amount of coins from default wallet of the node to the given account address.
+    /// Transfers tokens to a destination account.
     #[method(name = "Transfer")]
     async fn state_transfer(
         &self,
-        to: &AccAddress,
+        to: AccAddress,
         amount: u64,
         config: TxConfig,
-    ) -> Result<RawTxResponse, Error>;
+    ) -> RpcResult<RawTxResponse>;
 
-    /// Undelegate undelegates a user's delegated tokens, unbonding them from the current validator.
+    /// Undelegates tokens from a validator.
     #[method(name = "Undelegate")]
     async fn state_undelegate(
         &self,
-        addr: &ValAddress,
+        addr: ValAddress,
         amount: u64,
         config: TxConfig,
-    ) -> Result<RawTxResponse, Error>;
+    ) -> RpcResult<RawTxResponse>;
 }

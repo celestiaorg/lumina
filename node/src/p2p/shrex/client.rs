@@ -10,7 +10,7 @@ use celestia_types::namespace_data::{NamespaceData, NamespaceDataId};
 use celestia_types::nmt::Namespace;
 use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
-use celestia_types::{AppVersion, AxisType, DataAvailabilityHeader, ExtendedHeader};
+use celestia_types::{AxisType, DataAvailabilityHeader, ExtendedHeader};
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -67,7 +67,6 @@ where
 struct Request {
     ctx: RequestContext,
     dah: DataAvailabilityHeader,
-    app_version: AppVersion,
     tries_left: usize,
     cancellation_token: CancellationToken,
 }
@@ -166,7 +165,6 @@ where
             get_next_req_id(&mut self.next_req_id),
             Request {
                 ctx,
-                app_version: header.app_version(),
                 dah: header.dah,
                 tries_left: MAX_TRIES,
                 cancellation_token: self.cancellation_token.child_token(),
@@ -508,9 +506,8 @@ where
         &mut self,
         raw_data: &[u8],
         dah: &DataAvailabilityHeader,
-        app_version: AppVersion,
     ) -> Result<(), CodecError> {
-        let resp = TResp::decode_and_verify(raw_data, &self.req, dah, app_version)?;
+        let resp = TResp::decode_and_verify(raw_data, &self.req, dah)?;
         self.respond_to.maybe_send_ok(resp);
         Ok(())
     }
@@ -554,18 +551,12 @@ impl Request {
 
     fn decode_verify_respond(&mut self, raw_data: &[u8]) -> Result<(), CodecError> {
         match &mut self.ctx {
-            RequestContext::Row(state) => {
-                state.decode_verify_respond(raw_data, &self.dah, self.app_version)
-            }
-            RequestContext::Sample(state) => {
-                state.decode_verify_respond(raw_data, &self.dah, self.app_version)
-            }
+            RequestContext::Row(state) => state.decode_verify_respond(raw_data, &self.dah),
+            RequestContext::Sample(state) => state.decode_verify_respond(raw_data, &self.dah),
             RequestContext::NamespaceData(state) => {
-                state.decode_verify_respond(raw_data, &self.dah, self.app_version)
+                state.decode_verify_respond(raw_data, &self.dah)
             }
-            RequestContext::Eds(state) => {
-                state.decode_verify_respond(raw_data, &self.dah, self.app_version)
-            }
+            RequestContext::Eds(state) => state.decode_verify_respond(raw_data, &self.dah),
         }
     }
 

@@ -30,6 +30,8 @@ mod celestia_tx;
 mod blob;
 // cosmos.tx
 mod cosmos_tx;
+// fibre (BlockAPI + valaddr)
+mod fibre;
 
 pub use crate::grpc::celestia_tx::{TxStatus, TxStatusBatchResponse, TxStatusResponse};
 pub use crate::grpc::cosmos_tx::{BroadcastMode, GetTxResponse};

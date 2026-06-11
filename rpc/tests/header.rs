@@ -60,7 +60,7 @@ async fn get_range_by_height() {
     let second_header = client.header_get_by_height(2).await.unwrap();
 
     let headers = client
-        .header_get_range_by_height(&genesis_header, 3)
+        .header_get_range_by_height(genesis_header, 3)
         .await
         .unwrap();
 

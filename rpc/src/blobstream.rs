@@ -7,6 +7,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use celestia_types::MerkleProof;
 use celestia_types::consts::HASH_SIZE;
 use celestia_types::hash::Hash;
+use jsonrpsee::core::RpcResult;
 use jsonrpsee::core::client::{ClientT, Error};
 use jsonrpsee::proc_macros::rpc;
 
@@ -15,7 +16,8 @@ use crate::custom_client_error;
 mod rpc {
     use super::*;
 
-    #[rpc(client, namespace = "blobstream", namespace_separator = ".")]
+    /// Blobstream RPC methods.
+    #[rpc(client, server, namespace = "blobstream", namespace_separator = ".")]
     pub trait Blobstream {
         /// Collects the data roots over a provided ordered range of blocks, and then
         /// creates a new Merkle root of those data roots.
@@ -26,7 +28,7 @@ mod rpc {
             &self,
             start: u64,
             end: u64,
-        ) -> Result<String, Error>;
+        ) -> RpcResult<String>;
 
         /// Creates an inclusion proof, for the data root tuple of block height `height`,
         /// in the set of blocks defined by `start` and `end`.
@@ -38,7 +40,7 @@ mod rpc {
             height: u64,
             start: u64,
             end: u64,
-        ) -> Result<MerkleProof, Error>;
+        ) -> RpcResult<MerkleProof>;
     }
 }
 
@@ -92,4 +94,11 @@ pub trait BlobstreamClient: ClientT {
     }
 }
 
+/// Server trait for Blobstream RPC endpoints.
+pub trait BlobstreamServer: rpc::BlobstreamServer {}
+
 impl<T> BlobstreamClient for T where T: ClientT {}
+
+impl<T> BlobstreamServer for T where T: rpc::BlobstreamServer {}
+
+pub use rpc::BlobstreamServer as BlobstreamRpcServer;
