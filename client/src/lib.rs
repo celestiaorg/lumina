@@ -64,7 +64,7 @@ pub mod api {
 /// TX related types.
 pub mod tx {
     #[doc(inline)]
-    pub use celestia_grpc::grpc::{GasEstimate, TxPriority};
+    pub use celestia_grpc::grpc::{GasEstimate, GetTxResponse, TxPriority};
     #[doc(inline)]
     pub use celestia_grpc::{
         BroadcastedTx, DocSigner, IntoProtobufAny, SignDoc, SubmittedTx, TxConfig, TxInfo,
