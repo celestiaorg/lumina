@@ -30,8 +30,8 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 fn init_unit_test_logs() {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("lumina_node=debug"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("lumina_node=debug"));
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)

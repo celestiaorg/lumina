@@ -24,12 +24,13 @@ const WS_URL: &str = "ws://localhost:26658";
 /// the libtest capture writer) so that logs from the node's spawned tasks — which run
 /// on other threads — are not dropped. Defaults to `lumina_node=debug`; override with
 /// `RUST_LOG`, e.g. `RUST_LOG=debug` for everything or `RUST_LOG=lumina_node=trace`.
+#[cfg(not(target_arch = "wasm32"))]
 #[ctor::ctor]
 fn init_test_logs() {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("lumina_node=debug"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("lumina_node=debug"));
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
