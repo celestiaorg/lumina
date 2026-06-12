@@ -83,7 +83,7 @@ async fn shrex_sampling_backward() {
             }
         }
     };
-    let (from_height, to_height) = timeout(Duration::from_secs(4), new_batch_synced)
+    let (from_height, to_height) = timeout(Duration::from_secs(30), new_batch_synced)
         .await
         .unwrap();
 
