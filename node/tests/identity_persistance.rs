@@ -4,6 +4,10 @@ use libp2p::identity::Keypair;
 use lumina_node::{NodeBuilder, store::RedbStore};
 use tempfile::TempDir;
 
+// Pulls in the shared test setup, including the `#[ctor]` that installs the tracing
+// subscriber for this test binary.
+mod utils;
+
 #[tokio::test]
 async fn persists_identity() {
     let db_dir = TempDir::with_prefix("lumina.persistance.test")

@@ -19,8 +19,8 @@ pub const EDS_ID_SIZE: usize = 8;
 ///
 /// # Note
 ///
-/// EdsId is excluded from shwap operating on top of bitswap due to possible
-/// EDS sizes exceeding bitswap block limits.
+/// Unlike other shwap ids, EdsId is not exchanged as an individual block, because
+/// EDS sizes can be large; the full EDS is fetched via the shrex protocol instead.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct EdsId {
     height: u64,

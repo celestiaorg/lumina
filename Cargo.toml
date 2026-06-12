@@ -21,7 +21,6 @@ version = "1.0.0"
 edition = "2024"
 
 [workspace.dependencies]
-beetswap = "0.5"
 blockstore = "0.8"
 leopard-codec = "0.2"
 lumina-node = { version = "=1.0.0", path = "node" }
@@ -105,7 +104,6 @@ web-sys = "0.3.70"
 core2 = { git = "https://github.com/bbqsrc/core2", rev = "545e84bc" }
 
 # Uncomment to apply local changes
-# beetswap = { path = "../beetswap" }
 # blockstore = { path = "../blockstore" }
 # nmt-rs = { path = "../nmt-rs" }
 # libp2p = { path = "../../rust-libp2p/libp2p" }

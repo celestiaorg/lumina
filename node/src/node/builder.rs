@@ -121,7 +121,7 @@ where
         Node::start(config).await
     }
 
-    /// Set the [`Blockstore`] for Bitswap.
+    /// Set the [`Blockstore`] used to store sampled data.
     ///
     /// **Default:** [`InMemoryBlockstore`]
     pub fn blockstore<B2>(self, blockstore: B2) -> NodeBuilder<B2, S>

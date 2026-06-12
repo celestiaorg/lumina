@@ -778,7 +778,6 @@ mod tests {
     use crate::p2p::header_session;
     use crate::store::InMemoryStore;
     use crate::test_utils::{MockP2pHandle, gen_filled_store};
-    use crate::utils::OneshotResultSenderExt;
     use celestia_types::test_utils::ExtendedHeaderGenerator;
     use libp2p::request_response::OutboundFailure;
     use lumina_utils::test_utils::async_test;
@@ -1509,9 +1508,9 @@ mod tests {
                 sleep(Duration::from_secs(10)).await;
 
                 for respond_chan in no_respond_chans {
-                    respond_chan.maybe_send_err(P2pError::HeaderEx(
+                    let _ = respond_chan.send(Err(P2pError::HeaderEx(
                         HeaderExError::OutboundFailure(OutboundFailure::Timeout),
-                    ));
+                    )));
                 }
             });
         }
