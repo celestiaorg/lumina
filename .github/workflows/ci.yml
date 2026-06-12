@@ -86,7 +86,17 @@ jobs:
       uses: ./.github/actions/local-devnet
 
     - name: Run tests
+      env:
+        LUMINA_TEST_LOG: ${{ github.workspace }}/test-${{ matrix.crate }}.log
       run: cargo test --all-features -p ${{ matrix.crate }}
+
+    - name: Upload test logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs-${{ matrix.crate }}
+        path: test-${{ matrix.crate }}.log
+        if-no-files-found: ignore
 
 
   test-wasm:
