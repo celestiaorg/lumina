@@ -436,7 +436,7 @@ where
     }
 
     /// Request all blobs with provided namespace in the block corresponding to this header
-    /// using bitswap protocol.
+    /// using the shrex protocol.
     pub async fn request_all_blobs(
         &self,
         namespace: Namespace,

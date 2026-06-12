@@ -20,7 +20,7 @@ use crate::utils::{blob_submit, bridge_client, new_connected_node};
 mod utils;
 
 #[tokio::test]
-async fn shwap_sampling_forward() {
+async fn shrex_sampling_forward() {
     let (node, _) = new_connected_node().await;
 
     // create new events sub to ignore all previous events
@@ -61,7 +61,7 @@ async fn shwap_sampling_forward() {
 }
 
 #[tokio::test]
-async fn shwap_sampling_backward() {
+async fn shrex_sampling_backward() {
     let (node, mut events) = new_connected_node().await;
 
     let current_head = node.get_local_head_header().await.unwrap().height();
@@ -111,7 +111,7 @@ async fn shwap_sampling_backward() {
 }
 
 #[tokio::test]
-async fn shwap_request_sample() {
+async fn shrex_request_sample() {
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -148,7 +148,7 @@ async fn shwap_request_sample() {
 }
 
 #[tokio::test]
-async fn shwap_request_row() {
+async fn shrex_request_row() {
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 
@@ -178,7 +178,7 @@ async fn shwap_request_row() {
 }
 
 #[tokio::test]
-async fn shwap_request_all_blobs() {
+async fn shrex_request_all_blobs() {
     let (node, _) = new_connected_node().await;
     let client = bridge_client().await;
 

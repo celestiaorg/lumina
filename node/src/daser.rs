@@ -1339,7 +1339,7 @@ mod tests {
         }
     }
 
-    /// Responds to get_shwap_cid and returns all CIDs that were requested
+    /// Responds to sample requests and returns all CIDs that were requested
     async fn handle_concurrent_get_sample<const N: usize>(
         handle: &mut MockP2pHandle,
         handling_args: [(u64, &ExtendedDataSquare, bool); N],
@@ -1391,7 +1391,7 @@ mod tests {
         }
     }
 
-    /// Responds to get_shwap_cid and returns all CIDs that were requested
+    /// Responds to sample requests and returns all CIDs that were requested
     async fn handle_get_samples(
         handle: &mut MockP2pHandle,
         height: u64,

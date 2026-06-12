@@ -10,8 +10,7 @@
 //! - fraud-sub topic on libp2p-gossipsub
 //! - header-ex client
 //! - header-ex server
-//! - bitswap 1.2.0
-//! - shwap - celestia's data availability protocol on top of bitswap
+//! - shrex - celestia's share exchange protocol for samples, rows, EDS and namespace data
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -245,15 +244,11 @@ pub(crate) enum P2pCmd {
     GetNetworkHead {
         respond_to: oneshot::Sender<Option<ExtendedHeader>>,
     },
-    // This is dead code because `get_row` still uses Bitswap.
-    // We can use this when celestia-node#4288 is merged.
     GetRow {
         row_index: u16,
         block_height: u64,
         respond_to: OneshotResultSender<Row, P2pError>,
     },
-    // This is dead code because `get_sample` still uses Bitswap.
-    // We can use this when celestia-node#4288 is merged.
     GetSample {
         row_index: u16,
         column_index: u16,
@@ -501,7 +496,7 @@ impl P2p {
         Ok(headers)
     }
 
-    /// Request a [`Row`] on bitswap protocol.
+    /// Request a [`Row`] using the shrex protocol.
     pub async fn get_row(
         &self,
         row_index: u16,
@@ -525,7 +520,7 @@ impl P2p {
         }
     }
 
-    /// Request a [`Sample`] on bitswap protocol.
+    /// Request a [`Sample`] using the shrex protocol.
     pub async fn get_sample(
         &self,
         row_index: u16,
@@ -596,7 +591,7 @@ impl P2p {
     }
 
     /// Request all blobs with provided namespace in the block corresponding to this header
-    /// using bitswap protocol.
+    /// using the shrex protocol.
     pub async fn get_all_blobs(
         &self,
         namespace: Namespace,
