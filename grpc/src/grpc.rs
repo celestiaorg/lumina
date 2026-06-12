@@ -58,6 +58,11 @@ pub struct Context {
     /// Metadata attached to each grpc request.
     pub metadata: MetadataMap,
     pub timeout: Option<Duration>,
+    /// Connection (TCP/TLS) establishment timeout for the channel.
+    ///
+    /// Channel-scoped: consumed once when building the transport, never applied
+    /// per-request.
+    pub connect_timeout: Option<Duration>,
 }
 
 impl Context {
@@ -103,7 +108,9 @@ impl Context {
     }
 
     /// Merges the other context into self.
-    /// When both contexts have a timeout, the other (per-request) timeout takes precedence.
+    /// When both contexts set a timeout (or connect_timeout), the other context's
+    /// value takes precedence (per-request overrides endpoint, endpoint overrides
+    /// builder-wide).
     pub(crate) fn extend(&mut self, other: &Context) {
         self.append_metadata_map(&other.metadata);
         self.timeout = match (self.timeout, other.timeout) {
@@ -111,6 +118,10 @@ impl Context {
             (Some(t), None) => Some(t),
             (None, Some(t)) => Some(t),
             (Some(_), Some(t1)) => Some(t1), // per-request timeout overrides endpoint timeout
+        };
+        self.connect_timeout = match (self.connect_timeout, other.connect_timeout) {
+            (existing, None) => existing,
+            (_, Some(t)) => Some(t), // other (more specific) connect_timeout takes precedence
         };
     }
 
@@ -291,5 +302,38 @@ mod tests {
             context.metadata.get_all_bin("foo-bin").into_iter().count(),
             2
         );
+    }
+
+    #[test]
+    fn context_extend_merges_connect_timeout() {
+        let base = Duration::from_secs(5);
+        let other = Duration::from_millis(250);
+
+        // other (more specific) value takes precedence
+        let mut ctx = Context {
+            connect_timeout: Some(base),
+            ..Default::default()
+        };
+        ctx.extend(&Context {
+            connect_timeout: Some(other),
+            ..Default::default()
+        });
+        assert_eq!(ctx.connect_timeout, Some(other));
+
+        // existing value is kept when other has none
+        let mut ctx = Context {
+            connect_timeout: Some(base),
+            ..Default::default()
+        };
+        ctx.extend(&Context::default());
+        assert_eq!(ctx.connect_timeout, Some(base));
+
+        // other value is taken when self has none
+        let mut ctx = Context::default();
+        ctx.extend(&Context {
+            connect_timeout: Some(other),
+            ..Default::default()
+        });
+        assert_eq!(ctx.connect_timeout, Some(other));
     }
 }
