@@ -18,6 +18,25 @@ use tokio::time::{sleep, timeout};
 
 const WS_URL: &str = "ws://localhost:26658";
 
+/// Install a tracing subscriber once per test binary.
+///
+/// Runs automatically before any test via `#[ctor]`. Logs are written to stderr (not
+/// the libtest capture writer) so that logs from the node's spawned tasks — which run
+/// on other threads — are not dropped. Defaults to `lumina_node=debug`; override with
+/// `RUST_LOG`, e.g. `RUST_LOG=debug` for everything or `RUST_LOG=lumina_node=trace`.
+#[ctor::ctor]
+fn init_test_logs() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("lumina_node=debug"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 pub async fn bridge_client() -> Client {
     Client::new(WS_URL, None, None, None).await.unwrap()
 }

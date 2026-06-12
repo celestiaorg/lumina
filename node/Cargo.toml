@@ -125,9 +125,11 @@ lumina-node = { path = ".", features = ["test-utils"] }
 lumina-utils = { workspace = true, features = ["test-utils"] }
 
 bytes.workspace = true
+ctor = "0.2"
 rstest = "0.26"
 serde_json.workspace = true
 tempfile = "3"
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [features]
 test-utils = ["celestia-types/test-utils"]

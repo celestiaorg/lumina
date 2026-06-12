@@ -20,6 +20,25 @@ mod utils;
 #[cfg(all(target_arch = "wasm32", test))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
+/// Install a tracing subscriber once for the (native) unit-test binary.
+///
+/// Runs automatically before any test via `#[ctor]`, writing to stderr so logs from
+/// tasks on other threads are not lost. Defaults to `lumina_node=debug`; override with
+/// `RUST_LOG`, e.g. `RUST_LOG=debug` or `RUST_LOG=lumina_node=trace`.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[ctor::ctor]
+fn init_unit_test_logs() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("lumina_node=debug"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 
