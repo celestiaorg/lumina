@@ -78,7 +78,7 @@ async fn shwap_sampling_backward() {
             else {
                 continue;
             };
-            if to_height < current_head {
+            if from_height < current_head {
                 break (from_height, to_height);
             }
         }
