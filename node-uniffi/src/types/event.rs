@@ -73,14 +73,14 @@ pub enum NodeEvent {
         /// The column of the share.
         column: u16,
         /// Share sampling timed out.
-        timed_out: bool,
+        failed: bool,
     },
     /// Sampling result.
     SamplingResult {
         /// The block height that was sampled.
         height: u64,
         /// Sampling timed out.
-        timed_out: bool,
+        failed: bool,
         /// How much time sampling took in milliseconds.
         took_ms: u64,
     },
@@ -187,21 +187,21 @@ impl From<LuminaNodeEvent> for NodeEvent {
                 square_width,
                 row,
                 column,
-                timed_out,
+                failed,
             } => NodeEvent::ShareSamplingResult {
                 height,
                 square_width,
                 row,
                 column,
-                timed_out,
+                failed,
             },
             LuminaNodeEvent::SamplingResult {
                 height,
-                timed_out,
+                failed,
                 took,
             } => NodeEvent::SamplingResult {
                 height,
-                timed_out,
+                failed,
                 took_ms: took.as_millis() as u64,
             },
             LuminaNodeEvent::FatalDaserError { error } => NodeEvent::FatalDaserError { error },

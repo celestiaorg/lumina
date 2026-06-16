@@ -67,29 +67,6 @@ where
     }
 }
 
-pub(crate) trait OneshotResultSenderExt<T, E>
-where
-    T: Send + 'static,
-    E: Send + 'static,
-{
-    fn maybe_send_ok(self, val: T);
-    fn maybe_send_err(self, err: impl Into<E>);
-}
-
-impl<T, E> OneshotResultSenderExt<T, E> for oneshot::Sender<Result<T, E>>
-where
-    T: Send + 'static,
-    E: Send + 'static,
-{
-    fn maybe_send_ok(self, val: T) {
-        let _ = self.send(Ok(val));
-    }
-
-    fn maybe_send_err(self, err: impl Into<E>) {
-        let _ = self.send(Err(err.into()));
-    }
-}
-
 pub(crate) trait MultiaddrExt {
     fn peer_id(&self) -> Option<PeerId>;
 }

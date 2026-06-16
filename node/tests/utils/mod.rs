@@ -18,6 +18,38 @@ use tokio::time::{sleep, timeout};
 
 const WS_URL: &str = "ws://localhost:26658";
 
+/// Install a tracing subscriber once per test binary.
+///
+/// Runs automatically before any test via `#[ctor]`. Logs are written to a file (never
+/// to the test output) so they can be inspected or uploaded as a CI artifact. The path
+/// comes from `LUMINA_TEST_LOG` (default: `lumina-test.log`); the file is appended to.
+/// Defaults to `lumina_node=debug`; override with `RUST_LOG=lumina_node=trace`.
+#[cfg(not(target_arch = "wasm32"))]
+#[ctor::ctor]
+fn init_test_logs() {
+    use std::sync::Mutex;
+
+    use tracing_subscriber::EnvFilter;
+
+    let path = std::env::var("LUMINA_TEST_LOG").unwrap_or_else(|_| "lumina-test.log".to_string());
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("lumina_node=debug"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(Mutex::new(file))
+        .try_init();
+}
+
 pub async fn bridge_client() -> Client {
     Client::new(WS_URL, None, None, None).await.unwrap()
 }

@@ -287,7 +287,7 @@ impl NodeClient {
     }
 
     /// Request all blobs with provided namespace in the block corresponding to this header
-    /// using bitswap protocol.
+    /// using the shrex protocol.
     #[wasm_bindgen(js_name = requestAllBlobs)]
     pub async fn request_all_blobs(
         &self,
