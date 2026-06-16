@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::events::{EventPublisher, NodeEvent};
-use crate::p2p::{P2p, P2pError, ShrExError};
+use crate::p2p::{P2p, P2pError};
 use crate::store::{BlockRanges, Store, StoreError};
 use crate::utils::{OneshotSenderExt, TimeExt};
 
@@ -368,10 +368,17 @@ where
                 Some(res) = self.sampling_futs.next() => {
                     // The future only returns fatal errors that are not related
                     // to P2P nor networking.
-                    let (height, samples, failed) = res?;
+                    let (height, samples, mut failed) = res?;
 
                     for (cid, sample) in samples {
-                        self.blockstore.put_keyed(&cid, &sample).await?;
+                        // A transient blockstore write failure shouldn't take
+                        // down sampling for the whole node. Mark the block as
+                        // failed so it gets re-sampled later instead of
+                        // propagating the error up through `run`.
+                        if let Err(e) = self.blockstore.put_keyed(&cid, &sample).await {
+                            warn!("Failed to store sample {cid} for height {height}: {e}");
+                            failed = true;
+                        }
                     }
 
                     if failed {
@@ -555,11 +562,12 @@ where
 
                         false
                     }
-                    // Validation is done at DA protocol level.
-                    // If we hit the timeout or maximum retries of the request
-                    // we can mark it as failure
-                    Err(P2pError::RequestTimedOut)
-                    | Err(P2pError::ShrEx(ShrExError::MaxTriesReached)) => true,
+                    // Validation is done at DA protocol level. Any non-fatal
+                    // error (request timeout, max retries reached, header
+                    // pruned/not synced, request cancelled, ...) just means we
+                    // couldn't retrieve this share, so we mark it as a failure.
+                    // Only genuinely fatal errors should stop the Daser.
+                    Err(e) if !e.is_fatal() => true,
                     Err(e) => return Err(e.into()),
                 };
 
