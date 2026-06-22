@@ -6,7 +6,8 @@ use std::time::Duration;
 use blockstore::cond_send::CondSend;
 pub use celestia_grpc::Endpoint;
 use celestia_grpc::{GrpcClient, GrpcClientBuilder};
-use celestia_rpc::{Client as RpcClient, HeaderClient};
+pub use celestia_rpc::RpcEndpoint;
+use celestia_rpc::{FailoverClient, HeaderClient};
 use http::Request;
 use tonic::body::Body as TonicBody;
 use tonic::codegen::{Bytes, Service};
@@ -83,7 +84,7 @@ pub struct Client {
 }
 
 pub(crate) struct ClientInner {
-    pub(crate) rpc: RpcClient,
+    pub(crate) rpc: FailoverClient,
     grpc: Option<GrpcClient>,
     pubkey: Option<VerifyingKey>,
     chain_id: tendermint::chain::Id,
@@ -94,6 +95,9 @@ pub(crate) struct ClientInner {
 pub struct ClientBuilder {
     rpc_url: Option<String>,
     rpc_auth_token: Option<String>,
+    rpc_endpoints: Vec<RpcEndpoint>,
+    rpc_health_check_interval: Option<Duration>,
+    rpc_max_head_age: Option<Duration>,
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
     grpc_builder: Option<GrpcClientBuilder>,
@@ -108,6 +112,16 @@ impl fmt::Debug for ClientBuilder {
                 "rpc_auth_token",
                 &self.rpc_auth_token.as_ref().map(|_| "***"),
             )
+            .field(
+                "rpc_endpoints",
+                &self
+                    .rpc_endpoints
+                    .iter()
+                    .map(|e| &e.url)
+                    .collect::<Vec<_>>(),
+            )
+            .field("rpc_health_check_interval", &self.rpc_health_check_interval)
+            .field("rpc_max_head_age", &self.rpc_max_head_age)
             .field("timeout", &self.timeout)
             .field("connect_timeout", &self.connect_timeout)
             .field("grpc_builder", &self.grpc_builder)
@@ -252,6 +266,58 @@ impl ClientBuilder {
         self
     }
 
+    /// Add an RPC endpoint for failover.
+    ///
+    /// Accepts [`RpcEndpoint`], `&str`, or `String`. Use [`RpcEndpoint`] when an
+    /// endpoint needs its own authentication token (e.g. a fallback provider
+    /// such as QuickNode that uses a different token than your own node).
+    ///
+    /// Endpoints are tried in priority order: the first endpoint added (or the
+    /// one set via [`rpc_url`](ClientBuilder::rpc_url)) is the most preferred.
+    /// When the preferred endpoint fails, the client automatically falls back to
+    /// the next one, and a background health-check switches back to the preferred
+    /// endpoint once it recovers.
+    pub fn rpc_endpoint(mut self, endpoint: impl Into<RpcEndpoint>) -> ClientBuilder {
+        self.rpc_endpoints.push(endpoint.into());
+        self
+    }
+
+    /// Add multiple RPC endpoints at once for failover.
+    ///
+    /// Accepts [`RpcEndpoint`], `&str`, or `String` items. See
+    /// [`rpc_endpoint`](ClientBuilder::rpc_endpoint) for the failover semantics.
+    pub fn rpc_endpoints<I, E>(mut self, endpoints: I) -> ClientBuilder
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<RpcEndpoint>,
+    {
+        self.rpc_endpoints
+            .extend(endpoints.into_iter().map(Into::into));
+        self
+    }
+
+    /// Set the interval at which the preferred RPC endpoint is probed for
+    /// recovery while a fallback is in use.
+    ///
+    /// Only has an effect when more than one RPC endpoint is configured.
+    /// Defaults to [`celestia_rpc::DEFAULT_HEALTH_CHECK_INTERVAL`].
+    pub fn rpc_health_check_interval(mut self, interval: Duration) -> ClientBuilder {
+        self.rpc_health_check_interval = Some(interval);
+        self
+    }
+
+    /// Set the maximum age of the preferred RPC endpoint's head for it to be
+    /// considered healthy enough to switch back to.
+    ///
+    /// While a fallback is in use, the background health-check only switches back
+    /// to the preferred endpoint once its head is no older than this (i.e. it has
+    /// caught up to the chain tip). Defaults to
+    /// [`celestia_rpc::DEFAULT_MAX_HEAD_AGE`].
+    pub fn rpc_max_head_age(mut self, max_head_age: Duration) -> ClientBuilder {
+        self.rpc_max_head_age = Some(max_head_age);
+        self
+    }
+
     /// Set the request timeout for both RPC and gRPC endpoints.
     ///
     /// This bounds the duration of individual requests only. To bound how long
@@ -364,8 +430,22 @@ impl ClientBuilder {
 
     /// Build [`Client`].
     pub async fn build(self) -> Result<Client> {
-        let rpc_url = self.rpc_url.as_ref().ok_or(Error::RpcEndpointNotSet)?;
-        let rpc_auth_token = self.rpc_auth_token.as_deref();
+        // The endpoint set via `rpc_url` (with its optional `rpc_auth_token`) is
+        // the most preferred one; any endpoints added via `rpc_endpoint(s)`
+        // follow it as fallbacks.
+        let mut rpc_endpoints = Vec::with_capacity(self.rpc_endpoints.len() + 1);
+        if let Some(url) = self.rpc_url {
+            let mut endpoint = RpcEndpoint::new(url);
+            if let Some(token) = self.rpc_auth_token {
+                endpoint = endpoint.auth_token(token);
+            }
+            rpc_endpoints.push(endpoint);
+        }
+        rpc_endpoints.extend(self.rpc_endpoints);
+
+        if rpc_endpoints.is_empty() {
+            return Err(Error::RpcEndpointNotSet);
+        }
 
         let (grpc, pubkey) = if let Some(mut grpc_builder) = self.grpc_builder {
             if let Some(timeout) = self.timeout {
@@ -381,8 +461,24 @@ impl ClientBuilder {
             (None, None)
         };
 
-        let rpc =
-            RpcClient::new(rpc_url, rpc_auth_token, self.connect_timeout, self.timeout).await?;
+        // Only run the background health-check when there is a preferred endpoint
+        // to switch back to.
+        let health_check_interval = (rpc_endpoints.len() > 1).then(|| {
+            self.rpc_health_check_interval
+                .unwrap_or(celestia_rpc::DEFAULT_HEALTH_CHECK_INTERVAL)
+        });
+
+        let max_head_age = self
+            .rpc_max_head_age
+            .unwrap_or(celestia_rpc::DEFAULT_MAX_HEAD_AGE);
+
+        let rpc = FailoverClient::new(
+            rpc_endpoints,
+            self.connect_timeout,
+            self.timeout,
+            health_check_interval,
+            max_head_age,
+        )?;
 
         let head = rpc.header_network_head().await?;
         head.validate()?;

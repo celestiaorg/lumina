@@ -1,4 +1,3 @@
-use arc_swap::ArcSwap;
 use std::error::Error as StdError;
 use std::fmt;
 use std::sync::Arc;
@@ -6,6 +5,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use k256::ecdsa::{SigningKey, VerifyingKey};
+use lumina_utils::failover::{Endpoint as FailoverEndpoint, Failover};
 use signature::Keypair;
 use tonic::body::Body as TonicBody;
 use tonic::codegen::Service;
@@ -13,11 +13,21 @@ use tonic::metadata::MetadataMap;
 use zeroize::Zeroizing;
 
 use crate::boxed::{BoxedTransport, TransportMetadata, boxed};
-use crate::client::AccountState;
+use crate::client::{AccountState, probe_head};
 use crate::grpc::Context;
 use crate::signer::{AccountSigner, BoxedDocSigner};
 use crate::utils::CondSend;
-use crate::{DocSigner, GrpcClient, GrpcClientBuilderError};
+use crate::{DocSigner, Error, GrpcClient, GrpcClientBuilderError};
+
+/// Default interval between background health-checks of the preferred endpoint.
+const DEFAULT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Default timeout for a single gRPC health-check probe.
+const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default maximum head age for an endpoint to be considered healthy enough to
+/// switch back to.
+const DEFAULT_MAX_HEAD_AGE: Duration = Duration::from_secs(30);
 
 /// A URL endpoint with per-endpoint configuration.
 ///
@@ -142,6 +152,8 @@ pub struct GrpcClientBuilder {
     transports: Vec<TransportEntry>,
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
+    health_check_interval: Option<Duration>,
+    max_head_age: Option<Duration>,
     signer_kind: Option<SignerKind>,
 }
 
@@ -303,6 +315,34 @@ impl GrpcClientBuilder {
         self
     }
 
+    /// Override the interval of the background health-check that switches back to
+    /// the preferred endpoint once it recovers.
+    ///
+    /// Endpoints are tried in priority order (the first added is the most
+    /// preferred). When a network error makes the client fail over to a
+    /// fallback, this task probes the preferred endpoint on the given interval
+    /// and switches back to it once it has recovered and its head is recent
+    /// enough (within [`max_head_age`](GrpcClientBuilder::max_head_age)).
+    ///
+    /// The health-check is enabled by default (every 10s) whenever more than one
+    /// endpoint is configured; use this only to change the interval.
+    pub fn health_check_interval(mut self, interval: Duration) -> GrpcClientBuilder {
+        self.health_check_interval = Some(interval);
+        self
+    }
+
+    /// Set the maximum age of the preferred endpoint's head (by timestamp) for
+    /// it to be considered healthy enough to switch back to.
+    ///
+    /// While a fallback is in use, the background health-check only switches back
+    /// to the preferred endpoint once its head is no older than this. Defaults to
+    /// 30 seconds. Only relevant when
+    /// [`health_check_interval`](GrpcClientBuilder::health_check_interval) is set.
+    pub fn max_head_age(mut self, max_head_age: Duration) -> GrpcClientBuilder {
+        self.max_head_age = Some(max_head_age);
+        self
+    }
+
     /// Build [`GrpcClient`]
     ///
     /// Returns error if no transports were configured.
@@ -339,11 +379,40 @@ impl GrpcClientBuilder {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let transports = Arc::new(ArcSwap::from_pointee(transports));
+        // gRPC transports are built eagerly (lazily-connecting channels), so each
+        // endpoint slot is pre-cached and never rebuilt.
+        let endpoints = transports
+            .into_iter()
+            .map(|transport| {
+                let label = transport.metadata.url.clone().unwrap_or_default();
+                FailoverEndpoint::prebuilt(label, transport)
+            })
+            .collect();
+
+        let probe_timeout = self.timeout.unwrap_or(DEFAULT_PROBE_TIMEOUT);
+        let max_head_age = self.max_head_age.unwrap_or(DEFAULT_MAX_HEAD_AGE);
+        let failover = Failover::new(
+            endpoints,
+            Error::is_network_error,
+            probe_timeout,
+            max_head_age,
+        )
+        .expect("transports were checked to be non-empty");
+        let failover = Arc::new(failover);
+
+        // Enabled by default; `spawn_health_check` is a no-op for a single
+        // endpoint, so this only starts a task when there's a fallback.
+        let health_check_interval = self
+            .health_check_interval
+            .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL);
+        failover.spawn_health_check(
+            health_check_interval,
+            |transport: Arc<BoxedTransport>| async move { probe_head(transport).await },
+        );
 
         let signer_config = self.signer_kind.map(TryInto::try_into).transpose()?;
 
-        Ok(GrpcClient::new(transports, signer_config))
+        Ok(GrpcClient::new(failover, signer_config))
     }
 }
 

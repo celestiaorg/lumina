@@ -12,6 +12,7 @@ rust-version = "1.85"
 [dependencies]
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures = { workspace = true, optional = true }
@@ -40,6 +41,7 @@ wasm-bindgen-test.workspace = true
 [features]
 default = []
 executor = ["token", "dep:tokio-util", "dep:tokio", "tokio/rt", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:send_wrapper"]
+failover = ["executor", "time", "dep:tracing"]
 token = ["dep:tokio-util"]
 time = ["dep:gloo-timers", "dep:tokio", "tokio/time", "dep:send_wrapper", "dep:futures", "dep:pin-project", "dep:web-time"]
 test-utils = ["dep:tokio", "tokio/macros", "dep:wasm-bindgen-test"]

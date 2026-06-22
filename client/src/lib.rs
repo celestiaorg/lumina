@@ -89,7 +89,7 @@ pub use celestia_proto as proto;
 #[doc(inline)]
 pub use celestia_types as types;
 
-pub use crate::client::{Client, ClientBuilder, Endpoint};
+pub use crate::client::{Client, ClientBuilder, Endpoint, RpcEndpoint};
 
 /// Alias for a `Result` with the error type [`celestia_client::Error`].
 ///

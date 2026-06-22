@@ -5,6 +5,9 @@ pub mod cond_send;
 /// async executor platform independent utilities
 #[cfg(feature = "executor")]
 pub mod executor;
+/// transport-agnostic multi-endpoint failover engine
+#[cfg(feature = "failover")]
+pub mod failover;
 /// JS object utils
 #[cfg(all(target_arch = "wasm32", feature = "make-object"))]
 mod object;

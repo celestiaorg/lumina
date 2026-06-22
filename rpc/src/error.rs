@@ -17,6 +17,10 @@ pub enum Error {
     #[error("Protocol not supported or missing: {0}")]
     ProtocolNotSupported(String),
 
+    /// No RPC endpoints were provided when constructing a failover client.
+    #[error("No RPC endpoints provided")]
+    NoEndpoints,
+
     /// Error propagated from the [`jsonrpsee`].
     #[error(transparent)]
     JsonRpc(#[from] jsonrpsee::core::ClientError),
