@@ -373,7 +373,10 @@ impl<C, E> Failover<C, E> {
             }
 
             slot.set_healthy(true);
-            debug!("failover: endpoint {} recovered and is active again", slot.label);
+            debug!(
+                "failover: endpoint {} recovered and is active again",
+                slot.label
+            );
         }
     }
 
@@ -716,7 +719,11 @@ mod tests {
         // Once the preferred recovers too, it takes precedence again.
         preferred.set_up(true);
         do_health_check(&engine).await;
-        assert_eq!(engine.active(), 0, "preferred takes precedence once recovered");
+        assert_eq!(
+            engine.active(),
+            0,
+            "preferred takes precedence once recovered"
+        );
     }
 
     #[tokio::test]
@@ -736,7 +743,11 @@ mod tests {
         assert_eq!(engine.active(), 1);
 
         do_health_check(&engine).await;
-        assert_eq!(engine.active(), 0, "preferred is active again after recovery");
+        assert_eq!(
+            engine.active(),
+            0,
+            "preferred is active again after recovery"
+        );
 
         // Further requests go to the preferred and never touch the fallback, no
         // matter how many succeed.
