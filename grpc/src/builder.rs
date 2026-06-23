@@ -19,8 +19,8 @@ use crate::signer::{AccountSigner, BoxedDocSigner};
 use crate::utils::CondSend;
 use crate::{DocSigner, Error, GrpcClient, GrpcClientBuilderError};
 
-/// Default interval between background health-checks of the preferred endpoint.
-const DEFAULT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+/// Default interval between background health-checks of unhealthy endpoints.
+const DEFAULT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Default timeout for a single gRPC health-check probe.
 const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);

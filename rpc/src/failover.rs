@@ -40,8 +40,8 @@ use crate::HeaderClient;
 use crate::client::Client;
 use crate::error::Error;
 
-/// Default interval between background health-checks of the preferred endpoint.
-pub const DEFAULT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+/// Default interval between background health-checks of unhealthy endpoints.
+pub const DEFAULT_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Default timeout for a single health-check probe.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);

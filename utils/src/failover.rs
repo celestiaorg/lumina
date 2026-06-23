@@ -1,10 +1,14 @@
 //! Transport-agnostic multi-endpoint failover engine.
 //!
 //! [`Failover`](crate::failover::Failover) holds a priority-ordered list of endpoints and runs logical
-//! requests against the most-preferred reachable one, transparently falling
-//! back to the next endpoint on a *network* error. An optional background
-//! health-check probes the preferred endpoint and switches back to it once it
-//! has recovered *and its head is fresh* (within a configurable max age).
+//! requests against the most-preferred *healthy* one, transparently falling
+//! back to the next endpoint on a *network* error. Each endpoint carries a
+//! health flag; the active endpoint is **derived** as the lowest-index healthy
+//! one rather than stored, so an in-flight fallback request can never clobber a
+//! concurrent recovery of a more-preferred endpoint. An optional background
+//! health-check probes the currently-unhealthy endpoints and brings each one
+//! back once it has recovered *and its head is fresh* (within a configurable max
+//! age).
 //!
 //! The engine knows nothing about the concrete transport (`C`) or its error
 //! type (`E`): callers inject
@@ -13,17 +17,17 @@
 //!   client (or pre-cache it for transports that are built eagerly),
 //! - an `is_network_error` classifier deciding which errors trigger failover,
 //! - a *call* closure performing a single request against one client, and
-//! - (for switch-back) a *probe* closure returning an endpoint's current head
+//! - (for recovery) a *probe* closure returning an endpoint's current head
 //!   timestamp.
 //!
-//! Note: the switch-back "healthy" criterion is purely the head's **timestamp
+//! Note: the recovery "healthy" criterion is purely the head's **timestamp
 //! age**, not its block height. An endpoint can be a few blocks behind and still
 //! count as healthy if its head time is within `max_head_age`. This favours a
 //! simple, transport-agnostic signal over strict height parity.
 //!
 //! This lets both the JSON-RPC and the gRPC clients share one implementation.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -148,23 +152,32 @@ impl<C, E> EndpointSlot<C, E> {
     fn set_healthy(&self, healthy: bool) {
         self.healthy.store(healthy, Ordering::Release);
     }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
+    }
 }
 
 /// A transport-agnostic failover engine over a priority-ordered endpoint list.
 ///
 /// See the [module documentation](self) for details.
 pub struct Failover<C, E> {
+    /// Priority-ordered endpoints; index `0` is the most preferred.
+    ///
+    /// There is deliberately no stored "active" index: the endpoint a request
+    /// uses is *derived* as the lowest-index healthy endpoint (see
+    /// [`attempt_order`](Failover::attempt_order)). Routing being a pure function
+    /// of the per-endpoint `healthy` flags means an in-flight fallback request
+    /// can never clobber a concurrent recovery of a more-preferred endpoint.
     endpoints: Vec<EndpointSlot<C, E>>,
-    /// Index of the endpoint requests currently start from.
-    active: AtomicUsize,
     probe_timeout: Duration,
     /// Maximum age of an endpoint's head (by timestamp) for it to be considered
     /// healthy.
     ///
-    /// Used by the switch-back check: a preferred endpoint whose head timestamp
-    /// is older than this is treated as stale (e.g. reconnected but still
-    /// syncing), so we don't switch back to it. This is a timestamp check only —
-    /// it does not compare block heights.
+    /// Used by the background recovery probe: an endpoint whose head timestamp is
+    /// older than this is treated as stale (e.g. reconnected but still syncing),
+    /// so we keep it inactive. This is a timestamp check only — it does not
+    /// compare block heights.
     max_head_age: Duration,
     is_network_error: fn(&E) -> bool,
 }
@@ -174,8 +187,8 @@ impl<C, E> Failover<C, E> {
     ///
     /// The first endpoint is the most preferred. `is_network_error` decides
     /// which errors trigger failover; `probe_timeout` bounds a single
-    /// health-check probe; `max_head_age` is how recent a preferred endpoint's
-    /// head must be for the switch-back to consider it healthy.
+    /// health-check probe; `max_head_age` is how recent an endpoint's head must
+    /// be for the recovery probe to consider it healthy again.
     ///
     /// Returns `None` if `endpoints` is empty.
     pub fn new(
@@ -200,7 +213,6 @@ impl<C, E> Failover<C, E> {
 
         Some(Failover {
             endpoints,
-            active: AtomicUsize::new(0),
             probe_timeout,
             max_head_age,
             is_network_error,
@@ -217,11 +229,16 @@ impl<C, E> Failover<C, E> {
         self.endpoints.is_empty()
     }
 
-    /// Index of the endpoint requests currently start from.
+    /// Index of the endpoint requests currently prefer: the lowest-index healthy
+    /// endpoint, or `0` if none are currently healthy.
+    ///
+    /// This is *derived* from the per-endpoint health flags, not stored, so it
+    /// always reflects the latest health information without any writer that
+    /// could race a concurrent recovery.
     pub fn active(&self) -> usize {
-        self.active
-            .load(Ordering::Acquire)
-            .min(self.endpoints.len() - 1)
+        (0..self.endpoints.len())
+            .find(|&i| self.endpoints[i].is_healthy())
+            .unwrap_or(0)
     }
 
     /// The cached client of the currently active endpoint, building it if needed.
@@ -232,21 +249,20 @@ impl<C, E> Failover<C, E> {
         self.endpoints[self.active()].get_or_build().await
     }
 
-    /// Order in which endpoints are attempted: the active endpoint first, then
-    /// all others in priority order (so we always re-try the preferred ones).
+    /// Order in which endpoints are attempted: currently-healthy endpoints in
+    /// priority order, then currently-unhealthy ones (also in priority order) as
+    /// a last resort.
+    ///
+    /// So requests prefer the most-preferred *healthy* endpoint, an unhealthy
+    /// endpoint is skipped until the background probe (or a total outage) brings
+    /// it back, and even when everything is marked unhealthy we still attempt the
+    /// preferred endpoint first.
     fn attempt_order(&self) -> Vec<usize> {
         let n = self.endpoints.len();
-        let active = self.active();
-        let mut order = Vec::with_capacity(n);
-        order.push(active);
-        order.extend((0..n).filter(|&i| i != active));
-        order
-    }
-
-    fn select(&self, idx: usize) {
-        if self.active.load(Ordering::Acquire) != idx {
-            self.active.store(idx, Ordering::Release);
-        }
+        let (mut healthy, unhealthy): (Vec<usize>, Vec<usize>) =
+            (0..n).partition(|&i| self.endpoints[i].is_healthy());
+        healthy.extend(unhealthy);
+        healthy
     }
 
     /// Whether a head produced at `head_unix_secs` is recent enough (within
@@ -289,8 +305,10 @@ impl<C, E> Failover<C, E> {
 
             match call(client).await {
                 Ok(value) => {
+                    // Marking only this endpoint healthy is enough; routing is
+                    // derived from the flags, so a fallback success cannot demote
+                    // or override a more-preferred endpoint.
                     slot.set_healthy(true);
-                    self.select(idx);
                     return Ok(value);
                 }
                 Err(err) if (self.is_network_error)(&err) => {
@@ -307,56 +325,56 @@ impl<C, E> Failover<C, E> {
         Err(last_err.expect("attempt_order is never empty"))
     }
 
-    /// If the preferred endpoint (index `0`) is not the active one and has
-    /// recovered, switch the active endpoint back to it.
+    /// Probe every currently-unhealthy endpoint and bring back the ones that have
+    /// recovered, so routing can again prefer them.
     ///
-    /// The preferred endpoint counts as healthy only if it answers the probe
-    /// **and** its head is fresh (within `max_head_age`). A reconnected-but-still
-    /// -syncing endpoint reports an old head, so we keep using the fallback
-    /// rather than switch back to stale data.
+    /// An endpoint is brought back only if it answers the probe **and** its head
+    /// is fresh (within `max_head_age`). A reconnected-but-still-syncing endpoint
+    /// reports an old head, so it stays inactive rather than serving stale data.
+    /// Healthy endpoints are left untouched (they are presumably in use and would
+    /// be marked unhealthy by [`run`](Failover::run) on a real failure).
+    ///
+    /// Because the active endpoint is derived as the lowest-index healthy one,
+    /// reviving a more-preferred endpoint here automatically routes subsequent
+    /// requests back to it — without any switch that an in-flight request could
+    /// clobber.
     ///
     /// `probe` returns the endpoint's current head time (unix seconds) if it
     /// answers, or `None` if it is unreachable (the engine applies
     /// `probe_timeout`).
-    pub async fn switch_back_with<F, Fut>(&self, probe: F)
+    pub async fn recover_unhealthy_with<F, Fut>(&self, probe: F)
     where
         F: Fn(Arc<C>) -> Fut,
         Fut: std::future::Future<Output = Option<i64>>,
     {
-        if self.active() == 0 {
-            return;
-        }
-
-        let slot = &self.endpoints[0];
-        let client = match slot.get_or_build().await {
-            Ok(client) => client,
-            Err(_) => {
-                slot.set_healthy(false);
-                return;
+        for idx in 0..self.endpoints.len() {
+            let slot = &self.endpoints[idx];
+            if slot.is_healthy() {
+                continue;
             }
-        };
 
-        let Some(head) = self.probe(&probe, client).await else {
-            slot.set_healthy(false);
-            return;
-        };
+            let Ok(client) = slot.get_or_build().await else {
+                // Still cannot even build a client; remains inactive.
+                continue;
+            };
 
-        if !self.is_fresh(head) {
-            slot.set_healthy(false);
-            debug!(
-                "failover: preferred endpoint {} recovered but its head is stale \
-                 (older than {:?}); staying on the active endpoint",
-                slot.label, self.max_head_age
-            );
-            return;
+            let Some(head) = self.probe(&probe, client).await else {
+                // Unreachable; remains inactive.
+                continue;
+            };
+
+            if !self.is_fresh(head) {
+                debug!(
+                    "failover: endpoint {} reachable but its head is stale \
+                     (older than {:?}); keeping it inactive",
+                    slot.label, self.max_head_age
+                );
+                continue;
+            }
+
+            slot.set_healthy(true);
+            debug!("failover: endpoint {} recovered and is active again", slot.label);
         }
-
-        slot.set_healthy(true);
-        self.select(0);
-        debug!(
-            "failover: switched back to preferred endpoint {}",
-            slot.label
-        );
     }
 
     async fn probe<F, Fut>(&self, probe: &F, client: Arc<C>) -> Option<i64>
@@ -391,11 +409,12 @@ where
 {
     /// Spawn the background health-check task.
     ///
-    /// Every `interval` it probes the preferred endpoint via `probe` and, once
-    /// it has recovered and its head is recent enough, switches the active
-    /// endpoint back to it (see
-    /// [`switch_back_with`](Failover::switch_back_with)). The task holds a
-    /// [`Weak`] reference, so it stops on its own once the engine is dropped.
+    /// Every `interval` it probes each currently-unhealthy endpoint via `probe`
+    /// and brings back the ones that have recovered and whose head is recent
+    /// enough (see
+    /// [`recover_unhealthy_with`](Failover::recover_unhealthy_with)). The task
+    /// holds a [`Weak`] reference, so it stops on its own once the engine is
+    /// dropped.
     ///
     /// Does nothing when only a single endpoint is configured.
     pub fn spawn_health_check<F, Fut>(self: &Arc<Self>, interval: Duration, probe: F)
@@ -440,7 +459,7 @@ where
         let Some(engine) = weak.upgrade() else {
             break;
         };
-        engine.switch_back_with(&probe).await;
+        engine.recover_unhealthy_with(&probe).await;
     }
 }
 
@@ -538,7 +557,6 @@ mod tests {
 
         Failover {
             endpoints,
-            active: AtomicUsize::new(0),
             probe_timeout: Duration::from_secs(1),
             max_head_age: Duration::from_secs(30),
             is_network_error: is_network,
@@ -549,10 +567,10 @@ mod tests {
         engine.run(|client| async move { client.request() }).await
     }
 
-    /// A switch-back probe reporting a reachable endpoint's head height.
-    async fn do_switch_back(engine: &Failover<FakeClient, FakeError>) {
+    /// Run one recovery pass, probing reachable endpoints for their head time.
+    async fn do_health_check(engine: &Failover<FakeClient, FakeError>) {
         engine
-            .switch_back_with(|client| async move {
+            .recover_unhealthy_with(|client| async move {
                 match client.request() {
                     Ok(_) => Some(client.head()),
                     Err(_) => None,
@@ -626,7 +644,7 @@ mod tests {
         assert_eq!(engine.active(), 1);
 
         preferred.set_up(true);
-        do_switch_back(&engine).await;
+        do_health_check(&engine).await;
 
         assert_eq!(engine.active(), 0, "should switch back to preferred");
 
@@ -644,7 +662,7 @@ mod tests {
         do_request(&engine).await.unwrap();
         assert_eq!(engine.active(), 1);
 
-        do_switch_back(&engine).await;
+        do_health_check(&engine).await;
 
         assert_eq!(engine.active(), 1, "must stay on fallback");
     }
@@ -662,7 +680,7 @@ mod tests {
         // still catching up.
         preferred.set_up(true);
         preferred.set_stale_head();
-        do_switch_back(&engine).await;
+        do_health_check(&engine).await;
         assert_eq!(
             engine.active(),
             1,
@@ -671,12 +689,12 @@ mod tests {
 
         // Once its head is fresh again, the next health-check switches back.
         preferred.set_fresh_head();
-        do_switch_back(&engine).await;
+        do_health_check(&engine).await;
         assert_eq!(engine.active(), 0, "switches back once caught up");
     }
 
     #[tokio::test]
-    async fn only_switches_back_to_preferred_not_intermediate() {
+    async fn recovery_prefers_higher_priority_endpoint() {
         let preferred = Arc::new(FakeClient::new(false));
         let middle = Arc::new(FakeClient::new(false));
         let last = Arc::new(FakeClient::new(true));
@@ -685,19 +703,49 @@ mod tests {
         do_request(&engine).await.unwrap();
         assert_eq!(engine.active(), 2);
 
-        // The intermediate endpoint recovers but the preferred is still down.
+        // The intermediate endpoint recovers while the preferred is still down:
+        // routing prefers it over the lower-priority `last` endpoint.
         middle.set_up(true);
-        do_switch_back(&engine).await;
+        do_health_check(&engine).await;
         assert_eq!(
             engine.active(),
-            2,
-            "intermediate recovery must not switch back"
+            1,
+            "a recovered higher-priority endpoint is preferred over a lower one"
         );
 
-        // Once the preferred recovers, the next probe switches straight back.
+        // Once the preferred recovers too, it takes precedence again.
         preferred.set_up(true);
-        do_switch_back(&engine).await;
-        assert_eq!(engine.active(), 0, "should switch back to preferred");
+        do_health_check(&engine).await;
+        assert_eq!(engine.active(), 0, "preferred takes precedence once recovered");
+    }
+
+    #[tokio::test]
+    async fn fallback_success_does_not_demote_preferred() {
+        // The flapping bug, at the routing level: once the preferred endpoint is
+        // healthy again, ongoing successful fallback usage must not pull routing
+        // back to the fallback. With routing derived from per-endpoint health
+        // flags there is no shared "active" pointer for a fallback success to
+        // clobber.
+        let preferred = Arc::new(FakeClient::new(true));
+        let fallback = Arc::new(FakeClient::new(true));
+        let engine = engine(vec![preferred.clone(), fallback.clone()]);
+
+        // Force a failover to the fallback, then let the preferred recover.
+        engine.endpoints[0].set_healthy(false);
+        do_request(&engine).await.unwrap();
+        assert_eq!(engine.active(), 1);
+
+        do_health_check(&engine).await;
+        assert_eq!(engine.active(), 0, "preferred is active again after recovery");
+
+        // Further requests go to the preferred and never touch the fallback, no
+        // matter how many succeed.
+        let before = fallback.calls();
+        for _ in 0..5 {
+            do_request(&engine).await.unwrap();
+        }
+        assert_eq!(fallback.calls(), before, "fallback must not be re-pinned");
+        assert_eq!(engine.active(), 0);
     }
 
     #[tokio::test]
