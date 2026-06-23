@@ -15,7 +15,7 @@ use lumina_node::test_utils::{
 };
 use rand::Rng;
 use tendermint_proto::Protobuf;
-use tokio::{select, spawn, sync::mpsc, time::sleep};
+use tokio::{select, spawn, sync::mpsc, time::sleep, time::timeout};
 
 use crate::utils::{fetch_bridge_info, new_connected_node};
 
@@ -124,19 +124,52 @@ async fn peer_discovery() {
 
     node3.wait_connected().await.unwrap();
 
-    // Small wait until all nodes are discovered and connected
-    sleep(Duration::from_millis(2000)).await;
+    let node1_peer_id = *node1.local_peer_id();
+    let node2_peer_id = *node2.local_peer_id();
+    let node3_peer_id = *node3.local_peer_id();
 
-    let node1_peer_id = node1.local_peer_id();
-    let node2_peer_id = node2.local_peer_id();
-    let node3_peer_id = node3.local_peer_id();
+    // Wait until all nodes have discovered and connected to each other.
+    //
+    // Discovery is transitive (Node2/Node3 learn the bridge's address via
+    // Node1) and its timing depends on Kademlia and identify round-trips,
+    // which vary with machine load. Poll for the observed end-state instead
+    // of sleeping a fixed amount, otherwise the test is flaky on slow CI.
+    let mesh_formed = timeout(Duration::from_secs(30), async {
+        loop {
+            let n1 = node1.connected_peers().await.unwrap();
+            let n2 = node2.connected_peers().await.unwrap();
+            let n3 = node3.connected_peers().await.unwrap();
+
+            let n1_ok = n1.contains(&bridge_peer_id)
+                && n1.contains(&node2_peer_id)
+                && n1.contains(&node3_peer_id);
+            let n2_ok = n2.contains(&bridge_peer_id)
+                && n2.contains(&node1_peer_id)
+                && n2.contains(&node3_peer_id);
+            let n3_ok = n3.contains(&bridge_peer_id)
+                && n3.contains(&node1_peer_id)
+                && n3.contains(&node2_peer_id);
+
+            if n1_ok && n2_ok && n3_ok {
+                break;
+            }
+
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    assert!(
+        mesh_formed.is_ok(),
+        "Timed out waiting for all nodes to discover and connect to each other"
+    );
 
     // Check Node1 connected peers
     let connected_peers = node1.connected_peers().await.unwrap();
     let tracker_info = node1.peer_tracker_info();
     assert!(connected_peers.contains(&bridge_peer_id));
-    assert!(connected_peers.contains(node2_peer_id));
-    assert!(connected_peers.contains(node3_peer_id));
+    assert!(connected_peers.contains(&node2_peer_id));
+    assert!(connected_peers.contains(&node3_peer_id));
     assert!(tracker_info.num_connected_peers >= 3);
     assert_eq!(tracker_info.num_connected_trusted_peers, 1);
 
@@ -144,17 +177,17 @@ async fn peer_discovery() {
     let connected_peers = node2.connected_peers().await.unwrap();
     let tracker_info = node2.peer_tracker_info();
     assert!(connected_peers.contains(&bridge_peer_id));
-    assert!(connected_peers.contains(node1_peer_id));
-    assert!(connected_peers.contains(node3_peer_id));
+    assert!(connected_peers.contains(&node1_peer_id));
+    assert!(connected_peers.contains(&node3_peer_id));
     assert!(tracker_info.num_connected_peers >= 3);
     assert_eq!(tracker_info.num_connected_trusted_peers, 1);
 
     // Check Node3 connected peers
     let connected_peers = node3.connected_peers().await.unwrap();
-    let tracker_info = node2.peer_tracker_info();
+    let tracker_info = node3.peer_tracker_info();
     assert!(connected_peers.contains(&bridge_peer_id));
-    assert!(connected_peers.contains(node1_peer_id));
-    assert!(connected_peers.contains(node2_peer_id));
+    assert!(connected_peers.contains(&node1_peer_id));
+    assert!(connected_peers.contains(&node2_peer_id));
     assert!(tracker_info.num_connected_peers >= 3);
     assert_eq!(tracker_info.num_connected_trusted_peers, 1);
 }
