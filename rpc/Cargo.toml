@@ -78,7 +78,13 @@ libp2p = { workspace = true, features = [
   "noise",
   "yamux",
 ] }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = [
+  "rt",
+  "macros",
+  "net",
+  "io-util",
+  "time",
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 getrandom_02.workspace = true

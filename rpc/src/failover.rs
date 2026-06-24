@@ -331,4 +331,177 @@ mod tests {
 
         client.header_network_head().await.unwrap_err();
     }
+
+    /// The live node's `host:port`, derived from [`celestia_rpc_url`].
+    fn celestia_rpc_host_port() -> String {
+        celestia_rpc_url()
+            .trim_start_matches("wss://")
+            .trim_start_matches("ws://")
+            .to_string()
+    }
+
+    /// A controllable TCP proxy placed in front of a real node so a test can
+    /// simulate the upstream disconnecting and recovering.
+    ///
+    /// While enabled it forwards each accepted connection to the upstream. When
+    /// disabled it force-closes live connections and refuses new ones (the ws
+    /// client then sees the connection drop, exactly like a node going away).
+    /// `forwarded` counts the connections it has proxied, so a test can tell
+    /// which endpoint actually served traffic.
+    mod tcp_proxy {
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use tokio::net::{TcpListener, TcpStream};
+
+        pub struct TcpProxy {
+            addr: SocketAddr,
+            enabled: Arc<AtomicBool>,
+            forwarded: Arc<AtomicUsize>,
+        }
+
+        impl TcpProxy {
+            pub async fn start(upstream: String) -> TcpProxy {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let enabled = Arc::new(AtomicBool::new(true));
+                let forwarded = Arc::new(AtomicUsize::new(0));
+
+                let task_enabled = enabled.clone();
+                let task_forwarded = forwarded.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let Ok((mut inbound, _)) = listener.accept().await else {
+                            break;
+                        };
+                        if !task_enabled.load(Ordering::SeqCst) {
+                            // Refuse: dropping `inbound` closes the connection.
+                            continue;
+                        }
+                        task_forwarded.fetch_add(1, Ordering::SeqCst);
+
+                        let conn_enabled = task_enabled.clone();
+                        let upstream = upstream.clone();
+                        tokio::spawn(async move {
+                            let Ok(mut outbound) = TcpStream::connect(&upstream).await else {
+                                return;
+                            };
+                            tokio::select! {
+                                _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound) => {}
+                                // Force-close the connection as soon as we're disabled.
+                                _ = wait_until_disabled(&conn_enabled) => {}
+                            }
+                        });
+                    }
+                });
+
+                TcpProxy {
+                    addr,
+                    enabled,
+                    forwarded,
+                }
+            }
+
+            pub fn ws_url(&self) -> String {
+                format!("ws://{}", self.addr)
+            }
+
+            pub fn disable(&self) {
+                self.enabled.store(false, Ordering::SeqCst);
+            }
+
+            pub fn enable(&self) {
+                self.enabled.store(true, Ordering::SeqCst);
+            }
+
+            pub fn forwarded(&self) -> usize {
+                self.forwarded.load(Ordering::SeqCst)
+            }
+        }
+
+        async fn wait_until_disabled(enabled: &AtomicBool) {
+            while enabled.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    /// End-to-end against a real node: the preferred endpoint goes through a
+    /// controllable TCP proxy, the fallback is the node directly. Killing the
+    /// proxy drops the preferred connection (→ fail over); restoring it must let
+    /// the background health-check reconnect through the *same cached* client and
+    /// route traffic back to the preferred endpoint.
+    ///
+    /// `WsReconnectClient` keeps a single persistent connection, so the proxy's
+    /// per-connection counter rising again is exactly the signal that the cached
+    /// client reconnected after the drop. We use a generous `max_head_age` so the
+    /// switch-back tests the reconnect path rather than chain liveness (a static
+    /// devnet may have a stale head).
+    #[tokio::test]
+    async fn switches_back_to_preferred_after_reconnect() {
+        use std::time::Duration;
+
+        // Large enough that a reachable-but-not-advancing devnet still counts as
+        // fresh; this test is about reconnect/switch-back, not head freshness.
+        let max_head_age = Duration::from_secs(3600 * 24 * 365 * 10);
+
+        let proxy = tcp_proxy::TcpProxy::start(celestia_rpc_host_port()).await;
+
+        let client = FailoverClient::new(
+            vec![
+                RpcEndpoint::new(proxy.ws_url()),
+                RpcEndpoint::new(celestia_rpc_url()),
+            ],
+            None,
+            None,
+            // Fast health-check so the test doesn't wait long for switch-back.
+            Some(Duration::from_millis(500)),
+            max_head_age,
+        )
+        .unwrap();
+
+        // Preferred (through the proxy) serves the first request, opening one
+        // connection.
+        client.header_network_head().await.unwrap();
+        assert_eq!(
+            proxy.forwarded(),
+            1,
+            "preferred endpoint should serve first"
+        );
+
+        // Kill the preferred: force-close its connection and refuse new ones. Give
+        // the force-close a moment to land, then a request must fail over to the
+        // fallback (real node) and succeed.
+        proxy.disable();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let head = client.header_network_head().await.unwrap();
+        assert!(
+            head.height() > 0,
+            "fallback should serve while preferred is down"
+        );
+
+        // The preferred is now unhealthy and its connection is gone; the counter
+        // is stable while disabled.
+        let before = proxy.forwarded();
+
+        // Restore the preferred. The background health-check reuses the SAME cached
+        // client, which reconnects (a new proxied connection → counter rises) and
+        // is marked healthy again, so routing returns to the preferred endpoint.
+        proxy.enable();
+        let mut switched_back = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            client.header_network_head().await.unwrap();
+            if proxy.forwarded() > before {
+                switched_back = true;
+                break;
+            }
+        }
+        assert!(
+            switched_back,
+            "should reconnect and route back through the preferred endpoint after it recovers"
+        );
+    }
 }
