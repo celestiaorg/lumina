@@ -6326,7 +6326,7 @@ lumina\_node\_wasm.d.ts:2317
 > **requestAllBlobs**(`namespace`, `block_height`, `timeout_secs`?): `Promise`\<[`Blob`](#classesblobmd)[]\>
 
 Request all blobs with provided namespace in the block corresponding to this header
-using bitswap protocol.
+using the shrex protocol.
 
 ##### Parameters
 

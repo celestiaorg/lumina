@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/lumina-node-wasm-v1.0.0...lumina-node-wasm-v1.1.0-rc.1) - 2026-06-24
+
+### Added
+
+- *(node)* [**breaking**] switch sample and row requests to shrex ([#976](https://github.com/celestiaorg/lumina/pull/976))
+
 ## [1.0.0](https://github.com/celestiaorg/lumina/compare/lumina-node-wasm-v1.0.0-rc.3...lumina-node-wasm-v1.0.0) - 2026-04-03
 
 ### Other

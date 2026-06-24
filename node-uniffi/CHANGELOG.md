@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/lumina-node-uniffi-v1.0.0...lumina-node-uniffi-v1.1.0-rc.1) - 2026-06-24
+
+### Added
+
+- *(node)* [**breaking**] switch sample and row requests to shrex ([#976](https://github.com/celestiaorg/lumina/pull/976))
+
+### Other
+
+- [**breaking**] remove iOS, Android, and uniffi binding CI jobs ([#960](https://github.com/celestiaorg/lumina/pull/960))
+
 ### Deprecated
 
 - iOS/Android CI jobs, release automation, and binary artifact builds have been removed ([#960](https://github.com/celestiaorg/lumina/pull/960)). The builds will be removed in future versions.

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v1.0.0...celestia-grpc-v1.1.0-rc.1) - 2026-06-24
+
+### Added
+
+- share one failover engine across RPC and gRPC clients ([#977](https://github.com/celestiaorg/lumina/pull/977))
+- add multi-account TX service and refactor tx client ([#963](https://github.com/celestiaorg/lumina/pull/963))
+- add fibre crate with domain types ([#959](https://github.com/celestiaorg/lumina/pull/959))
+- add fibre gRPC service client and account signer ([#958](https://github.com/celestiaorg/lumina/pull/958))
+
+### Other
+
+- Add support for connect timeout ([#975](https://github.com/celestiaorg/lumina/pull/975))
+
 ## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v1.0.0-rc.2...celestia-grpc-v1.0.0-rc.3) - 2026-03-19
 
 ### Added
