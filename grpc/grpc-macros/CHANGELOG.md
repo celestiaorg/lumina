@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/celestiaorg/lumina/compare/celestia-grpc-macros-v1.0.0...celestia-grpc-macros-v2.0.0) - 2026-06-24
+
+### Added
+
+- share one failover engine across RPC and gRPC clients ([#977](https://github.com/celestiaorg/lumina/pull/977))
+
 ## [1.0.0-rc.2](https://github.com/celestiaorg/lumina/compare/celestia-grpc-macros-v0.7.0...celestia-grpc-macros-v1.0.0-rc.2) - 2026-02-25
 
 ### Added

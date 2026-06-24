@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/celestiaorg/lumina/compare/celestia-client-v1.0.0...celestia-client-v2.0.0) - 2026-06-24
+
+### Added
+
+- share one failover engine across RPC and gRPC clients ([#977](https://github.com/celestiaorg/lumina/pull/977))
+- *(client)* expose get_tx on StateApi for reading submitted transactions ([#974](https://github.com/celestiaorg/lumina/pull/974))
+- add fibre download client and lumina client integration ([#971](https://github.com/celestiaorg/lumina/pull/971))
+
+### Other
+
+- Add support for connect timeout ([#975](https://github.com/celestiaorg/lumina/pull/975))
+
 ## [1.0.0-rc.3](https://github.com/celestiaorg/lumina/compare/celestia-client-v1.0.0-rc.2...celestia-client-v1.0.0-rc.3) - 2026-03-19
 
 ### Added
