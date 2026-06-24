@@ -2,9 +2,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use ::tendermint::chain::Id;
-use arc_swap::ArcSwap;
 use celestia_types::any::IntoProtobufAny;
 use k256::ecdsa::VerifyingKey;
+use lumina_utils::failover::Failover;
 use lumina_utils::time::Interval;
 use prost::Message;
 use std::time::Duration;
@@ -24,6 +24,7 @@ use celestia_proto::celestia::valaddr::v1::{
 };
 use celestia_proto::cosmos::auth::v1beta1::query_client::QueryClient as AuthQueryClient;
 use celestia_proto::cosmos::bank::v1beta1::query_client::QueryClient as BankQueryClient;
+use celestia_proto::cosmos::base::node::v1beta1::StatusRequest;
 use celestia_proto::cosmos::base::node::v1beta1::service_client::ServiceClient as ConfigServiceClient;
 use celestia_proto::cosmos::base::tendermint::v1beta1::service_client::ServiceClient as TendermintServiceClient;
 use celestia_proto::cosmos::staking::v1beta1::query_client::QueryClient as StakingQueryClient;
@@ -98,20 +99,20 @@ pub struct GrpcClient {
 }
 
 struct GrpcClientInner {
-    transports: Arc<ArcSwap<Vec<BoxedTransport>>>,
+    failover: Arc<Failover<BoxedTransport, Error>>,
     account: Option<AccountState>,
     chain_state: OnceCell<ChainState>,
 }
 
 impl GrpcClient {
-    /// Create a new client wrapping given transports
+    /// Create a new client wrapping the given failover engine over the transports.
     pub(crate) fn new(
-        transports: Arc<ArcSwap<Vec<BoxedTransport>>>,
+        failover: Arc<Failover<BoxedTransport, Error>>,
         account: Option<AccountState>,
     ) -> Self {
         Self {
             inner: Arc::new(GrpcClientInner {
-                transports,
+                failover,
                 account,
                 chain_state: OnceCell::new(),
             }),
@@ -998,6 +999,38 @@ impl fmt::Debug for GrpcClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("GrpcClient { .. }")
     }
+}
+
+/// Probe a single transport for its current head's timestamp (unix seconds).
+///
+/// Used by the failover health-check to tell whether a recovered preferred
+/// endpoint's head is recent. Uses the lightweight node `Status` query (just
+/// metadata, no block body). Returns `None` if the endpoint is unreachable or
+/// reports no timestamp.
+///
+/// The endpoint's own metadata and timeout are applied to the request, mirroring
+/// the generated call path, so an endpoint that requires per-endpoint auth (e.g.
+/// a bearer token) is probed with that auth too.
+pub(crate) async fn probe_head(transport: Arc<BoxedTransport>) -> Option<i64> {
+    let context = &transport.metadata.context;
+
+    let mut request = tonic::Request::from_parts(
+        context.metadata.clone(),
+        tonic::Extensions::new(),
+        StatusRequest {},
+    );
+    if let Some(timeout) = context.timeout {
+        request.set_timeout(timeout);
+    }
+
+    let mut client = ConfigServiceClient::new((*transport).clone());
+
+    let fut = client.status(request);
+
+    #[cfg(target_arch = "wasm32")]
+    let fut = send_wrapper::SendWrapper::new(fut);
+
+    Some(fut.await.ok()?.into_inner().timestamp?.seconds)
 }
 
 fn is_wrong_sequence(code: ErrorCode) -> bool {

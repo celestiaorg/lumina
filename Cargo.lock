@@ -121,15 +121,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
-name = "arc-swap"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ded5f9a03ac8f24d1b8a25101ee812cd32cdc8c50a4c50237de2c4915850e73"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -774,7 +765,6 @@ dependencies = [
 name = "celestia-grpc"
 version = "1.0.0"
 dependencies = [
- "arc-swap",
  "async-trait",
  "bytes",
  "celestia-grpc-macros",
@@ -3647,6 +3637,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

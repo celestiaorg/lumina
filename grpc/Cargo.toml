@@ -26,9 +26,8 @@ crate-type = ["cdylib", "lib"]
 celestia-grpc-macros.workspace = true
 celestia-proto = { workspace = true, features = ["tonic"] }
 celestia-types.workspace = true
-lumina-utils = { workspace = true, features = ["time", "executor"] }
+lumina-utils = { workspace = true, features = ["time", "executor", "failover"] }
 
-arc-swap = "1"
 async-trait = { workspace = true }
 bytes.workspace = true
 dyn-clone = "1"

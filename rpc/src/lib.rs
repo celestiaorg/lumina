@@ -10,6 +10,11 @@ pub mod blobstream;
 pub mod client;
 pub mod das;
 mod error;
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "wasm-bindgen")
+))]
+mod failover;
 pub mod fraud;
 mod header;
 #[cfg(feature = "p2p")]
@@ -40,6 +45,21 @@ pub use crate::blobstream::BlobstreamServer;
 pub use crate::client::Client;
 pub use crate::das::DasClient;
 pub use crate::error::{Error, Result};
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "wasm-bindgen")
+))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+        not(target_arch = "wasm32"),
+        all(target_arch = "wasm32", feature = "wasm-bindgen")
+    )))
+)]
+pub use crate::failover::{
+    DEFAULT_HEALTH_CHECK_INTERVAL, DEFAULT_MAX_HEAD_AGE, DEFAULT_PROBE_TIMEOUT, FailoverClient,
+    RpcEndpoint,
+};
 pub use crate::fraud::FraudClient;
 pub use crate::fraud::FraudRpcServer;
 pub use crate::fraud::FraudServer;

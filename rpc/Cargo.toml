@@ -31,6 +31,7 @@ jsonrpsee = { workspace = true, features = [
   "macros",
   "server-core",
 ] }
+lumina-utils = { workspace = true, features = ["executor", "time", "failover"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_repr.workspace = true
@@ -77,7 +78,13 @@ libp2p = { workspace = true, features = [
   "noise",
   "yamux",
 ] }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = [
+  "rt",
+  "macros",
+  "net",
+  "io-util",
+  "time",
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 getrandom_02.workspace = true
