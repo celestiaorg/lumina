@@ -48,7 +48,7 @@ dashmap = "6"
 either = "1.12"
 futures.workspace = true
 integer-encoding = "4.1.0"
-multihash-codetable = { version = "0.1.2", features = ["sha2"] }
+multihash-codetable = { version = "0.2.2", features = ["sha2"] }
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }
 smallvec = { version = "1.13.2", features = [
