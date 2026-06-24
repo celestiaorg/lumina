@@ -477,10 +477,19 @@ mod tests {
 
     /// A configurable fake transport client. `head` is the head's unix-seconds
     /// timestamp; the probe returns it so the engine can judge freshness.
+    ///
+    /// It also models a *self-healing* connection like `celestia_rpc`'s
+    /// `WsReconnectClient`: `connected` tracks the live socket, and a request made
+    /// while disconnected transparently reconnects (bumping `reconnects`) before
+    /// serving — provided the backend (`up`) is reachable. This lets a test drive
+    /// recovery through the engine's *cached* client without the engine ever
+    /// rebuilding it.
     struct FakeClient {
         up: AtomicBool,
         calls: AtomicUsize,
         head: AtomicI64,
+        connected: AtomicBool,
+        reconnects: AtomicUsize,
     }
 
     /// A simple error type with a "network error" variant.
@@ -510,11 +519,21 @@ mod tests {
                 up: AtomicBool::new(up),
                 calls: AtomicUsize::new(0),
                 head: AtomicI64::new(now_unix_secs()),
+                connected: AtomicBool::new(true),
+                reconnects: AtomicUsize::new(0),
             }
         }
 
         fn set_up(&self, up: bool) {
             self.up.store(up, Ordering::SeqCst);
+        }
+
+        fn is_connected(&self) -> bool {
+            self.connected.load(Ordering::SeqCst)
+        }
+
+        fn reconnects(&self) -> usize {
+            self.reconnects.load(Ordering::SeqCst)
         }
 
         fn set_fresh_head(&self) {
@@ -534,12 +553,28 @@ mod tests {
             self.calls.load(Ordering::SeqCst)
         }
 
-        /// Returns `1` when up, a network error otherwise.
+        /// Returns `1` when reachable, a network error otherwise — reconnecting in
+        /// place if the socket had dropped (mirroring `WsReconnectClient`).
         fn request(&self) -> Result<u64, FakeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+
+            // Socket previously dropped: reconnect on use if the backend is up,
+            // otherwise the reconnect fails and we stay disconnected.
+            if !self.connected.load(Ordering::SeqCst) {
+                if self.up.load(Ordering::SeqCst) {
+                    self.connected.store(true, Ordering::SeqCst);
+                    self.reconnects.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    return Err(FakeError::Network);
+                }
+            }
+
             if self.up.load(Ordering::SeqCst) {
                 Ok(1)
             } else {
+                // Backend dropped under a live socket: detect it and mark the
+                // connection dead so the next use must reconnect.
+                self.connected.store(false, Ordering::SeqCst);
                 Err(FakeError::Network)
             }
         }
@@ -757,6 +792,59 @@ mod tests {
         }
         assert_eq!(fallback.calls(), before, "fallback must not be re-pinned");
         assert_eq!(engine.active(), 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_reconnects_cached_client_without_rebuilding() {
+        // The seam the engine relies on: it keeps an endpoint's cached client and
+        // never rebuilds it (these slots have no build factory), so recovery after
+        // a disconnect can only come from the client self-healing on its next use
+        // — exactly how celestia_rpc's WsReconnectClient reconnects on
+        // RestartNeeded. This test drives a real disconnect/recovery through the
+        // engine and asserts the switch-back happens via an in-place reconnect.
+        let preferred = Arc::new(FakeClient::new(true));
+        let fallback = Arc::new(FakeClient::new(true));
+        let engine = engine(vec![preferred.clone(), fallback.clone()]);
+
+        do_request(&engine).await.unwrap();
+        assert_eq!(engine.active(), 0);
+
+        // The preferred backend goes down: the next request detects the dropped
+        // connection, fails over to the fallback, and leaves the preferred's
+        // cached client disconnected.
+        preferred.set_up(false);
+        do_request(&engine).await.unwrap();
+        assert_eq!(engine.active(), 1);
+        assert!(
+            !preferred.is_connected(),
+            "the dropped socket is now disconnected"
+        );
+
+        // While still down, the recovery probe reuses the cached client but cannot
+        // reconnect it, so we stay on the fallback.
+        do_health_check(&engine).await;
+        assert_eq!(engine.active(), 1);
+        assert_eq!(
+            preferred.reconnects(),
+            0,
+            "must not reconnect while the backend is down"
+        );
+
+        // The backend recovers. The next probe reuses the SAME cached client,
+        // which reconnects itself, and routing switches back — the engine never
+        // rebuilt the client.
+        preferred.set_up(true);
+        do_health_check(&engine).await;
+        assert_eq!(
+            engine.active(),
+            0,
+            "switches back once the cached client has reconnected"
+        );
+        assert_eq!(
+            preferred.reconnects(),
+            1,
+            "recovery came from a single in-place reconnect"
+        );
     }
 
     #[tokio::test]
