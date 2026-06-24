@@ -34,7 +34,7 @@ const_format = "0.2.32"
 ed25519-consensus = { version = "2", optional = true }
 enum_dispatch = "0.3.13"
 leopard-codec.workspace = true
-multihash = "0.19.1"
+multihash = "0.19.4"
 rand = { workspace = true, optional = true }
 rust_decimal = { version = "1.35", default-features = false, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }

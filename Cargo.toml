@@ -40,7 +40,7 @@ async-stream = "0.3.5"
 async-trait = "0.1.80"
 base64 = "0.22.1"
 bytes = { version = "1.6", default-features = false }
-cid = { version = "0.11", default-features = false }
+cid = { version = "0.11.2", default-features = false }
 dotenvy = "0.15"
 futures = "0.3.30"
 futures-util = "0.3"
