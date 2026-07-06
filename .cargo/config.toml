@@ -1,2 +1,6 @@
+[alias]
+# Run the in-house release tooling: `cargo xtask prepare-release` / `cargo xtask release`.
+xtask = "run --package xtask --"
+
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

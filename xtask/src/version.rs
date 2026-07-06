@@ -1,0 +1,476 @@
+//! Pure version-validation logic for the release tool.
+//!
+//! This module implements the **Version validation** rules from
+//! `release-spec/orchestrator.md` (§ "Version validation"). Given a *current*
+//! version and a *requested next* version it decides whether the next version is
+//! **exactly** a legal successor of the current one, and — when it is —
+//! classifies which kind of bump the transition represents.
+//!
+//! The rules, verbatim from the spec:
+//!
+//! * If the current version is a prerelease `X.Y.Z-rc.N`, the legal next versions
+//!   are `X.Y.Z-rc.(N+1)` (continue the rc series) or `X.Y.Z` (promote rc →
+//!   final).
+//! * If the current version is stable `X.Y.Z`, the legal next versions are a
+//!   single SemVer bump where a higher component resets the lower ones to `0` —
+//!   `(X+1).0.0` (major), `X.(Y+1).0` (minor), `X.Y.(Z+1)` (patch) — or any one of
+//!   those three with a `-rc.1` suffix appended.
+//! * Anything else is rejected.
+//!
+//! The module is **pure**: it performs no filesystem, network, git, or process
+//! I/O, holds no state, and is deterministic in its inputs. Determining *which*
+//! version is current (from git tags + the registry) is out of scope and belongs
+//! to the workspace/command modules.
+
+pub use semver::Version;
+
+/// Classification of a *legal* transition from a current version to a requested
+/// next version.
+///
+/// Returned by [`classify_bump`] / [`is_legal_successor`] when, and only when, the
+/// requested version is an exact legal successor under the spec rules. Callers can
+/// use it to describe the transition (e.g. in a release-PR body).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bump {
+    /// Current is `X.Y.Z-rc.N`, next is `X.Y.Z-rc.(N+1)` — continue the rc series.
+    RcContinue,
+    /// Current is `X.Y.Z-rc.N`, next is `X.Y.Z` — promote the rc to a final release.
+    RcPromote,
+    /// Current stable, next is `(X+1).0.0` — a major bump.
+    Major,
+    /// Current stable, next is `X.(Y+1).0` — a minor bump.
+    Minor,
+    /// Current stable, next is `X.Y.(Z+1)` — a patch bump.
+    Patch,
+    /// Current stable, next is `(X+1).0.0-rc.1` — a major bump's first rc.
+    MajorRc,
+    /// Current stable, next is `X.(Y+1).0-rc.1` — a minor bump's first rc.
+    MinorRc,
+    /// Current stable, next is `X.Y.(Z+1)-rc.1` — a patch bump's first rc.
+    PatchRc,
+}
+
+/// Everything that can go wrong while validating a version transition.
+///
+/// One variant per failure case, per the module contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionError {
+    /// The *current* version string failed to parse as SemVer.
+    ParseCurrent {
+        /// The offending input string.
+        input: String,
+        /// The underlying `semver` parse error, rendered as text.
+        source: String,
+    },
+    /// The *requested next* version string failed to parse as SemVer.
+    ParseNext {
+        /// The offending input string.
+        input: String,
+        /// The underlying `semver` parse error, rendered as text.
+        source: String,
+    },
+    /// The current version parsed but is not a shape these rules model: it carries
+    /// a pre-release other than exactly `rc.N` (with `N >= 1`), or it carries build
+    /// metadata.
+    UnsupportedCurrent {
+        /// The parsed current version.
+        version: Version,
+    },
+    /// Both versions parsed and the current shape is supported, but `next` is not
+    /// any legal successor of `current` under the spec rules.
+    IllegalSuccessor {
+        /// The parsed current version.
+        current: Version,
+        /// The parsed requested-next version.
+        next: Version,
+    },
+}
+
+impl std::fmt::Display for VersionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VersionError::ParseCurrent { input, source } => {
+                write!(f, "current version `{input}` is not valid SemVer: {source}")
+            }
+            VersionError::ParseNext { input, source } => {
+                write!(
+                    f,
+                    "requested next version `{input}` is not valid SemVer: {source}"
+                )
+            }
+            VersionError::UnsupportedCurrent { version } => write!(
+                f,
+                "current version `{version}` has an unsupported shape \
+                 (only stable `X.Y.Z` or release-candidate `X.Y.Z-rc.N` are supported)"
+            ),
+            VersionError::IllegalSuccessor { current, next } => {
+                write!(f, "`{next}` is not a legal successor of `{current}`")
+            }
+        }
+    }
+}
+
+impl std::error::Error for VersionError {}
+
+/// Parse a SemVer string as the *current* version.
+///
+/// A parse failure is tagged [`VersionError::ParseCurrent`].
+pub fn parse_current(s: &str) -> Result<Version, VersionError> {
+    Version::parse(s).map_err(|e| VersionError::ParseCurrent {
+        input: s.to_owned(),
+        source: e.to_string(),
+    })
+}
+
+/// Parse a SemVer string as the *requested next* version.
+///
+/// A parse failure is tagged [`VersionError::ParseNext`].
+pub fn parse_next(s: &str) -> Result<Version, VersionError> {
+    Version::parse(s).map_err(|e| VersionError::ParseNext {
+        input: s.to_owned(),
+        source: e.to_string(),
+    })
+}
+
+/// Classify the transition `current -> next`, returning the [`Bump`] kind iff
+/// `next` is exactly a legal successor of `current` under the spec rules.
+///
+/// Operates on already-parsed [`Version`]s; it does not parse. Returns:
+///
+/// * [`VersionError::UnsupportedCurrent`] if `current` is neither stable nor a
+///   modeled `rc.N` prerelease.
+/// * [`VersionError::IllegalSuccessor`] if `current` is a supported shape but
+///   `next` is not any legal successor.
+pub fn classify_bump(current: &Version, next: &Version) -> Result<Bump, VersionError> {
+    let illegal = || VersionError::IllegalSuccessor {
+        current: current.clone(),
+        next: next.clone(),
+    };
+
+    match rc_number(current) {
+        // Current is a modeled release candidate: X.Y.Z-rc.N.
+        CurrentShape::Rc(n) => {
+            // Continue the rc series: same core, rc.(N+1).
+            if same_core(next, current) {
+                if let CurrentShape::Rc(m) = rc_number(next) {
+                    if m == n + 1 {
+                        return Ok(Bump::RcContinue);
+                    }
+                }
+                // Promote to final: same core, no pre-release, no build.
+                if next.pre.is_empty() && next.build.is_empty() {
+                    return Ok(Bump::RcPromote);
+                }
+            }
+            Err(illegal())
+        }
+        // Current is stable: X.Y.Z.
+        CurrentShape::Stable => {
+            // Build metadata on next is never a legal successor.
+            if !next.build.is_empty() {
+                return Err(illegal());
+            }
+            let core_bump = stable_core_bump(current, next);
+            match (&core_bump, next.pre.as_str()) {
+                (Some(b), "") => Ok(*b),
+                (Some(b), "rc.1") => Ok(rc_variant(*b)),
+                _ => Err(illegal()),
+            }
+        }
+        // Current carries an unmodeled pre-release or build metadata.
+        CurrentShape::Unsupported => Err(VersionError::UnsupportedCurrent {
+            version: current.clone(),
+        }),
+    }
+}
+
+/// Parse both strings then classify the transition.
+///
+/// Equivalent to [`parse_current`] then [`parse_next`] then [`classify_bump`],
+/// short-circuiting on the first parse error.
+pub fn is_legal_successor(current: &str, next: &str) -> Result<Bump, VersionError> {
+    let current = parse_current(current)?;
+    let next = parse_next(next)?;
+    classify_bump(&current, &next)
+}
+
+/// The recognised shape of a version with respect to its pre-release.
+enum CurrentShape {
+    /// Stable: no pre-release, no build metadata.
+    Stable,
+    /// A modeled release candidate `rc.N` with `N >= 1`, no build metadata.
+    Rc(u64),
+    /// Anything else (foreign pre-release, `rc` without a number, `rc.0`,
+    /// multi-part rc, or any build metadata).
+    Unsupported,
+}
+
+/// Determine the [`CurrentShape`] of a version: stable, modeled `rc.N`, or
+/// unsupported. Build metadata always renders a version unsupported.
+fn rc_number(v: &Version) -> CurrentShape {
+    if !v.build.is_empty() {
+        return CurrentShape::Unsupported;
+    }
+    if v.pre.is_empty() {
+        return CurrentShape::Stable;
+    }
+    // Pre-release present: accept only exactly `rc.<number>` with number >= 1.
+    let mut parts = v.pre.as_str().split('.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("rc"), Some(num), None) => match num.parse::<u64>() {
+            // Reject leading-zero forms like `rc.01` (not canonical) and `rc.0`.
+            Ok(n) if n >= 1 && !num.starts_with('0') => CurrentShape::Rc(n),
+            _ => CurrentShape::Unsupported,
+        },
+        _ => CurrentShape::Unsupported,
+    }
+}
+
+/// True iff `a` and `b` have the same `major.minor.patch` core (ignoring
+/// pre-release and build).
+fn same_core(a: &Version, b: &Version) -> bool {
+    a.major == b.major && a.minor == b.minor && a.patch == b.patch
+}
+
+/// If `next`'s core (major.minor.patch) is exactly one legal stable bump of
+/// `current`'s core — with lower components reset to 0 — return which one.
+/// Ignores pre-release/build; the caller checks those.
+fn stable_core_bump(current: &Version, next: &Version) -> Option<Bump> {
+    let (cx, cy, cz) = (current.major, current.minor, current.patch);
+    let (nx, ny, nz) = (next.major, next.minor, next.patch);
+    if nx == cx + 1 && ny == 0 && nz == 0 {
+        Some(Bump::Major)
+    } else if nx == cx && ny == cy + 1 && nz == 0 {
+        Some(Bump::Minor)
+    } else if nx == cx && ny == cy && nz == cz + 1 {
+        Some(Bump::Patch)
+    } else {
+        None
+    }
+}
+
+/// Map a stable bump to its `-rc.1` counterpart.
+fn rc_variant(bump: Bump) -> Bump {
+    match bump {
+        Bump::Major => Bump::MajorRc,
+        Bump::Minor => Bump::MinorRc,
+        Bump::Patch => Bump::PatchRc,
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Assert `next` is a legal successor of `current` with the expected bump.
+    /// Exercises both `is_legal_successor` (string entry point) and the symmetry
+    /// with `classify_bump` on the parsed values.
+    fn ok(current: &str, next: &str, expected: Bump) {
+        assert_eq!(
+            is_legal_successor(current, next),
+            Ok(expected),
+            "{current} -> {next} should be {expected:?}"
+        );
+        let c = Version::parse(current).unwrap();
+        let n = Version::parse(next).unwrap();
+        assert_eq!(classify_bump(&c, &n), Ok(expected));
+    }
+
+    /// Assert `next` is rejected as an `IllegalSuccessor` of `current`.
+    fn illegal(current: &str, next: &str) {
+        match is_legal_successor(current, next) {
+            Err(VersionError::IllegalSuccessor { .. }) => {}
+            other => panic!("{current} -> {next} expected IllegalSuccessor, got {other:?}"),
+        }
+    }
+
+    // --- Spec rule: prerelease current `X.Y.Z-rc.N` -> rc.(N+1) (RcContinue) ---
+
+    #[test]
+    fn rc_continues_to_next_rc() {
+        ok("1.2.0-rc.2", "1.2.0-rc.3", Bump::RcContinue);
+        ok("0.1.0-rc.1", "0.1.0-rc.2", Bump::RcContinue);
+        ok("2.0.0-rc.9", "2.0.0-rc.10", Bump::RcContinue);
+    }
+
+    // --- Spec rule: prerelease current `X.Y.Z-rc.N` -> `X.Y.Z` (RcPromote) ---
+
+    #[test]
+    fn rc_promotes_to_final() {
+        ok("1.2.0-rc.2", "1.2.0", Bump::RcPromote);
+        ok("0.1.0-rc.1", "0.1.0", Bump::RcPromote);
+    }
+
+    // --- Spec rule: stable current -> major/minor/patch with lower reset ---
+
+    #[test]
+    fn stable_major_bump_resets_lower() {
+        ok("1.4.2", "2.0.0", Bump::Major);
+        ok("0.9.9", "1.0.0", Bump::Major);
+    }
+
+    #[test]
+    fn stable_minor_bump_resets_patch() {
+        ok("1.4.2", "1.5.0", Bump::Minor);
+        ok("1.0.0", "1.1.0", Bump::Minor);
+    }
+
+    #[test]
+    fn stable_patch_bump() {
+        ok("1.4.2", "1.4.3", Bump::Patch);
+        ok("0.0.0", "0.0.1", Bump::Patch);
+    }
+
+    // --- Spec rule: stable current -> any of the three bumps with `-rc.1` ---
+
+    #[test]
+    fn stable_major_rc1() {
+        ok("1.4.2", "2.0.0-rc.1", Bump::MajorRc);
+    }
+
+    #[test]
+    fn stable_minor_rc1() {
+        ok("1.4.2", "1.5.0-rc.1", Bump::MinorRc);
+    }
+
+    #[test]
+    fn stable_patch_rc1() {
+        ok("1.4.2", "1.4.3-rc.1", Bump::PatchRc);
+    }
+
+    // --- Rejection: illegal jumps (skip a number) ---
+
+    #[test]
+    fn reject_skipping_components() {
+        illegal("1.4.2", "3.0.0"); // major jumps by 2
+        illegal("1.4.2", "1.7.0"); // minor jumps by 2
+        illegal("1.4.2", "1.4.5"); // patch jumps by 3
+        illegal("1.2.0-rc.2", "1.2.0-rc.4"); // rc skips a number
+    }
+
+    // --- Rejection: higher component bumped without resetting lower ones ---
+
+    #[test]
+    fn reject_non_reset() {
+        illegal("1.4.2", "2.4.2"); // major bump but minor/patch not reset
+        illegal("1.4.2", "2.0.2"); // major bump but patch not reset
+        illegal("1.4.2", "2.4.0"); // major bump but minor not reset
+        illegal("1.4.2", "1.5.2"); // minor bump but patch not reset
+    }
+
+    // --- Rejection: bumping more than one component at once ---
+
+    #[test]
+    fn reject_multi_component_bump() {
+        illegal("1.4.2", "2.1.0");
+        illegal("1.0.0", "2.1.1");
+    }
+
+    // --- Rejection: going backwards / staying put ---
+
+    #[test]
+    fn reject_backwards_or_same() {
+        illegal("1.4.2", "1.4.2"); // identical
+        illegal("1.4.2", "1.4.1"); // patch backwards
+        illegal("1.4.2", "1.3.0"); // minor backwards
+        illegal("2.0.0", "1.0.0"); // major backwards
+        illegal("1.2.0-rc.3", "1.2.0-rc.2"); // rc backwards
+    }
+
+    // --- Rejection: rc edge cases on the stable path ---
+
+    #[test]
+    fn reject_wrong_rc_on_stable() {
+        illegal("1.4.2", "2.0.0-rc.2"); // must be rc.1, not rc.2
+        illegal("1.4.2", "1.4.2-rc.1"); // rc.1 on a non-bumped core
+        illegal("1.4.2", "2.0.0-beta.1"); // foreign pre-release
+        illegal("1.4.2", "2.4.2-rc.1"); // rc.1 but lower not reset
+    }
+
+    // --- Rejection: rc-current that is neither rc.(N+1) nor promotion ---
+
+    #[test]
+    fn reject_illegal_rc_transitions() {
+        illegal("1.2.0-rc.2", "1.3.0"); // promote to a different core
+        illegal("1.2.0-rc.2", "1.2.0-rc.2"); // same rc
+        illegal("1.2.0-rc.2", "1.2.1"); // wrong core on promote
+        illegal("1.2.0-rc.2", "1.2.0-rc.1"); // rc decreases
+    }
+
+    // --- Rejection: build metadata is never a legal successor ---
+
+    #[test]
+    fn reject_build_metadata_on_next() {
+        illegal("1.4.2", "1.4.3+build.5");
+        illegal("1.4.2", "2.0.0-rc.1+sha");
+    }
+
+    // --- UnsupportedCurrent: current carries an unmodeled shape ---
+
+    #[test]
+    fn unsupported_current_shapes() {
+        for (cur, next) in [
+            ("1.2.0-beta.1", "1.2.0"),
+            ("1.2.0-rc", "1.2.0"),     // rc with no number
+            ("1.2.0-rc.0", "1.2.0"),   // rc.0 not modeled
+            ("1.2.0-rc.1.2", "1.2.0"), // multi-part rc
+            ("1.2.0-alpha", "1.2.0"),
+        ] {
+            match is_legal_successor(cur, next) {
+                Err(VersionError::UnsupportedCurrent { .. }) => {}
+                other => panic!("{cur} should be UnsupportedCurrent, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_current_with_build_metadata() {
+        match is_legal_successor("1.2.0+meta", "1.2.1") {
+            Err(VersionError::UnsupportedCurrent { .. }) => {}
+            other => panic!("build metadata on current should be Unsupported, got {other:?}"),
+        }
+    }
+
+    // --- Parse errors: garbage input, tagged to the right side ---
+
+    #[test]
+    fn parse_errors_tagged_per_side() {
+        assert!(matches!(
+            is_legal_successor("not-a-version", "1.0.0"),
+            Err(VersionError::ParseCurrent { .. })
+        ));
+        assert!(matches!(
+            is_legal_successor("1.0.0", "garbage"),
+            Err(VersionError::ParseNext { .. })
+        ));
+        // Current is parsed first: a bad current short-circuits before next.
+        assert!(matches!(
+            is_legal_successor("bad", "also-bad"),
+            Err(VersionError::ParseCurrent { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_helpers_tag_correctly() {
+        assert!(matches!(
+            parse_current("x.y.z"),
+            Err(VersionError::ParseCurrent { .. })
+        ));
+        assert!(matches!(
+            parse_next("x.y.z"),
+            Err(VersionError::ParseNext { .. })
+        ));
+        assert_eq!(parse_current("1.2.3").unwrap(), Version::new(1, 2, 3));
+        assert_eq!(parse_next("1.2.3").unwrap(), Version::new(1, 2, 3));
+    }
+
+    // --- Error type plumbing: Display + std::error::Error ---
+
+    #[test]
+    fn error_implements_display_and_error_trait() {
+        let e = is_legal_successor("1.4.2", "9.9.9").unwrap_err();
+        let _: &dyn std::error::Error = &e;
+        assert!(!e.to_string().is_empty());
+    }
+}
