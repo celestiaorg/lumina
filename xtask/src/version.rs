@@ -1,12 +1,10 @@
-//! Pure version-validation logic for the release tool.
+//! Version-validation logic for the release tool.
 //!
-//! This module implements the **Version validation** rules from
-//! `release-spec/orchestrator.md` (§ "Version validation"). Given a *current*
-//! version and a *requested next* version it decides whether the next version is
-//! **exactly** a legal successor of the current one, and — when it is —
-//! classifies which kind of bump the transition represents.
+//! Given a current version and a requested next version, decide whether the next
+//! version is exactly a legal successor of the current one, and — when it is —
+//! classify which kind of bump the transition represents.
 //!
-//! The rules, verbatim from the spec:
+//! The rules:
 //!
 //! * If the current version is a prerelease `X.Y.Z-rc.N`, the legal next versions
 //!   are `X.Y.Z-rc.(N+1)` (continue the rc series) or `X.Y.Z` (promote rc →
@@ -17,10 +15,9 @@
 //!   those three with a `-rc.1` suffix appended.
 //! * Anything else is rejected.
 //!
-//! The module is **pure**: it performs no filesystem, network, git, or process
-//! I/O, holds no state, and is deterministic in its inputs. Determining *which*
-//! version is current (from git tags + the registry) is out of scope and belongs
-//! to the workspace/command modules.
+//! This module is pure: no filesystem, network, git, or process I/O, no state, and
+//! deterministic in its inputs. Determining which version is current (from git tags
+//! and the registry) lives in the workspace/command modules.
 
 pub use semver::Version;
 
@@ -28,8 +25,8 @@ pub use semver::Version;
 /// next version.
 ///
 /// Returned by [`classify_bump`] / [`is_legal_successor`] when, and only when, the
-/// requested version is an exact legal successor under the spec rules. Callers can
-/// use it to describe the transition (e.g. in a release-PR body).
+/// requested version is an exact legal successor. Callers can use it to describe the
+/// transition (e.g. in a release-PR body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bump {
     /// Current is `X.Y.Z-rc.N`, next is `X.Y.Z-rc.(N+1)` — continue the rc series.
@@ -51,8 +48,6 @@ pub enum Bump {
 }
 
 /// Everything that can go wrong while validating a version transition.
-///
-/// One variant per failure case, per the module contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionError {
     /// The *current* version string failed to parse as SemVer.
@@ -77,7 +72,7 @@ pub enum VersionError {
         version: Version,
     },
     /// Both versions parsed and the current shape is supported, but `next` is not
-    /// any legal successor of `current` under the spec rules.
+    /// any legal successor of `current`.
     IllegalSuccessor {
         /// The parsed current version.
         current: Version,
@@ -133,7 +128,7 @@ pub fn parse_next(s: &str) -> Result<Version, VersionError> {
 }
 
 /// Classify the transition `current -> next`, returning the [`Bump`] kind iff
-/// `next` is exactly a legal successor of `current` under the spec rules.
+/// `next` is exactly a legal successor of `current`.
 ///
 /// Operates on already-parsed [`Version`]s; it does not parse. Returns:
 ///
@@ -285,7 +280,7 @@ mod tests {
         }
     }
 
-    // --- Spec rule: prerelease current `X.Y.Z-rc.N` -> rc.(N+1) (RcContinue) ---
+    // prerelease current X.Y.Z-rc.N -> rc.(N+1)
 
     #[test]
     fn rc_continues_to_next_rc() {
@@ -294,7 +289,7 @@ mod tests {
         ok("2.0.0-rc.9", "2.0.0-rc.10", Bump::RcContinue);
     }
 
-    // --- Spec rule: prerelease current `X.Y.Z-rc.N` -> `X.Y.Z` (RcPromote) ---
+    // prerelease current X.Y.Z-rc.N -> X.Y.Z (promotion)
 
     #[test]
     fn rc_promotes_to_final() {
@@ -302,7 +297,7 @@ mod tests {
         ok("0.1.0-rc.1", "0.1.0", Bump::RcPromote);
     }
 
-    // --- Spec rule: stable current -> major/minor/patch with lower reset ---
+    // stable current -> major/minor/patch with lower components reset
 
     #[test]
     fn stable_major_bump_resets_lower() {
@@ -322,7 +317,7 @@ mod tests {
         ok("0.0.0", "0.0.1", Bump::Patch);
     }
 
-    // --- Spec rule: stable current -> any of the three bumps with `-rc.1` ---
+    // stable current -> any of the three bumps with a -rc.1 suffix
 
     #[test]
     fn stable_major_rc1() {
@@ -339,7 +334,7 @@ mod tests {
         ok("1.4.2", "1.4.3-rc.1", Bump::PatchRc);
     }
 
-    // --- Rejection: illegal jumps (skip a number) ---
+    // reject illegal jumps that skip a number
 
     #[test]
     fn reject_skipping_components() {
@@ -349,7 +344,7 @@ mod tests {
         illegal("1.2.0-rc.2", "1.2.0-rc.4"); // rc skips a number
     }
 
-    // --- Rejection: higher component bumped without resetting lower ones ---
+    // reject a higher component bumped without resetting the lower ones
 
     #[test]
     fn reject_non_reset() {
@@ -359,7 +354,7 @@ mod tests {
         illegal("1.4.2", "1.5.2"); // minor bump but patch not reset
     }
 
-    // --- Rejection: bumping more than one component at once ---
+    // reject bumping more than one component at once
 
     #[test]
     fn reject_multi_component_bump() {
@@ -367,7 +362,7 @@ mod tests {
         illegal("1.0.0", "2.1.1");
     }
 
-    // --- Rejection: going backwards / staying put ---
+    // reject going backwards or staying put
 
     #[test]
     fn reject_backwards_or_same() {
@@ -378,7 +373,7 @@ mod tests {
         illegal("1.2.0-rc.3", "1.2.0-rc.2"); // rc backwards
     }
 
-    // --- Rejection: rc edge cases on the stable path ---
+    // reject rc edge cases on the stable path
 
     #[test]
     fn reject_wrong_rc_on_stable() {
@@ -388,7 +383,7 @@ mod tests {
         illegal("1.4.2", "2.4.2-rc.1"); // rc.1 but lower not reset
     }
 
-    // --- Rejection: rc-current that is neither rc.(N+1) nor promotion ---
+    // reject an rc current that is neither rc.(N+1) nor a promotion
 
     #[test]
     fn reject_illegal_rc_transitions() {
@@ -398,7 +393,7 @@ mod tests {
         illegal("1.2.0-rc.2", "1.2.0-rc.1"); // rc decreases
     }
 
-    // --- Rejection: build metadata is never a legal successor ---
+    // build metadata is never a legal successor
 
     #[test]
     fn reject_build_metadata_on_next() {
@@ -406,7 +401,7 @@ mod tests {
         illegal("1.4.2", "2.0.0-rc.1+sha");
     }
 
-    // --- UnsupportedCurrent: current carries an unmodeled shape ---
+    // current carries an unmodeled shape
 
     #[test]
     fn unsupported_current_shapes() {
@@ -432,7 +427,7 @@ mod tests {
         }
     }
 
-    // --- Parse errors: garbage input, tagged to the right side ---
+    // garbage input is tagged to the right side
 
     #[test]
     fn parse_errors_tagged_per_side() {
@@ -464,8 +459,6 @@ mod tests {
         assert_eq!(parse_current("1.2.3").unwrap(), Version::new(1, 2, 3));
         assert_eq!(parse_next("1.2.3").unwrap(), Version::new(1, 2, 3));
     }
-
-    // --- Error type plumbing: Display + std::error::Error ---
 
     #[test]
     fn error_implements_display_and_error_trait() {

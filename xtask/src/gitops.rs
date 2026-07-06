@@ -1,37 +1,10 @@
-//! Thin, well-typed git primitives for the release tool.
+//! Typed wrappers around the `git` CLI for the release commands: branch checks,
+//! create-or-reset of the release branch, a stage-all + commit helper, push, and
+//! tag existence/creation. Pure primitives — the commands decide when to call them.
 //!
-//! This module shells out to the `git` CLI (via [`std::process::Command`]) to
-//! provide exactly the set of git operations the two orchestrator flows need:
-//! branch existence checks, create-or-reset of the release branch, a stage-all +
-//! single-commit helper, push, tag existence checks, and tag creation.
-//!
-//! The module owns *no policy*: it does not decide *when* to call these (branch
-//! guard, `--push` gating, idempotency scan) — that lives in the command modules.
-//! It only exposes correct, well-documented primitives.
-//!
-//! ## Side effects & network
-//!
-//! Every method runs `git` in [`Git::repo_root`] via
-//! [`Command::current_dir`](std::process::Command::current_dir), so behavior never
-//! depends on the process's current directory.
-//!
-//! | Method | Mutates repo | Network |
-//! | --- | --- | --- |
-//! | [`Git::new`] | no | no |
-//! | [`Git::branch_exists`] | no | only with [`Where::Remote`]/[`Where::Both`] |
-//! | [`Git::create_or_reset_branch`] | yes | no |
-//! | [`Git::stage_all_and_commit`] | yes | no |
-//! | [`Git::push`] | remote ref | **yes** |
-//! | [`Git::tag_exists`] | no | only with [`Where::Remote`]/[`Where::Both`] |
-//! | [`Git::list_tags`] | no | only with [`Where::Remote`]/[`Where::Both`] |
-//! | [`Git::create_tag`] | yes (local tag) | no |
-//!
-//! Tokens/secrets are **never** handled here: [`Git::push`] and the remote checks
-//! rely on git's ambient credential configuration (credential helper / `gh auth`).
-//!
-//! Spec traceability: `release-spec/orchestrator.md` Flow 1 (branch guard, single
-//! commit, push) and `release-spec/publish-crates-logic.md` (tag existence scan +
-//! idempotent tag creation, the orphan-tag fix).
+//! Every method runs `git` in [`Git::repo_root`], so behavior never depends on the
+//! process's current directory. Tokens/secrets are never handled here: [`Git::push`]
+//! and the remote checks rely on git's ambient credential configuration.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -41,9 +14,8 @@ use anyhow::{Context, Result, bail};
 
 /// Selects which side(s) of an existence check to consult.
 ///
-/// Encodes the network intent explicitly: Flow 1 checks the local repo always and
-/// the remote only under `--push`, while the publish idempotency scan checks
-/// "locally and on the remote".
+/// Encodes the network intent explicitly: some checks only touch the local repo,
+/// others also (or only) hit the remote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Where {
     /// Consult only the local repository (no network).
@@ -232,7 +204,7 @@ impl Git {
     }
 
     /// Check whether a tag exists. Mirrors [`Self::branch_exists`] for the tag
-    /// namespace; used by the publish-crates idempotency scan.
+    /// namespace; used by the publish idempotency scan.
     ///
     /// - Local: true iff `refs/tags/<name>` resolves. Absent ⇒ `Ok(false)`.
     /// - Remote: true iff `git ls-remote --tags <remote> <name>` matches
@@ -255,8 +227,8 @@ impl Git {
     /// - [`Where::Both`]: the union of local and remote names, deduplicated.
     ///
     /// Returns the **raw** tag names with no version parsing or ordering — callers
-    /// (e.g. M12 `cmd_prepare` current-version discovery) parse them with `semver`
-    /// and pick the highest. Order is unspecified.
+    /// (e.g. `cmd_prepare` current-version discovery) parse them with `semver` and
+    /// pick the highest. Order is unspecified.
     ///
     /// # Errors
     /// The `git` process could not be spawned, or `git ls-remote` failed (unknown
@@ -332,9 +304,8 @@ impl Git {
     /// and check it out. Implemented as `git checkout -B <name> <base>`, which is
     /// create-or-reset in one atomic call.
     ///
-    /// Recreating from scratch preserves the orchestrator's "one commit on the
-    /// release branch" guarantee: prior commits unique to a stale `name` become
-    /// unreachable from it.
+    /// Recreating from scratch preserves the "one commit on the release branch"
+    /// guarantee: prior commits unique to a stale `name` become unreachable from it.
     ///
     /// Postcondition: HEAD is on `name`, pointing at `base`. Local only (no
     /// network).
@@ -354,10 +325,10 @@ impl Git {
     /// ambient repo/global config.
     ///
     /// # Errors
-    /// Nothing staged ("nothing to commit") is reported as an error — Flow 1 is
-    /// expected to have real changes, so an empty release commit signals an upstream
-    /// bug. Also: missing committer identity, non-zero commit exit, spawn/exec
-    /// failure. Local only (no network).
+    /// Nothing staged ("nothing to commit") is reported as an error — the release
+    /// flow is expected to have real changes, so an empty release commit signals an
+    /// upstream bug. Also: missing committer identity, non-zero commit exit,
+    /// spawn/exec failure. Local only (no network).
     pub fn stage_all_and_commit(&self, message: &str) -> Result<String> {
         self.run_checked(["add", "-A"])?;
         let mut args: Vec<String> = self.identity_args();
@@ -372,9 +343,9 @@ impl Git {
     /// Push `branch` to `remote`, honoring [`PushOptions`].
     ///
     /// Runs `git push [--set-upstream] [--force-with-lease] <remote> <branch>`.
-    /// **Network operation** — called only when the orchestrator is in `--push`
-    /// mode. Authentication is whatever `git` is already configured to use; no token
-    /// is passed by this module.
+    /// **Network operation** — called only in `--push` mode. Authentication is
+    /// whatever `git` is already configured to use; no token is passed by this
+    /// module.
     ///
     /// # Errors
     /// Unknown remote, rejected push (non-fast-forward / failed lease), auth/network
@@ -464,17 +435,16 @@ impl Git {
     /// Local only — does **not** push the tag (pushing tags / cutting GitHub
     /// releases is the forge module's job).
     ///
-    /// ## Idempotency (the orphan-tag fix)
-    /// Tag creation is idempotent-friendly: creating an already-existing tag is a
-    /// graceful no-op, not a panic and not an error
-    /// (`publish-crates-logic.md` §"The orphan-tag fix").
+    /// ## Idempotency
+    /// Creating an already-existing tag is a graceful no-op, not a panic and not an
+    /// error.
     ///
     /// - If the tag already exists locally, return `Ok(())` without invoking
     ///   `git tag`.
     /// - Otherwise run `git tag`; as a race guard, an "already exists" failure from
     ///   `git tag` is also mapped to `Ok(())`.
     /// - The existing tag is **not** re-pointed even if it targets a different SHA
-    ///   (a no-op, per spec; re-pointing would be a destructive surprise).
+    ///   (a no-op; re-pointing would be a destructive surprise).
     ///
     /// # Errors
     /// `target_sha` does not resolve, or git refuses for a reason other than "tag
@@ -571,8 +541,6 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    // --- branch_exists (local) ----------------------------------------------
-    // Maps to: orchestrator Flow 1 step 1 (branch guard, local).
     #[test]
     fn branch_exists_local_true_and_false() {
         let (_d, git) = fresh_repo();
@@ -580,8 +548,6 @@ mod tests {
         assert!(!git.branch_exists("does-not-exist", Where::Local).unwrap());
     }
 
-    // --- create_or_reset_branch ---------------------------------------------
-    // Maps to: orchestrator Flow 1 step 1 ("recreate from scratch → one commit").
     #[test]
     fn create_branch_then_branch_exists() {
         let (_d, git) = fresh_repo();
@@ -612,8 +578,6 @@ mod tests {
         );
     }
 
-    // --- stage_all_and_commit -----------------------------------------------
-    // Maps to: orchestrator Flow 1 step 8 (single commit) + Goal 6.
     #[test]
     fn stage_all_and_commit_creates_one_commit_and_returns_sha() {
         let (_d, git) = fresh_repo();
@@ -642,8 +606,6 @@ mod tests {
         );
     }
 
-    // --- tag_exists (local) -------------------------------------------------
-    // Maps to: publish-crates-logic.md §Idempotency scan (a).
     #[test]
     fn tag_exists_local_true_and_false() {
         let (_d, git) = fresh_repo();
@@ -652,9 +614,6 @@ mod tests {
         assert!(git.tag_exists("v0.2.0", Where::Local).unwrap());
     }
 
-    // --- list_tags (local) --------------------------------------------------
-    // Maps to: M12 cmd_prepare current-version discovery (enumerate tags, then the
-    // caller parses with semver and picks the highest).
     #[test]
     fn list_tags_local_empty_repo_is_empty() {
         let (_d, git) = fresh_repo();
@@ -685,8 +644,6 @@ mod tests {
         );
     }
 
-    // --- create_tag ---------------------------------------------------------
-    // Maps to: publish-crates-logic.md §Per-crate flow step 4 + §orphan-tag fix.
     #[test]
     fn create_lightweight_tag_on_sha() {
         let (_d, git) = fresh_repo();
@@ -736,7 +693,6 @@ mod tests {
         assert!(!git.tag_exists("v3.0.0", Where::Local).unwrap());
     }
 
-    // --- injected identity (GitIdentity via with_identity) ------------------
     // release-plz-style attribution: the release commit and annotated tag are
     // authored by the configured identity (resolved from the GitHub token owner),
     // overriding the runner's ambient git config.
@@ -799,9 +755,6 @@ mod tests {
         );
     }
 
-    // --- stage_all + staged_paths (signed-commit change enumeration) --------
-    // Maps to: cmd_prepare signed-commit path (enumerate the release change set as
-    // additions/deletions for forge::create_commit_on_branch).
     #[test]
     fn staged_paths_splits_upserts_and_deletions() {
         let (_d, git) = fresh_repo();
@@ -838,7 +791,7 @@ mod tests {
         assert_eq!(git.rev_parse("HEAD").unwrap(), head_sha(&git));
     }
 
-    // --- remote/push: intentionally NOT exercised (would require network). ---
-    // branch_exists/tag_exists with Where::Remote(..)/Both(..) and push() touch the
-    // network and are excluded from the hermetic suite by design (see test-report).
+    // remote/push are intentionally NOT exercised: branch_exists/tag_exists with
+    // Where::Remote(..)/Both(..) and push() touch the network and are excluded from
+    // the hermetic suite by design.
 }

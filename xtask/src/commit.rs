@@ -1,22 +1,16 @@
 //! Path-scoped git-log collection and Conventional-Commit parsing.
 //!
-//! This module is the shared foundation for `changelog` (M9) and `breaking`
-//! (M10). It has two responsibilities:
+//! Two responsibilities:
 //!
 //! 1. [`collect`] — shell out to `git log` to gather the commits touching a
-//!    directory over a range. This is the only function that performs I/O.
-//! 2. [`parse`] — a **pure** Conventional-Commit parser that turns a [`Commit`]
+//!    directory over a range. The only function that performs I/O.
+//! 2. [`parse`] — a pure Conventional-Commit parser that turns a [`Commit`]
 //!    into a [`ParsedCommit`] (type, scope, breaking markers, description,
-//!    Keep-a-Changelog group, breaking footer).
+//!    breaking footer).
 //!
-//! A collected [`Commit`] captures the hash, **subject**, and **body** so that a
-//! single commit set serves both consumers: the changelog generator renders from
-//! the subject, while breaking-change detection scans the body for a
-//! `BREAKING CHANGE:` footer.
-//!
-//! Implements `release-spec/changelog-generation.md` (§"Collecting commits
-//! (path-scoped git log)", §"Minimal Conventional Commits parser") and
-//! `release-spec/breaking-change-detection.md` (§"Signal 2: intent breakage").
+//! A collected [`Commit`] captures the hash, subject, and body so a single commit
+//! set serves both consumers: the changelog generator renders from the subject,
+//! while breaking-change detection scans the body for a `BREAKING CHANGE:` footer.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -48,7 +42,7 @@ pub struct Commit {
 
 /// The result of parsing a [`Commit`].
 ///
-/// Note: the Keep-a-Changelog *grouping* (feat → Added, fix → Fixed, …) is not
+/// Note: Keep-a-Changelog *grouping* (feat → Added, fix → Fixed, …) is not
 /// represented here — the changelog generator does its own grouping through
 /// git-cliff's `commit_parsers` table (see [`crate::changelog`]). This struct
 /// carries only what the breaking-change detector and the parser's own callers
@@ -72,14 +66,14 @@ pub struct ParsedCommit {
 }
 
 /// Collect the commits that belong to the package rooted at `dir`, newest-first,
-/// using **content/identity tracking that survives directory renames**.
+/// tracking file identity across directory renames.
 ///
 /// A plain `git log -- <dir>` silently drops a package's history the moment its
-/// directory is renamed (git does not follow directory renames), which produces
+/// directory is renamed (git does not follow directory renames), producing
 /// misleadingly empty changelogs. Instead this:
 ///
-/// 1. lists the package's **current** tracked files (`git ls-files -- <dir>`);
-/// 2. for each file, gathers the commits that touched it **following renames**
+/// 1. lists the package's current tracked files (`git ls-files -- <dir>`);
+/// 2. for each file, gathers the commits that touched it following renames
 ///    (`git log --follow -- <file>`), so history from the file's former locations
 ///    is included;
 /// 3. unions those commit hashes and re-lists them in canonical newest-first order
@@ -88,16 +82,10 @@ pub struct ParsedCommit {
 /// `range = Some("<ref>..HEAD")` restricts every step to that range; `range = None`
 /// walks all history (the never-released case). `--no-merges` is applied throughout.
 ///
-/// # Side effects
-///
 /// Spawns `git` subprocesses that read the repository at `repo_root` (one
 /// `ls-files`, one `git log --follow` per package file, one final `git log`). No
-/// network access, no writes.
-///
-/// # Errors
-///
-/// Returns an error if git fails to spawn, any `git` invocation exits non-zero, or
-/// its output is not valid UTF-8.
+/// network access, no writes. Errors if git fails to spawn, any invocation exits
+/// non-zero, or its output is not valid UTF-8.
 pub fn collect(repo_root: &Path, range: Option<&str>, dir: &str) -> Result<Vec<Commit>> {
     let files = tracked_files(repo_root, dir)?;
     if files.is_empty() {
@@ -125,8 +113,8 @@ pub fn collect(repo_root: &Path, range: Option<&str>, dir: &str) -> Result<Vec<C
 }
 
 /// Derive the `git log` pathspec for a package from its absolute `manifest_dir`,
-/// made relative to `repo_root`. Falls back to `.` (whole tree) for the degenerate
-/// case where the manifest dir is the repo root or is not under it. Pure.
+/// made relative to `repo_root`. Falls back to `.` (whole tree) when the manifest
+/// dir is the repo root or is not under it.
 ///
 /// Callers pass the result as the `dir` argument to [`collect`].
 pub fn pathspec(repo_root: &Path, manifest_dir: &Path) -> String {
@@ -137,7 +125,7 @@ pub fn pathspec(repo_root: &Path, manifest_dir: &Path) -> String {
 }
 
 /// Run `git -C <repo_root> <args>`, require a zero exit, and return stdout decoded
-/// as UTF-8. The single spawn/check/decode seam for this module.
+/// as UTF-8. The single spawn/check/decode point for this module.
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<String> {
     let pretty = args.join(" ");
     let output = Command::new("git")
@@ -222,15 +210,13 @@ fn parse_log_output(stdout: &str) -> Result<Vec<Commit>> {
     Ok(commits)
 }
 
-/// Parse a [`Commit`] into a [`ParsedCommit`]. **Pure** — no I/O.
+/// Parse a [`Commit`] into a [`ParsedCommit`]. Pure — no I/O.
 ///
-/// Total: any input yields a `ParsedCommit` (a non-conventional message yields
-/// `kind = None` with the whole subject as the description).
+/// Any input yields a `ParsedCommit`; a non-conventional message yields
+/// `kind = None` with the whole subject as the description.
 ///
-/// Subject grammar (`release-spec/changelog-generation.md`):
-/// `<type>[(scope)][!]: <description>`. Body footers (`BREAKING CHANGE:` /
-/// `BREAKING-CHANGE:`) are scanned per `release-spec/breaking-change-detection.md`
-/// §"Signal 2".
+/// Subject grammar: `<type>[(scope)][!]: <description>`. Body footers
+/// (`BREAKING CHANGE:` / `BREAKING-CHANGE:`) are scanned separately.
 pub fn parse(commit: &Commit) -> ParsedCommit {
     let breaking_footer = parse_breaking_footer(&commit.body);
 
@@ -276,12 +262,10 @@ pub fn parse(commit: &Commit) -> ParsedCommit {
     }
 }
 
-/// Whether the parsed commit declares a breaking change (intent signal).
+/// Whether the parsed commit declares a breaking change.
 ///
-/// Returns `true` if the `!` marker is present **or** a `BREAKING CHANGE:` /
-/// `BREAKING-CHANGE:` footer was captured — per
-/// `release-spec/breaking-change-detection.md` §"Signal 2" (either rule alone
-/// marks a commit breaking). **Pure.**
+/// Returns `true` if the `!` marker is present or a `BREAKING CHANGE:` /
+/// `BREAKING-CHANGE:` footer was captured; either alone marks a commit breaking.
 pub fn is_breaking(parsed: &ParsedCommit) -> bool {
     parsed.breaking_bang || parsed.breaking_footer.is_some()
 }
@@ -373,8 +357,6 @@ mod tests {
         }
     }
 
-    // --- package pathspec derivation ---------------------------------------
-
     #[test]
     fn pathspec_relative_under_root() {
         let root = Path::new("/repo");
@@ -389,9 +371,6 @@ mod tests {
         assert_eq!(pathspec(root, Path::new("/elsewhere")), ".");
     }
 
-    // --- Subject parsing: type, scope, description -------------------------
-
-    // Rule: conventional `feat:` — type/scope/description recovered.
     #[test]
     fn feat_parses_type_and_description() {
         let p = parse(&subj("feat: add the thing"));
@@ -402,7 +381,6 @@ mod tests {
         assert!(!is_breaking(&p));
     }
 
-    // Rule: `fix:` type and description.
     #[test]
     fn fix_parses_type_and_description() {
         let p = parse(&subj("fix: correct the bug"));
@@ -410,7 +388,7 @@ mod tests {
         assert_eq!(p.description, "correct the bug");
     }
 
-    // Rule: an arbitrary type is preserved verbatim (lowercased).
+    // An arbitrary type is preserved verbatim (lowercased).
     #[test]
     fn arbitrary_type_is_preserved() {
         let p = parse(&subj("refactor: shuffle internals"));
@@ -418,7 +396,7 @@ mod tests {
         assert_eq!(p.description, "shuffle internals");
     }
 
-    // Rule: non-conventional (no `:`) -> kind None, whole subject as desc.
+    // Non-conventional (no `:`) -> kind None, whole subject as description.
     #[test]
     fn non_conventional_has_no_kind() {
         let p = parse(&subj("just a plain message"));
@@ -429,14 +407,13 @@ mod tests {
         assert!(!is_breaking(&p));
     }
 
-    // Rule: type token is lowercased.
     #[test]
     fn type_is_lowercased() {
         let p = parse(&subj("FEAT: shout"));
         assert_eq!(p.kind.as_deref(), Some("feat"));
     }
 
-    // Rule: scope is stripped from the type and captured verbatim.
+    // Scope is stripped from the type and captured verbatim.
     #[test]
     fn scope_is_stripped_and_captured() {
         let p = parse(&subj("feat(core): scoped change"));
@@ -445,16 +422,14 @@ mod tests {
         assert!(!p.breaking_bang);
     }
 
-    // Rule: description after the first `:` is trimmed; later colons stay.
+    // Description after the first `:` is trimmed; later colons stay.
     #[test]
     fn description_keeps_later_colons() {
         let p = parse(&subj("fix:  ratio is 1:2  "));
         assert_eq!(p.description, "ratio is 1:2");
     }
 
-    // --- Breaking via `!` marker -------------------------------------------
-
-    // Rule (breaking §Signal 2.1): `feat!:` sets the bang and is breaking.
+    // `feat!:` sets the bang and is breaking.
     #[test]
     fn bang_marker_is_breaking() {
         let p = parse(&subj("feat!: drop the old api"));
@@ -463,7 +438,7 @@ mod tests {
         assert!(is_breaking(&p));
     }
 
-    // Rule: `feat(core)!:` — scope AND bang together.
+    // `feat(core)!:` — scope and bang together.
     #[test]
     fn scope_and_bang_together() {
         let p = parse(&subj("feat(core)!: change get() signature"));
@@ -473,7 +448,7 @@ mod tests {
         assert!(is_breaking(&p));
     }
 
-    // Rule: any type may carry `!` (e.g. refactor!:), still breaking.
+    // Any type may carry `!` (e.g. refactor!:), still breaking.
     #[test]
     fn bang_on_any_type_is_breaking() {
         let p = parse(&subj("refactor!: rework module layout"));
@@ -482,7 +457,7 @@ mod tests {
         assert!(is_breaking(&p));
     }
 
-    // Rule: `!` present but NO footer — still breaking via the marker alone.
+    // `!` present but no footer — still breaking via the marker alone.
     #[test]
     fn bang_without_footer_is_breaking() {
         let p = parse(&with_body(
@@ -494,9 +469,7 @@ mod tests {
         assert!(is_breaking(&p));
     }
 
-    // --- Breaking via footer -----------------------------------------------
-
-    // Rule (breaking §Signal 2.2): `BREAKING CHANGE:` footer captured + breaking.
+    // `BREAKING CHANGE:` footer captured and breaking.
     #[test]
     fn breaking_change_footer_space_spelling() {
         let p = parse(&with_body(
@@ -511,7 +484,7 @@ mod tests {
         assert!(is_breaking(&p));
     }
 
-    // Rule: `BREAKING-CHANGE:` (hyphen) is equivalent to the space spelling.
+    // `BREAKING-CHANGE:` (hyphen) is equivalent to the space spelling.
     #[test]
     fn breaking_change_footer_hyphen_spelling() {
         let p = parse(&with_body(
@@ -525,7 +498,7 @@ mod tests {
         assert!(is_breaking(&p));
     }
 
-    // Rule: footer on a non-`feat` type still triggers the breaking signal.
+    // A footer on a non-`feat` type still triggers the breaking signal.
     #[test]
     fn footer_on_non_feat_is_breaking() {
         let p = parse(&with_body(
@@ -536,7 +509,7 @@ mod tests {
         assert!(is_breaking(&p));
     }
 
-    // Rule: no marker and no footer -> not breaking.
+    // No marker and no footer -> not breaking.
     #[test]
     fn no_marker_no_footer_not_breaking() {
         let p = parse(&with_body("feat: add", "Just an ordinary body, no footer."));
@@ -545,7 +518,7 @@ mod tests {
         assert!(!is_breaking(&p));
     }
 
-    // Rule: footer text is body-derived even when not on the first body line.
+    // The first footer wins even when it is not on the first body line.
     #[test]
     fn first_footer_wins() {
         let p = parse(&with_body(
@@ -555,8 +528,8 @@ mod tests {
         assert_eq!(p.breaking_footer.as_deref(), Some("first one"));
     }
 
-    // Rule: a footer value that wraps across lines is captured in full, not
-    // truncated at the first line.
+    // A footer value that wraps across lines is captured in full, not truncated
+    // at the first line.
     #[test]
     fn multiline_footer_is_captured_in_full() {
         let p = parse(&with_body(
@@ -571,7 +544,7 @@ mod tests {
         );
     }
 
-    // Rule: the footer value stops at a blank line, so a trailing trailer (e.g.
+    // The footer value stops at a blank line, so a trailing trailer (e.g.
     // `Co-Authored-By:`) after a blank line is not folded into the value.
     #[test]
     fn footer_stops_at_blank_line_before_trailer() {
@@ -582,8 +555,8 @@ mod tests {
         assert_eq!(p.breaking_footer.as_deref(), Some("line one\nline two"));
     }
 
-    // Rule: the footer value stops at the next footer token even without a blank
-    // line between them.
+    // The footer value stops at the next footer token even without a blank line
+    // between them.
     #[test]
     fn footer_stops_at_next_footer_token() {
         let p = parse(&with_body(
@@ -593,9 +566,7 @@ mod tests {
         assert_eq!(p.breaking_footer.as_deref(), Some("the reason"));
     }
 
-    // --- Raw git-log record splitting (pure part of `collect`) -------------
-
-    // Rule (changelog §Collecting commits): records on 0x1e, fields on 0x1f.
+    // Records split on 0x1e, fields on 0x1f.
     #[test]
     fn parse_log_output_splits_records_and_fields() {
         let raw = "h1\u{1f}feat: a\u{1f}body one\u{1e}h2\u{1f}fix: b\u{1f}\u{1e}";
@@ -614,10 +585,7 @@ mod tests {
         assert!(parse_log_output("").unwrap().is_empty());
     }
 
-    // --- Light integration: real `collect` against this worktree -----------
-
-    // Rule (changelog §Collecting commits): collect() shells out without error
-    // and a real crate directory has history (newest-first preserved).
+    // collect() shells out without error and a real crate directory has history.
     #[test]
     fn collect_against_real_worktree() {
         // Tests run with cwd = crate dir (xtask/); the repo root is its parent.

@@ -1,23 +1,19 @@
-//! Diagnostic-only breaking-change detection (module M10 `breaking`).
-//!
-//! Implements [`breaking-change-detection.md`] for the `prepare-release`
+//! Diagnostic-only breaking-change detection for the `prepare-release`
 //! subcommand: for each crate it decides whether a release contains breaking
-//! changes and produces a short human-readable reason. **This never influences
-//! the version** — its output is a per-crate diagnostic consumed only by the
-//! PR-body logic (M11).
+//! changes and produces a short human-readable reason. This never influences the
+//! version — its output is a per-crate diagnostic consumed only when rendering the
+//! PR body.
 //!
-//! Two independent signals are combined; **either alone** marks a crate breaking:
+//! Two independent signals are combined; either alone marks a crate breaking:
 //!
-//! 1. **API breakage (primary)** — `cargo-semver-checks` diffs the crate's public
+//! 1. API breakage (primary) — `cargo-semver-checks` diffs the crate's public
 //!    API against its last published baseline (library crates only).
-//! 2. **Intent breakage (secondary)** — author-declared breaking changes in the
+//! 2. Intent breakage (secondary) — author-declared breaking changes in the
 //!    Conventional Commits touching the crate (`!` marker / `BREAKING CHANGE:`
-//!    footer), parsed by M4 `commit`.
+//!    footer).
 //!
-//! If `cargo-semver-checks` is missing or errors, the step **fails open** to the
+//! If `cargo-semver-checks` is missing or errors, the step fails open to the
 //! intent signal (`ApiStatus::Unavailable`) rather than aborting the prepare step.
-//!
-//! [`breaking-change-detection.md`]: ../../release-spec/breaking-change-detection.md
 
 use regex::Regex;
 use std::path::Path;
@@ -41,8 +37,6 @@ pub enum ApiStatus {
 }
 
 /// Per-crate breaking-change diagnostic (the module's output).
-///
-/// Matches breaking-change-detection.md §"Per-package result".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BreakingReport {
     /// `api_breaking || intent_breaking`.
@@ -66,14 +60,14 @@ pub struct BreakingReport {
 /// * `baseline` — the crate's last published version, supplied by the caller
 ///   (the caller owns the tags+registry lookup); `None` ⇒ never published.
 /// * `parsed_commits` — the already-parsed commits touching this crate since the
-///   baseline (M4 `collect` + `parse`), shared with the changelog step.
+///   baseline, shared with the changelog step.
 pub fn analyze(
     repo_root: &Path,
     crate_info: &workspace::CrateInfo,
     baseline: Option<&semver::Version>,
     parsed_commits: &[commit::ParsedCommit],
 ) -> BreakingReport {
-    // Never published: neither signal runs (breaking-change-detection.md §Baseline).
+    // Never published: neither signal runs.
     let Some(baseline) = baseline else {
         return BreakingReport {
             has_breaking: false,
@@ -90,7 +84,7 @@ pub fn analyze(
         // Binary-only / cdylib (e.g. toy-kv-wasm) — no Rust library API to diff.
         (ApiStatus::Skipped, None)
     } else if parsed_commits.is_empty() {
-        // No changes since the baseline — no point diffing (see contract Q1).
+        // No changes since the baseline — no point diffing.
         (ApiStatus::Skipped, None)
     } else {
         run_semver_checks(repo_root, &crate_info.manifest_path, baseline)
@@ -99,10 +93,10 @@ pub fn analyze(
     combine(api_status, api_reason, intent_reason)
 }
 
-/// The intent signal (breaking-change-detection.md §"Signal 2" + §"Reason string").
+/// The intent signal.
 ///
-/// Returns `Some(reason)` if **any** commit is breaking (`!` marker or
-/// `BREAKING CHANGE:`/`BREAKING-CHANGE:` footer, via M4 [`commit::is_breaking`]),
+/// Returns `Some(reason)` if any commit is breaking (`!` marker or
+/// `BREAKING CHANGE:`/`BREAKING-CHANGE:` footer, via [`commit::is_breaking`]),
 /// else `None`. The `Some`/`None` doubles as the `intent_breaking` boolean.
 ///
 /// Reason precedence: the first commit (in slice order) with a breaking footer
@@ -128,9 +122,9 @@ fn intent_signal(parsed: &[commit::ParsedCommit]) -> Option<String> {
 
 /// Reconstruct a Conventional-Commit subject from the parsed fields.
 ///
-/// M4's `ParsedCommit` does not carry the raw subject (see contract Q2), so the
-/// `!`-only intent reason rebuilds `<kind>[(<scope>)]!: <description>`. Faithful for
-/// conventional commits, which are the only ones that can carry a `!` marker.
+/// `ParsedCommit` does not carry the raw subject, so the `!`-only intent reason
+/// rebuilds `<kind>[(<scope>)]!: <description>`. Faithful for conventional commits,
+/// which are the only ones that can carry a `!` marker.
 fn reconstruct_subject(p: &commit::ParsedCommit) -> String {
     let kind = p.kind.as_deref().unwrap_or("");
     let mut head = String::from(kind);
@@ -150,8 +144,7 @@ fn reconstruct_subject(p: &commit::ParsedCommit) -> String {
     }
 }
 
-/// Pure signal combination + reason building (breaking-change-detection.md
-/// §"Combining the signals").
+/// Pure signal combination + reason building.
 fn combine(
     api_status: ApiStatus,
     api_reason: Option<String>,
@@ -183,7 +176,7 @@ fn combine(
 ///
 /// Thin shell-out wrapper around the pure [`interpret_semver_checks`] seam. A spawn
 /// failure (the tool is not installed) fails open to [`ApiStatus::Unavailable`] with
-/// a warning, per breaking-change-detection.md §"Signal 1".
+/// a warning.
 fn run_semver_checks(
     repo_root: &Path,
     manifest_path: &Path,
@@ -218,8 +211,7 @@ fn run_semver_checks(
 /// Interpret a finished `cargo-semver-checks` invocation (the pure shell-out seam).
 ///
 /// Maps exit status + captured output to `(ApiStatus, reason)` with no I/O, so it is
-/// unit-testable with synthetic strings (breaking-change-detection.md §"Signal 1"
-/// result interpretation):
+/// unit-testable with synthetic strings:
 ///
 /// * exit 0 → `(Compatible, None)`.
 /// * non-zero **with** a human-readable incompatibility report → `(Incompatible,
@@ -263,10 +255,9 @@ fn strip_ansi(s: &str) -> String {
 /// Whether a crate exposes a diffable Rust library target.
 ///
 /// Returns `false` for binary-only crates and for crates whose library target is
-/// exclusively a `cdylib`/`staticlib` (e.g. `toy-kv-wasm`) — those are `Skipped`
-/// (breaking-change-detection.md §"Signal 1" — "Library crates only"). Reads the
-/// crate `Cargo.toml` (`[lib].crate-type`) directly since M2's contract does not
-/// surface target kinds (see contract Q4). A read failure is treated
+/// exclusively a `cdylib`/`staticlib` (e.g. `toy-kv-wasm`) — those are `Skipped`.
+/// Reads the crate `Cargo.toml` (`[lib].crate-type`) directly since target kinds
+/// aren't surfaced by the workspace metadata. A read failure is treated
 /// conservatively as "no library target" (the crate is `Skipped`, not crashed).
 fn has_library_target(manifest_path: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(manifest_path) else {

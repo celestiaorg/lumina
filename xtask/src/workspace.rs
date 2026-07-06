@@ -3,12 +3,8 @@
 //! Shells out to `cargo metadata` to learn the facts the release process needs
 //! about the workspace it is releasing: the single workspace version, the list of
 //! member crates (name, version, manifest dir/path, publishability), and the
-//! **topological publish order** — publishable crates ordered so each is published
-//! only after every in-workspace crate it depends on.
-//!
-//! Implements `release-spec/orchestrator.md` §"Portability & configuration" (the
-//! "Discovered" bullet) and `release-spec/publish-crates-logic.md` §"The
-//! workspace" / §"Compute the publish order ourselves".
+//! topological publish order — publishable crates ordered so each is published only
+//! after every in-workspace crate it depends on.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -313,10 +309,9 @@ mod tests {
             .collect()
     }
 
-    // --- Pure topo_sort (cargo-free) ----------------------------------------
+    // Pure topo_sort (cargo-free)
 
-    /// Rule: topo sort over normal+build deps; dependency precedes dependent.
-    /// (publish-crates-logic.md §"Compute the publish order ourselves" steps 1–3.)
+    /// Topo sort over normal+build deps: a dependency precedes its dependent.
     #[test]
     fn topo_sort_simple_chain() {
         // c depends on b depends on a  =>  a, b, c
@@ -326,9 +321,8 @@ mod tests {
         assert_eq!(order, s(&["a", "b", "c"]));
     }
 
-    /// Rule: a diamond still yields a valid order where every dependency precedes
-    /// its dependents (publish-crates-logic.md §"Compute…" step 3). Determinism is
-    /// also checked: ties break by input order.
+    /// A diamond still yields a valid order where every dependency precedes its
+    /// dependents. Determinism is also checked: ties break by input order.
     #[test]
     fn topo_sort_diamond() {
         // d -> b, d -> c, b -> a, c -> a   (a is foundational, d is top)
@@ -346,8 +340,7 @@ mod tests {
         assert_eq!(order, s(&["a", "b", "c", "d"]));
     }
 
-    /// Rule: a dependency cycle => error naming the involved crates
-    /// (publish-crates-logic.md §"Compute…" step 4, cycle detection).
+    /// A dependency cycle errors, naming the involved crates.
     #[test]
     fn topo_sort_cycle_is_error_naming_crates() {
         // a -> b -> c -> a is a cycle.
@@ -362,7 +355,7 @@ mod tests {
     }
 
     /// A self-loop is a degenerate cycle and must be reported, not silently
-    /// dropped (publish-crates-logic.md §"Compute…" step 4).
+    /// dropped.
     #[test]
     fn topo_sort_self_loop_is_cycle() {
         let nodes = s(&["a", "b"]);
@@ -371,7 +364,7 @@ mod tests {
         assert!(err.crates.contains(&"a".to_string()));
     }
 
-    // --- Integration-style: discover() against the real worktree ------------
+    // Integration-style: discover() against the real worktree
 
     /// The repo root is the parent of this crate's manifest dir (`xtask/`).
     fn repo_root() -> PathBuf {
@@ -381,9 +374,8 @@ mod tests {
             .to_path_buf()
     }
 
-    /// Rules: discover the single workspace version + the four members +
-    /// is_publishable from `publish = false` (orchestrator.md §Portability
-    /// "Discovered" bullet; publish-crates-logic.md §"The workspace").
+    /// Discover the single workspace version, the members, and `is_publishable`
+    /// from `publish = false`.
     #[test]
     fn discover_finds_version_members_and_publishability() {
         let ws = Workspace::discover(&repo_root()).expect("discover real workspace");
@@ -418,11 +410,10 @@ mod tests {
         assert!(utils.manifest_path.ends_with("Cargo.toml"));
     }
 
-    /// Rules: topological publish order over normal+build in-workspace deps, then
-    /// filter to publishable crates dropping `publish = false`
-    /// (publish-crates-logic.md §"Compute…", final filter paragraph). Asserts the
-    /// order is a *valid* topological sort rather than an exact fixture: `xtask` is
-    /// excluded, and every in-workspace dependency precedes its dependent.
+    /// Topological publish order over normal+build in-workspace deps, then filter
+    /// to publishable crates dropping `publish = false`. Asserts the order is a
+    /// *valid* topological sort rather than an exact fixture: `xtask` is excluded,
+    /// and every in-workspace dependency precedes its dependent.
     #[test]
     fn publish_order_is_valid_topological_order() {
         let ws = Workspace::discover(&repo_root()).expect("discover real workspace");

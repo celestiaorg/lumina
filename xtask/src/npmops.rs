@@ -1,24 +1,19 @@
-//! M8 `npmops` — npm / WASM primitives and the two release-time procedures.
+//! npm / WASM primitives and the two release-time procedures.
 //!
-//! This module owns the npm-side logic of the release tool: deriving the npm
-//! dist-tag from a version, and the two procedures driven by the orchestrator:
+//! Owns the npm-side logic of the release tool: deriving the npm dist-tag from a
+//! version, plus two procedures:
 //!
-//! - [`update_for_pr`] — the **Prepare-time** procedure
-//!   (`release-spec/npm-release-pr-steps.md`): mirror the workspace version into
-//!   the JS wrapper and refresh its lockfile against a fresh `wasm-pack` build.
+//! - [`update_for_pr`] — prepare-time: mirror the workspace version into the JS
+//!   wrapper and refresh its lockfile against a fresh `wasm-pack` build.
 //!   Idempotent, publishes nothing, needs no credentials.
-//! - [`publish`] — the **Release-time** procedure
-//!   (`release-spec/release-step.md`): build + publish the wasm bindings and the
+//! - [`publish`] — release-time: build + publish the wasm bindings and the
 //!   wrapper, both at the same version under the derived dist-tag, repinning the
 //!   wrapper's dependency to the concrete published version.
 //!
-//! The procedures shell out to `wasm-pack` and `npm` via [`std::process::Command`]
-//! and therefore are **not** exercised in unit tests (the toolchain/registry/token
-//! may be absent in CI). The pure pieces — [`dist_tag`] and the private
-//! version-suffix / command-argument helpers — are exhaustively unit-tested.
-//!
-//! This module has no internal dependencies and does **not** read M1's config; it
-//! owns its own [`NpmComponent`] input. A caller maps M1's config into this shape.
+//! The procedures shell out to `wasm-pack` and `npm`, so they are not exercised in
+//! unit tests (the toolchain/registry/token may be absent in CI). The pure pieces —
+//! [`dist_tag`] and the private version-suffix / command-argument helpers — are
+//! unit-tested.
 
 use std::path::Path;
 use std::process::Command;
@@ -27,14 +22,12 @@ use anyhow::{Context, Result, anyhow, bail};
 
 /// One configured npm component: a compiled wasm-bindgen package plus the JS
 /// wrapper that depends on it.
-///
-/// Owned by M8 (not M1's `NpmComponent`); this module does not depend on M1.
 #[derive(Debug, Clone)]
 pub struct NpmComponent {
     /// npm/crate name of the compiled wasm-bindgen package, e.g. `"toy-kv-wasm"`.
     ///
-    /// Used as the argument to `npm show <wasm_crate> version` (Release idempotency
-    /// guard) and as the `dependencies[...]` key repinned in the wrapper.
+    /// Used as the argument to `npm show <wasm_crate> version` (the publish
+    /// idempotency guard) and as the `dependencies[...]` key repinned in the wrapper.
     pub wasm_crate: String,
     /// Path (relative to the repo root) to the JS wrapper package directory, e.g.
     /// `"wasm/js"` — the `package.json` that is version-set / dependency-repinned.
@@ -66,14 +59,14 @@ impl NpmComponent {
 
 /// Derive the npm dist-tag from a version's prerelease suffix.
 ///
-/// Pure and total: no I/O, never panics. Mirrors `release-step.md` step 3.
+/// Pure and total: no I/O, never panics.
 ///
 /// - No prerelease suffix (no `-`) → `"latest"`.
 /// - Otherwise the leading alphabetic identifier of the prerelease part:
 ///   `0.2.0-rc.1` → `"rc"`, `0.2.0-alpha.2` → `"alpha"`, `0.2.0-beta.3` → `"beta"`.
 ///
-/// Any label that is not `rc`/`alpha`/`beta` passes through verbatim (the spec
-/// lists those as examples, not an allow-list), e.g. `1.0.0-next.5` → `"next"`.
+/// Not an allow-list: any label other than `rc`/`alpha`/`beta` passes through
+/// verbatim, e.g. `1.0.0-next.5` → `"next"`.
 ///
 /// # Examples
 ///
@@ -95,9 +88,8 @@ pub fn dist_tag(version: &str) -> String {
 ///
 /// Pure. Returns `None` when the version has no prerelease suffix (no `-`), else
 /// the substring of the prerelease part (everything after the first `-`) up to —
-/// but not including — the first `.` or ASCII digit. This matches the shell
-/// `npm_tag="${local_version#*-}"; npm_tag="${npm_tag%%[.0-9]*}"` from
-/// `release-step.md` step 3.
+/// but not including — the first `.` or ASCII digit. Equivalent to the shell
+/// `npm_tag="${local_version#*-}"; npm_tag="${npm_tag%%[.0-9]*}"`.
 ///
 /// Degenerate inputs: a trailing `-` (empty suffix) yields `Some("")`.
 fn prerelease_label(version: &str) -> Option<&str> {
@@ -108,19 +100,19 @@ fn prerelease_label(version: &str) -> Option<&str> {
     Some(&suffix[..end])
 }
 
-/// The **Prepare-time** procedure (`release-spec/npm-release-pr-steps.md`).
+/// Prepare-time procedure.
 ///
 /// Mirrors the resolved workspace `version` into the wrapper's `package.json`
 /// (idempotently — skips when already at `version`), rebuilds the wasm package,
 /// and refreshes the wrapper lockfile against the fresh build. Validates that the
 /// wrapper still compiles.
 ///
-/// **Publishes nothing and needs no credentials.** Leaves changed:
+/// Publishes nothing and needs no credentials. Leaves changed:
 /// `<package_dir>/package.json`, `<package_dir>/package-lock.json`, the
 /// regenerated declarations (`<package_dir>/index.d.ts`), and the regenerated
-/// `<package_dir>/README.md` (typedoc) — all of which the orchestrator commits
-/// into the release PR, so `release` can publish the committed wrapper source
-/// (`index.js`/`worker.js`) as-is without a build step.
+/// `<package_dir>/README.md` (typedoc) — all committed into the release PR, so
+/// `release` can publish the committed wrapper source (`index.js`/`worker.js`)
+/// as-is without a build step.
 ///
 /// # Errors
 ///
@@ -185,20 +177,19 @@ pub fn update_for_pr(component: &NpmComponent, version: &str) -> Result<()> {
     Ok(())
 }
 
-/// The **Release-time** procedure (`release-spec/release-step.md`).
+/// Release-time procedure.
 ///
 /// Publishes the wasm bindings (`component.wasm_crate`) and the JS wrapper, both at
 /// `version` under `dist_tag`. The wasm crate is built + published with `wasm-pack`;
-/// the wrapper is published from its **committed hand-written source**
+/// the wrapper is published from its committed hand-written source
 /// (`index.js`/`worker.js` + the `index.d.ts` regenerated during `prepare`) with
-/// only a dependency repin — no build or `npm install` at release time (mirrors
-/// lumina; see `release-step.md`).
+/// only a dependency repin — no build or `npm install` at release time.
 ///
-/// Idempotent **per package**: each of the two packages is published only if npm
-/// does not already have this version, so a resumed run finishes whichever half is
+/// Idempotent per package: each of the two packages is published only if npm does
+/// not already have this version, so a resumed run finishes whichever half is
 /// missing (e.g. wasm already up, wrapper not).
 ///
-/// `npm_token_env` is the **NAME** of the environment variable holding the npm auth
+/// `npm_token_env` is the NAME of the environment variable holding the npm auth
 /// token (e.g. `"NPM_REGISTRY_TOKEN"`). The token value is read from the environment
 /// and re-exported to the publish child processes under the *same* name, so the
 /// committed `.npmrc` (`//registry.npmjs.org/:_authToken=${<name>}`) resolves it. It
@@ -223,9 +214,9 @@ pub fn publish(
         anyhow!("npm token env var `{npm_token_env}` is not set (publish requires it)")
     })?;
 
-    // The wasm bindings crate and the JS wrapper are TWO npm packages and are
-    // published independently: each step is guarded by its own `npm show` so a
-    // resumed run (e.g. wasm already up, wrapper not) finishes the missing half.
+    // The wasm bindings crate and the JS wrapper are two npm packages, published
+    // independently: each step is guarded by its own `npm show` so a resumed run
+    // (e.g. wasm already up, wrapper not) finishes the missing half.
 
     // Build + publish the wasm bindings package, unless npm already has it.
     if npm_show_version(&component.wasm_crate)?.as_deref() != Some(version) {
@@ -264,8 +255,8 @@ pub fn publish(
         )?;
         // Publish the wrapper. It ships its committed hand-written source
         // (index.js/worker.js) plus the index.d.ts regenerated during `prepare` —
-        // there is NO build or install at release time. The `files` allow-list bounds
-        // the tarball to those files, so the repinned dependency is only a metadata
+        // no build or install at release time. The `files` allow-list bounds the
+        // tarball to those files, so the repinned dependency is only a metadata
         // change.
         run(
             Command::new("npm")
@@ -289,7 +280,7 @@ fn npm_pkg_set_dep_arg(wasm_crate: &str, version: &str) -> String {
 /// Read the wrapper's current `package.json` version via `npm pkg get version`.
 ///
 /// `npm pkg get version` prints the value JSON-quoted (e.g. `"0.2.0"`); the quotes
-/// are stripped, mirroring the spec's `| tr -d '"'`.
+/// are stripped.
 fn npm_pkg_get_version(pkg_dir: &Path) -> Result<String> {
     npm_pkg_get(pkg_dir, "version")
 }
@@ -323,8 +314,8 @@ fn parse_npm_get_version(stdout: &str) -> String {
 ///
 /// Returns `Ok(None)` when the package has never been published (e.g. `npm show`
 /// exits non-zero or prints nothing) so the caller treats it as "not yet
-/// published" and proceeds (contract Spec question Q2). Returns `Ok(Some(v))` when
-/// a published version is reported.
+/// published" and proceeds. Returns `Ok(Some(v))` when a published version is
+/// reported.
 fn npm_show_version(pkg: &str) -> Result<Option<String>> {
     let out = Command::new("npm")
         .args(["show", pkg, "version"])
@@ -354,7 +345,7 @@ fn run(cmd: &mut Command, step: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    // --- dist_tag: spec-mandated cases ---
+    // dist_tag: standard cases
 
     #[test]
     fn dist_tag_plain_is_latest() {
@@ -376,7 +367,7 @@ mod tests {
         assert_eq!(dist_tag("0.2.0-beta.3"), "beta");
     }
 
-    // --- dist_tag / prerelease_label: edge cases ---
+    // edge cases
 
     #[test]
     fn dist_tag_label_without_dot_number() {
@@ -428,7 +419,7 @@ mod tests {
         assert_eq!(prerelease_label("0.2.0-"), Some(""));
     }
 
-    // --- pure command/arg builders ---
+    // pure command/arg builders
 
     #[test]
     fn npm_pkg_set_dep_arg_shape() {
@@ -453,7 +444,7 @@ mod tests {
         assert_eq!(parse_npm_get_version("  \"1.2.3-rc.1\"  "), "1.2.3-rc.1");
     }
 
-    // --- struct construction ---
+    // struct construction
 
     #[test]
     fn npm_component_new_sets_fields() {

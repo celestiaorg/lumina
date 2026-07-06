@@ -1,18 +1,16 @@
-//! Release-PR **title** and **body** generation.
+//! Release-PR title and body generation.
 //!
-//! The body is a **Tera template** ported from release-plz
+//! The body is a Tera template ported from release-plz
 //! (`release_plz_core::pr::DEFAULT_PR_BODY_TEMPLATE`), rendered over one
-//! [`ReleaseInfo`] per package — a faithful mirror of release-plz's PR body, minus
-//! its tool-attribution footer. It emits the `## 🤖 New release` bullet list (with
-//! inline API-status markers), per-package breaking-change blocks, and a
-//! collapsible `<blockquote>` changelog, degrading gracefully under GitHub's
-//! [`MAX_PR_BODY`] character cap exactly as release-plz does.
+//! [`ReleaseInfo`] per package, minus release-plz's tool-attribution footer. It
+//! emits the `## 🤖 New release` bullet list (with inline API-status markers),
+//! per-package breaking-change blocks, and a collapsible `<blockquote>` changelog,
+//! degrading gracefully under GitHub's [`MAX_PR_BODY`] character cap as release-plz
+//! does.
 //!
-//! Marker semantics differ from release-plz by design: the `⚠ / ✓` marker is driven
-//! by toy-kv's **combined** breaking flag (API *or* intent), not the API-only
-//! `cargo-semver-checks` result — see the caller ([`crate::breaking`]).
-//!
-//! Branch naming and the GitHub API call live in the orchestrator / `forge` module.
+//! Unlike release-plz, the `⚠ / ✓` marker is driven by the combined breaking flag
+//! (API *or* intent), not the API-only `cargo-semver-checks` result — see the
+//! caller ([`crate::breaking`]).
 
 use anyhow::Context;
 use serde::Serialize;
@@ -60,9 +58,9 @@ const DEFAULT_PR_BODY_TEMPLATE: &str = r#"
 /// PR body is built.
 ///
 /// All per-package data arrives pre-computed: `previous_version` / `new_version`
-/// are validated version strings (M3), `breaking` / `breaking_reason` come from the
-/// breaking-change diagnostic (M10), and `title` / `changelog_body` come from the
-/// changelog step (M9). This module renders them verbatim.
+/// are validated version strings, `breaking` / `breaking_reason` come from the
+/// breaking-change diagnostic, and `title` / `changelog_body` come from the
+/// changelog step. This module renders them verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageReport {
     /// Package name, e.g. `"toy-kv-utils"`. Rendered inside backticks.
@@ -86,8 +84,8 @@ pub struct PackageReport {
     pub changelog_body: String,
 }
 
-/// The per-release context object the template renders over — the toy-kv twin of
-/// release-plz's `ReleaseInfo`. Field names are the template's contract.
+/// The per-release context object the template renders over, mirroring
+/// release-plz's `ReleaseInfo`. Field names must match the template.
 #[derive(Debug, Serialize)]
 struct ReleaseInfo {
     package: String,
@@ -223,7 +221,7 @@ mod tests {
         }
     }
 
-    // --- title ----------------------------------------------------------------
+    // title
 
     #[test]
     fn title_uses_first_record_new_version() {
@@ -239,7 +237,7 @@ mod tests {
         assert_eq!(title(&[]), "chore: release v");
     }
 
-    // --- summary: 🤖 bullet list + inline markers -----------------------------
+    // summary: bullet list + inline markers
 
     #[test]
     fn summary_is_robot_bullet_list_with_markers() {
@@ -269,7 +267,7 @@ mod tests {
         assert!(b.contains("* `same-pkg`: 0.2.0 (✓ API compatible changes)"));
     }
 
-    // --- breaking-change blocks -----------------------------------------------
+    // breaking-change blocks
 
     #[test]
     fn breaking_block_only_for_breaking_packages_fenced() {
@@ -292,7 +290,7 @@ mod tests {
         assert!(!b.contains("breaking changes\n\n```text"));
     }
 
-    // --- collapsible changelog (blockquote, headings) -------------------------
+    // collapsible changelog (blockquote, headings)
 
     #[test]
     fn changelog_omitted_when_no_content() {
@@ -340,7 +338,7 @@ mod tests {
         assert!(!b.contains("## `toy-kv-wasm`"));
     }
 
-    // --- no branding ----------------------------------------------------------
+    // no branding
 
     #[test]
     fn body_has_no_release_plz_branding() {
@@ -351,7 +349,7 @@ mod tests {
         assert!(!b.contains("This PR was generated"));
     }
 
-    // --- length safety --------------------------------------------------------
+    // length safety
 
     #[test]
     fn length_safety_normal_input_keeps_changelog() {

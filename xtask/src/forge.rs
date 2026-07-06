@@ -1,23 +1,6 @@
-//! M7 `forge` — GitHub API primitives over blocking HTTP.
-//!
-//! Two side-effecting operations: opening/updating the release PR and creating a
-//! GitHub release for a tag. Implements:
-//!
-//! - `pr-body-logic.md` §"Branch name and opening the PR" — POST title/body/head/
-//!   base; on a refresh of an existing release PR, rewrite title/body only when
-//!   they changed.
-//! - `publish-crates-logic.md` §"Not published, no tag" step 4 — create a GitHub
-//!   release from the tag, body from the crate changelog entry, pre-release flag
-//!   derived from the semver.
-//! - `orchestrator.md` §Credentials — the GitHub token is read from the env var
-//!   whose **name** is passed in (`github_token_env`); a literal token is never
-//!   accepted and the value is never logged.
-//!
-//! The PR **body** text (M11) and the changelog entry (M9) are produced
-//! elsewhere; callers pass the finished strings in here.
-//!
-//! Tests target the pure helpers (URL/JSON building, env-name resolution,
-//! update comparison, semver classification); the network wrappers are thin.
+//! GitHub API primitives over blocking HTTP: open/update the release PR and
+//! create a GitHub release for a tag. The token is read from the env var whose
+//! name is passed in; a literal token is never accepted and never logged.
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -68,8 +51,6 @@ pub struct PrRef {
 /// `1.2.0-rc.1`), `false` for a clean release (e.g. `1.2.0`).
 ///
 /// The caller passes the result as the `prerelease` flag of [`create_release`].
-/// Implements `publish-crates-logic.md` §"Not published, no tag" step 4 ("an
-/// `-rc.N` version is a pre-release").
 pub fn is_prerelease(version: &semver::Version) -> bool {
     !version.pre.is_empty()
 }
@@ -77,7 +58,7 @@ pub fn is_prerelease(version: &semver::Version) -> bool {
 /// Resolve a GitHub token by reading the env var **named** by `name`.
 ///
 /// Never accepts a literal token and never logs the value: the error names the
-/// env var only. Implements `orchestrator.md` §Credentials.
+/// env var only.
 fn token_from_env(name: &str) -> Result<String> {
     std::env::var(name).map_err(|_| {
         anyhow!("GitHub token env var `{name}` is not set (or not valid UTF-8); export it before running")
@@ -86,14 +67,9 @@ fn token_from_env(name: &str) -> Result<String> {
 
 /// Whether a PR refresh needs to rewrite the title/body: `true` iff either the
 /// title or the body differs from the current values.
-///
-/// Implements the "rewrite title/body only when they changed" rule of
-/// `pr-body-logic.md` §"Branch name and opening the PR".
 fn update_needed(current_title: &str, current_body: &str, new_title: &str, new_body: &str) -> bool {
     current_title != new_title || current_body != new_body
 }
-
-// --- URL construction -------------------------------------------------------
 
 /// `GET` URL for the open PR with the given `head`/`base`. GitHub qualifies the
 /// `head` branch with the owner: `{owner}:{head}`.
@@ -122,8 +98,6 @@ fn releases_create_url(repo: &Repo) -> String {
     format!("{}/releases", repo.rest_base())
 }
 
-// --- Request-body JSON builders ---------------------------------------------
-
 /// JSON body for `POST /pulls`.
 fn create_pr_body(head: &str, base: &str, title: &str, body: &str) -> Value {
     json!({ "title": title, "head": head, "base": base, "body": body })
@@ -139,8 +113,6 @@ fn create_release_body(tag: &str, name: &str, body: &str, prerelease: bool) -> V
     json!({ "tag_name": tag, "name": name, "body": body, "prerelease": prerelease })
 }
 
-// --- HTTP wrappers ----------------------------------------------------------
-
 /// Apply the common GitHub headers (auth, accept, user-agent) to a request.
 fn auth(req: ureq::Request, token: &str) -> ureq::Request {
     req.set("Authorization", &format!("Bearer {token}"))
@@ -154,8 +126,6 @@ fn auth(req: ureq::Request, token: &str) -> ureq::Request {
 ///
 /// Side effects: network. Reads the token value from the env var named
 /// `github_token_env`. Returns the PR's `html_url`.
-///
-/// Implements `pr-body-logic.md` §"Branch name and opening the PR".
 pub fn open_or_update_pr(
     repo: &Repo,
     head: &str,
@@ -307,8 +277,6 @@ pub fn token_committer(github_token_env: &str) -> Result<Option<GitIdentity>> {
 ///
 /// Side effects: network. Reads the token from the env var named
 /// `github_token_env`.
-///
-/// Implements `publish-crates-logic.md` §"Not published, no tag" step 4.
 pub fn create_release(
     repo: &Repo,
     tag: &str,
@@ -438,8 +406,6 @@ mod tests {
         }
     }
 
-    // --- is_prerelease (publish-crates-logic.md step 4) ---------------------
-
     #[test]
     fn is_prerelease_false_for_stable() {
         let v = semver::Version::parse("1.2.0").unwrap();
@@ -451,8 +417,6 @@ mod tests {
         let v = semver::Version::parse("1.2.0-rc.1").unwrap();
         assert!(is_prerelease(&v));
     }
-
-    // --- update_needed (pr-body-logic.md "rewrite only when changed") -------
 
     #[test]
     fn update_needed_false_when_unchanged() {
@@ -468,8 +432,6 @@ mod tests {
     fn update_needed_true_when_body_changed() {
         assert!(update_needed("t", "old", "t", "new"));
     }
-
-    // --- URL construction ---------------------------------------------------
 
     #[test]
     fn pulls_list_url_encodes_owner_qualified_head() {
@@ -502,8 +464,6 @@ mod tests {
             "https://api.github.com/repos/mcrakhman/toy-kv/releases"
         );
     }
-
-    // --- Request-body JSON shape --------------------------------------------
 
     #[test]
     fn create_pr_body_shape() {
@@ -538,8 +498,6 @@ mod tests {
         let stable = create_release_body("v1.2.0", "v1.2.0", "notes", false);
         assert_eq!(stable["prerelease"], false);
     }
-
-    // --- token-from-env resolution (orchestrator.md Credentials) ------------
 
     #[test]
     fn is_no_commits_race_matches_github_wording() {

@@ -1,17 +1,14 @@
-//! M12 `cmd_prepare` — orchestration of **Flow 1: Prepare release PR**.
+//! Prepare the release PR: branch guard, current-version discovery (git tags +
+//! registry), legal-successor validation, the format-preserving workspace version
+//! bump, per-crate breaking analysis (diagnostic) and changelogs, the optional npm
+//! wrapper update, the single release commit, the PR-body assembly, and — only under
+//! `--push` — pushing the branch and opening or updating the PR.
 //!
-//! Implements [`orchestrator.md` §Flow 1] steps 1–10: branch guard, current-version
-//! discovery (git tags + registry), exact legal-successor validation, the
-//! format-preserving workspace version bump, per-crate breaking analysis (diagnostic)
-//! and changelogs, the optional npm wrapper update, the single release commit, the
-//! PR-body assembly, and — only under `--push` — pushing the branch and opening or
-//! updating the PR.
-//!
-//! All real work is delegated to the dependency modules (`config`, `workspace`,
+//! The real work is delegated to the sibling modules (`config`, `workspace`,
 //! `version`, `commit`, `gitops`, `cargoops`, `forge`, `npmops`, `changelog`,
-//! `breaking`, `prbody`); this module owns only the wiring and the pure helpers below.
+//! `breaking`, `prbody`); this module owns the wiring and the pure helpers below.
 //!
-//! The two orchestrator-fixed conventions (shared with M13 `cmd_release`):
+//! Two conventions are shared with `cmd_release`:
 //! - per-crate tag name `format!("{crate_name}-v{version}")`;
 //! - a tag counts as a version tag iff it matches
 //!   `^.+-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$`, parsing the substring after the
@@ -29,18 +26,17 @@ use crate::prbody::PackageReport;
 /// The default release-branch prefix when neither the option nor config supplies one.
 const DEFAULT_BRANCH_PREFIX: &str = "release-";
 
-/// Fully-resolved inputs to a prepare run (the CLI / M14 turns prompts + flags into
-/// this).
+/// Fully-resolved inputs to a prepare run (the CLI turns prompts + flags into this).
 #[derive(Debug, Clone)]
 pub struct PrepareOptions {
     /// Release-branch prefix. Resolution: this → `config.defaults.branch_prefix` →
     /// `"release-"`.
     pub branch_prefix: Option<String>,
-    /// The requested next version (already resolved by the CLI). Validated in step 3.
+    /// The requested next version, already resolved by the CLI.
     pub version: String,
-    /// Auto-confirm destructive prompts (the branch-delete prompt in step 1).
+    /// Auto-confirm destructive prompts (the branch-delete prompt).
     pub yes: bool,
-    /// Opt into remote actions (the remote branch check in step 1 and step 10).
+    /// Opt into remote actions (the remote branch check and the push/PR step).
     pub push: bool,
     /// The **name** of the env var holding the GitHub token. Only used under `push`.
     pub github_token_env: String,
@@ -59,20 +55,19 @@ pub struct PrepareOptions {
 pub struct PrepareOutcome {
     /// The release branch that was created/reset (`"<prefix><version>"`).
     pub branch: String,
-    /// SHA of the single release commit (step 8).
+    /// SHA of the single release commit.
     pub commit_sha: String,
     /// `true` iff the branch was pushed and the PR opened/updated (only under `push`).
     pub pushed: bool,
     /// The PR html_url when `pushed`; `None` otherwise.
     pub pr_url: Option<String>,
-    /// The discovered current version (step 2); `None` for a first release.
+    /// The discovered current version; `None` for a first release.
     pub current_version: Option<String>,
-    /// The per-crate reports fed to M11 (one per publishable crate).
+    /// The per-crate reports, one per publishable crate.
     pub packages: Vec<PackageReport>,
 }
 
-/// Execute Flow 1 steps 1–10. See the module docs / `artifacts/M12/contract.md` for
-/// the per-step behavioral contract.
+/// Build the release PR end to end. See the module docs for the overall flow.
 pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
     let config = crate::config::load(repo_root).context("loading release.toml")?;
     let ws = crate::workspace::Workspace::discover(repo_root).context("discovering workspace")?;
@@ -149,8 +144,8 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
 /// Guard against clobbering an existing release branch: if it already exists,
 /// prompt (unless `--yes`) and error on decline. Under `--push` the existence check
 /// consults the remote too. Does **not** create the branch — the caller resolves the
-/// base branch and creates it, so `git_default_branch`'s current-branch fallback is
-/// evaluated at the right point (before the branch switch, and only past this guard).
+/// base branch and creates it, so `git_default_branch`'s current-branch fallback runs
+/// at the right point (before the branch switch, and only past this guard).
 fn guard_release_branch(
     git: &Git,
     branch: &str,
@@ -395,10 +390,6 @@ fn create_release_commit(
     })
 }
 
-// ============================================================================
-// Pure / decomposable helpers (unit-tested without network/stdin/registry).
-// ============================================================================
-
 /// Resolve the branch prefix: explicit option → config default → `"release-"`.
 fn resolve_branch_prefix(opt: Option<&str>, cfg: Option<&str>) -> String {
     opt.or(cfg).unwrap_or(DEFAULT_BRANCH_PREFIX).to_string()
@@ -446,8 +437,8 @@ fn select_current_version(
         .cloned()
 }
 
-/// First-release acceptance rule: accept any parseable semver (reject only
-/// un-parseable). See contract Spec question Q1.
+/// First-release acceptance rule: accept any parseable semver, reject only
+/// un-parseable input.
 fn first_release_accept(requested: &str) -> Result<Version, crate::version::VersionError> {
     crate::version::parse_next(requested)
 }
@@ -527,7 +518,7 @@ fn set_string_value(item: &mut toml_edit::Item, new: &str) {
     }
 }
 
-/// Assemble one M11 `PackageReport` from the per-crate data.
+/// Assemble one `PackageReport` from the per-crate data.
 fn build_package_report(
     name: &str,
     prev: Option<&Version>,
@@ -574,15 +565,6 @@ fn confirm(prompt: &str, yes: bool) -> Result<bool> {
     Ok(confirm_decision(false, &line))
 }
 
-// ============================================================================
-// I/O seams (git default-branch lookup). Repo derivation lives in `crate::repo`.
-// ============================================================================
-
-/// Best-effort resolution of the default branch the release is cut from. Tries
-/// `origin/HEAD` (`git symbolic-ref --short refs/remotes/origin/HEAD`); falls back to
-/// `HEAD` when no remote is configured (e.g. a local fixture with no `origin`). See
-/// contract Spec question Q2. Shells `git` directly (orchestration glue, not an M5
-/// primitive — M5's contract does not expose a default-branch lookup).
 /// The repository's default branch name, used as the release-branch base *and* the
 /// PR base. Must resolve to a real branch name: `"HEAD"` is a valid commit-ish for
 /// branching but an **invalid PR base** (GitHub rejects it `422 field: base`).
@@ -646,7 +628,6 @@ mod tests {
         Version::parse(s).unwrap()
     }
 
-    // --- Default-branch detection (base for the release branch + PR) -------------
     // Regression: `actions/checkout` leaves `refs/remotes/origin/HEAD` unset, which
     // used to fall back to the literal "HEAD" — a valid branch-from ref but an
     // INVALID PR base (`422 field: base`). Detection must yield a real branch name.
@@ -678,8 +659,6 @@ mod tests {
         assert_ne!(base, "HEAD");
     }
 
-    // --- Branch-name computation (Flow 1 step 1) ---------------------------------
-
     #[test]
     fn target_branch_concatenates_prefix_and_version() {
         assert_eq!(target_branch("release-", "0.2.0"), "release-0.2.0");
@@ -697,7 +676,6 @@ mod tests {
         assert_eq!(resolve_branch_prefix(None, None), DEFAULT_BRANCH_PREFIX);
     }
 
-    // --- Version-tag convention (orchestrator-fixed) -----------------------------
     // The tag *name* convention (`{crate}-v{version}`) is `cmd_release::tag_name`,
     // tested there; here we test that the *parser* round-trips it.
 
@@ -727,8 +705,6 @@ mod tests {
         assert_eq!(parse_version_tag("toy-kv-v1.2.3+build"), None); // build metadata rejected
         assert_eq!(parse_version_tag("random-tag"), None);
     }
-
-    // --- Current-version selection (Flow 1 step 2 + first-release rule) ----------
 
     #[test]
     fn select_current_version_takes_max_across_both_sets() {
@@ -763,7 +739,7 @@ mod tests {
 
     #[test]
     fn first_release_accepts_any_parseable_semver() {
-        // The lenient first-release rule (contract Spec question Q1).
+        // The lenient first-release rule: accept any parseable semver.
         assert!(first_release_accept("0.1.0").is_ok());
         assert!(first_release_accept("1.0.0").is_ok());
         assert!(first_release_accept("2.3.4-rc.1").is_ok());
@@ -771,8 +747,6 @@ mod tests {
         assert!(first_release_accept("not-a-version").is_err());
         assert!(first_release_accept("1.2").is_err());
     }
-
-    // --- Version bump on a Cargo.toml (Flow 1 step 4) ----------------------------
 
     const SAMPLE_MANIFEST: &str = r#"# top comment
 [workspace]
@@ -839,8 +813,6 @@ bare-pin = "=0.1.0"
         assert!(apply_version_bump(bad, "0.2.0").is_err());
     }
 
-    // --- PackageReport assembly (Flow 1 step 9) ----------------------------------
-
     #[test]
     fn build_package_report_normal_release() {
         let r = build_package_report(
@@ -869,10 +841,7 @@ bare-pin = "=0.1.0"
         assert!(!r.breaking);
     }
 
-    // Repo-URL parsing now lives in `crate::repo` (shared with M13); see its
-    // unit tests there.
-
-    // --- Confirm decision logic (Flow 1 step 1, stdin split off) -----------------
+    // Repo-URL parsing now lives in `crate::repo`; see its unit tests there.
 
     #[test]
     fn confirm_decision_yes_flag_short_circuits() {

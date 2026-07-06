@@ -17,7 +17,6 @@
 //! placed verbatim into the git-cliff `Release`); nothing here computes a version.
 //!
 //! [`git-cliff-core`]: https://crates.io/crates/git-cliff-core
-//! [`changelog-generation.md`]: ../../release-spec/changelog-generation.md
 
 use anyhow::{Context, bail};
 use git_cliff_core::{
@@ -152,8 +151,8 @@ pub fn render_entry(
     let entry = entry.trim_matches('\n');
 
     // git-cliff renders nothing for a release with no commits (even with
-    // `render_always`), but the contract still wants a dated heading for an
-    // unchanged package. Synthesize the bare heading in that case.
+    // `render_always`), but we still want a dated heading for an unchanged
+    // package. Synthesize the bare heading in that case.
     let file_entry = if entry.is_empty() {
         format!("## [{version}] - {date}\n")
     } else {
@@ -402,7 +401,7 @@ mod tests {
         }
     }
 
-    // --- render_entry (git-cliff): grouping, headings, body-only stripping -----
+    // render_entry (git-cliff): grouping, headings, body-only stripping
 
     /// A `feat:` and two `fix:` commits render a dated heading with `### Added`
     /// and `### Fixed` sections and the descriptions as bullets.
@@ -459,7 +458,7 @@ mod tests {
         assert!(out.body_only.is_empty());
     }
 
-    // --- prepend_into: header preservation, fallback default header ------------
+    // prepend_into: header preservation, fallback default header
 
     /// The existing header (through `## [Unreleased]`) is preserved, the new entry
     /// is spliced beneath it, and the old body is retained below the new entry.
@@ -549,7 +548,7 @@ Hand-edited preamble that must survive.
         assert!(!out.ends_with("\n\n"));
     }
 
-    // --- date_to_timestamp / civil_from_days: date round-trip -----------------
+    // date_to_timestamp / civil_from_days: date round-trip
 
     /// `date_to_timestamp` must land on midnight UTC of the requested day, and
     /// `civil_from_days` must invert it.

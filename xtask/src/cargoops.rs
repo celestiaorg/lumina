@@ -1,20 +1,16 @@
 //! Cargo/registry primitives for the crate-publishing step of `cargo xtask
-//! release`.
+//! release`. Everything here shells out to `cargo`; per-crate orchestration
+//! (idempotency scan, tag creation, dependency order) lives in higher modules.
 //!
-//! Implements `release-spec/publish-crates-logic.md` §"Idempotency scan" (b) and
-//! §"Not published, no tag" steps 1–3. Everything here shells out to `cargo` via
-//! [`std::process::Command`]; the per-crate orchestration (idempotency scan, tag
-//! creation, dependency order) lives in higher modules.
-//!
-//! Key rules from the spec, enforced here:
-//! - the registry token is read from an env var **named** by the caller and
-//!   passed to `cargo publish` via the process environment as
-//!   `CARGO_REGISTRY_TOKEN` — never on the command line, never logged;
-//! - a `cargo publish` failure whose output says the version was *already
-//!   uploaded* / *already exists* is treated as **success** (a race won by
-//!   another runner or an earlier attempt);
+//! Key rules enforced here:
+//! - the registry token is read from an env var named by the caller and passed
+//!   to `cargo publish` via the process environment as `CARGO_REGISTRY_TOKEN` —
+//!   never on the command line, never logged;
+//! - a `cargo publish` failure whose output says the version was already
+//!   uploaded / already exists is treated as success (a race won by another
+//!   runner or an earlier attempt);
 //! - `wait_until_published` polls the registry on a short interval until the
-//!   version indexes or a **timeout** elapses (timeout ⇒ `Err`).
+//!   version indexes or a timeout elapses (timeout ⇒ `Err`).
 
 use std::path::Path;
 use std::process::Command;
@@ -27,12 +23,11 @@ use anyhow::{Context, Result, anyhow, bail};
 /// regardless of which env var the caller stored it in.
 const CARGO_REGISTRY_TOKEN_ENV: &str = "CARGO_REGISTRY_TOKEN";
 
-/// Interval between registry polls in [`wait_until_published`]. The spec mandates
-/// "a short interval" without fixing a value; this is our concrete choice.
+/// Interval between registry polls in [`wait_until_published`].
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Render a process `ExitStatus` as its numeric code, or `"signal"` when the
-/// process was killed by a signal (no code). Pure.
+/// process was killed by a signal (no code).
 fn exit_code_str(status: &std::process::ExitStatus) -> String {
     status
         .code()
@@ -91,8 +86,7 @@ fn cargo_info(args: &[&str], cwd: Option<&Path>) -> Result<CargoInfo> {
 ///
 /// Runs `cargo info <name>@<version>` and reports whether that exact package
 /// version exists **on the registry**. A clean "not found" is `Ok(false)` — not
-/// an error — because callers branch on existence (see `publish-crates-logic.md`
-/// §"Idempotency scan" (b)).
+/// an error — because callers branch on existence.
 ///
 /// ## In-workspace hazard (local-source) — why we run from a temp dir
 /// When `cargo info <name>@<version>` is run from *inside* the workspace that
@@ -128,8 +122,7 @@ pub fn is_published(name: &str, version: &str) -> Result<bool> {
 /// Runs `cargo info <name>` and parses the `version:` line it prints for the
 /// latest released version (see [`parse_max_version`]). Used by higher modules
 /// to discover the repo's **current version** from the registry (the highest
-/// existing version — `orchestrator.md` §"Version validation": current version =
-/// highest of published registry versions + git tags).
+/// existing version).
 ///
 /// A clean "not found" — the crate has never been published — is `Ok(None)`,
 /// **not** an error, mirroring [`is_published`]'s `Ok(false)`. Likewise, a
@@ -172,7 +165,7 @@ pub fn max_published_version(name: &str) -> Result<Option<semver::Version>> {
 ///
 /// If `cargo publish` fails but its output indicates the version was already
 /// uploaded / already exists, that is treated as success (the "already exists"
-/// race — `publish-crates-logic.md` §"Not published, no tag" step 2).
+/// race).
 ///
 /// # Errors
 /// Returns `Err` if the named env var is unset/empty, if `cargo` cannot be
@@ -259,8 +252,7 @@ pub fn verify_publishable(repo_root: &Path) -> Result<()> {
 /// Poll the registry until `name@version` indexes, or `timeout` elapses.
 ///
 /// Calls [`is_published`] on a short fixed interval ([`POLL_INTERVAL`]) until it
-/// observes `true`. Implements `publish-crates-logic.md` §"Not published, no
-/// tag" step 3.
+/// observes `true`.
 ///
 /// # Errors
 /// Returns `Err` if `timeout` elapses before the version appears (a re-run will
@@ -308,9 +300,8 @@ where
 
 /// Build the argument vector for `cargo publish` for the crate whose manifest is
 /// at `manifest_path`. Pure (no I/O) and **token-free** by construction — the
-/// registry token is supplied only through the child environment, never argv
-/// (`publish-crates-logic.md` §Inputs 2). Factored out so the command shape is
-/// unit-testable.
+/// registry token is supplied only through the child environment, never argv.
+/// Factored out so the command shape is unit-testable.
 fn publish_args(manifest_path: &Path) -> [&std::ffi::OsStr; 3] {
     [
         "publish".as_ref(),
@@ -319,39 +310,30 @@ fn publish_args(manifest_path: &Path) -> [&std::ffi::OsStr; 3] {
     ]
 }
 
-/// Parse the latest **published** version from `cargo info <name>` stdout.
+/// Parse the latest published version from `cargo info <name>` stdout.
 ///
-/// Pure (no I/O). `cargo info` prints a `version: …` line reporting the crate's
-/// version; this returns the first such version that resolves to a **registry**
-/// publication.
+/// `cargo info` prints a `version: …` line; this returns the first such version
+/// that resolves to a registry publication. Two annotations can follow the value
+/// and mean opposite things:
 ///
-/// Two annotations can follow the version value, and they mean opposite things:
-///
-/// - `version: 0.1.0 (from ./utils)` — a **local-source** annotation: `cargo
-///   info`, when run *inside the workspace that contains the crate*, resolves to
-///   the LOCAL workspace member, which is **not** a registry publication. Such a
-///   line is **skipped** (we keep scanning), so an unpublished workspace crate
-///   yields `None` rather than masquerading as published.
+/// - `version: 0.1.0 (from ./utils)` — a local-source annotation: run inside the
+///   workspace that contains the crate, `cargo info` resolves to the local
+///   member, which is not a registry publication. Such a line is skipped, so an
+///   unpublished workspace crate yields `None` rather than looking published.
 /// - `version: 1.0.0 (latest 1.0.102)` — a registry annotation pointing at the
 ///   newest release; this *is* a publication. We keep only the leading semver
 ///   token (`1.0.0`) and ignore the trailing `(latest …)`.
 ///
-/// For each candidate `version:` field we therefore (a) reject it if its value
-/// carries a local-source `(from …)` annotation, then (b) take the first
-/// whitespace-delimited token and parse it as a [`semver::Version`]. Returns
-/// `None` if no such registry version line is present (empty / unexpected output
-/// / only a local-source line), which the caller maps to a genuine error only on
-/// a *successful* `cargo info` whose absence wasn't already explained by
-/// [`is_not_found_error`] on stderr. Field-name matching is case-insensitive;
-/// prereleases (e.g. `1.0.0-rc.1`) parse through unchanged.
+/// Returns `None` if no registry version line is present. Field-name matching is
+/// case-insensitive; prereleases (e.g. `1.0.0-rc.1`) parse through unchanged.
 /// Remove ANSI CSI escape sequences (`ESC [ … <final byte>`, e.g. SGR color
 /// codes) from `s`.
 ///
-/// Pure. `cargo info` colorizes its output in some environments (notably GitHub
-/// Actions), wrapping the `version:` line in SGR codes so that it no longer
-/// starts with the literal `version:` prefix. We set `CARGO_TERM_COLOR=never` on
-/// the `cargo info` invocations to prevent that at the source; stripping here as
-/// well keeps the line parsing robust even if colored output slips through.
+/// `cargo info` colorizes its output in some environments (notably GitHub
+/// Actions), wrapping the `version:` line in SGR codes so it no longer starts
+/// with the literal `version:` prefix. We set `CARGO_TERM_COLOR=never` on the
+/// `cargo info` invocations to prevent that at the source; stripping here as well
+/// keeps the line parsing robust even if colored output slips through.
 fn strip_ansi_csi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -451,10 +433,9 @@ fn is_not_found_error(stderr: &str) -> bool {
 /// True iff `stderr` matches cargo's "already uploaded" / "already exists"
 /// wording for a version that is already on the registry.
 ///
-/// Pure and case-insensitive; recognizes the phrases cargo / the registry emit
-/// when an upload loses the race. Unrelated failures (auth, network, dirty tree,
-/// verification build) return `false`. Implements the success-on-race rule of
-/// `publish-crates-logic.md` §"Not published, no tag" step 2.
+/// Case-insensitive; recognizes the phrases cargo / the registry emit when an
+/// upload loses the race. Unrelated failures (auth, network, dirty tree,
+/// verification build) return `false`.
 pub fn is_already_uploaded_error(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
     s.contains("already uploaded") || s.contains("already exists")
@@ -464,9 +445,6 @@ pub fn is_already_uploaded_error(stderr: &str) -> bool {
 mod tests {
     use super::*;
     use std::cell::Cell;
-
-    // --- is_already_uploaded_error: the "already exists" race = success rule ---
-    // (publish-crates-logic.md §"Not published, no tag" step 2)
 
     #[test]
     fn already_uploaded_matches_realistic_cargo_stderr() {
@@ -507,8 +485,7 @@ mod tests {
         }
     }
 
-    // --- is_not_found_error: drives is_published's Ok(false) vs Err split ---
-    // (publish-crates-logic.md §"Idempotency scan" (b))
+    // is_not_found_error drives is_published's Ok(false) vs Err split.
 
     #[test]
     fn not_found_matches_cargo_info_absence_wording() {
@@ -538,10 +515,6 @@ mod tests {
             );
         }
     }
-
-    // --- parse_max_version: pure parse of `cargo info` stdout ---
-    // (orchestrator.md §"Version validation" — current version = highest
-    // published registry version; max_published_version feeds that lookup)
 
     #[test]
     fn parse_max_version_reads_version_line() {
@@ -626,8 +599,6 @@ mod tests {
         );
     }
 
-    // --- is_local_source_version: the `(from …)` path-source marker ---
-
     #[test]
     fn local_source_version_detects_from_annotation() {
         assert!(is_local_source_version("0.1.0 (from ./utils)"));
@@ -638,8 +609,8 @@ mod tests {
         assert!(!is_local_source_version("1.4.2"));
     }
 
-    // --- is_local_source_resolution: drives is_published's Ok(false) for the ---
-    // --- in-workspace local-crate hazard (publish-crates-logic.md §scan (b)) ---
+    // is_local_source_resolution drives is_published's Ok(false) for the
+    // in-workspace local-crate hazard.
 
     #[test]
     fn local_source_resolution_true_for_workspace_member() {
@@ -668,7 +639,7 @@ mod tests {
         assert!(!is_local_source_resolution(""));
     }
 
-    // --- ANSI-color regression (the first-release CI failure) --------------------
+    // ANSI-color regression (the first-release CI failure).
     // In some environments (notably GitHub Actions) `cargo info` colorizes its
     // output, wrapping the `version:` line in SGR escape codes so it no longer
     // begins with the literal `version:` prefix. That silently broke BOTH parsers:
@@ -714,11 +685,9 @@ mod tests {
         assert!(is_local_source_resolution(COLORED_LOCAL_INFO));
     }
 
-    // --- max_published_version success-branch decision (local source -> None) ---
     // A `cargo info <name>` that exits 0 but resolved to the LOCAL workspace
     // member is NOT a registry publication: the success branch must map it to
     // "no published version" (Ok(None)), NOT to the "unparseable" error.
-    // (publish-crates-logic.md §"Idempotency scan" (b) — in-workspace hazard)
 
     #[test]
     fn max_published_version_treats_local_source_success_as_unpublished() {
@@ -752,8 +721,7 @@ mod tests {
         );
     }
 
-    // --- publish_args: command construction, token never on argv ---
-    // (publish-crates-logic.md §Inputs 2; §"Not published, no tag" step 1)
+    // publish_args: command construction, token never on argv.
 
     #[test]
     fn publish_args_shape_and_no_token() {
@@ -775,8 +743,7 @@ mod tests {
         }
     }
 
-    // --- poll_until: the generic poll loop (injected check + no-op sleep) ---
-    // (publish-crates-logic.md §"Not published, no tag" step 3)
+    // poll_until: the generic poll loop (injected check + no-op sleep).
 
     #[test]
     fn poll_succeeds_when_check_turns_true() {

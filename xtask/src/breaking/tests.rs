@@ -1,11 +1,10 @@
-//! Unit tests for the **pure** logic of M10 `breaking`.
+//! Unit tests for the pure logic of `breaking`.
 //!
-//! These exercise the contract's pure helpers (`intent_signal`,
-//! `interpret_semver_checks`, `strip_ansi`, `combine`, `reconstruct_subject`,
-//! `has_library_target`) and the never-published path of `analyze`. The **live**
-//! `cargo-semver-checks` run is deliberately NOT exercised — interpretation is
-//! tested via the seam with synthetic strings (contract: "tested with synthetic
-//! strings — ANSI stripping included").
+//! These exercise the pure helpers (`intent_signal`, `interpret_semver_checks`,
+//! `strip_ansi`, `combine`, `reconstruct_subject`, `has_library_target`) and the
+//! never-published path of `analyze`. The live `cargo-semver-checks` run is
+//! deliberately NOT exercised — interpretation is tested via the seam with
+//! synthetic strings, ANSI stripping included.
 
 use super::*;
 use crate::commit::ParsedCommit;
@@ -27,7 +26,7 @@ fn pc(
     }
 }
 
-// ---- Signal 2: intent detection (breaking-change-detection.md §"Signal 2") ----
+// intent detection
 
 #[test]
 fn intent_none_when_no_breaking_commits() {
@@ -72,7 +71,7 @@ fn intent_detects_breaking_change_footer() {
 
 #[test]
 fn intent_detects_breaking_dash_change_footer_spelling() {
-    // M4 normalizes both `BREAKING CHANGE:` and `BREAKING-CHANGE:` into
+    // Both `BREAKING CHANGE:` and `BREAKING-CHANGE:` normalize into
     // `breaking_footer`; either spelling yields the footer text here.
     let commits = [pc(Some("chore"), None, false, "bump", Some("dropped X"))];
     assert_eq!(intent_signal(&commits), Some("dropped X".to_string()));
@@ -113,7 +112,7 @@ fn intent_footer_preferred_even_when_bang_commit_comes_first() {
     assert_eq!(intent_signal(&commits), Some("footer text".to_string()));
 }
 
-// ---- strip_ansi (ANSI stripping) ----
+// strip_ansi
 
 #[test]
 fn strip_ansi_removes_sgr_color_codes() {
@@ -132,7 +131,7 @@ fn strip_ansi_passes_plain_text_through() {
     assert_eq!(strip_ansi("no escapes here"), "no escapes here");
 }
 
-// ---- Signal 1: result interpretation (the shell-out seam) ----
+// result interpretation (the shell-out seam)
 
 #[test]
 fn interpret_exit_zero_is_compatible() {
@@ -174,7 +173,7 @@ fn interpret_nonzero_with_no_report_fails_open_to_unavailable() {
     assert_eq!(reason, None);
 }
 
-// ---- reconstruct_subject ----
+// reconstruct_subject
 
 #[test]
 fn reconstruct_subject_with_scope_and_bang() {
@@ -203,7 +202,7 @@ fn reconstruct_subject_non_conventional_is_description() {
     assert_eq!(reconstruct_subject(&c), "merge stuff");
 }
 
-// ---- combine: signal combination + reason precedence ----
+// combine: signal combination + reason precedence
 
 #[test]
 fn combine_neither_signal_is_not_breaking() {
@@ -274,7 +273,7 @@ fn combine_unavailable_without_intent_is_not_breaking() {
     assert_eq!(r.reason, None);
 }
 
-// ---- has_library_target ----
+// has_library_target
 
 #[test]
 fn library_target_explicit_lib_crate_type() {
@@ -341,7 +340,7 @@ fn library_target_missing_manifest_is_conservatively_false() {
     assert!(!has_library_target(&manifest));
 }
 
-// ---- analyze: never-published short-circuit (no real tool run) ----
+// analyze: never-published short-circuit (no real tool run)
 
 #[test]
 fn analyze_no_baseline_is_first_release_skipped() {
@@ -372,7 +371,7 @@ fn analyze_no_baseline_is_first_release_skipped() {
     );
 }
 
-// ---- analyze: API Skipped paths combine with intent only (no real tool run) ----
+// analyze: API Skipped paths combine with intent only (no real tool run)
 
 #[test]
 fn analyze_cdylib_skips_api_and_uses_intent() {

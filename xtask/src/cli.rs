@@ -1,15 +1,14 @@
-//! M14 `cli` — the `xtask` command surface.
+//! The `xtask` command surface.
 //!
-//! Implements [`orchestrator.md` §The xtask surface] and [§Credentials]: a
-//! [`clap`] (derive) parser for the two subcommands, interactive prompts for the
-//! **non-secret** inputs (branch prefix, next version, commit SHA), and the
-//! `--*-token-env` resolution that turns an (optional) flag into the **name** of an
+//! A [`clap`] (derive) parser for the two subcommands, interactive prompts for the
+//! non-secret inputs (branch prefix, next version, commit SHA), and the
+//! `--*-token-env` resolution that turns an optional flag into the name of an
 //! environment variable holding a token — never a literal token.
 //!
 //! The CLI only parses, prompts, maps arguments onto
 //! [`crate::cmd_prepare::PrepareOptions`] / [`crate::cmd_release::ReleaseOptions`],
-//! dispatches to the flows, and prints an outcome summary. All git / network /
-//! registry / npm side effects live in M12 / M13.
+//! dispatches to the flows, and prints an outcome summary. The git / network /
+//! registry / npm side effects live in the command modules.
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -20,14 +19,14 @@ use clap::{Args, Parser, Subcommand};
 use crate::cmd_prepare::{self, PrepareOptions};
 use crate::cmd_release::{self, ReleaseOptions};
 
-/// Default env-var **name** for the GitHub token in the *prepare* flow.
+/// Default env-var name for the GitHub token in the prepare flow.
 ///
 /// A PAT (or GitHub App token), not the default Actions `GITHUB_TOKEN`, so the
-/// release-branch commit re-triggers PR CI (orchestrator §Credentials).
+/// release-branch commit re-triggers PR CI.
 const PREPARE_GITHUB_TOKEN_ENV: &str = "GH_TOKEN";
-/// Default env-var **name** for the GitHub token in the *release* flow.
+/// Default env-var name for the GitHub token in the release flow.
 const RELEASE_GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
-/// Default env-var **name** for the cargo registry token in the *release* flow.
+/// Default env-var name for the cargo registry token in the release flow.
 const REGISTRY_TOKEN_ENV: &str = "CARGO_REGISTRY_TOKEN";
 
 /// The `xtask` command-line interface.
@@ -198,15 +197,15 @@ pub(crate) fn resolve_or_prompt(
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
-/// Resolve a `--*-token-env` flag to the env-var **name** to forward, applying the
-/// spec's default name when the flag was omitted. Pure.
+/// Resolve a `--*-token-env` flag to the env-var name to forward, falling back to
+/// the default name when the flag was omitted.
 pub(crate) fn resolve_token_env(flag: Option<String>, default_name: &str) -> String {
     flag.unwrap_or_else(|| default_name.to_string())
 }
 
 /// Map parsed `prepare-release` args (+ the resolved prefix/version) onto
-/// [`PrepareOptions`]. Pure. The GitHub token env defaults to `GH_TOKEN`; `date`
-/// is always `None` (the CLI exposes no date override — M12 defaults to today UTC).
+/// [`PrepareOptions`]. The GitHub token env defaults to `GH_TOKEN`; `date` is always
+/// `None` (the CLI exposes no date override — the prepare flow defaults to today UTC).
 pub(crate) fn to_prepare_options(
     args: PrepareArgs,
     branch_prefix: Option<String>,
@@ -224,10 +223,10 @@ pub(crate) fn to_prepare_options(
     }
 }
 
-/// Map parsed `release` args (+ the resolved SHA) onto [`ReleaseOptions`]. Pure.
+/// Map parsed `release` args (+ the resolved SHA) onto [`ReleaseOptions`].
 /// The GitHub / registry token envs default to `GITHUB_TOKEN` /
 /// `CARGO_REGISTRY_TOKEN`; the npm token env is forwarded as-is (`None` ⇒ npm step
-/// skipped). `publish_timeout` gets M13's default via [`ReleaseOptions::new`].
+/// skipped). `publish_timeout` gets its default via [`ReleaseOptions::new`].
 pub(crate) fn to_release_options(args: ReleaseArgs, sha: String) -> ReleaseOptions {
     ReleaseOptions::new(
         sha,
@@ -237,8 +236,8 @@ pub(crate) fn to_release_options(args: ReleaseArgs, sha: String) -> ReleaseOptio
     )
 }
 
-/// Print a short status summary of a successful prepare run. M12 already printed the
-/// PR body to stdout in its step 9; this is a status line, not a duplicate body.
+/// Print a short status summary of a successful prepare run. The prepare flow already
+/// printed the PR body to stdout; this is just a status line, not a duplicate body.
 fn print_prepare_summary(
     opts: &PrepareOptions,
     outcome: &cmd_prepare::PrepareOutcome,
@@ -320,8 +319,6 @@ mod tests {
         }
     }
 
-    // --- clap surface validity (spec §xtask surface) ---------------------------
-
     #[test]
     fn clap_command_is_valid() {
         Cli::command().debug_assert();
@@ -340,8 +337,6 @@ mod tests {
         let err = Cli::try_parse_from(["xtask", "release", "--github-token-env"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
-
-    // --- prepare-release parsing ----------------------------------------------
 
     #[test]
     fn prepare_parses_all_flags() {
@@ -374,8 +369,6 @@ mod tests {
         assert_eq!(args.github_token_env, None);
     }
 
-    // --- release parsing ------------------------------------------------------
-
     #[test]
     fn release_parses_all_flags() {
         let args = parse_release(&[
@@ -405,7 +398,7 @@ mod tests {
         assert_eq!(args.npm_token_env, None, "npm token has no default");
     }
 
-    // --- token-env defaulting (spec §Credentials default-name table) ----------
+    // token-env defaulting
 
     #[test]
     fn resolve_token_env_uses_default_when_flag_absent() {
@@ -461,7 +454,7 @@ mod tests {
 
     #[test]
     fn release_npm_token_absent_stays_none() {
-        // No --npm-token-env ⇒ Option<String> None ⇒ M13 skips the npm step.
+        // No --npm-token-env ⇒ Option<String> None ⇒ the release flow skips the npm step.
         let args = parse_release(&["xtask", "release"]);
         let opts = to_release_options(args, "sha".into());
         assert_eq!(opts.npm_token_env, None);
@@ -474,7 +467,7 @@ mod tests {
         assert_eq!(opts.npm_token_env.as_deref(), Some("NPM_REGISTRY_TOKEN"));
     }
 
-    // --- resolve_or_prompt: skip when flag present, read otherwise ------------
+    // resolve_or_prompt: skip when flag present, read otherwise
 
     #[test]
     fn resolve_or_prompt_skips_reader_when_value_present() {

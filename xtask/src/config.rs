@@ -1,11 +1,7 @@
 //! Release-tool configuration: parsing the optional repo-root `release.toml`.
 //!
-//! Implements [`orchestrator.md` §Portability & configuration]. The config file
-//! is **entirely optional**: a crate-only workspace omits it, in which case
-//! [`load`] returns a default (empty) [`Config`].
-//!
-//! [`orchestrator.md` §Portability & configuration]:
-//!   ../../release-spec/orchestrator.md
+//! The config file is entirely optional: a crate-only workspace omits it, in
+//! which case [`load`] returns a default (empty) [`Config`].
 
 use std::fs;
 use std::io;
@@ -42,8 +38,7 @@ pub struct Defaults {
 
 /// One `[[npm]]` entry — a single **published** npm package.
 ///
-/// These are publish targets only, not test-only wasm builds (see the spec's
-/// "Publish targets only — not test-only wasm" note).
+/// These are publish targets only, not test-only wasm builds.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct NpmComponent {
     /// Name of the crate `wasm-pack` builds into the published wasm package
@@ -84,7 +79,7 @@ mod tests {
     use super::*;
 
     /// Full example: `[defaults]` + one `[[npm]]` (the toy-kv fixture shape).
-    /// Rule: complete config parses all fields. (orchestrator.md §Portability)
+    /// A complete config parses all fields.
     #[test]
     fn parses_full_example() {
         let toml = r#"
@@ -102,8 +97,7 @@ mod tests {
         assert_eq!(cfg.npm[0].package_dir, "wasm/js");
     }
 
-    /// Rule: a missing `release.toml` is NOT an error -> default/empty config.
-    /// (orchestrator.md §Portability "entirely optional"; IMPL-GUIDE §6 M1)
+    /// A missing `release.toml` is NOT an error -> default/empty config.
     #[test]
     fn missing_file_is_default() {
         let dir = std::env::temp_dir().join(format!(
@@ -118,7 +112,7 @@ mod tests {
         assert!(cfg.npm.is_empty());
     }
 
-    /// Rule: `[defaults]` only, no `[[npm]]` -> empty npm vec (partial file valid).
+    /// `[defaults]` only, no `[[npm]]` -> empty npm vec (partial file valid).
     #[test]
     fn defaults_only() {
         let cfg = from_str("[defaults]\nbranch_prefix = \"rel/\"\n").expect("valid");
@@ -126,8 +120,7 @@ mod tests {
         assert!(cfg.npm.is_empty());
     }
 
-    /// Rule: several `[[npm]]` entries -> list, preserved in file order.
-    /// (orchestrator.md §Portability: "`[[npm]]` is a list".)
+    /// Several `[[npm]]` entries -> list, preserved in file order.
     #[test]
     fn multiple_npm_entries_in_order() {
         let toml = r#"
@@ -147,7 +140,7 @@ mod tests {
         assert_eq!(cfg.defaults.branch_prefix, None);
     }
 
-    /// Rule: zero `[[npm]]` (crate-only) -> empty vec; empty string also valid.
+    /// Zero `[[npm]]` (crate-only) -> empty vec; empty string also valid.
     #[test]
     fn zero_npm_and_empty_string() {
         let cfg = from_str("").expect("empty string is valid");
@@ -155,13 +148,13 @@ mod tests {
         assert!(cfg.npm.is_empty());
     }
 
-    /// Rule: malformed TOML -> error (never silently defaulted).
+    /// Malformed TOML -> error (never silently defaulted).
     #[test]
     fn malformed_toml_is_error() {
         assert!(from_str("this is not = = toml [[[").is_err());
     }
 
-    /// Rule: schema violation (`[[npm]]` missing a required field) -> error.
+    /// Schema violation (`[[npm]]` missing a required field) -> error.
     #[test]
     fn npm_entry_missing_field_is_error() {
         let toml = r#"

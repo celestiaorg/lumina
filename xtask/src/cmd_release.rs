@@ -1,16 +1,9 @@
-//! Flow 2 — Release orchestration (`cargo xtask release`).
+//! Release orchestration (`cargo xtask release`).
 //!
 //! Publishes every publishable workspace crate to the registry in dependency
 //! (topological) order, creates each crate's git tag + GitHub release, then
 //! publishes the configured npm component(s). Fully idempotent / resumable: there
 //! is no state file — re-running converges on "every crate published and tagged".
-//!
-//! Implements [`orchestrator.md` §Flow 2 — Release], driving
-//! [`publish-crates-logic.md`] (step 2) and [`release-step.md`] (step 3). See
-//! `artifacts/M13/contract.md` for the full behavioral contract.
-//!
-//! Wiring (by contract only): M1 `config`, M2 `workspace`, M5 `gitops`,
-//! M6 `cargoops`, M7 `forge`, M8 `npmops`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -32,11 +25,7 @@ pub(crate) const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(600);
 /// The remote consulted by the idempotency scan's remote tag check.
 const REMOTE: &str = "origin";
 
-// ---------------------------------------------------------------------------
-// Inputs
-// ---------------------------------------------------------------------------
-
-/// Inputs for one release run (orchestrator Flow 2 §Inputs).
+/// Inputs for one release run.
 ///
 /// Every credential is the **name** of an environment variable holding the
 /// token, never a literal token (the wired deps read the value from the env).
@@ -74,12 +63,9 @@ impl ReleaseOptions {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pure decision core (unit-tested without I/O)
-// ---------------------------------------------------------------------------
+// Pure decision core (unit-tested without I/O).
 
-/// The per-crate decision yielded by the corrected state table
-/// ([`publish-crates-logic.md` §"Corrected state table"]).
+/// The per-crate publish decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrateAction {
     /// Tag already exists → fully done, do nothing.
@@ -90,7 +76,7 @@ pub enum CrateAction {
     Publish,
 }
 
-/// The corrected state table (pure). `tag_exists == true` short-circuits to
+/// Decide what to do for one crate. `tag_exists == true` short-circuits to
 /// [`CrateAction::Skip`] regardless of `is_published` (a tag implies the version
 /// was published before the tag was created).
 ///
@@ -109,16 +95,11 @@ pub fn decide_action(tag_exists: bool, is_published: bool) -> CrateAction {
     }
 }
 
-/// The orchestrator-fixed per-crate tag convention: `{crate_name}-v{version}`.
-///
-/// Must match M12 (which reads these tags). E.g. `toy-kv-v0.2.0`.
+/// The per-crate tag convention: `{crate_name}-v{version}`, e.g. `toy-kv-v0.2.0`.
+/// Whatever reads these tags back must use the same convention.
 pub fn tag_name(crate_name: &str, version: &str) -> String {
     format!("{crate_name}-v{version}")
 }
-
-// ---------------------------------------------------------------------------
-// Outcome
-// ---------------------------------------------------------------------------
 
 /// What happened for one crate during the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,10 +149,6 @@ pub struct ReleaseOutcome {
     pub npm: NpmStatus,
 }
 
-// ---------------------------------------------------------------------------
-// Release-note body
-// ---------------------------------------------------------------------------
-
 /// Best-effort release-note body: the top entry of the crate's `CHANGELOG.md`
 /// (the text under the first `## [..]` heading), or a short fallback note. Never
 /// errors — release notes are non-critical.
@@ -214,12 +191,7 @@ fn top_changelog_entry(contents: &str) -> Option<String> {
     Some(body.join("\n").trim().to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
-/// Execute Flow 2 (steps 1–3). See the module docs / contract for the full
-/// behavioral specification.
+/// Execute the release run. See the module docs for the behavior.
 pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
     let ws: Workspace =
         Workspace::discover(repo_root).context("discovering the workspace (cargo metadata)")?;
@@ -323,9 +295,9 @@ fn create_tag_and_release(
     Ok(())
 }
 
-/// The pure npm-step gate decision (Flow 2 step 3): the npm step runs only if a
-/// component is configured AND a token was supplied; otherwise it is skipped
-/// wholesale. Factored out so the gate is unit-testable without I/O.
+/// The pure npm-step gate decision: the npm step runs only if a component is
+/// configured AND a token was supplied; otherwise it is skipped wholesale.
+/// Factored out so the gate is unit-testable without I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NpmGate {
     /// No `[[npm]]` configured → `NpmStatus::SkippedNoComponent`.
@@ -347,8 +319,8 @@ pub(crate) fn npm_gate(has_component: bool, has_token: bool) -> NpmGate {
     }
 }
 
-/// Run the optional npm publish step (Flow 2 step 3). Skipped wholesale unless
-/// `config::load` yields ≥1 `[[npm]]` AND `opts.npm_token_env` is `Some`.
+/// Run the optional npm publish step. Skipped wholesale unless `config::load`
+/// yields ≥1 `[[npm]]` AND `opts.npm_token_env` is `Some`.
 fn run_npm_step(repo_root: &Path, version: &str, opts: &ReleaseOptions) -> Result<NpmStatus> {
     let cfg = config::load(repo_root).context("loading release.toml for the npm step")?;
 
@@ -377,16 +349,13 @@ fn run_npm_step(repo_root: &Path, version: &str, opts: &ReleaseOptions) -> Resul
     Ok(NpmStatus::Published(published))
 }
 
-// ---------------------------------------------------------------------------
 // Unit tests — pure decision logic only (no publish, no tag, no network).
-// Live publish/tag/network is approximated in Wave 5 E2.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // --- Corrected state table (publish-crates-logic.md) ---------------------
+    // State table
 
     #[test]
     fn state_table_tag_exists_skips_regardless_of_published() {
@@ -424,7 +393,7 @@ mod tests {
         }
     }
 
-    // --- Tag-name convention (orchestrator-fixed, must match M12) ------------
+    // Tag-name convention
 
     #[test]
     fn tag_name_uses_crate_v_version_convention() {
@@ -438,10 +407,9 @@ mod tests {
         assert_eq!(tag_name("toy-kv", "1.0.0-rc.1"), "toy-kv-v1.0.0-rc.1");
     }
 
-    // Repo-URL parsing now lives in `crate::repo` (shared with M12); see its
-    // unit tests there.
+    // Repo-URL parsing now lives in `crate::repo`; see its unit tests there.
 
-    // --- npm gate (skip when no component / no token) -----------------------
+    // npm gate (skip when no component / no token)
 
     #[test]
     fn npm_gate_skips_without_component() {
@@ -459,7 +427,7 @@ mod tests {
         assert_eq!(npm_gate(true, true), NpmGate::Publish);
     }
 
-    // --- dist-tag selection wiring (delegates to npmops::dist_tag) -----------
+    // dist-tag selection wiring (delegates to npmops::dist_tag)
 
     #[test]
     fn dist_tag_wiring_matches_npmops() {
@@ -469,7 +437,7 @@ mod tests {
         assert_eq!(npmops::dist_tag("0.2.0-rc.1"), "rc");
     }
 
-    // --- prerelease flag wiring (forge::is_prerelease) ----------------------
+    // prerelease flag wiring (forge::is_prerelease)
 
     #[test]
     fn prerelease_flag_wiring() {
@@ -479,7 +447,7 @@ mod tests {
         assert!(forge::is_prerelease(&rc));
     }
 
-    // --- release-note body extraction ---------------------------------------
+    // release-note body extraction
 
     #[test]
     fn top_changelog_entry_extracts_first_entry_body() {
@@ -534,7 +502,7 @@ mod tests {
         assert_eq!(top_changelog_entry("just text, no heading"), None);
     }
 
-    // --- ReleaseOptions constructor default ---------------------------------
+    // ReleaseOptions constructor default
 
     #[test]
     fn release_options_new_sets_default_timeout() {

@@ -1,7 +1,6 @@
-//! Shared GitHub-repo derivation for the two flows (M12 `cmd_prepare` and
-//! M13 `cmd_release`).
+//! Shared GitHub-repo derivation for the prepare and release flows.
 //!
-//! Both flows must agree on the same `owner/name`, so the parsing and the
+//! Both flows must agree on the same `owner/name`, so the URL parsing and the
 //! `origin`-remote → workspace-metadata fallback live here once rather than being
 //! reimplemented (and silently drifting) in each command module.
 
@@ -107,7 +106,7 @@ fn workspace_repository_url(repo_root: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
-    // `forge::Repo` does not derive `PartialEq` (M7 contract), so compare fields.
+    // `forge::Repo` does not derive `PartialEq`, so compare fields.
     #[track_caller]
     fn assert_repo(url: &str, owner: &str, name: &str) {
         let r = from_url(url).unwrap_or_else(|| panic!("expected Some for {url:?}"));
