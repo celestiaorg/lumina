@@ -108,9 +108,23 @@ fn update_pr_body(title: &str, body: &str) -> Value {
     json!({ "title": title, "body": body })
 }
 
-/// JSON body for `POST /releases`.
-fn create_release_body(tag: &str, name: &str, body: &str, prerelease: bool) -> Value {
-    json!({ "tag_name": tag, "name": name, "body": body, "prerelease": prerelease })
+/// JSON body for `POST /releases`. `target_commitish` pins the commit GitHub
+/// creates the tag from when the tag doesn't already exist (it's ignored when the
+/// tag is already present).
+fn create_release_body(
+    tag: &str,
+    target_commitish: &str,
+    name: &str,
+    body: &str,
+    prerelease: bool,
+) -> Value {
+    json!({
+        "tag_name": tag,
+        "target_commitish": target_commitish,
+        "name": name,
+        "body": body,
+        "prerelease": prerelease,
+    })
 }
 
 /// Apply the common GitHub headers (auth, accept, user-agent) to a request.
@@ -275,11 +289,16 @@ pub fn token_committer(github_token_env: &str) -> Result<Option<GitIdentity>> {
 /// idempotent no-op success instead of erroring, so the publish step is safe to
 /// re-run (the orphan-tag fix's idempotency requirement).
 ///
+/// `target_commitish` is the commit the tag is created from (when GitHub has to
+/// create it); pass the release SHA so the tag lands on the released commit rather
+/// than the default branch's current HEAD. It's ignored when the tag already exists.
+///
 /// Side effects: network. Reads the token from the env var named
 /// `github_token_env`.
 pub fn create_release(
     repo: &Repo,
     tag: &str,
+    target_commitish: &str,
     name: &str,
     body: &str,
     prerelease: bool,
@@ -288,7 +307,7 @@ pub fn create_release(
     let token = token_from_env(github_token_env)?;
 
     let resp = auth(ureq::post(&releases_create_url(repo)), &token)
-        .send_json(create_release_body(tag, name, body, prerelease));
+        .send_json(create_release_body(tag, target_commitish, name, body, prerelease));
 
     match resp {
         Ok(_) => Ok(()),
@@ -489,13 +508,15 @@ mod tests {
 
     #[test]
     fn create_release_body_carries_prerelease_flag() {
-        let pre = create_release_body("v1.2.0-rc.1", "v1.2.0-rc.1", "notes", true);
+        let pre = create_release_body("v1.2.0-rc.1", "deadbeef", "v1.2.0-rc.1", "notes", true);
         assert_eq!(pre["tag_name"], "v1.2.0-rc.1");
+        assert_eq!(pre["target_commitish"], "deadbeef");
         assert_eq!(pre["name"], "v1.2.0-rc.1");
         assert_eq!(pre["body"], "notes");
         assert_eq!(pre["prerelease"], true);
 
-        let stable = create_release_body("v1.2.0", "v1.2.0", "notes", false);
+        let stable = create_release_body("v1.2.0", "cafef00d", "v1.2.0", "notes", false);
+        assert_eq!(stable["target_commitish"], "cafef00d");
         assert_eq!(stable["prerelease"], false);
     }
 

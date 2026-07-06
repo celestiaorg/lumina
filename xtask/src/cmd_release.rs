@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::cargoops;
 use crate::config;
@@ -208,6 +208,11 @@ pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
         .context("resolving the tagger from the GitHub token")?;
     let git = Git::new(repo_root).with_identity(identity);
 
+    // The version we publish is read from the checked-out tree, but every tag and
+    // release targets `opts.sha`. If those are different commits we'd tag a commit
+    // that doesn't carry the published version — refuse before touching anything.
+    ensure_sha_is_head(&git, &opts.sha)?;
+
     // For each crate in publish order: scan its release state (tag + registry),
     // then apply the decision — skip, publish + tag, or tag-only (orphan-tag fix).
     let mut crates = Vec::with_capacity(order.len());
@@ -266,6 +271,24 @@ pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
     })
 }
 
+/// Guard: the commit we tag (`sha`) must be the checked-out `HEAD` — the commit we
+/// read the version from. Both are resolved through `rev-parse` so a short SHA or a
+/// ref name still compares equal to a full HEAD SHA.
+fn ensure_sha_is_head(git: &Git, sha: &str) -> Result<()> {
+    let head = git.rev_parse("HEAD").context("resolving HEAD")?;
+    let target = git
+        .rev_parse(sha)
+        .with_context(|| format!("resolving release SHA `{sha}`"))?;
+    if head != target {
+        bail!(
+            "release SHA `{sha}` ({target}) is not the checked-out commit ({head}); \
+             the version is read from the working tree, so they must be the same commit. \
+             Check out the release commit (or pass its SHA with --sha)."
+        );
+    }
+    Ok(())
+}
+
 /// Create the crate's git tag on the release SHA and cut its GitHub release.
 /// Shared by the `Publish` and `TagOnly` branches. Both `gitops::create_tag`
 /// and `forge::create_release` are idempotent (existing tag/release = success).
@@ -286,7 +309,8 @@ fn create_tag_and_release(
     forge::create_release(
         repo,
         tag,
-        tag, // release name = tag name
+        &opts.sha, // pin the tag GitHub creates to the released commit, not main's HEAD
+        tag,       // release name = tag name
         &body,
         prerelease,
         &opts.github_token_env,
@@ -354,6 +378,44 @@ fn run_npm_step(repo_root: &Path, version: &str, opts: &ReleaseOptions) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ensure_sha_is_head against a real repo
+
+    #[test]
+    fn ensure_sha_is_head_accepts_head_and_rejects_other_commit() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .expect("spawn git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "Test User"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "c1"]);
+        let c1 = run(&["rev-parse", "HEAD"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "c2"]);
+        let c2 = run(&["rev-parse", "HEAD"]);
+
+        let git = Git::new(root.to_path_buf());
+        // HEAD is c2, in full, `HEAD`, and abbreviated forms.
+        assert!(ensure_sha_is_head(&git, &c2).is_ok());
+        assert!(ensure_sha_is_head(&git, "HEAD").is_ok());
+        assert!(ensure_sha_is_head(&git, &c2[..8]).is_ok());
+        // A different (valid) commit is refused.
+        let err = ensure_sha_is_head(&git, &c1).unwrap_err().to_string();
+        assert!(err.contains("not the checked-out commit"), "{err}");
+    }
 
     // State table
 
