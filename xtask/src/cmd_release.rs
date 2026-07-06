@@ -221,7 +221,6 @@ fn top_changelog_entry(contents: &str) -> Option<String> {
 /// Execute Flow 2 (steps 1–3). See the module docs / contract for the full
 /// behavioral specification.
 pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
-    // Step 0 — discovery.
     let ws: Workspace =
         Workspace::discover(repo_root).context("discovering the workspace (cargo metadata)")?;
     let version = ws.version.to_string();
@@ -237,7 +236,8 @@ pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
         .context("resolving the tagger from the GitHub token")?;
     let git = Git::new(repo_root).with_identity(identity);
 
-    // Steps 1 + 2 — idempotency scan + publish, fused per crate in order.
+    // For each crate in publish order: scan its release state (tag + registry),
+    // then apply the decision — skip, publish + tag, or tag-only (orphan-tag fix).
     let mut crates = Vec::with_capacity(order.len());
     for crate_info in &order {
         let tag = tag_name(&crate_info.name, &version);
@@ -285,7 +285,6 @@ pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
         });
     }
 
-    // Step 3 — npm publish (optional).
     let npm = run_npm_step(repo_root, &version, opts)?;
 
     Ok(ReleaseOutcome {
@@ -464,8 +463,8 @@ mod tests {
 
     #[test]
     fn dist_tag_wiring_matches_npmops() {
-        // M13 wires `npmops::dist_tag(version)`; confirm the wiring picks the
-        // expected tags for stable vs prerelease versions.
+        // The release flow wires `npmops::dist_tag(version)`; confirm the wiring
+        // picks the expected tags for stable vs prerelease versions.
         assert_eq!(npmops::dist_tag("0.2.0"), "latest");
         assert_eq!(npmops::dist_tag("0.2.0-rc.1"), "rc");
     }

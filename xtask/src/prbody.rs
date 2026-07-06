@@ -160,13 +160,13 @@ pub fn title(reports: &[PackageReport]) -> String {
 pub fn body(reports: &[PackageReport]) -> anyhow::Result<String> {
     let mut releases: Vec<ReleaseInfo> = reports.iter().map(to_release_info).collect();
 
-    // Step 1: full render.
     let full = render_template(&releases)?;
     if full.chars().count() <= MAX_PR_BODY {
         return Ok(full);
     }
 
-    // Step 2: shed the bulky changelog (drop `changelog` + `title`) and re-render.
+    // Over the cap: shed the bulky changelog (drop `changelog` + `title`) and
+    // re-render, keeping the summary + breaking blocks.
     // NOTE: release-plz's own code trims the *first* render before this length
     // check, so this degradation never actually fires there — it hard-truncates
     // instead. We keep the intended graceful behavior.
@@ -176,7 +176,7 @@ pub fn body(reports: &[PackageReport]) -> anyhow::Result<String> {
     }
     let without_changelog = render_template(&releases)?;
 
-    // Step 3: last resort — hard-truncate at a UTF-8 char boundary.
+    // Last resort — hard-truncate at a UTF-8 char boundary.
     Ok(trim_pr_body(without_changelog))
 }
 
@@ -369,7 +369,7 @@ mod tests {
         let b = body(&[r]).unwrap();
 
         assert!(b.chars().count() <= MAX_PR_BODY);
-        // Step 2: the <details> changelog is dropped...
+        // The <details> changelog is dropped when over the cap...
         assert!(!b.contains("<details>"));
         // ...but the summary bullet is kept.
         assert!(b.contains("## 🤖 New release"));

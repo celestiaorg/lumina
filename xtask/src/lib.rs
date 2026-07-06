@@ -1,15 +1,11 @@
 //! In-house release tooling for the lumina workspace.
 //!
-//! This crate implements the two `cargo xtask` subcommands specified in
-//! `release-spec/orchestrator.md`: `prepare-release` and `release`.
-//!
-//! Modules are declared here by each wave's Integration agent as they are built
-//! (the `mod …;` lines below are a stitch point — see
-//! `release-spec/IMPLEMENTATION-GUIDE.md` §8.4). The crate starts empty.
+//! This crate implements the two `cargo xtask` subcommands, `prepare-release`
+//! (build a single-commit release PR) and `release` (publish crates + npm and cut
+//! tags/releases). The modules are layered: I/O primitives, then pure feature
+//! logic, then command orchestration, then the CLI.
 
-// Module declarations are added by the per-wave Integration agent.
-
-// Wave 1 — foundation modules (M1-M8).
+// I/O primitives — git, cargo/registry, GitHub, npm, workspace/repo discovery.
 pub mod cargoops;
 pub mod commit;
 pub mod config;
@@ -20,14 +16,14 @@ pub mod repo;
 pub mod version;
 pub mod workspace;
 
-// Wave 2 — feature logic (M9, M10, M11).
+// Feature logic — breaking-change detection, changelog + PR-body rendering.
 pub mod breaking;
 pub mod changelog;
 pub mod prbody;
 
-// Wave 3 — command orchestration (M12, M13).
+// Command orchestration.
 pub mod cmd_prepare;
 pub mod cmd_release;
 
-// Wave 4 — entry point (M14).
+// CLI entry point.
 pub mod cli;

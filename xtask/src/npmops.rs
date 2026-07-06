@@ -129,8 +129,8 @@ fn prerelease_label(version: &str) -> Option<&str> {
 pub fn update_for_pr(component: &NpmComponent, version: &str) -> Result<()> {
     let pkg_dir = Path::new(&component.package_dir);
 
-    // 1. Set the wrapper version, idempotently: skip when already at target so the
-    //    step never produces an empty change.
+    // Set the wrapper version, idempotently: skip when already at target so the
+    // step never produces an empty change.
     let current = npm_pkg_get_version(pkg_dir)?;
     if current == version {
         return Ok(());
@@ -142,13 +142,13 @@ pub fn update_for_pr(component: &NpmComponent, version: &str) -> Result<()> {
         "npm version (set wrapper version)",
     )?;
 
-    // 2. Build the wasm package into <wasm_dir>/pkg/.
+    // Build the wasm package into <wasm_dir>/pkg/.
     run(
         Command::new("wasm-pack").args(["build", component.wasm_dir()]),
         "wasm-pack build",
     )?;
 
-    // 3. Refresh the lockfile against the fresh ../pkg build, then validate it.
+    // Refresh the lockfile against the fresh ../pkg build, then validate it.
     run(
         Command::new("npm")
             .current_dir(pkg_dir)
@@ -162,10 +162,10 @@ pub fn update_for_pr(component: &NpmComponent, version: &str) -> Result<()> {
         "npm clean-install",
     )?;
 
-    // 4. Regenerate the committed type declarations (index.d.ts) from the JSDoc
-    //    in the hand-written wrapper, against the fresh wasm types. The wrapper's
-    //    .js is source (published as-is); tsc emits declarations only, so this is
-    //    both the "refresh committed .d.ts" step and a compile check.
+    // Regenerate the committed type declarations (index.d.ts) from the JSDoc in the
+    // hand-written wrapper, against the fresh wasm types. The wrapper's .js is source
+    // (published as-is); tsc emits declarations only, so this is both the "refresh
+    // committed .d.ts" step and a compile check.
     run(
         Command::new("npm")
             .current_dir(pkg_dir)
@@ -173,9 +173,8 @@ pub fn update_for_pr(component: &NpmComponent, version: &str) -> Result<()> {
         "npm run tsc",
     )?;
 
-    // 5. Regenerate the wrapper README from its public API via typedoc (mirrors
-    //    lumina's `npm run update-readme`), so the committed README stays in sync
-    //    with the wrapper on every release PR.
+    // Regenerate the wrapper README from its public API via typedoc, so the committed
+    // README stays in sync with the wrapper on every release PR.
     run(
         Command::new("npm")
             .current_dir(pkg_dir)
@@ -228,7 +227,7 @@ pub fn publish(
     // published independently: each step is guarded by its own `npm show` so a
     // resumed run (e.g. wasm already up, wrapper not) finishes the missing half.
 
-    // 1. Build + publish the wasm bindings package, unless npm already has it.
+    // Build + publish the wasm bindings package, unless npm already has it.
     if npm_show_version(&component.wasm_crate)?.as_deref() != Some(version) {
         run(
             Command::new("wasm-pack").args(["build", component.wasm_dir()]),
@@ -249,8 +248,8 @@ pub fn publish(
         )?;
     }
 
-    // 2. Publish the wrapper, unless npm already has it. The wrapper's npm name is
-    //    read from its own package.json (it differs from the wasm crate name).
+    // Publish the wrapper, unless npm already has it. The wrapper's npm name is read
+    // from its own package.json (it differs from the wasm crate name).
     let wrapper = npm_pkg_get(pkg_dir, "name")?;
     if npm_show_version(&wrapper)?.as_deref() != Some(version) {
         // Repin the wrapper's wasm dependency from `file:../pkg` to the concrete
@@ -265,9 +264,9 @@ pub fn publish(
         )?;
         // Publish the wrapper. It ships its committed hand-written source
         // (index.js/worker.js) plus the index.d.ts regenerated during `prepare` —
-        // there is NO build or install at release time, mirroring lumina. The
-        // `files` allow-list bounds the tarball to those files, so the repinned
-        // dependency is only a metadata change.
+        // there is NO build or install at release time. The `files` allow-list bounds
+        // the tarball to those files, so the repinned dependency is only a metadata
+        // change.
         run(
             Command::new("npm")
                 .current_dir(pkg_dir)

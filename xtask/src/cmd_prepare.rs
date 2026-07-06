@@ -77,8 +77,7 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
     let config = crate::config::load(repo_root).context("loading release.toml")?;
     let ws = crate::workspace::Workspace::discover(repo_root).context("discovering workspace")?;
     // When pushing (the CI path) attribute the release commit to the GitHub token
-    // owner, the way release-plz does (orchestrator.md §Actions wiring). A local,
-    // no-push run keeps the developer's ambient git identity.
+    // owner. A local, no-push run keeps the developer's ambient git identity.
     let identity = if opts.push {
         crate::forge::token_committer(&opts.github_token_env)
             .context("resolving the release-commit author from the GitHub token")?
@@ -104,8 +103,62 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
     } else {
         Where::Local
     };
+    guard_release_branch(&git, &branch, remote_scope.clone(), opts)?;
+    // Resolve the base branch *before* switching to the release branch (its
+    // current-branch fallback depends on that), then create/reset the branch.
+    let base = git_default_branch(repo_root);
+    git.create_or_reset_branch(&branch, &base)
+        .with_context(|| format!("creating release branch `{branch}` at `{base}`"))?;
+
+    let current = discover_current_version(&git, &ws, remote_scope)?;
+    validate_requested_version(current.as_ref(), &opts.version)?;
+
+    bump_workspace_version(repo_root, &opts.version)?;
+    preflight_publishable(repo_root, opts.no_verify)?;
+
+    let reports = build_package_reports(repo_root, &ws, current.as_ref(), &opts.version, &date)?;
+
+    update_npm_wrappers(&config, &opts.version)?;
+
+    // The signed-commit path needs the title/body, and neither depends on the commit
+    // SHA, so render them before creating the commit.
+    let title = crate::prbody::title(&reports);
+    let body = crate::prbody::body(&reports).context("rendering the PR body")?;
+    println!("{body}");
+
+    // Optionally persist the PR description to a Markdown file (e.g. for a local,
+    // no-`--push` preview).
+    if let Some(path) = &opts.pr_body_out {
+        std::fs::write(path, &body)
+            .with_context(|| format!("writing PR description to {}", path.display()))?;
+        eprintln!("PR description written to {}", path.display());
+    }
+
+    let commit = create_release_commit(&git, repo_root, opts, &branch, &base, &title, &body)?;
+
+    Ok(PrepareOutcome {
+        branch,
+        commit_sha: commit.sha,
+        pushed: commit.pushed,
+        pr_url: commit.pr_url,
+        current_version: current.map(|v| v.to_string()),
+        packages: reports,
+    })
+}
+
+/// Guard against clobbering an existing release branch: if it already exists,
+/// prompt (unless `--yes`) and error on decline. Under `--push` the existence check
+/// consults the remote too. Does **not** create the branch — the caller resolves the
+/// base branch and creates it, so `git_default_branch`'s current-branch fallback is
+/// evaluated at the right point (before the branch switch, and only past this guard).
+fn guard_release_branch(
+    git: &Git,
+    branch: &str,
+    remote_scope: Where,
+    opts: &PrepareOptions,
+) -> Result<()> {
     if git
-        .branch_exists(&branch, remote_scope.clone())
+        .branch_exists(branch, remote_scope)
         .with_context(|| format!("checking whether release branch `{branch}` exists"))?
     {
         let prompt = format!(
@@ -118,10 +171,16 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
             ));
         }
     }
-    let base = git_default_branch(repo_root);
-    git.create_or_reset_branch(&branch, &base)
-        .with_context(|| format!("creating release branch `{branch}` at `{base}`"))?;
+    Ok(())
+}
 
+/// Discover the current version: the max of the version git tags and the highest
+/// version published to the registry across all members. `None` for a first release.
+fn discover_current_version(
+    git: &Git,
+    ws: &crate::workspace::Workspace,
+    remote_scope: Where,
+) -> Result<Option<Version>> {
     let tags = git
         .list_tags(remote_scope)
         .context("listing git tags for current-version discovery")?;
@@ -135,72 +194,84 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
             registry_versions.push(v);
         }
     }
-    let current = select_current_version(&tag_versions, &registry_versions);
+    Ok(select_current_version(&tag_versions, &registry_versions))
+}
 
-    match &current {
+/// Validate the requested version: a legal successor of `current`, or — for a first
+/// release (`current` is `None`) — any parseable semver.
+fn validate_requested_version(current: Option<&Version>, requested: &str) -> Result<()> {
+    match current {
         Some(cur) => {
-            crate::version::is_legal_successor(&cur.to_string(), &opts.version).map_err(|e| {
+            crate::version::is_legal_successor(&cur.to_string(), requested).map_err(|e| {
                 anyhow!(
-                    "requested version `{}` is not a legal successor of current `{}`: {e}",
-                    opts.version,
-                    cur
+                    "requested version `{requested}` is not a legal successor of current `{cur}`: {e}"
                 )
             })?;
         }
         None => {
-            // First release: accept any parseable semver (design decision — see
-            // contract Spec question Q1).
-            first_release_accept(&opts.version).map_err(|e| {
-                anyhow!(
-                    "requested first-release version `{}` is not valid semver: {e}",
-                    opts.version
-                )
+            first_release_accept(requested).map_err(|e| {
+                anyhow!("requested first-release version `{requested}` is not valid semver: {e}")
             })?;
         }
     }
+    Ok(())
+}
 
+/// Format-preserving rewrite of the workspace version in the root `Cargo.toml`.
+fn bump_workspace_version(repo_root: &Path, version: &str) -> Result<()> {
     let manifest_path = repo_root.join("Cargo.toml");
     let manifest_src = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let bumped = apply_version_bump(&manifest_src, &opts.version)
+    let bumped = apply_version_bump(&manifest_src, version)
         .with_context(|| format!("bumping workspace version in {}", manifest_path.display()))?;
     std::fs::write(&manifest_path, bumped)
-        .with_context(|| format!("writing {}", manifest_path.display()))?;
+        .with_context(|| format!("writing {}", manifest_path.display()))
+}
 
-    // --- Step 4.5: publishability preflight (before we commit) -------------------
-    // With the versions bumped (but nothing committed yet), verify the whole
-    // workspace can actually be packaged + published. This catches problems like a
-    // yanked dependency now, rather than half-way through the real release. Runs on
-    // the dirty tree via `--allow-dirty`; skip with `--no-verify`.
-    if !opts.no_verify {
-        println!("Running publishability preflight (cargo publish --workspace --dry-run)…");
-        crate::cargoops::verify_publishable(repo_root)
-            .context("publishability preflight failed — aborting before the release commit")?;
+/// Verify the whole workspace can be packaged + published before anything is
+/// committed, catching problems (e.g. a yanked dependency) up front rather than
+/// half-way through the real release. Runs on the dirty tree via `--allow-dirty`;
+/// a no-op when `no_verify` is set.
+fn preflight_publishable(repo_root: &Path, no_verify: bool) -> Result<()> {
+    if no_verify {
+        return Ok(());
     }
+    println!("Running publishability preflight (cargo publish --workspace --dry-run)…");
+    crate::cargoops::verify_publishable(repo_root)
+        .context("publishability preflight failed — aborting before the release commit")
+}
 
+/// Per publishable crate (topological order): collect its commits once, run the
+/// diagnostic breaking analysis, render + write its changelog entry, and assemble
+/// the PR-body report.
+fn build_package_reports(
+    repo_root: &Path,
+    ws: &crate::workspace::Workspace,
+    current: Option<&Version>,
+    version: &str,
+    date: &str,
+) -> Result<Vec<PackageReport>> {
     let publishable: Vec<crate::workspace::CrateInfo> =
         ws.publish_order()?.into_iter().cloned().collect();
 
     let mut reports: Vec<PackageReport> = Vec::with_capacity(publishable.len());
     for crate_info in &publishable {
-        let last_ref = current
-            .as_ref()
-            .map(|cur| crate::cmd_release::tag_name(&crate_info.name, &cur.to_string()));
+        let last_ref =
+            current.map(|cur| crate::cmd_release::tag_name(&crate_info.name, &cur.to_string()));
         let dir = crate::commit::pathspec(repo_root, &crate_info.manifest_dir);
 
         // Collect the package's commits once and share them with both breaking
-        // analysis and changelog rendering (M9 no longer re-collects).
+        // analysis and changelog rendering.
         let range = last_ref.as_ref().map(|r| format!("{r}..HEAD"));
         let commits = crate::commit::collect(repo_root, range.as_deref(), &dir)
             .with_context(|| format!("collecting commits for `{}`", crate_info.name))?;
         let parsed: Vec<crate::commit::ParsedCommit> =
             commits.iter().map(crate::commit::parse).collect();
-        let breaking = crate::breaking::analyze(repo_root, crate_info, current.as_ref(), &parsed);
+        let breaking = crate::breaking::analyze(repo_root, crate_info, current, &parsed);
 
-        let changelog = crate::changelog::generate(crate_info, &opts.version, &date, &commits)
+        let changelog = crate::changelog::generate(crate_info, version, date, &commits)
             .with_context(|| format!("generating changelog for `{}`", crate_info.name))?;
 
-        // Step 9 (assembled here while the per-crate data is in hand).
         // The PR body wants the entry heading text without the `## ` prefix.
         let entry_title = changelog
             .file_entry
@@ -209,121 +280,118 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
             .unwrap_or("")
             .trim_start_matches("## ")
             .to_string();
-        let report = build_package_report(
+        reports.push(build_package_report(
             &crate_info.name,
-            current.as_ref(),
-            &opts.version,
+            current,
+            version,
             &entry_title,
             breaking.has_breaking,
             breaking.reason.as_deref().unwrap_or(""),
             &changelog.body_only,
-        );
-        reports.push(report);
+        ));
     }
+    Ok(reports)
+}
 
-    // --- Step 7: npm update (only if a component is configured) -------------------
+/// Mirror the release version into each configured npm wrapper (a no-op when no
+/// component is configured). Publishes nothing.
+fn update_npm_wrappers(config: &crate::config::Config, version: &str) -> Result<()> {
     for component in &config.npm {
         let npm = crate::npmops::NpmComponent {
             wasm_crate: component.wasm_crate.clone(),
             package_dir: component.package_dir.clone(),
         };
-        crate::npmops::update_for_pr(&npm, &opts.version)
+        crate::npmops::update_for_pr(&npm, version)
             .with_context(|| format!("updating npm wrapper `{}`", component.package_dir))?;
     }
+    Ok(())
+}
 
-    // --- Step 9: PR body (assembled before the commit) ---------------------------
-    // The signed-commit path needs the title/body, and neither depends on the commit
-    // SHA, so render them first.
+/// The outcome of creating the single release commit.
+struct ReleaseCommit {
+    /// SHA of the release commit.
+    sha: String,
+    /// `true` iff the branch was pushed and the PR opened/updated (only under `--push`).
+    pushed: bool,
+    /// The PR html_url when `pushed`; `None` otherwise.
+    pr_url: Option<String>,
+}
+
+/// Create the single release commit. Under `--push` the commit is made through
+/// GitHub's `createCommitOnBranch` API so it is GitHub-signed ("Verified"): the
+/// branch is pushed at its base commit, one signed commit carrying the whole release
+/// change set is created on top, then the PR is opened/updated. A local (no-`--push`)
+/// run keeps a plain local commit — a preview that cannot be signed without a key.
+fn create_release_commit(
+    git: &Git,
+    repo_root: &Path,
+    opts: &PrepareOptions,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<ReleaseCommit> {
     let commit_message = format!("chore: release v{}", opts.version);
-    let title = crate::prbody::title(&reports);
-    let body = crate::prbody::body(&reports).context("rendering the PR body")?;
-    println!("{body}");
-
-    // Optionally persist the PR description to a Markdown file (e.g. for a local,
-    // no-`--push` preview).
-    if let Some(path) = &opts.pr_body_out {
-        std::fs::write(path, &body)
-            .with_context(|| format!("writing PR description to {}", path.display()))?;
-        eprintln!("PR description written to {}", path.display());
+    if !opts.push {
+        let sha = git
+            .stage_all_and_commit(&commit_message)
+            .context("creating the single release commit")?;
+        return Ok(ReleaseCommit {
+            sha,
+            pushed: false,
+            pr_url: None,
+        });
     }
 
-    // --- Steps 8 + 10: the release commit, then (under --push) the PR -------------
-    // Under `--push` the commit is created through GitHub's `createCommitOnBranch`
-    // API so it is GitHub-signed ("Verified"): the release branch is first pushed at
-    // its base commit, then a single signed commit carrying the whole release change
-    // set is created on top, then the PR is opened/updated. A local (no-`--push`) run
-    // keeps a plain local commit — a preview that cannot be signed without a key.
-    let mut pushed = false;
-    let mut pr_url = None;
-    let commit_sha = if opts.push {
-        // The base commit the branch was reset to — still HEAD, since nothing has
-        // been committed locally. It becomes the signed commit's expectedHeadOid.
-        let base_sha = git
-            .rev_parse("HEAD")
-            .context("resolving the base commit SHA")?;
+    // The base commit the branch was reset to — still HEAD, since nothing has been
+    // committed locally. It becomes the signed commit's expectedHeadOid.
+    let base_sha = git.rev_parse("HEAD").context("resolving the base commit SHA")?;
 
-        // Enumerate the release change set (version bump, changelogs, npm mirror) as
-        // additions + deletions for the API commit.
-        git.stage_all().context("staging the release changes")?;
-        let staged = git
-            .staged_paths()
-            .context("enumerating the staged release changes")?;
-        if staged.upserts.is_empty() && staged.deletions.is_empty() {
-            return Err(anyhow!(
-                "no changes to release — the release commit would be empty"
-            ));
-        }
-        let mut additions = Vec::with_capacity(staged.upserts.len());
-        for path in &staged.upserts {
-            let contents = std::fs::read(repo_root.join(path))
-                .with_context(|| format!("reading staged file `{path}`"))?;
-            additions.push(crate::forge::FileAddition {
-                path: path.clone(),
-                contents,
-            });
-        }
+    // Enumerate the release change set (version bump, changelogs, npm mirror) as
+    // additions + deletions for the API commit.
+    git.stage_all().context("staging the release changes")?;
+    let staged = git
+        .staged_paths()
+        .context("enumerating the staged release changes")?;
+    if staged.upserts.is_empty() && staged.deletions.is_empty() {
+        return Err(anyhow!(
+            "no changes to release — the release commit would be empty"
+        ));
+    }
+    let mut additions = Vec::with_capacity(staged.upserts.len());
+    for path in &staged.upserts {
+        let contents = std::fs::read(repo_root.join(path))
+            .with_context(|| format!("reading staged file `{path}`"))?;
+        additions.push(crate::forge::FileAddition {
+            path: path.clone(),
+            contents,
+        });
+    }
 
-        let repo =
-            crate::repo::derive(repo_root).context("deriving the GitHub owner/name for the PR")?;
+    let repo =
+        crate::repo::derive(repo_root).context("deriving the GitHub owner/name for the PR")?;
 
-        // Publish the branch at its base commit, then create one signed commit on top.
-        git.push_commit_to_branch("origin", &base_sha, &branch)
-            .with_context(|| format!("pushing release branch `{branch}` base to origin"))?;
-        let sha = crate::forge::create_commit_on_branch(
-            &repo,
-            &branch,
-            &base_sha,
-            &commit_message,
-            &additions,
-            &staged.deletions,
-            &opts.github_token_env,
-        )
-        .context("creating the GitHub-signed release commit")?;
-
-        let pr = crate::forge::open_or_update_pr(
-            &repo,
-            &branch,
-            &base,
-            &title,
-            &body,
-            &opts.github_token_env,
-        )
-        .context("opening or updating the release PR")?;
-        pushed = true;
-        pr_url = Some(pr.url);
-        sha
-    } else {
-        git.stage_all_and_commit(&commit_message)
-            .context("creating the single release commit")?
-    };
-
-    Ok(PrepareOutcome {
+    // Publish the branch at its base commit, then create one signed commit on top.
+    git.push_commit_to_branch("origin", &base_sha, branch)
+        .with_context(|| format!("pushing release branch `{branch}` base to origin"))?;
+    let sha = crate::forge::create_commit_on_branch(
+        &repo,
         branch,
-        commit_sha,
-        pushed,
-        pr_url,
-        current_version: current.map(|v| v.to_string()),
-        packages: reports,
+        &base_sha,
+        &commit_message,
+        &additions,
+        &staged.deletions,
+        &opts.github_token_env,
+    )
+    .context("creating the GitHub-signed release commit")?;
+
+    let pr = crate::forge::open_or_update_pr(&repo, branch, base, title, body, &opts.github_token_env)
+        .context("opening or updating the release PR")?;
+
+    Ok(ReleaseCommit {
+        sha,
+        pushed: true,
+        pr_url: Some(pr.url),
     })
 }
 
