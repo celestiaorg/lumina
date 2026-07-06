@@ -1,0 +1,73 @@
+name: Prepare release
+
+# Flow 1 — Prepare release PR (release-spec/orchestrator.md §Flow 1).
+# Manual, thin wrapper over `cargo xtask prepare-release`. It opens or refreshes a
+# release PR and publishes nothing. The `--push` flag is what makes CI push the
+# branch and open the PR.
+on:
+  workflow_dispatch:
+    inputs:
+      branch_prefix:
+        description: >-
+          Release-branch prefix (branch = "<prefix><version>"). Optional; falls
+          back to release.toml [defaults].branch_prefix (release-).
+        required: false
+        type: string
+        default: "release-"
+      version:
+        description: >-
+          Next version to release (must be a legal successor of the current
+          version, e.g. 1.1.0 or 1.1.0-rc.2).
+        required: true
+        type: string
+
+# Push the release-branch commit and open/update the PR.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    env:
+      # Map the repo PAT secret onto the env var the xtask reads. A PAT (NOT the
+      # default GITHUB_TOKEN) is required so the release-branch commit re-triggers
+      # PR CI (orchestrator.md §"Why a PAT for prepare but not release").
+      GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          # Disable the action's default `-D warnings`, which overwrites .cargo/config.toml.
+          rustflags: ""
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Prepare release PR
+        run: |
+          cargo xtask prepare-release \
+            --branch-prefix "${{ inputs.branch_prefix }}" \
+            --version "${{ inputs.version }}" \
+            --yes \
+            --push \
+            --github-token-env GH_TOKEN
