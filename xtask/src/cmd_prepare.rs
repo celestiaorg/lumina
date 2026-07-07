@@ -7,14 +7,8 @@
 //! The real work is delegated to the sibling modules (`config`, `workspace`,
 //! `version`, `commit`, `gitops`, `cargoops`, `forge`, `npmops`, `changelog`,
 //! `breaking`, `prbody`); this module owns the wiring and the pure helpers below.
-//!
-//! Two conventions are shared with `cmd_release`:
-//! - per-crate tag name `format!("{crate_name}-v{version}")`;
-//! - a tag counts as a version tag iff it matches
-//!   `^.+-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$`, parsing the substring after the
-//!   final `-v` as semver.
+//! Tag naming/parsing (`{crate}-v{version}`) lives in [`crate::version`].
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -101,7 +95,7 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
     guard_release_branch(&git, &branch, remote_scope.clone(), opts)?;
     // Resolve the base branch *before* switching to the release branch (its
     // current-branch fallback depends on that), then create/reset the branch.
-    let base = git_default_branch(repo_root);
+    let base = git.default_branch();
     git.create_or_reset_branch(&branch, &base)
         .with_context(|| format!("creating release branch `{branch}` at `{base}`"))?;
 
@@ -111,7 +105,8 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
     bump_workspace_version(repo_root, &opts.version)?;
     preflight_publishable(repo_root, opts.no_verify)?;
 
-    let reports = build_package_reports(repo_root, &ws, current.as_ref(), &opts.version, &date)?;
+    let reports =
+        build_package_reports(&git, repo_root, &ws, current.as_ref(), &opts.version, &date)?;
 
     update_npm_wrappers(&config, &opts.version)?;
 
@@ -141,30 +136,26 @@ pub fn run(repo_root: &Path, opts: &PrepareOptions) -> Result<PrepareOutcome> {
     })
 }
 
-/// Guard against clobbering an existing release branch: if it already exists,
-/// prompt (unless `--yes`) and error on decline. Under `--push` the existence check
-/// consults the remote too. Does **not** create the branch — the caller resolves the
-/// base branch and creates it, so `git_default_branch`'s current-branch fallback runs
-/// at the right point (before the branch switch, and only past this guard).
+/// Guard against clobbering an existing release branch: if it already exists and
+/// `--yes` was not given, error. Under `--push` the existence check consults the
+/// remote too. Does **not** create the branch — the caller resolves the base branch
+/// and creates it, so `Git::default_branch`'s current-branch fallback runs at the
+/// right point (before the branch switch, and only past this guard).
 fn guard_release_branch(
     git: &Git,
     branch: &str,
     remote_scope: Where,
     opts: &PrepareOptions,
 ) -> Result<()> {
-    if git
-        .branch_exists(branch, remote_scope)
-        .with_context(|| format!("checking whether release branch `{branch}` exists"))?
+    if !opts.yes
+        && git
+            .branch_exists(branch, remote_scope)
+            .with_context(|| format!("checking whether release branch `{branch}` exists"))?
     {
-        let prompt = format!(
-            "Release branch `{branch}` already exists. Delete and recreate it from scratch?"
-        );
-        if !confirm(&prompt, opts.yes)? {
-            return Err(anyhow!(
-                "refusing to overwrite existing release branch `{branch}` (declined). \
-                 Re-run with --yes to recreate it, or delete it manually."
-            ));
-        }
+        return Err(anyhow!(
+            "release branch `{branch}` already exists; pass --yes to delete and recreate it \
+             from scratch, or delete it manually."
+        ));
     }
     Ok(())
 }
@@ -179,17 +170,19 @@ fn discover_current_version(
     let tags = git
         .list_tags(remote_scope)
         .context("listing git tags for current-version discovery")?;
-    let tag_versions: Vec<Version> = tags.iter().filter_map(|t| parse_version_tag(t)).collect();
+    let mut versions: Vec<Version> = tags
+        .iter()
+        .filter_map(|t| crate::version::parse_version_tag(t))
+        .collect();
 
-    let mut registry_versions: Vec<Version> = Vec::new();
     for crate_info in &ws.crates {
         if let Some(v) = crate::cargoops::max_published_version(&crate_info.name)
             .with_context(|| format!("querying published versions of `{}`", crate_info.name))?
         {
-            registry_versions.push(v);
+            versions.push(v);
         }
     }
-    Ok(select_current_version(&tag_versions, &registry_versions))
+    Ok(crate::version::max_version(&versions))
 }
 
 /// Validate the requested version: a legal successor of `current`, or — for a first
@@ -204,7 +197,7 @@ fn validate_requested_version(current: Option<&Version>, requested: &str) -> Res
             })?;
         }
         None => {
-            first_release_accept(requested).map_err(|e| {
+            crate::version::parse_next(requested).map_err(|e| {
                 anyhow!("requested first-release version `{requested}` is not valid semver: {e}")
             })?;
         }
@@ -240,6 +233,7 @@ fn preflight_publishable(repo_root: &Path, no_verify: bool) -> Result<()> {
 /// diagnostic breaking analysis, render + write its changelog entry, and assemble
 /// the PR-body report.
 fn build_package_reports(
+    git: &Git,
     repo_root: &Path,
     ws: &crate::workspace::Workspace,
     current: Option<&Version>,
@@ -252,13 +246,13 @@ fn build_package_reports(
     let mut reports: Vec<PackageReport> = Vec::with_capacity(publishable.len());
     for crate_info in &publishable {
         let last_ref =
-            current.map(|cur| crate::cmd_release::tag_name(&crate_info.name, &cur.to_string()));
+            current.map(|cur| crate::version::tag_name(&crate_info.name, &cur.to_string()));
         let dir = crate::commit::pathspec(repo_root, &crate_info.manifest_dir);
 
         // Collect the package's commits once and share them with both breaking
         // analysis and changelog rendering.
         let range = last_ref.as_ref().map(|r| format!("{r}..HEAD"));
-        let commits = crate::commit::collect(repo_root, range.as_deref(), &dir)
+        let commits = crate::commit::collect(git, range.as_deref(), &dir)
             .with_context(|| format!("collecting commits for `{}`", crate_info.name))?;
         let parsed: Vec<crate::commit::ParsedCommit> =
             commits.iter().map(crate::commit::parse).collect();
@@ -340,7 +334,9 @@ fn create_release_commit(
 
     // The base commit the branch was reset to — still HEAD, since nothing has been
     // committed locally. It becomes the signed commit's expectedHeadOid.
-    let base_sha = git.rev_parse("HEAD").context("resolving the base commit SHA")?;
+    let base_sha = git
+        .rev_parse("HEAD")
+        .context("resolving the base commit SHA")?;
 
     // Enumerate the release change set (version bump, changelogs, npm mirror) as
     // additions + deletions for the API commit.
@@ -363,8 +359,7 @@ fn create_release_commit(
         });
     }
 
-    let repo =
-        crate::repo::derive(repo_root).context("deriving the GitHub owner/name for the PR")?;
+    let repo = crate::forge::derive(git).context("deriving the GitHub owner/name for the PR")?;
 
     // Publish the branch at its base commit, then create one signed commit on top.
     git.push_commit_to_branch("origin", &base_sha, branch)
@@ -380,8 +375,9 @@ fn create_release_commit(
     )
     .context("creating the GitHub-signed release commit")?;
 
-    let pr = crate::forge::open_or_update_pr(&repo, branch, base, title, body, &opts.github_token_env)
-        .context("opening or updating the release PR")?;
+    let pr =
+        crate::forge::open_or_update_pr(&repo, branch, base, title, body, &opts.github_token_env)
+            .context("opening or updating the release PR")?;
 
     Ok(ReleaseCommit {
         sha,
@@ -398,49 +394,6 @@ fn resolve_branch_prefix(opt: Option<&str>, cfg: Option<&str>) -> String {
 /// The release-branch name `"<prefix><version>"`.
 fn target_branch(prefix: &str, version: &str) -> String {
     format!("{prefix}{version}")
-}
-
-/// Parse a tag under the version-tag convention: a tag counts iff it matches
-/// `^.+-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$`. Returns the parsed semver of the
-/// substring after the **final** `-v`, or `None` if the tag does not match / does not
-/// parse. No regex crate — a hand-rolled matcher.
-fn parse_version_tag(tag: &str) -> Option<Version> {
-    // Find the final `-v` separator; there must be at least one char of prefix
-    // before it (the `^.+` requirement).
-    let sep = tag.rfind("-v")?;
-    if sep == 0 {
-        return None; // nothing before `-v`
-    }
-    let ver = &tag[sep + 2..];
-    if ver.is_empty() {
-        return None;
-    }
-    // The convention's `<ver>` group is a strict semver core + optional pre-release;
-    // semver::Version::parse enforces the X.Y.Z(-pre)(+build) grammar. We additionally
-    // reject build metadata (`+...`) since the convention regex does not allow it.
-    if ver.contains('+') {
-        return None;
-    }
-    Version::parse(ver).ok()
-}
-
-/// The current version = the max semver across version tags and published registry
-/// versions, or `None` when both are empty (first release).
-fn select_current_version(
-    tag_versions: &[Version],
-    registry_versions: &[Version],
-) -> Option<Version> {
-    tag_versions
-        .iter()
-        .chain(registry_versions.iter())
-        .max()
-        .cloned()
-}
-
-/// First-release acceptance rule: accept any parseable semver, reject only
-/// un-parseable input.
-fn first_release_accept(requested: &str) -> Result<Version, crate::version::VersionError> {
-    crate::version::parse_next(requested)
 }
 
 /// Format-preserving workspace-version bump applied to a manifest's text.
@@ -540,86 +493,6 @@ fn build_package_report(
     }
 }
 
-/// Decision logic for an interactive y/n confirmation, split out from stdin so it is
-/// unit-testable. `yes` short-circuits to `true`; otherwise an input starting with
-/// `y`/`Y` (case-insensitive) is `true`, anything else `false`.
-fn confirm_decision(yes: bool, input: &str) -> bool {
-    if yes {
-        return true;
-    }
-    matches!(input.trim().chars().next(), Some('y') | Some('Y'))
-}
-
-/// Interactive confirmation: `yes ⇒ Ok(true)`; otherwise prints `prompt` and reads a
-/// y/n answer from stdin. The only stdin seam in the module.
-fn confirm(prompt: &str, yes: bool) -> Result<bool> {
-    if yes {
-        return Ok(true);
-    }
-    print!("{prompt} [y/N] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .context("reading confirmation from stdin")?;
-    Ok(confirm_decision(false, &line))
-}
-
-/// The repository's default branch name, used as the release-branch base *and* the
-/// PR base. Must resolve to a real branch name: `"HEAD"` is a valid commit-ish for
-/// branching but an **invalid PR base** (GitHub rejects it `422 field: base`).
-///
-/// Layered so it works both locally and on a fresh CI checkout:
-/// 1. `refs/remotes/origin/HEAD` — set by a normal `git clone` (local dev).
-/// 2. `git remote set-head origin --auto` then re-read — `actions/checkout` does
-///    **not** set that ref, so ask the remote for its default and set it (network).
-/// 3. the currently checked-out branch — resolved before we switch to the release
-///    branch, so on a CI runner this is the base branch (e.g. `main`); no network.
-/// 4. `"main"` — conventional last resort, still a real branch name.
-fn git_default_branch(repo_root: &Path) -> String {
-    if let Some(b) = origin_head_branch(repo_root) {
-        return b;
-    }
-    let _ = git_capture(repo_root, &["remote", "set-head", "origin", "--auto"]);
-    if let Some(b) = origin_head_branch(repo_root) {
-        return b;
-    }
-    if let Some(cur) = current_branch(repo_root) {
-        if cur != "HEAD" && !cur.is_empty() {
-            return cur;
-        }
-    }
-    "main".to_string()
-}
-
-/// Read `refs/remotes/origin/HEAD` as a plain branch name (`origin/` stripped), or
-/// `None` if the symbolic ref is unset.
-fn origin_head_branch(repo_root: &Path) -> Option<String> {
-    let out = git_capture(repo_root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])?;
-    let s = out.trim();
-    let base = s.strip_prefix("origin/").unwrap_or(s);
-    (!base.is_empty()).then(|| base.to_string())
-}
-
-/// The currently checked-out branch, or `None`/`"HEAD"` when detached.
-fn current_branch(repo_root: &Path) -> Option<String> {
-    let out = git_capture(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let s = out.trim().to_string();
-    (!s.is_empty()).then_some(s)
-}
-
-/// Run `git <args>` in `repo_root`, returning stdout as a `String` on a zero exit.
-fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(args)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,33 +504,6 @@ mod tests {
     // Regression: `actions/checkout` leaves `refs/remotes/origin/HEAD` unset, which
     // used to fall back to the literal "HEAD" — a valid branch-from ref but an
     // INVALID PR base (`422 field: base`). Detection must yield a real branch name.
-
-    #[test]
-    fn git_default_branch_falls_back_to_current_branch_without_origin_head() {
-        // A repo with a commit on `main` and NO origin/HEAD (mirrors a CI checkout).
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .current_dir(p)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.name", "t"]);
-        git(&["config", "user.email", "t@e.com"]);
-        std::fs::write(p.join("f"), "x").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-q", "-m", "init"]);
-
-        // No origin/HEAD and no reachable remote → falls through to the current
-        // branch, never the invalid literal "HEAD".
-        let base = git_default_branch(p);
-        assert_eq!(base, "main");
-        assert_ne!(base, "HEAD");
-    }
 
     #[test]
     fn target_branch_concatenates_prefix_and_version() {
@@ -676,78 +522,6 @@ mod tests {
         assert_eq!(resolve_branch_prefix(None, None), DEFAULT_BRANCH_PREFIX);
     }
 
-    // The tag *name* convention (`{crate}-v{version}`) is `cmd_release::tag_name`,
-    // tested there; here we test that the *parser* round-trips it.
-
-    #[test]
-    fn parse_version_tag_matches_convention() {
-        // crate-name with internal hyphens: split on the FINAL `-v`.
-        assert_eq!(parse_version_tag("toy-kv-utils-v0.2.0"), Some(v("0.2.0")));
-        assert_eq!(parse_version_tag("toy-kv-v0.2.0"), Some(v("0.2.0")));
-        // prerelease is captured.
-        assert_eq!(
-            parse_version_tag("toy-kv-v1.0.0-rc.1"),
-            Some(v("1.0.0-rc.1"))
-        );
-        // round-trips the convention tag.
-        let tag = crate::cmd_release::tag_name("a-b-c", "3.4.5-rc.2");
-        assert_eq!(parse_version_tag(&tag), Some(v("3.4.5-rc.2")));
-    }
-
-    #[test]
-    fn parse_version_tag_rejects_non_matching() {
-        assert_eq!(parse_version_tag("v0.2.0"), None); // nothing before `-v`
-        assert_eq!(parse_version_tag("-v0.2.0"), None); // empty prefix
-        assert_eq!(parse_version_tag("toy-kv-0.2.0"), None); // no `-v`
-        assert_eq!(parse_version_tag("toy-kv-v"), None); // empty version
-        assert_eq!(parse_version_tag("toy-kv-vlatest"), None); // not semver
-        assert_eq!(parse_version_tag("toy-kv-v1.2"), None); // not X.Y.Z
-        assert_eq!(parse_version_tag("toy-kv-v1.2.3+build"), None); // build metadata rejected
-        assert_eq!(parse_version_tag("random-tag"), None);
-    }
-
-    #[test]
-    fn select_current_version_takes_max_across_both_sets() {
-        let tags = vec![v("0.1.0"), v("0.3.0")];
-        let reg = vec![v("0.2.0"), v("0.2.5")];
-        assert_eq!(select_current_version(&tags, &reg), Some(v("0.3.0")));
-    }
-
-    #[test]
-    fn select_current_version_registry_can_win() {
-        let tags = vec![v("0.1.0")];
-        let reg = vec![v("0.9.0")];
-        assert_eq!(select_current_version(&tags, &reg), Some(v("0.9.0")));
-    }
-
-    #[test]
-    fn select_current_version_prerelease_ordering() {
-        // a final release outranks its own rc per semver.
-        let tags = vec![v("1.0.0-rc.1"), v("1.0.0-rc.2")];
-        let reg = vec![v("1.0.0")];
-        assert_eq!(select_current_version(&tags, &reg), Some(v("1.0.0")));
-        // rc only, no final yet.
-        let reg2: Vec<Version> = vec![];
-        assert_eq!(select_current_version(&tags, &reg2), Some(v("1.0.0-rc.2")));
-    }
-
-    #[test]
-    fn select_current_version_first_release_is_none() {
-        let empty: Vec<Version> = vec![];
-        assert_eq!(select_current_version(&empty, &empty), None);
-    }
-
-    #[test]
-    fn first_release_accepts_any_parseable_semver() {
-        // The lenient first-release rule: accept any parseable semver.
-        assert!(first_release_accept("0.1.0").is_ok());
-        assert!(first_release_accept("1.0.0").is_ok());
-        assert!(first_release_accept("2.3.4-rc.1").is_ok());
-        // rejects only un-parseable input.
-        assert!(first_release_accept("not-a-version").is_err());
-        assert!(first_release_accept("1.2").is_err());
-    }
-
     const SAMPLE_MANIFEST: &str = r#"# top comment
 [workspace]
 members = ["core", "utils"]
@@ -757,8 +531,8 @@ version = "0.1.0"   # inline comment
 edition = "2021"
 
 [workspace.dependencies]
-toy-kv-utils = { version = "=0.1.0", path = "utils" }
-toy-kv = { path = "core", version = "=0.1.0" }
+lumina-utils = { version = "=0.1.0", path = "utils" }
+lumina = { path = "core", version = "=0.1.0" }
 serde = "1"
 external = { version = "1.2", features = ["derive"] }
 bare-pin = "=0.1.0"
@@ -780,8 +554,8 @@ bare-pin = "=0.1.0"
         let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
         let deps = &doc["workspace"]["dependencies"];
         // both intra-workspace `=` pins (inline-table form, either key order) repinned
-        assert_eq!(deps["toy-kv-utils"]["version"].as_str(), Some("=0.2.0"));
-        assert_eq!(deps["toy-kv"]["version"].as_str(), Some("=0.2.0"));
+        assert_eq!(deps["lumina-utils"]["version"].as_str(), Some("=0.2.0"));
+        assert_eq!(deps["lumina"]["version"].as_str(), Some("=0.2.0"));
         // bare `=`-string pin repinned
         assert_eq!(deps["bare-pin"].as_str(), Some("=0.2.0"));
     }
@@ -816,7 +590,7 @@ bare-pin = "=0.1.0"
     #[test]
     fn build_package_report_normal_release() {
         let r = build_package_report(
-            "toy-kv",
+            "lumina",
             Some(&v("0.1.0")),
             "0.2.0",
             "[0.2.0] - 2026-06-14",
@@ -824,7 +598,7 @@ bare-pin = "=0.1.0"
             "boom",
             "### Added\n\n- thing\n",
         );
-        assert_eq!(r.name, "toy-kv");
+        assert_eq!(r.name, "lumina");
         assert_eq!(r.previous_version, "0.1.0");
         assert_eq!(r.new_version, "0.2.0");
         assert_eq!(r.title, "[0.2.0] - 2026-06-14");
@@ -835,29 +609,9 @@ bare-pin = "=0.1.0"
 
     #[test]
     fn build_package_report_first_release_has_empty_previous() {
-        let r = build_package_report("toy-kv", None, "0.1.0", "", false, "", "");
+        let r = build_package_report("lumina", None, "0.1.0", "", false, "", "");
         // First release ⇒ empty previous (PR body omits the arrow).
         assert_eq!(r.previous_version, "");
         assert!(!r.breaking);
-    }
-
-    // Repo-URL parsing now lives in `crate::repo`; see its unit tests there.
-
-    #[test]
-    fn confirm_decision_yes_flag_short_circuits() {
-        assert!(confirm_decision(true, ""));
-        assert!(confirm_decision(true, "n"));
-    }
-
-    #[test]
-    fn confirm_decision_parses_yes_no() {
-        assert!(confirm_decision(false, "y"));
-        assert!(confirm_decision(false, "Y\n"));
-        assert!(confirm_decision(false, "yes"));
-        assert!(!confirm_decision(false, "n"));
-        assert!(!confirm_decision(false, "no"));
-        assert!(!confirm_decision(false, "")); // default is No
-        assert!(!confirm_decision(false, "\n"));
-        assert!(!confirm_decision(false, "maybe"));
     }
 }

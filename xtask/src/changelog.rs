@@ -1,22 +1,15 @@
-//! Per-package `CHANGELOG.md` generation, rendered by [`git-cliff-core`].
+//! Per-package `CHANGELOG.md` generation via [`git-cliff-core`].
 //!
-//! This module used to hand-roll conventional-commit grouping and markdown
-//! rendering. It now delegates that work to [`git-cliff-core`] — the same engine
-//! release-plz uses — while keeping the two toy-kv-specific responsibilities that
-//! git-cliff does *not* do:
+//! git-cliff renders the entry; this module adds the workspace-specific
+//! responsibilities it does not handle:
 //!
-//! 1. **Path-scoped commit selection** — [`crate::commit::collect`] shells out to
-//!    `git log -- <package dir>` so each package's changelog covers only its own
-//!    directory. git-cliff renders whatever commit set we hand it; it does not
-//!    scope by directory.
-//! 2. **Header-preserving splice** — [`prepend_into`] keeps a hand-edited
-//!    `# Changelog` header (through `## [Unreleased]`) intact across releases,
-//!    inserting the new entry beneath it (newest-on-top).
+//! 1. Path-scoped commit selection ([`crate::commit::collect`]) so each package's
+//!    changelog covers only its own directory.
+//! 2. Header-preserving splice ([`prepend_into`]) that keeps the hand-edited
+//!    `# Changelog` header (through `## [Unreleased]`) intact and inserts new
+//!    entries newest-on-top.
 //!
-//! The **version is always caller-supplied** ([`generate`]'s `version` argument is
-//! placed verbatim into the git-cliff `Release`); nothing here computes a version.
-//!
-//! [`git-cliff-core`]: https://crates.io/crates/git-cliff-core
+//! The version is always caller-supplied; nothing here computes one.
 
 use anyhow::{Context, bail};
 use git_cliff_core::{
@@ -33,17 +26,14 @@ use crate::workspace;
 /// The two artifacts produced for one package by [`generate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageChangelog {
-    /// The full rendered entry (`## [version] - date` heading + `### Group`
-    /// sections + bullets) spliced into `CHANGELOG.md`. Ends with a newline.
+    /// Full rendered entry (heading + sections + bullets) for `CHANGELOG.md`.
     pub file_entry: String,
-    /// The same sections + bullets **without** the `## [..]` heading, for the PR
-    /// body. Ends with a single trailing newline (empty when there are no groups).
+    /// The same sections + bullets without the `## [..]` heading, for the PR body.
     pub body_only: String,
 }
 
-/// The standard Keep-a-Changelog header, synthesized when no header can be
-/// preserved. Terminates at the `## [Unreleased]` line; the new entry is spliced
-/// directly after it.
+/// Standard Keep-a-Changelog header, synthesized when none can be preserved. Ends
+/// on the `## [Unreleased]` line; the new entry is spliced directly after it.
 const DEFAULT_HEADER: &str = "\
 # Changelog
 
@@ -54,10 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]";
 
-/// git-cliff body template (Keep a Changelog). Renders the `## [version] - date`
-/// heading, then one `### <Group>` section per non-empty group with a `- <msg>`
-/// bullet per commit. Mirrors release-plz's default (scope + breaking markers),
-/// minus the remote/release-link context we don't populate.
+/// git-cliff body template (Keep a Changelog): a dated `## [version]` heading, then
+/// one `### <Group>` section per non-empty group with a `- <msg>` bullet per commit.
 const BODY_TEMPLATE: &str = r#"
 ## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {% for group, commits in commits | group_by(attribute="group") %}
@@ -72,16 +60,11 @@ const BODY_TEMPLATE: &str = r#"
 {% endfor -%}
 {% endfor %}"#;
 
-/// Top-level per-package generator: render (git-cliff) → splice into the package's
-/// `CHANGELOG.md` → return the entry (with heading) and the body-only copy.
+/// Render the entry (git-cliff), splice it into the package's `CHANGELOG.md`, and
+/// return the entry (with heading) plus the body-only copy.
 ///
-/// `commits` is the package's path-scoped commit set, collected once by the caller
-/// (via [`crate::commit::collect`]) and shared with breaking-change analysis. `date`
-/// is explicit (`YYYY-MM-DD`); pass [`today_utc`] for the production default. The
-/// `version` is placed verbatim into the entry heading — no version is computed.
-///
-/// Side effects: one write to `crate_info.manifest_dir/CHANGELOG.md`. No network,
-/// no subprocess (the caller already collected the commits).
+/// `commits` is the package's path-scoped set; `date` is `YYYY-MM-DD` (pass
+/// [`today_utc`] for the default); `version` is placed verbatim into the heading.
 pub fn generate(
     crate_info: &workspace::CrateInfo,
     version: &str,
@@ -108,16 +91,9 @@ pub fn generate(
     Ok(rendered)
 }
 
-/// Render one release entry with git-cliff from raw [`commit::Commit`]s.
-///
-/// Converts each collected commit into a git-cliff [`CliffCommit`] (subject + body
-/// as the message so `BREAKING CHANGE:` footers are detected), processes it under
-/// the Keep-a-Changelog git config, and renders the [`BODY_TEMPLATE`] against a
-/// single [`Release`] carrying the caller's `version` and `date`. Returns the entry
-/// (with heading) as `file_entry` and the same entry minus its heading as
-/// `body_only`.
-///
-/// Deterministic in (`version`, `date`, commits); performs no I/O.
+/// Render one release entry with git-cliff from raw [`commit::Commit`]s. Returns the
+/// entry (with heading) as `file_entry` and the same entry minus its heading as
+/// `body_only`. Deterministic; no I/O.
 pub fn render_entry(
     version: &str,
     date: &str,
@@ -150,9 +126,8 @@ pub fn render_entry(
     let entry = String::from_utf8(out).context("git-cliff produced non-UTF-8 output")?;
     let entry = entry.trim_matches('\n');
 
-    // git-cliff renders nothing for a release with no commits (even with
-    // `render_always`), but we still want a dated heading for an unchanged
-    // package. Synthesize the bare heading in that case.
+    // git-cliff renders nothing for a release with no commits, but an unchanged
+    // package still needs a dated heading; synthesize the bare heading here.
     let file_entry = if entry.is_empty() {
         format!("## [{version}] - {date}\n")
     } else {
@@ -166,9 +141,8 @@ pub fn render_entry(
     })
 }
 
-/// Build a git-cliff [`CliffCommit`] from a collected commit. The message is the
-/// subject plus the body (when present) so conventional-commit parsing sees the
-/// full message, including `BREAKING CHANGE:` footers.
+/// Build a git-cliff [`CliffCommit`]. The message is subject plus body so
+/// conventional-commit parsing sees `BREAKING CHANGE:` footers.
 fn cliff_commit(c: &commit::Commit) -> CliffCommit<'static> {
     let message = if c.body.trim().is_empty() {
         c.subject.clone()
@@ -178,9 +152,8 @@ fn cliff_commit(c: &commit::Commit) -> CliffCommit<'static> {
     CliffCommit::new(c.hash.clone(), message)
 }
 
-/// Strip the leading `## [..]` heading line (and the blank line after it) from a
-/// rendered entry, yielding the body-only sections. Returns the entry unchanged if
-/// it does not start with a `## [` heading.
+/// Strip the leading `## [..]` heading (and the blank line after it) to get the
+/// body-only sections. Returns the entry unchanged if it has no such heading.
 fn body_from_entry(entry: &str) -> String {
     match entry.split_once('\n') {
         Some((first, rest)) if first.trim_start().starts_with("## [") => {
@@ -191,8 +164,7 @@ fn body_from_entry(entry: &str) -> String {
 }
 
 /// The Keep-a-Changelog git-cliff [`Config`]: no header (we splice our own),
-/// [`BODY_TEMPLATE`] for each release, `render_always` so a package with no commits
-/// still gets a dated heading, and the KaC commit parsers.
+/// [`BODY_TEMPLATE`] body, `render_always`, and the KaC commit parsers.
 fn kac_config() -> Config {
     Config {
         changelog: ChangelogConfig {
@@ -220,8 +192,7 @@ fn kac_config() -> Config {
     }
 }
 
-/// A single git-cliff [`CommitParser`] mapping commits whose message matches
-/// `regex` into `group`.
+/// A git-cliff [`CommitParser`] mapping messages matching `regex` into `group`.
 fn commit_parser(regex: &str, group: &str) -> CommitParser {
     CommitParser {
         message: Regex::new(regex).ok(),
@@ -237,8 +208,8 @@ fn commit_parser(regex: &str, group: &str) -> CommitParser {
     }
 }
 
-/// Commit parsers based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-/// matching release-plz's mapping.
+/// Commit-type → group parsers based on
+/// [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 fn kac_commit_parsers() -> Vec<CommitParser> {
     vec![
         commit_parser("^feat", "added"),
@@ -251,14 +222,10 @@ fn kac_commit_parsers() -> Vec<CommitParser> {
     ]
 }
 
-/// Header-preserving splice of a new `entry` into an existing `CHANGELOG.md`.
-///
-/// Preserves everything from the top of the file through the `## [Unreleased]`
-/// line (the `# Changelog` title is matched case-insensitively) and inserts the
-/// new entry directly beneath it, ahead of any prior entries (newest-on-top). When
-/// the file is missing, empty, or has no recognizable header, the standard
-/// Keep-a-Changelog header is synthesized instead. The result always ends with a
-/// single trailing newline.
+/// Splice a new `entry` into an existing `CHANGELOG.md`, preserving everything
+/// through the `## [Unreleased]` line and inserting the entry beneath it
+/// (newest-on-top). Falls back to the default header when none is recognizable.
+/// Always ends with a single trailing newline.
 pub fn prepend_into(existing: Option<&str>, entry: &str) -> String {
     match existing.and_then(parse_header) {
         Some((header, old_body)) => compose(header, entry, old_body),
@@ -266,9 +233,9 @@ pub fn prepend_into(existing: Option<&str>, entry: &str) -> String {
     }
 }
 
-/// Concatenate `{header}\n\n{entry}{old_body}`, normalizing to exactly one
-/// trailing newline. `header` carries no trailing newline (it ends on the
-/// `## [Unreleased]` line); `old_body` retains its own leading newlines.
+/// Concatenate `{header}\n\n{entry}{old_body}` with exactly one trailing newline.
+/// `header` ends on the `## [Unreleased]` line (no trailing newline); `old_body`
+/// keeps its own leading newlines.
 fn compose(header: &str, entry: &str, old_body: &str) -> String {
     let mut out = String::new();
     out.push_str(header.trim_end_matches('\n'));
@@ -286,12 +253,9 @@ fn compose(header: &str, entry: &str, old_body: &str) -> String {
     out
 }
 
-/// Parse `existing` into `(header, old_body)`, where the header runs from the start
-/// of the file through (and including) the `## [Unreleased]` line.
-///
-/// Requires both a case-insensitive `# Changelog` title line and a `## [Unreleased]`
-/// line; returns `None` (no recognizable header) otherwise, so the caller falls
-/// back to the default header.
+/// Parse `existing` into `(header, old_body)`, the header running from the start
+/// through (and including) the `## [Unreleased]` line. Requires a case-insensitive
+/// `# Changelog` title and an `## [Unreleased]` line; otherwise returns `None`.
 fn parse_header(existing: &str) -> Option<(&str, &str)> {
     if existing.trim().is_empty() {
         return None;
@@ -308,7 +272,6 @@ fn parse_header(existing: &str) -> Option<(&str, &str)> {
     let mut offset = 0usize;
     for line in existing.split_inclusive('\n') {
         offset += line.len();
-        // Strip the trailing newline (if any) for the comparison.
         let trimmed = line.strip_suffix('\n').unwrap_or(line).trim();
         if is_unreleased_line(trimmed) {
             let header_end = offset; // include this line (and its newline) in header
@@ -320,15 +283,15 @@ fn parse_header(existing: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// `true` for the `## [Unreleased]` marker line (case-insensitive on the word).
+/// `true` for the `## [Unreleased]` marker line (case-insensitive).
 fn is_unreleased_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower == "## [unreleased]"
 }
 
-/// Convert a `YYYY-MM-DD` date into a Unix timestamp (seconds) at midnight UTC,
-/// for git-cliff's `Release::timestamp`. git-cliff's `date` filter renders it back
-/// to `YYYY-MM-DD`, so the round trip preserves the date.
+/// Convert `YYYY-MM-DD` into a Unix timestamp at midnight UTC for git-cliff's
+/// `Release::timestamp`; git-cliff's `date` filter renders it back, so the date
+/// round-trips.
 fn date_to_timestamp(date: &str) -> anyhow::Result<i64> {
     let mut parts = date.split('-');
     let (Some(y), Some(m), Some(d), None) =
@@ -344,8 +307,8 @@ fn date_to_timestamp(date: &str) -> anyhow::Result<i64> {
     Ok(days_from_civil(year, month, day) * 86_400)
 }
 
-/// Days since the Unix epoch (1970-01-01) for a civil `(year, month, day)` in the
-/// proleptic Gregorian calendar. Howard Hinnant's `days_from_civil` (std-only).
+/// Days since the Unix epoch for a civil `(year, month, day)` in the proleptic
+/// Gregorian calendar. Howard Hinnant's `days_from_civil`.
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 }.div_euclid(400);
@@ -357,7 +320,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// The current UTC date formatted `YYYY-MM-DD`. Reads the system clock only.
+/// The current UTC date formatted `YYYY-MM-DD`.
 pub fn today_utc() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -369,9 +332,8 @@ pub fn today_utc() -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// Convert a count of days since the Unix epoch (1970-01-01) to a civil
-/// `(year, month, day)` in the proleptic Gregorian calendar. Howard Hinnant's
-/// `days_from_civil` inverse (std-only).
+/// Convert days since the Unix epoch to a civil `(year, month, day)` in the
+/// proleptic Gregorian calendar. Inverse of [`days_from_civil`].
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     // Shift the epoch to 0000-03-01 so leap days fall at the end of the era.
     let z = z + 719_468;
@@ -392,7 +354,7 @@ mod tests {
     use super::*;
     use crate::commit::Commit;
 
-    /// Build a collected `Commit` with the given subject and an empty body.
+    /// Build a `Commit` with the given subject and an empty body.
     fn subj(subject: &str) -> Commit {
         Commit {
             hash: "deadbeef".into(),
@@ -401,10 +363,7 @@ mod tests {
         }
     }
 
-    // render_entry (git-cliff): grouping, headings, body-only stripping
-
-    /// A `feat:` and two `fix:` commits render a dated heading with `### Added`
-    /// and `### Fixed` sections and the descriptions as bullets.
+    /// feat + fix commits render a dated heading with `### Added` and `### Fixed`.
     #[test]
     fn render_entry_groups_and_headings() {
         let commits = [
@@ -429,7 +388,7 @@ mod tests {
         assert!(out.file_entry.find("### Added") < out.file_entry.find("### Fixed"));
     }
 
-    /// `body_only` carries the same sections/bullets with NO `## [..]` heading.
+    /// `body_only` has the sections/bullets but no `## [..]` heading.
     #[test]
     fn render_entry_body_only_has_no_version_heading() {
         let out = render_entry("9.9.9", "2026-01-01", &[subj("feat: a feature")]).unwrap();
@@ -442,7 +401,7 @@ mod tests {
         assert!(out.body_only.contains("- a feature"));
     }
 
-    /// A non-conventional subject falls into the `Other` group verbatim.
+    /// A non-conventional subject falls into the `Other` group.
     #[test]
     fn render_entry_non_conventional_goes_to_other() {
         let out = render_entry("0.1.0", "2026-06-14", &[subj("just a plain message")]).unwrap();
@@ -450,7 +409,7 @@ mod tests {
         assert!(out.file_entry.contains("- just a plain message"));
     }
 
-    /// A package with no commits still gets a dated heading; body-only is empty.
+    /// No commits still yields a dated heading; body-only is empty.
     #[test]
     fn render_entry_no_commits_yields_bare_heading() {
         let out = render_entry("0.1.0", "2026-06-14", &[]).unwrap();
@@ -458,10 +417,8 @@ mod tests {
         assert!(out.body_only.is_empty());
     }
 
-    // prepend_into: header preservation, fallback default header
-
-    /// The existing header (through `## [Unreleased]`) is preserved, the new entry
-    /// is spliced beneath it, and the old body is retained below the new entry.
+    /// The header is preserved, the new entry spliced beneath it, and the old body
+    /// retained below.
     #[test]
     fn prepend_preserves_header_and_old_body() {
         let existing = "\
@@ -495,7 +452,7 @@ Hand-edited preamble that must survive.
         assert!(unrel_idx < new_idx);
     }
 
-    /// The `# Changelog` title is matched case-insensitively (`# CHANGELOG` counts).
+    /// The `# Changelog` title is matched case-insensitively.
     #[test]
     fn prepend_matches_title_case_insensitively() {
         let existing =
@@ -507,7 +464,7 @@ Hand-edited preamble that must survive.
         assert!(out.contains("- prior"));
     }
 
-    /// Missing file → synthesize the default Keep-a-Changelog header + entry.
+    /// Missing file falls back to the default header + entry.
     #[test]
     fn prepend_fallback_default_header_when_none() {
         let entry = render_entry("0.1.0", "2026-06-14", &[subj("feat: initial")])
@@ -522,7 +479,7 @@ Hand-edited preamble that must survive.
         assert!(out.contains("- initial"));
     }
 
-    /// Empty / whitespace-only existing content also falls back to the default.
+    /// Whitespace-only existing content falls back to the default.
     #[test]
     fn prepend_fallback_on_empty_existing() {
         let entry = render_entry("0.1.0", "2026-06-14", &[]).unwrap().file_entry;
@@ -530,7 +487,7 @@ Hand-edited preamble that must survive.
         assert!(out.starts_with("# Changelog\n\nAll notable changes"));
     }
 
-    /// A file lacking a recognizable `# Changelog` title falls back to default.
+    /// A file lacking a `# Changelog` title falls back to the default.
     #[test]
     fn prepend_fallback_when_no_title() {
         let existing = "## [Unreleased]\n\n## [0.1.0]\n";
@@ -548,10 +505,7 @@ Hand-edited preamble that must survive.
         assert!(!out.ends_with("\n\n"));
     }
 
-    // date_to_timestamp / civil_from_days: date round-trip
-
-    /// `date_to_timestamp` must land on midnight UTC of the requested day, and
-    /// `civil_from_days` must invert it.
+    /// `date_to_timestamp` lands on midnight UTC and `civil_from_days` inverts it.
     #[test]
     fn date_to_timestamp_round_trips() {
         for date in ["1970-01-01", "2000-02-29", "2022-01-01", "2026-06-14"] {
@@ -588,6 +542,5 @@ Hand-edited preamble that must survive.
         assert!(parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())));
     }
 
-    // Package pathspec derivation now lives in `crate::commit::pathspec`; see its
-    // unit tests there.
+    // Pathspec derivation is tested in `crate::commit`.
 }

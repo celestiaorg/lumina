@@ -1,16 +1,5 @@
-//! Cargo/registry primitives for the crate-publishing step of `cargo xtask
-//! release`. Everything here shells out to `cargo`; per-crate orchestration
-//! (idempotency scan, tag creation, dependency order) lives in higher modules.
-//!
-//! Key rules enforced here:
-//! - the registry token is read from an env var named by the caller and passed
-//!   to `cargo publish` via the process environment as `CARGO_REGISTRY_TOKEN` —
-//!   never on the command line, never logged;
-//! - a `cargo publish` failure whose output says the version was already
-//!   uploaded / already exists is treated as success (a race won by another
-//!   runner or an earlier attempt);
-//! - `wait_until_published` polls the registry on a short interval until the
-//!   version indexes or a timeout elapses (timeout ⇒ `Err`).
+//! Cargo/registry helpers for the crate-publishing step of `cargo xtask release`.
+//! Everything here shells out to `cargo`.
 
 use std::path::Path;
 use std::process::Command;
@@ -18,16 +7,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-/// Name of the environment variable `cargo publish` reads the registry token
-/// from. We always pass the token to the child process under this name,
-/// regardless of which env var the caller stored it in.
+/// Env var `cargo publish` reads the registry token from. We always pass the
+/// token to the child under this name, whatever env var the caller stored it in.
 const CARGO_REGISTRY_TOKEN_ENV: &str = "CARGO_REGISTRY_TOKEN";
 
 /// Interval between registry polls in [`wait_until_published`].
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Render a process `ExitStatus` as its numeric code, or `"signal"` when the
-/// process was killed by a signal (no code).
+/// Numeric exit code, or `"signal"` when the process was killed by a signal.
 fn exit_code_str(status: &std::process::ExitStatus) -> String {
     status
         .code()
@@ -35,8 +22,7 @@ fn exit_code_str(status: &std::process::ExitStatus) -> String {
         .unwrap_or_else(|| "signal".into())
 }
 
-/// Outcome of a `cargo info` query: the crate/version was found (its stdout), or
-/// it was **cleanly absent** from the registry (cargo's not-found wording).
+/// Outcome of a `cargo info` query: found (its stdout), or cleanly absent.
 enum CargoInfo {
     Found(String),
     NotFound,
@@ -44,15 +30,8 @@ enum CargoInfo {
 
 /// Run `cargo info <args>` with color forced off, optionally from `cwd`.
 ///
-/// Shared by [`is_published`] and [`max_published_version`], which differ only in
-/// the args, the working directory, and how they interpret the stdout. Returns
-/// [`CargoInfo::Found`] on a zero exit, [`CargoInfo::NotFound`] when stderr is
-/// cargo's not-found wording (see [`is_not_found_error`]) — a clean absence, not
-/// an error — and `Err` on a spawn failure or any other non-zero exit.
-///
-/// Color is forced OFF because in some environments (e.g. GitHub Actions) `cargo
-/// info` wraps the `version:` line in ANSI SGR codes, which breaks the downstream
-/// line parsing (`\x1b[..mversion:` no longer has the `version:` prefix).
+/// Color is forced off because some environments (e.g. GitHub Actions) wrap the
+/// `version:` line in ANSI SGR codes, which breaks the downstream line parsing.
 fn cargo_info(args: &[&str], cwd: Option<&Path>) -> Result<CargoInfo> {
     let pretty = args.join(" ");
     let mut cmd = Command::new("cargo");
@@ -82,57 +61,35 @@ fn cargo_info(args: &[&str], cwd: Option<&Path>) -> Result<CargoInfo> {
     }
 }
 
-/// Query the registry for an exact `name@version`.
+/// Whether exactly `name@version` exists on the registry. A clean "not found" is
+/// `Ok(false)`, not an error.
 ///
-/// Runs `cargo info <name>@<version>` and reports whether that exact package
-/// version exists **on the registry**. A clean "not found" is `Ok(false)` — not
-/// an error — because callers branch on existence.
-///
-/// ## In-workspace hazard (local-source) — why we run from a temp dir
-/// When `cargo info <name>@<version>` is run from *inside* the workspace that
-/// defines `<name>`, cargo resolves to the LOCAL workspace member and exits 0
-/// **regardless of the registry** — printing a `version: <v> (from ./path)` line.
-/// After the release commit sets the workspace to the release version, that means
-/// a workspace crate would look "resolved" whether or not it is actually
-/// published, so the post-publish index poll ([`wait_until_published`]) could
-/// never observe the registry and would always time out. To get the true registry
-/// answer we run `cargo info` from a directory **outside** the workspace (the OS
-/// temp dir), where cargo has no local member to resolve to. The local-source
-/// guard is kept as a belt-and-braces fallback.
+/// Run from the OS temp dir (outside the workspace): inside the workspace that
+/// defines `name`, `cargo info` resolves to the LOCAL member and exits 0
+/// regardless of the registry, so an unpublished crate would look "resolved" and
+/// [`wait_until_published`] would never observe the registry. The local-source
+/// guard stays as a fallback.
 ///
 /// # Errors
 /// Returns `Err` if `cargo` cannot be spawned, or if `cargo info` fails for a
 /// reason other than "not found" (e.g. network/auth failure).
 pub fn is_published(name: &str, version: &str) -> Result<bool> {
     let spec = format!("{name}@{version}");
-    // Run OUTSIDE the workspace so `cargo info` queries the registry rather than
-    // resolving to the local workspace member (see the doc comment above).
     let outside = std::env::temp_dir();
     match cargo_info(&["info", &spec], Some(&outside))? {
-        // Outside the workspace this is a genuine registry hit; the local-source
-        // check stays only as a defensive fallback.
         CargoInfo::Found(stdout) => Ok(!is_local_source_resolution(&stdout)),
         CargoInfo::NotFound => Ok(false),
     }
 }
 
-/// The highest version of `name` currently published on the registry, or `None`
-/// if the crate has never been published.
+/// Highest version of `name` published on the registry, or `None` if it has never
+/// been published.
 ///
-/// Runs `cargo info <name>` and parses the `version:` line it prints for the
-/// latest released version (see [`parse_max_version`]). Used by higher modules
-/// to discover the repo's **current version** from the registry (the highest
-/// existing version).
-///
-/// A clean "not found" — the crate has never been published — is `Ok(None)`,
-/// **not** an error, mirroring [`is_published`]'s `Ok(false)`. Likewise, a
-/// success whose `version:` line is a **local-source resolution**
-/// (`version: <v> (from ./path)`) means `cargo info`, run from *inside* the
-/// workspace, resolved to the LOCAL workspace member rather than a registry
-/// release — that is not a publication, so it too yields `Ok(None)` (see
-/// [`is_local_source_resolution`]). Only a genuine query failure
-/// (network/auth/spawn), or a *non*-local-source success whose version line is
-/// truly unparseable, is `Err`.
+/// A clean "not found" yields `Ok(None)`, mirroring [`is_published`]. So does a
+/// local-source resolution (`version: <v> (from ./path)`): run inside the
+/// workspace, `cargo info` resolved to the LOCAL member, which is not a
+/// publication. Only a genuine query failure, or a non-local-source success whose
+/// version line is unparseable, is `Err`.
 ///
 /// # Errors
 /// Returns `Err` if `cargo` cannot be spawned, if `cargo info` fails for a reason
@@ -141,9 +98,8 @@ pub fn is_published(name: &str, version: &str) -> Result<bool> {
 pub fn max_published_version(name: &str) -> Result<Option<semver::Version>> {
     match cargo_info(&["info", name], None)? {
         CargoInfo::Found(stdout) => {
-            // A success can still be the LOCAL workspace crate (path source) rather
-            // than a registry release — `version: <v> (from ./path)`. That is not a
-            // publication, so report "no published version" rather than erroring.
+            // A local-source resolution is the workspace member, not a
+            // publication — report "no published version".
             if is_local_source_resolution(&stdout) {
                 return Ok(None);
             }
@@ -151,21 +107,16 @@ pub fn max_published_version(name: &str) -> Result<Option<semver::Version>> {
                 anyhow!("`cargo info {name}` succeeded but no version line could be parsed")
             })
         }
-        // Never published — a clean absence, not an error.
         CargoInfo::NotFound => Ok(None),
     }
 }
 
-/// Publish one crate at `manifest_dir` to the registry.
+/// Publish the crate at `manifest_dir` to the registry.
 ///
-/// Reads the token **value** from the environment variable **named** by
-/// `registry_token_env` and passes it to `cargo publish` via the child
-/// environment as `CARGO_REGISTRY_TOKEN`. The token is never placed on the
-/// command line and never logged.
-///
-/// If `cargo publish` fails but its output indicates the version was already
-/// uploaded / already exists, that is treated as success (the "already exists"
-/// race).
+/// The token value is read from the env var named by `registry_token_env` and
+/// passed to `cargo publish` via the child environment as `CARGO_REGISTRY_TOKEN`
+/// — never on the command line, never logged. An "already uploaded" / "already
+/// exists" failure is treated as success (the race won by another runner).
 ///
 /// # Errors
 /// Returns `Err` if the named env var is unset/empty, if `cargo` cannot be
@@ -198,8 +149,7 @@ pub fn publish(manifest_dir: &Path, registry_token_env: &str) -> Result<()> {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if is_already_uploaded_error(&stderr) {
-        // Race won by another runner / earlier attempt: the version is on the
-        // registry, so this is a successful publish from our point of view.
+        // Version already on the registry: a successful publish for us.
         return Ok(());
     }
 
@@ -211,24 +161,16 @@ pub fn publish(manifest_dir: &Path, registry_token_env: &str) -> Result<()> {
     ))
 }
 
-/// Publishability preflight: verify every publishable workspace crate can be
-/// packaged and verify-built, **without uploading anything**.
+/// Preflight: package and verify-build every publishable workspace crate without
+/// uploading anything.
 ///
 /// Runs `cargo publish --workspace --dry-run --allow-dirty` from `repo_root`:
-/// - `--workspace` packages every publishable member (crates with
-///   `publish = false`, like `xtask`, are skipped) and resolves *unpublished*
-///   sibling crates against a temporary local registry — so nothing needs to be on
-///   crates.io yet;
-/// - `--dry-run` performs the full package + verification build but stops before
-///   the upload;
-/// - `--allow-dirty` lets it run on the prepared-but-uncommitted working tree.
-///
-/// The verification build re-resolves each crate's dependencies, so it surfaces
-/// problems that would otherwise only blow up mid-release — most importantly a
-/// **yanked dependency** whose requirement has no non-yanked match.
-///
-/// Streams cargo's own output. Returns `Err` if cargo cannot be spawned or the
-/// dry-run exits non-zero (the streamed output carries the specifics).
+/// `--workspace` skips `publish = false` crates and resolves unpublished siblings
+/// against a temporary local registry; `--dry-run` stops before the upload;
+/// `--allow-dirty` allows the prepared-but-uncommitted tree. The verification
+/// build surfaces problems like a yanked dependency with no non-yanked match.
+/// Streams cargo's output. Returns `Err` if cargo cannot be spawned or the
+/// dry-run exits non-zero.
 pub fn verify_publishable(repo_root: &Path) -> Result<()> {
     let status = Command::new("cargo")
         .current_dir(repo_root)
@@ -251,13 +193,9 @@ pub fn verify_publishable(repo_root: &Path) -> Result<()> {
 
 /// Poll the registry until `name@version` indexes, or `timeout` elapses.
 ///
-/// Calls [`is_published`] on a short fixed interval ([`POLL_INTERVAL`]) until it
-/// observes `true`.
-///
 /// # Errors
 /// Returns `Err` if `timeout` elapses before the version appears (a re-run will
-/// resume — the upload itself already succeeded), or if [`is_published`]
-/// surfaces an error.
+/// resume — the upload itself already succeeded), or if [`is_published`] errors.
 pub fn wait_until_published(name: &str, version: &str, timeout: Duration) -> Result<()> {
     poll_until(
         timeout,
@@ -269,17 +207,8 @@ pub fn wait_until_published(name: &str, version: &str, timeout: Duration) -> Res
 }
 
 /// Generic poll loop, factored out so the success/timeout behavior can be unit-
-/// tested without cargo or the network.
-///
-/// Repeatedly invokes `check`:
-/// - returns `Ok(())` the first time `check` yields `Ok(true)`;
-/// - propagates any `Err` `check` returns;
-/// - returns `Err` (timeout) once `timeout` elapses while `check` keeps yielding
-///   `Ok(false)`.
-///
-/// `sleep` is injected (the real loop sleeps; tests pass a no-op) and `interval`
-/// bounds how much budget remains before the final attempt. `now` is read from
-/// [`Instant`] so tests with a no-op sleep terminate immediately on timeout.
+/// tested without cargo or the network. `sleep` is injected (the real loop
+/// sleeps; tests pass a no-op).
 fn poll_until<C, S>(timeout: Duration, interval: Duration, mut check: C, mut sleep: S) -> Result<()>
 where
     C: FnMut() -> Result<bool>,
@@ -298,10 +227,8 @@ where
     }
 }
 
-/// Build the argument vector for `cargo publish` for the crate whose manifest is
-/// at `manifest_path`. Pure (no I/O) and **token-free** by construction — the
-/// registry token is supplied only through the child environment, never argv.
-/// Factored out so the command shape is unit-testable.
+/// Build the `cargo publish` argv for the manifest at `manifest_path`. Token-free
+/// by construction — the token is supplied only through the child environment.
 fn publish_args(manifest_path: &Path) -> [&std::ffi::OsStr; 3] {
     [
         "publish".as_ref(),
@@ -310,30 +237,30 @@ fn publish_args(manifest_path: &Path) -> [&std::ffi::OsStr; 3] {
     ]
 }
 
-/// Parse the latest published version from `cargo info <name>` stdout.
-///
-/// `cargo info` prints a `version: …` line; this returns the first such version
-/// that resolves to a registry publication. Two annotations can follow the value
-/// and mean opposite things:
-///
-/// - `version: 0.1.0 (from ./utils)` — a local-source annotation: run inside the
-///   workspace that contains the crate, `cargo info` resolves to the local
-///   member, which is not a registry publication. Such a line is skipped, so an
-///   unpublished workspace crate yields `None` rather than looking published.
-/// - `version: 1.0.0 (latest 1.0.102)` — a registry annotation pointing at the
-///   newest release; this *is* a publication. We keep only the leading semver
-///   token (`1.0.0`) and ignore the trailing `(latest …)`.
-///
-/// Returns `None` if no registry version line is present. Field-name matching is
-/// case-insensitive; prereleases (e.g. `1.0.0-rc.1`) parse through unchanged.
-/// Remove ANSI CSI escape sequences (`ESC [ … <final byte>`, e.g. SGR color
-/// codes) from `s`.
-///
-/// `cargo info` colorizes its output in some environments (notably GitHub
-/// Actions), wrapping the `version:` line in SGR codes so it no longer starts
-/// with the literal `version:` prefix. We set `CARGO_TERM_COLOR=never` on the
-/// `cargo info` invocations to prevent that at the source; stripping here as well
-/// keeps the line parsing robust even if colored output slips through.
+/// Latest published version from `cargo info <name>` stdout, skipping any
+/// local-source line so an unpublished workspace crate yields `None`. Keeps only
+/// the leading semver token; field-name matching is case-insensitive.
+fn parse_max_version(stdout: &str) -> Option<semver::Version> {
+    for value in version_line_values(stdout) {
+        // `(from <path>)` = local workspace member, not a registry publication.
+        if is_local_source_version(&value) {
+            continue;
+        }
+        // Keep only the leading semver token (drop e.g. `(latest 1.0.102)`).
+        let Some(token) = value.split_whitespace().next() else {
+            continue;
+        };
+        if let Ok(v) = semver::Version::parse(token) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Remove ANSI CSI escape sequences (`ESC [ … <final byte>`) from `s`. `cargo
+/// info` colorizes output in some environments (notably GitHub Actions), wrapping
+/// the `version:` line in SGR codes so it no longer starts with `version:`;
+/// stripping keeps the line parsing robust.
 fn strip_ansi_csi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -353,10 +280,9 @@ fn strip_ansi_csi(s: &str) -> String {
     out
 }
 
-/// The trimmed *value* of every `version:` field in `cargo info` stdout, ANSI
-/// stripped and case-insensitive on the field name (so `rust-version:` and other
-/// `*version:` fields are ignored). Shared by [`parse_max_version`] and
-/// [`is_local_source_resolution`], which previously hand-rolled the same scan.
+/// Trimmed value of every `version:` field in `cargo info` stdout, ANSI-stripped
+/// and case-insensitive on the field name (so `rust-version:` and other
+/// `*version:` fields are ignored).
 fn version_line_values(stdout: &str) -> Vec<String> {
     let stdout = strip_ansi_csi(stdout);
     stdout
@@ -374,54 +300,25 @@ fn version_line_values(stdout: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_max_version(stdout: &str) -> Option<semver::Version> {
-    for value in version_line_values(stdout) {
-        // A `(from <path>)` annotation means cargo resolved to a LOCAL workspace
-        // member (path source), not a registry publication — skip it.
-        if is_local_source_version(&value) {
-            continue;
-        }
-        // Keep only the leading semver token; drop any trailing annotation such
-        // as `(latest 1.0.102)`.
-        let Some(token) = value.split_whitespace().next() else {
-            continue;
-        };
-        if let Ok(v) = semver::Version::parse(token) {
-            return Some(v);
-        }
-    }
-    None
-}
-
-/// True iff a `cargo info` version-line *value* carries a local-source
-/// annotation — i.e. it contains `(from ` (e.g. `0.1.0 (from ./utils)` or
-/// `0.1.0 (from /abs/path)`).
-///
-/// Pure. `cargo info` emits this `(from <path>)` suffix when it resolves the
-/// crate to a LOCAL workspace member (a path source) rather than to a registry
-/// release — which happens whenever `cargo info <name>` is run from *inside* the
-/// workspace that defines `<name>`. Such a result is **not** evidence of a
-/// registry publication, so callers must treat it as "not published".
+/// True iff a `cargo info` version-line value carries a `(from <path>)`
+/// annotation — cargo resolved to a LOCAL workspace member (a path source), not a
+/// registry release, so it is not a publication.
 fn is_local_source_version(value: &str) -> bool {
     value.contains("(from ")
 }
 
-/// True iff `cargo info` stdout shows the crate was resolved to a LOCAL
-/// workspace member — i.e. its `version:` line carries a `(from <path>)`
-/// annotation (see [`is_local_source_version`]).
-///
-/// Pure. Used by [`is_published`] to reject the in-workspace case where `cargo
-/// info <name>@<version>` exits 0 against the local path source even though the
-/// version was never published to the registry. Other `version:`-like fields
-/// (e.g. `rust-version:`) are ignored.
+/// True iff `cargo info` stdout resolved to a LOCAL workspace member (its
+/// `version:` line carries a `(from <path>)` annotation). Used by
+/// [`is_published`] to reject the in-workspace case where an exact-version lookup
+/// exits 0 against the local path source for a never-published version.
 fn is_local_source_resolution(stdout: &str) -> bool {
     version_line_values(stdout)
         .iter()
         .any(|v| is_local_source_version(v))
 }
 
-/// True iff `stderr` is `cargo info`'s "no such package/version" wording (as
-/// opposed to a genuine query failure like a network or auth error).
+/// True iff `stderr` is `cargo info`'s "no such package/version" wording (not a
+/// genuine query failure like a network or auth error).
 fn is_not_found_error(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
     s.contains("could not find")
@@ -430,12 +327,9 @@ fn is_not_found_error(stderr: &str) -> bool {
         || s.contains("does not exist")
 }
 
-/// True iff `stderr` matches cargo's "already uploaded" / "already exists"
-/// wording for a version that is already on the registry.
-///
-/// Case-insensitive; recognizes the phrases cargo / the registry emit when an
-/// upload loses the race. Unrelated failures (auth, network, dirty tree,
-/// verification build) return `false`.
+/// True iff `stderr` is cargo's "already uploaded" / "already exists" wording for
+/// a version already on the registry. Case-insensitive; unrelated failures (auth,
+/// network, dirty tree, verification build) return `false`.
 pub fn is_already_uploaded_error(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
     s.contains("already uploaded") || s.contains("already exists")
@@ -448,12 +342,11 @@ mod tests {
 
     #[test]
     fn already_uploaded_matches_realistic_cargo_stderr() {
-        // Phrasings cargo / the registry actually emit when a version already
-        // exists on the index.
+        // Phrasings cargo / the registry emit when a version already exists.
         let positives = [
             "error: failed to publish to registry at https://crates.io\n\nCaused by:\n  the remote server responded with an error (status 200 OK): crate version `0.3.1` is already uploaded",
             "error: crate version `1.0.0` is already uploaded",
-            "    Uploading toy-kv-utils v0.3.1\nerror: api errors (status 200 OK): crate version `0.3.1` already exists on crates.io index",
+            "    Uploading lumina-utils v0.3.1\nerror: api errors (status 200 OK): crate version `0.3.1` already exists on crates.io index",
             "the remote server responded with an error: A crate with the name already exists",
             // case-insensitive
             "CRATE VERSION `2.0.0` IS ALREADY UPLOADED",
@@ -485,12 +378,10 @@ mod tests {
         }
     }
 
-    // is_not_found_error drives is_published's Ok(false) vs Err split.
-
     #[test]
     fn not_found_matches_cargo_info_absence_wording() {
         let positives = [
-            "error: could not find `toy-kv-utils@9.9.9` in registry `crates-io`",
+            "error: could not find `lumina-utils@9.9.9` in registry `crates-io`",
             "error: package `nope@1.0.0` not found",
             "error: no matching package named `ghost` found",
             "error: version `0.0.1` does not exist",
@@ -518,7 +409,6 @@ mod tests {
 
     #[test]
     fn parse_max_version_reads_version_line() {
-        // Realistic `cargo info <crate>` stdout (header + fields).
         let stdout = "anyhow #error #error-handling\n\
             Flexible concrete Error type built on std::error::Error\n\
             version: 1.0.102\n\
@@ -533,9 +423,7 @@ mod tests {
 
     #[test]
     fn parse_max_version_does_not_match_rust_version_field() {
-        // `rust-version:` also ends in "version:" and is a bare MSRV like `1.68`,
-        // which is NOT a valid semver — must be skipped, and the real `version:`
-        // line picked instead.
+        // `rust-version:` also ends in "version:" but is a bare MSRV, not semver.
         let stdout = "rust-version: 1.68\nversion: 0.3.1\n";
         assert_eq!(
             parse_max_version(stdout),
@@ -562,8 +450,6 @@ mod tests {
 
     #[test]
     fn parse_max_version_none_on_empty_or_no_version_line() {
-        // Empty output, and output that carries no parseable `version:` field,
-        // both yield None (caller decides whether that's an error).
         assert_eq!(parse_max_version(""), None);
         assert_eq!(
             parse_max_version("name #tag\ndescription only\nlicense: MIT\n"),
@@ -575,12 +461,10 @@ mod tests {
 
     #[test]
     fn parse_max_version_skips_local_source_line() {
-        // In-workspace `cargo info <name>` resolves to the LOCAL workspace member
-        // and prints `version: <v> (from ./path)`. That is NOT a registry
-        // publication, so it must be skipped — here there is no registry line,
-        // so the result is None (caller maps that to "never published").
-        let stdout = "toy-kv-utils #key-value #wasm #toy\n\
-            Foundational error, JSON, and key-validation helpers for toy-kv.\n\
+        // In-workspace `cargo info` resolves to the local member and prints
+        // `version: <v> (from ./path)`; not a publication, so None.
+        let stdout = "lumina-utils #key-value #wasm #toy\n\
+            Foundational error, JSON, and key-validation helpers for lumina.\n\
             version: 0.1.0 (from ./utils)\n\
             license: MIT\n\
             rust-version: 1.85\n";
@@ -591,8 +475,7 @@ mod tests {
 
     #[test]
     fn parse_max_version_keeps_only_leading_token() {
-        // A genuine registry release at an exact version prints a trailing
-        // `(latest …)` annotation — that IS published; keep just `1.0.0`.
+        // A genuine release prints a trailing `(latest …)`; keep just `1.0.0`.
         assert_eq!(
             parse_max_version("version: 1.0.0 (latest 1.0.102)\n"),
             Some(semver::Version::new(1, 0, 0))
@@ -609,15 +492,12 @@ mod tests {
         assert!(!is_local_source_version("1.4.2"));
     }
 
-    // is_local_source_resolution drives is_published's Ok(false) for the
-    // in-workspace local-crate hazard.
-
     #[test]
     fn local_source_resolution_true_for_workspace_member() {
         // `cargo info <name>@<version>` from inside the workspace exits 0 but
         // resolves to the local path source even for an unpublished version.
-        let stdout = "toy-kv-utils #key-value #wasm #toy\n\
-            Foundational error, JSON, and key-validation helpers for toy-kv.\n\
+        let stdout = "lumina-utils #key-value #wasm #toy\n\
+            Foundational error, JSON, and key-validation helpers for lumina.\n\
             version: 0.1.0 (from ./utils)\n\
             license: MIT\n\
             rust-version: 1.85\n";
@@ -626,34 +506,26 @@ mod tests {
 
     #[test]
     fn local_source_resolution_false_for_registry_release() {
-        // A real registry publication (exact-version lookup shows `(latest …)`,
-        // a plain `version:` line shows nothing) is NOT a local source.
         assert!(!is_local_source_resolution(
             "version: 1.0.0 (latest 1.0.102)\n"
         ));
         assert!(!is_local_source_resolution(
             "anyhow #error\nversion: 1.0.102\nlicense: MIT\n"
         ));
-        // `rust-version:` carrying nothing relevant must not be misread.
+        // `rust-version:` must not be misread.
         assert!(!is_local_source_resolution("rust-version: 1.85\n"));
         assert!(!is_local_source_resolution(""));
     }
 
-    // ANSI-color regression (the first-release CI failure).
-    // In some environments (notably GitHub Actions) `cargo info` colorizes its
-    // output, wrapping the `version:` line in SGR escape codes so it no longer
-    // begins with the literal `version:` prefix. That silently broke BOTH parsers:
-    // `is_local_source_resolution` returned false and `parse_max_version` returned
-    // None, so an unpublished first-release workspace crate raised
-    // "succeeded but no version line could be parsed" instead of Ok(None).
-    // We force `CARGO_TERM_COLOR=never` on the `cargo info` calls; these tests pin
-    // that the parsers are also robust if colored output slips through.
+    // ANSI-color regression: colored `cargo info` output wraps the `version:`
+    // line in SGR codes, which once broke both parsers. We force
+    // `CARGO_TERM_COLOR=never`; these tests pin that the parsers are also robust
+    // if colored output slips through.
 
-    /// The exact colored line `cargo info` emits for a local workspace member,
-    /// reproduced from a `CARGO_TERM_COLOR=always` run.
+    /// The colored line `cargo info` emits for a local workspace member.
     const COLORED_LOCAL_INFO: &str = concat!(
-        "toy-kv-utils #key-value #wasm #toy\n",
-        "Foundational error, JSON, and key-validation helpers for toy-kv.\n",
+        "lumina-utils #key-value #wasm #toy\n",
+        "Foundational error, JSON, and key-validation helpers for lumina.\n",
         "\x1b[1m\x1b[92mversion:\x1b[0m 0.1.0 \x1b[1m\x1b[94m(from ./utils)\x1b[0m\n",
         "\x1b[1m\x1b[92mlicense:\x1b[0m MIT\n",
     );
@@ -670,8 +542,7 @@ mod tests {
 
     #[test]
     fn parse_max_version_tolerates_ansi_color_codes() {
-        // Colored local-source line is still recognized as local → None (not the
-        // "unparseable" error that broke the first CI release).
+        // Colored local-source line is still recognized as local → None.
         assert_eq!(parse_max_version(COLORED_LOCAL_INFO), None);
         // A colored registry line still parses to its version.
         assert_eq!(
@@ -685,23 +556,15 @@ mod tests {
         assert!(is_local_source_resolution(COLORED_LOCAL_INFO));
     }
 
-    // A `cargo info <name>` that exits 0 but resolved to the LOCAL workspace
-    // member is NOT a registry publication: the success branch must map it to
-    // "no published version" (Ok(None)), NOT to the "unparseable" error.
-
     #[test]
     fn max_published_version_treats_local_source_success_as_unpublished() {
-        // Realistic in-workspace `cargo info toy-kv-utils` stdout: exits 0 but
-        // the version line is a local path source.
-        let stdout = "toy-kv-utils\nversion: 0.1.0 (from ./utils)\n";
-        // The success-branch guard: a local-source resolution short-circuits to
-        // Ok(None), so this must be detected as a local source...
+        // In-workspace `cargo info` exits 0 with a local path source; the success
+        // branch must map it to Ok(None), not the "unparseable" error.
+        let stdout = "lumina-utils\nversion: 0.1.0 (from ./utils)\n";
         assert!(
             is_local_source_resolution(stdout),
             "in-workspace success must be recognized as a local source"
         );
-        // ...and parse_max_version must NOT yield a (would-be-erroring) version
-        // for it — confirming the only path left is Ok(None), never Err.
         assert_eq!(
             parse_max_version(stdout),
             None,
@@ -711,8 +574,7 @@ mod tests {
 
     #[test]
     fn max_published_version_registry_success_still_parses() {
-        // A genuine registry release is NOT a local source, so the success
-        // branch falls through to parse_max_version, which yields the version.
+        // A genuine release is not a local source, so parse_max_version yields it.
         let stdout = "anyhow #error\nversion: 1.0.102\nlicense: MIT\n";
         assert!(!is_local_source_resolution(stdout));
         assert_eq!(
@@ -721,8 +583,6 @@ mod tests {
         );
     }
 
-    // publish_args: command construction, token never on argv.
-
     #[test]
     fn publish_args_shape_and_no_token() {
         let manifest = Path::new("/work/utils/Cargo.toml");
@@ -730,9 +590,7 @@ mod tests {
         assert_eq!(args[0], "publish");
         assert_eq!(args[1], "--manifest-path");
         assert_eq!(args[2], manifest.as_os_str());
-        // The token must never appear as a CLI argument; the only env-var name
-        // we ever surface is the fixed CARGO_REGISTRY_TOKEN (set on the child
-        // env, not argv). Assert no arg looks tokenish.
+        // The token must never appear on argv.
         for a in args {
             let s = a.to_string_lossy().to_lowercase();
             assert!(!s.contains("token"), "argv must not carry a token: {s}");
@@ -742,8 +600,6 @@ mod tests {
             );
         }
     }
-
-    // poll_until: the generic poll loop (injected check + no-op sleep).
 
     #[test]
     fn poll_succeeds_when_check_turns_true() {
@@ -787,8 +643,8 @@ mod tests {
 
     #[test]
     fn poll_times_out_when_check_never_true() {
-        // Zero timeout with a non-trivial interval: the deadline is already past,
-        // so the first false result must yield a timeout Err without sleeping.
+        // Zero timeout: the deadline is already past, so the first false result
+        // yields a timeout Err without sleeping.
         let sleeps = Cell::new(0u32);
         let res = poll_until(
             Duration::from_secs(0),

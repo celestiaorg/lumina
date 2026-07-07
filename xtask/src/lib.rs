@@ -5,14 +5,13 @@
 //! tags/releases). The modules are layered: I/O primitives, then pure feature
 //! logic, then command orchestration, then the CLI.
 
-// I/O primitives — git, cargo/registry, GitHub, npm, workspace/repo discovery.
+// I/O primitives — git, cargo/registry, GitHub, npm, workspace discovery.
 pub mod cargoops;
 pub mod commit;
 pub mod config;
 pub mod forge;
 pub mod gitops;
 pub mod npmops;
-pub mod repo;
 pub mod version;
 pub mod workspace;
 

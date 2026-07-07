@@ -1,31 +1,12 @@
 //! Release-PR title and body generation.
-//!
-//! The body is a Tera template ported from release-plz
-//! (`release_plz_core::pr::DEFAULT_PR_BODY_TEMPLATE`), rendered over one
-//! [`ReleaseInfo`] per package, minus release-plz's tool-attribution footer. It
-//! emits the `## 🤖 New release` bullet list (with inline API-status markers),
-//! per-package breaking-change blocks, and a collapsible `<blockquote>` changelog,
-//! degrading gracefully under GitHub's [`MAX_PR_BODY`] character cap as release-plz
-//! does.
-//!
-//! Unlike release-plz, the `⚠ / ✓` marker is driven by the combined breaking flag
-//! (API *or* intent), not the API-only `cargo-semver-checks` result — see the
-//! caller ([`crate::breaking`]).
 
 use anyhow::Context;
 use serde::Serialize;
 
-/// GitHub's cap on PR-body length, in **characters**. Enforced on
-/// `str::chars().count()`, mirroring release-plz's `MAX_BODY_LEN`.
+/// GitHub's cap on PR-body length, counted in characters.
 pub const MAX_PR_BODY: usize = 65_536;
 
-/// The PR-body template, ported from release-plz's `DEFAULT_PR_BODY_TEMPLATE`
-/// (same layout: `## 🤖 New release` bullets, per-package breaking blocks, and a
-/// collapsible `<blockquote>` changelog) with two adaptations: the trailing
-/// `---` / "generated with release-plz" attribution footer is removed (branding),
-/// and the changelog section is gated on a precomputed `has_changelog` flag +
-/// inlined loop instead of release-plz's `{% set changes %}…{% endset %}` capture
-/// block, which Tera 1.x does not support. The rendered output is identical.
+/// The Tera PR-body template.
 const DEFAULT_PR_BODY_TEMPLATE: &str = r#"
 ## 🤖 New release
 {% for release in releases %}
@@ -54,59 +35,44 @@ const DEFAULT_PR_BODY_TEMPLATE: &str = r#"
 </p></details>
 {% endif %}"#;
 
-/// One record per workspace package, assembled by the prepare command before the
-/// PR body is built.
-///
-/// All per-package data arrives pre-computed: `previous_version` / `new_version`
-/// are validated version strings, `breaking` / `breaking_reason` come from the
-/// breaking-change diagnostic, and `title` / `changelog_body` come from the
-/// changelog step. This module renders them verbatim.
+/// One record per workspace package, assembled before the PR body is built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageReport {
-    /// Package name, e.g. `"toy-kv-utils"`. Rendered inside backticks.
+    /// Package name, e.g. `"lumina-utils"`. Rendered inside backticks.
     pub name: String,
-    /// Last published/tagged version, or empty for a first release (which
-    /// suppresses the `prev -> next` arrow, mirroring release-plz).
+    /// Last released version; empty for a first release (suppresses the arrow).
     pub previous_version: String,
-    /// The single workspace version being released (same across all records).
+    /// The workspace version being released.
     pub new_version: String,
-    /// The new changelog entry's heading text **without** the `## ` prefix (e.g.
-    /// `"[1.2.0] - 2026-06-14"`); empty when there is no entry.
+    /// Changelog entry heading without the `## ` prefix; empty when none.
     pub title: String,
-    /// Diagnostic breaking-change flag (API *or* intent). Drives the `⚠ / ✓` marker
-    /// and the breaking-detail block. Never influences the version.
+    /// Breaking flag (API or intent); drives the `⚠ / ✓` marker.
     pub breaking: bool,
-    /// Human-readable breaking reason, emitted verbatim inside a fenced `text`
-    /// block. Only used when `breaking` is `true`.
+    /// Breaking reason, emitted inside a fenced `text` block when breaking.
     pub breaking_reason: String,
-    /// Body-only changelog entry (no `## [..]` heading), possibly empty. Embedded
-    /// in the collapsible Changelog section when non-empty.
+    /// Body-only changelog entry, possibly empty.
     pub changelog_body: String,
 }
 
-/// The per-release context object the template renders over, mirroring
-/// release-plz's `ReleaseInfo`. Field names must match the template.
+/// The per-release context the template renders over. Field names must match the
+/// template.
 #[derive(Debug, Serialize)]
 struct ReleaseInfo {
     package: String,
-    /// New-entry heading (no `## `); `None` suppresses the in-blockquote heading.
+    /// Entry heading (no `## `); `None` suppresses the in-blockquote heading.
     title: Option<String>,
-    /// Body-only changelog notes; `None` omits this package's changelog block.
+    /// Changelog notes; `None` omits this package's changelog block.
     changelog: Option<String>,
     /// Empty string suppresses the `prev ->` arrow.
     previous_version: String,
     next_version: String,
     /// `None` omits the breaking-changes block.
     breaking_changes: Option<String>,
-    /// `"incompatible"` → `⚠`, `"compatible"` → `✓` (driven by the combined flag).
+    /// `"incompatible"` → `⚠`, `"compatible"` → `✓`.
     semver_check: String,
 }
 
-/// Map a caller-supplied [`PackageReport`] into the template's [`ReleaseInfo`].
-///
-/// Empty `changelog_body` ⇒ no changelog block (and no title); empty
-/// `previous_version` ⇒ no version arrow; the combined `breaking` flag selects the
-/// `incompatible`/`compatible` marker and gates the breaking-changes block.
+/// Map a [`PackageReport`] into the template's [`ReleaseInfo`].
 fn to_release_info(r: &PackageReport) -> ReleaseInfo {
     let changelog = {
         let trimmed = r.changelog_body.trim_matches('\n');
@@ -135,11 +101,8 @@ fn to_release_info(r: &PackageReport) -> ReleaseInfo {
     }
 }
 
-/// PR title: `chore: release v<version>`, where `<version>` is the `new_version`
-/// of the first report.
-///
-/// On an empty slice the version segment is empty (`"chore: release v"`); the
-/// caller is expected to pass at least one record.
+/// PR title `chore: release v<version>`, using the first report's `new_version`
+/// (empty segment on an empty slice).
 pub fn title(reports: &[PackageReport]) -> String {
     let version = reports
         .first()
@@ -148,13 +111,12 @@ pub fn title(reports: &[PackageReport]) -> String {
     format!("chore: release v{version}")
 }
 
-/// Render the release-plz PR body over `reports`, with release-plz's length-safety
-/// degradation applied so the result never exceeds [`MAX_PR_BODY`] characters:
+/// Render the PR body over `reports`, keeping it within [`MAX_PR_BODY`] characters:
 ///
 /// 1. full render; if within the cap, use it;
 /// 2. otherwise drop `changelog` + `title` from every release and re-render
 ///    (keeps the summary + breaking blocks, sheds the bulky changelog);
-/// 3. `trim_pr_body` hard-truncates at a UTF-8 char boundary as a last resort.
+/// 3. hard-truncate at a UTF-8 char boundary as a last resort.
 pub fn body(reports: &[PackageReport]) -> anyhow::Result<String> {
     let mut releases: Vec<ReleaseInfo> = reports.iter().map(to_release_info).collect();
 
@@ -163,23 +125,17 @@ pub fn body(reports: &[PackageReport]) -> anyhow::Result<String> {
         return Ok(full);
     }
 
-    // Over the cap: shed the bulky changelog (drop `changelog` + `title`) and
-    // re-render, keeping the summary + breaking blocks.
-    // NOTE: release-plz's own code trims the *first* render before this length
-    // check, so this degradation never actually fires there — it hard-truncates
-    // instead. We keep the intended graceful behavior.
+    // Over the cap: shed the bulky changelog, keeping the summary + breaking blocks.
     for release in &mut releases {
         release.changelog = None;
         release.title = None;
     }
     let without_changelog = render_template(&releases)?;
 
-    // Last resort — hard-truncate at a UTF-8 char boundary.
     Ok(trim_pr_body(without_changelog))
 }
 
-/// Render [`DEFAULT_PR_BODY_TEMPLATE`] against `releases` with a fresh Tera engine
-/// (matching release-plz's `render_template`).
+/// Render [`DEFAULT_PR_BODY_TEMPLATE`] against `releases` with a fresh Tera engine.
 fn render_template(releases: &[ReleaseInfo]) -> anyhow::Result<String> {
     let has_changelog = releases.iter().any(|r| r.changelog.is_some());
     let mut tera = tera::Tera::default();
@@ -192,9 +148,7 @@ fn render_template(releases: &[ReleaseInfo]) -> anyhow::Result<String> {
         .context("failed to render the PR body")
 }
 
-/// Hard-truncate at a valid UTF-8 char boundary if still over the cap (mirrors
-/// release-plz's `trim_pr_body`). A grapheme cluster may be split, but the result
-/// is always valid UTF-8; no truncation marker is appended.
+/// Hard-truncate at a valid UTF-8 char boundary if still over the cap.
 fn trim_pr_body(body: String) -> String {
     if body.chars().count() > MAX_PR_BODY {
         body.chars().take(MAX_PR_BODY).collect()
@@ -207,8 +161,7 @@ fn trim_pr_body(body: String) -> String {
 mod tests {
     use super::*;
 
-    /// Build a report with sensible defaults; override the fields each test cares
-    /// about.
+    /// Build a report with sensible defaults.
     fn report(name: &str, prev: &str, new: &str, breaking: bool) -> PackageReport {
         PackageReport {
             name: name.to_string(),
@@ -226,8 +179,8 @@ mod tests {
     #[test]
     fn title_uses_first_record_new_version() {
         let reports = vec![
-            report("toy-kv-utils", "0.1.0", "0.2.0", false),
-            report("toy-kv", "0.1.0", "0.2.0", false),
+            report("lumina-utils", "0.1.0", "0.2.0", false),
+            report("lumina", "0.1.0", "0.2.0", false),
         ];
         assert_eq!(title(&reports), "chore: release v0.2.0");
     }
@@ -242,15 +195,15 @@ mod tests {
     #[test]
     fn summary_is_robot_bullet_list_with_markers() {
         let reports = vec![
-            report("toy-kv-utils", "0.1.0", "0.2.0", false),
-            report("toy-kv", "0.1.0", "0.2.0", true),
+            report("lumina-utils", "0.1.0", "0.2.0", false),
+            report("lumina", "0.1.0", "0.2.0", true),
         ];
         let b = body(&reports).unwrap();
 
         assert!(b.contains("## 🤖 New release"));
-        assert!(b.contains("* `toy-kv-utils`: 0.1.0 -> 0.2.0 (✓ API compatible changes)"));
-        assert!(b.contains("* `toy-kv`: 0.1.0 -> 0.2.0 (⚠ API breaking changes)"));
-        // Mirrors release-plz: no table.
+        assert!(b.contains("* `lumina-utils`: 0.1.0 -> 0.2.0 (✓ API compatible changes)"));
+        assert!(b.contains("* `lumina`: 0.1.0 -> 0.2.0 (⚠ API breaking changes)"));
+        // No table.
         assert!(!b.contains("| Package | Version | Status |"));
     }
 
@@ -271,14 +224,14 @@ mod tests {
 
     #[test]
     fn breaking_block_only_for_breaking_packages_fenced() {
-        let mut breaks = report("toy-kv-utils", "0.1.0", "0.2.0", true);
+        let mut breaks = report("lumina-utils", "0.1.0", "0.2.0", true);
         breaks.breaking_reason = "removed pub fn `from_str`".to_string();
-        let ok = report("toy-kv", "0.1.0", "0.2.0", false);
+        let ok = report("lumina", "0.1.0", "0.2.0", false);
 
         let b = body(&[breaks, ok]).unwrap();
-        assert!(b.contains("### ⚠ `toy-kv-utils` breaking changes"));
+        assert!(b.contains("### ⚠ `lumina-utils` breaking changes"));
         assert!(b.contains("```text\nremoved pub fn `from_str`\n```"));
-        assert!(!b.contains("`toy-kv` breaking changes"));
+        assert!(!b.contains("`lumina` breaking changes"));
     }
 
     #[test]
@@ -305,8 +258,7 @@ mod tests {
 
     #[test]
     fn changelog_single_package_omits_package_heading_uses_blockquote() {
-        // A single-release PR: mirrors release-plz's `releases | length > 1` gate,
-        // so no per-package `## \`name\`` heading.
+        // Single release: no per-package `## \`name\`` heading.
         let mut r = report("only", "0.1.0", "0.2.0", false);
         r.title = "[0.2.0] - 2026-06-14".to_string();
         r.changelog_body = "### Added\n\n- a thing".to_string();
@@ -323,26 +275,26 @@ mod tests {
 
     #[test]
     fn changelog_multi_package_uses_package_headings_and_skips_empty() {
-        let mut a = report("toy-kv-utils", "0.1.0", "0.2.0", false);
+        let mut a = report("lumina-utils", "0.1.0", "0.2.0", false);
         a.changelog_body = "### Added\n\n- utils thing".to_string();
-        let mut c = report("toy-kv", "0.1.0", "0.2.0", false);
+        let mut c = report("lumina", "0.1.0", "0.2.0", false);
         c.changelog_body = "### Added\n\n- core thing".to_string();
-        let empty = report("toy-kv-wasm", "", "0.2.0", false);
+        let empty = report("lumina-node-wasm", "", "0.2.0", false);
         let b = body(&[a, empty, c]).unwrap();
 
-        assert!(b.contains("## `toy-kv-utils`"));
-        assert!(b.contains("## `toy-kv`"));
+        assert!(b.contains("## `lumina-utils`"));
+        assert!(b.contains("## `lumina`"));
         assert!(b.contains("- utils thing"));
         assert!(b.contains("- core thing"));
         // Empty-changelog package gets no heading and no blockquote content.
-        assert!(!b.contains("## `toy-kv-wasm`"));
+        assert!(!b.contains("## `lumina-node-wasm`"));
     }
 
     // no branding
 
     #[test]
     fn body_has_no_release_plz_branding() {
-        let mut r = report("toy-kv", "0.1.0", "0.2.0", false);
+        let mut r = report("lumina", "0.1.0", "0.2.0", false);
         r.changelog_body = "### Added\n\n- a thing".to_string();
         let b = body(&[r]).unwrap();
         assert!(!b.to_lowercase().contains("release-plz"));
@@ -353,7 +305,7 @@ mod tests {
 
     #[test]
     fn length_safety_normal_input_keeps_changelog() {
-        let mut r = report("toy-kv", "0.1.0", "0.2.0", false);
+        let mut r = report("lumina", "0.1.0", "0.2.0", false);
         r.changelog_body = "### Added\n\n- a normal change".to_string();
         let b = body(&[r]).unwrap();
         assert!(b.contains("<details>"));
@@ -362,7 +314,7 @@ mod tests {
 
     #[test]
     fn length_safety_oversized_changelog_drops_details_keeps_summary() {
-        let mut r = report("toy-kv", "0.1.0", "0.2.0", false);
+        let mut r = report("lumina", "0.1.0", "0.2.0", false);
         r.changelog_body = "### Added\n".to_string() + &"- x\n".repeat(20_000);
         let b = body(&[r]).unwrap();
 
@@ -371,13 +323,13 @@ mod tests {
         assert!(!b.contains("<details>"));
         // ...but the summary bullet is kept.
         assert!(b.contains("## 🤖 New release"));
-        assert!(b.contains("* `toy-kv`: 0.1.0 -> 0.2.0"));
+        assert!(b.contains("* `lumina`: 0.1.0 -> 0.2.0"));
     }
 
     #[test]
     fn length_safety_pathological_input_hard_truncates_at_char_boundary() {
         // Multi-byte breaking reason (un-droppable) large enough to force step 3.
-        let mut r = report("toy-kv", "0.1.0", "0.2.0", true);
+        let mut r = report("lumina", "0.1.0", "0.2.0", true);
         r.breaking_reason = "⚠".repeat(70_000);
         let b = body(&[r]).unwrap();
 

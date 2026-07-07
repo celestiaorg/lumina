@@ -1,32 +1,47 @@
-//! Version-validation logic for the release tool.
+//! Version logic: tag naming/parsing (`{crate}-v{version}`), prerelease detection,
+//! and legal-successor validation.
 //!
-//! Given a current version and a requested next version, decide whether the next
-//! version is exactly a legal successor of the current one, and — when it is —
-//! classify which kind of bump the transition represents.
-//!
-//! The rules:
-//!
-//! * If the current version is a prerelease `X.Y.Z-rc.N`, the legal next versions
-//!   are `X.Y.Z-rc.(N+1)` (continue the rc series) or `X.Y.Z` (promote rc →
-//!   final).
-//! * If the current version is stable `X.Y.Z`, the legal next versions are a
-//!   single SemVer bump where a higher component resets the lower ones to `0` —
-//!   `(X+1).0.0` (major), `X.(Y+1).0` (minor), `X.Y.(Z+1)` (patch) — or any one of
-//!   those three with a `-rc.1` suffix appended.
-//! * Anything else is rejected.
-//!
-//! This module is pure: no filesystem, network, git, or process I/O, no state, and
-//! deterministic in its inputs. Determining which version is current (from git tags
-//! and the registry) lives in the workspace/command modules.
+//! Successor rules: from a prerelease `X.Y.Z-rc.N` the legal next versions are
+//! `X.Y.Z-rc.(N+1)` or `X.Y.Z`; from a stable `X.Y.Z` they are a single SemVer bump
+//! that resets lower components to `0` (`(X+1).0.0` / `X.(Y+1).0` / `X.Y.(Z+1)`),
+//! optionally with a `-rc.1` suffix. Anything else is rejected. Pure — no I/O.
+
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 pub use semver::Version;
 
-/// Classification of a *legal* transition from a current version to a requested
-/// next version.
-///
-/// Returned by [`classify_bump`] / [`is_legal_successor`] when, and only when, the
-/// requested version is an exact legal successor. Callers can use it to describe the
-/// transition (e.g. in a release-PR body).
+/// The per-crate tag convention `{crate_name}-v{version}` (e.g. `lumina-utils-v0.2.0`).
+/// [`parse_version_tag`] is its inverse.
+pub fn tag_name(crate_name: &str, version: &str) -> String {
+    format!("{crate_name}-v{version}")
+}
+
+/// Matches a version tag `<crate>-v<semver-core>[-<prerelease>]`, capturing the
+/// version. The prerelease class excludes `+`, so build-metadata tags never match.
+static VERSION_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^.+-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$").unwrap());
+
+/// Parse the version out of a `{crate}-v{version}` tag (splitting on the final `-v`),
+/// or `None` if the tag doesn't match the convention or doesn't parse as semver.
+pub fn parse_version_tag(tag: &str) -> Option<Version> {
+    let caps = VERSION_TAG.captures(tag)?;
+    Version::parse(&caps[1]).ok()
+}
+
+/// The highest version in `versions`, or `None` when empty.
+pub fn max_version<'a>(versions: impl IntoIterator<Item = &'a Version>) -> Option<Version> {
+    versions.into_iter().max().cloned()
+}
+
+/// Whether `version` carries a prerelease component (e.g. `1.2.0-rc.1`).
+pub fn is_prerelease(version: &Version) -> bool {
+    !version.pre.is_empty()
+}
+
+/// The kind of a *legal* transition, returned by [`classify_bump`] /
+/// [`is_legal_successor`] only when the next version is an exact legal successor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bump {
     /// Current is `X.Y.Z-rc.N`, next is `X.Y.Z-rc.(N+1)` — continue the rc series.
@@ -51,34 +66,15 @@ pub enum Bump {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionError {
     /// The *current* version string failed to parse as SemVer.
-    ParseCurrent {
-        /// The offending input string.
-        input: String,
-        /// The underlying `semver` parse error, rendered as text.
-        source: String,
-    },
+    ParseCurrent { input: String, source: String },
     /// The *requested next* version string failed to parse as SemVer.
-    ParseNext {
-        /// The offending input string.
-        input: String,
-        /// The underlying `semver` parse error, rendered as text.
-        source: String,
-    },
-    /// The current version parsed but is not a shape these rules model: it carries
-    /// a pre-release other than exactly `rc.N` (with `N >= 1`), or it carries build
-    /// metadata.
-    UnsupportedCurrent {
-        /// The parsed current version.
-        version: Version,
-    },
-    /// Both versions parsed and the current shape is supported, but `next` is not
-    /// any legal successor of `current`.
-    IllegalSuccessor {
-        /// The parsed current version.
-        current: Version,
-        /// The parsed requested-next version.
-        next: Version,
-    },
+    ParseNext { input: String, source: String },
+    /// The current version parsed but is not a modeled shape (a pre-release other
+    /// than `rc.N` with `N >= 1`, or build metadata).
+    UnsupportedCurrent { version: Version },
+    /// Both parsed and the current shape is supported, but `next` is not a legal
+    /// successor of `current`.
+    IllegalSuccessor { current: Version, next: Version },
 }
 
 impl std::fmt::Display for VersionError {
@@ -107,9 +103,8 @@ impl std::fmt::Display for VersionError {
 
 impl std::error::Error for VersionError {}
 
-/// Parse a SemVer string as the *current* version.
-///
-/// A parse failure is tagged [`VersionError::ParseCurrent`].
+/// Parse a SemVer string as the *current* version (parse errors tagged
+/// [`VersionError::ParseCurrent`]).
 pub fn parse_current(s: &str) -> Result<Version, VersionError> {
     Version::parse(s).map_err(|e| VersionError::ParseCurrent {
         input: s.to_owned(),
@@ -117,9 +112,8 @@ pub fn parse_current(s: &str) -> Result<Version, VersionError> {
     })
 }
 
-/// Parse a SemVer string as the *requested next* version.
-///
-/// A parse failure is tagged [`VersionError::ParseNext`].
+/// Parse a SemVer string as the *requested next* version (parse errors tagged
+/// [`VersionError::ParseNext`]).
 pub fn parse_next(s: &str) -> Result<Version, VersionError> {
     Version::parse(s).map_err(|e| VersionError::ParseNext {
         input: s.to_owned(),
@@ -127,15 +121,10 @@ pub fn parse_next(s: &str) -> Result<Version, VersionError> {
     })
 }
 
-/// Classify the transition `current -> next`, returning the [`Bump`] kind iff
-/// `next` is exactly a legal successor of `current`.
-///
-/// Operates on already-parsed [`Version`]s; it does not parse. Returns:
-///
-/// * [`VersionError::UnsupportedCurrent`] if `current` is neither stable nor a
-///   modeled `rc.N` prerelease.
-/// * [`VersionError::IllegalSuccessor`] if `current` is a supported shape but
-///   `next` is not any legal successor.
+/// Classify the transition `current -> next` on already-parsed versions, returning
+/// the [`Bump`] iff `next` is a legal successor. Errors with
+/// [`VersionError::UnsupportedCurrent`] (current is neither stable nor `rc.N`) or
+/// [`VersionError::IllegalSuccessor`].
 pub fn classify_bump(current: &Version, next: &Version) -> Result<Bump, VersionError> {
     let illegal = || VersionError::IllegalSuccessor {
         current: current.clone(),
@@ -257,6 +246,62 @@ fn rc_variant(bump: Bump) -> Bump {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn tag_name_uses_crate_v_version_convention() {
+        assert_eq!(tag_name("lumina-utils", "0.2.0"), "lumina-utils-v0.2.0");
+        assert_eq!(tag_name("lumina", "0.2.0"), "lumina-v0.2.0");
+        assert_eq!(tag_name("lumina", "1.0.0-rc.1"), "lumina-v1.0.0-rc.1");
+    }
+
+    #[test]
+    fn parse_version_tag_round_trips_the_convention() {
+        // crate names with internal hyphens split on the FINAL `-v`.
+        assert_eq!(
+            parse_version_tag("lumina-node-utils-v0.2.0"),
+            Some(v("0.2.0"))
+        );
+        assert_eq!(parse_version_tag("lumina-v0.2.0"), Some(v("0.2.0")));
+        assert_eq!(
+            parse_version_tag("lumina-v1.0.0-rc.1"),
+            Some(v("1.0.0-rc.1"))
+        );
+        let tag = tag_name("a-b-c", "3.4.5-rc.2");
+        assert_eq!(parse_version_tag(&tag), Some(v("3.4.5-rc.2")));
+    }
+
+    #[test]
+    fn parse_version_tag_rejects_non_matching() {
+        assert_eq!(parse_version_tag("v0.2.0"), None); // nothing before `-v`
+        assert_eq!(parse_version_tag("-v0.2.0"), None); // empty prefix
+        assert_eq!(parse_version_tag("lumina-0.2.0"), None); // no `-v`
+        assert_eq!(parse_version_tag("lumina-v"), None); // empty version
+        assert_eq!(parse_version_tag("lumina-vlatest"), None); // not semver
+        assert_eq!(parse_version_tag("lumina-v1.2"), None); // not X.Y.Z
+        assert_eq!(parse_version_tag("lumina-v1.2.3+build"), None); // build metadata rejected
+        assert_eq!(parse_version_tag("random-tag"), None);
+    }
+
+    #[test]
+    fn max_version_picks_highest_and_none_when_empty() {
+        let vs = [v("0.1.0"), v("0.3.0"), v("0.2.5")];
+        assert_eq!(max_version(&vs), Some(v("0.3.0")));
+        // A final release outranks its own rc per semver.
+        let pre = [v("1.0.0-rc.1"), v("1.0.0"), v("1.0.0-rc.2")];
+        assert_eq!(max_version(&pre), Some(v("1.0.0")));
+        let empty: [Version; 0] = [];
+        assert_eq!(max_version(&empty), None);
+    }
+
+    #[test]
+    fn is_prerelease_detects_rc() {
+        assert!(!is_prerelease(&v("1.2.0")));
+        assert!(is_prerelease(&v("1.2.0-rc.1")));
+    }
 
     /// Assert `next` is a legal successor of `current` with the expected bump.
     /// Exercises both `is_legal_successor` (string entry point) and the symmetry

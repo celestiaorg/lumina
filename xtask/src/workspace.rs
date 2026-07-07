@@ -1,10 +1,5 @@
-//! Workspace discovery for the release tool.
-//!
-//! Shells out to `cargo metadata` to learn the facts the release process needs
-//! about the workspace it is releasing: the single workspace version, the list of
-//! member crates (name, version, manifest dir/path, publishability), and the
-//! topological publish order — publishable crates ordered so each is published only
-//! after every in-workspace crate it depends on.
+//! Workspace discovery via `cargo metadata`: the single workspace version, the
+//! member crates, and the topological publish order.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -12,8 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::{DependencyKind, MetadataCommand};
 
-/// Re-export of the `semver` crate that `cargo_metadata` parses versions with, so
-/// dependents can name [`Version`] without adding their own `semver` dependency.
+/// Re-export of `cargo_metadata`'s `semver` so dependents can name [`Version`].
 pub use cargo_metadata::semver;
 
 use semver::Version;
@@ -21,40 +15,31 @@ use semver::Version;
 /// Facts about a single workspace member crate.
 #[derive(Debug, Clone)]
 pub struct CrateInfo {
-    /// Package name, e.g. `toy-kv-utils`.
+    /// Package name, e.g. `lumina-utils`.
     pub name: String,
-    /// The crate's version (equals the workspace version under the
-    /// single-workspace-version rule).
+    /// The crate's version (equals the workspace version).
     pub version: Version,
-    /// Absolute directory containing the crate's `Cargo.toml` (its own directory;
-    /// used for changelog path-scoping by downstream modules).
+    /// Absolute directory containing the crate's `Cargo.toml`.
     pub manifest_dir: PathBuf,
     /// Absolute path to the crate's `Cargo.toml`.
     pub manifest_path: PathBuf,
-    /// `false` iff the manifest sets `publish = false`; `true` otherwise.
+    /// `false` iff the manifest sets `publish = false`.
     pub is_publishable: bool,
 }
 
 /// The discovered workspace: its single version and every member crate.
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    /// The single workspace version (`[workspace.package].version`), shared by
-    /// every member via `version.workspace = true`.
+    /// The single workspace version, shared by every member.
     pub version: Version,
-    /// Every workspace member, in `cargo metadata` order (publishable or not).
+    /// Every workspace member, in `cargo metadata` order.
     pub crates: Vec<CrateInfo>,
-    /// In-workspace dependency edges `(a, b)` meaning "crate `a` depends on crate
-    /// `b`" (normal + build kinds only; dev-deps excluded). Captured at discovery
-    /// time because the raw dependency kinds are only available from
-    /// `cargo metadata`. Not part of the public surface.
+    /// In-workspace dependency edges `(a, b)` meaning "`a` depends on `b`"
+    /// (normal + build kinds only; dev-deps excluded).
     edges: Vec<(String, String)>,
 }
 
 /// A dependency cycle in the in-workspace dependency graph.
-///
-/// Returned by the pure [`topo_sort`] helper so cycle behavior can be unit-tested
-/// without running `cargo`. Carries the names of the crates participating in the
-/// cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cycle {
     /// Names of the crates involved in the cycle (sorted, deterministic).
@@ -74,18 +59,11 @@ impl std::fmt::Display for Cycle {
 impl std::error::Error for Cycle {}
 
 impl Workspace {
-    /// Discover the workspace rooted at `repo_root` by shelling out to
-    /// `cargo metadata`.
-    ///
-    /// # Side effects
-    /// Spawns one `cargo metadata` subprocess. No network, no filesystem writes.
+    /// Discover the workspace rooted at `repo_root` via `cargo metadata`.
     ///
     /// # Errors
-    /// - `cargo metadata` fails to run or parse (cargo missing, unreadable or
-    ///   invalid manifest).
-    /// - The workspace has no members.
-    /// - Members disagree on their version (violates the single-version invariant);
-    ///   the error names the differing versions.
+    /// Errors if `cargo metadata` fails, the workspace has no members, or members
+    /// disagree on their version (violates the single-version invariant).
     pub fn discover(repo_root: &Path) -> Result<Workspace> {
         let metadata = MetadataCommand::new()
             .manifest_path(repo_root.join("Cargo.toml"))
@@ -116,8 +94,8 @@ impl Workspace {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| manifest_path.clone());
 
-            // Edge `pkg -> dep` for each normal/build dependency that is also a
-            // workspace member. Dev-dependencies are ignored.
+            // Edge `pkg -> dep` for each normal/build in-workspace dependency
+            // (dev-dependencies ignored).
             for dep in &pkg.dependencies {
                 let is_in_workspace = member_names.contains(dep.name.as_str());
                 let kind_counts =
@@ -149,18 +127,13 @@ impl Workspace {
         })
     }
 
-    /// The publishable crates in topological dependency order.
-    ///
-    /// Edges are computed over **normal and build** in-workspace dependencies
-    /// (dev-dependencies are ignored); an edge `A → B` means "A depends on B", so
-    /// `B` precedes `A`. The full member graph is sorted, then filtered to
-    /// publishable crates (relative order preserved).
-    ///
-    /// For the toy-kv fixture this is `[toy-kv-utils, toy-kv, toy-kv-wasm]`.
+    /// The publishable crates in topological dependency order: an edge `A → B`
+    /// means "A depends on B", so `B` precedes `A`. Normal + build in-workspace
+    /// deps only (dev-deps ignored); the sorted member graph is then filtered to
+    /// publishable crates.
     ///
     /// # Errors
-    /// Returns an error naming the involved crates if the in-workspace dependency
-    /// graph contains a cycle (an unpublishable, malformed workspace).
+    /// Errors naming the involved crates if the dependency graph contains a cycle.
     pub fn publish_order(&self) -> Result<Vec<&CrateInfo>> {
         let names: Vec<String> = self.crates.iter().map(|c| c.name.clone()).collect();
 
@@ -181,20 +154,18 @@ impl Workspace {
     }
 }
 
-/// Whether a package is publishable: `false` iff `publish = false`
-/// (`cargo metadata` reports an empty registry list), `true` otherwise.
+/// Whether a package is publishable: `false` iff `publish = false`, which
+/// `cargo metadata` reports as an empty registry list.
 fn is_publishable(pkg: &cargo_metadata::Package) -> bool {
     match &pkg.publish {
-        // `publish = false` → `Some([])`; an explicit non-empty registry list is
-        // still publishable (to those registries).
+        // `publish = false` → `Some([])`; a non-empty registry list is publishable.
         Some(list) => !list.is_empty(),
-        // `publish` absent → publishable to any registry.
         None => true,
     }
 }
 
-/// Determine the single workspace version from the member versions, erroring if
-/// they disagree (which would violate the single-workspace-version invariant).
+/// The single workspace version, erroring if members disagree (violates the
+/// single-version invariant).
 fn single_version(crates: &[CrateInfo]) -> Result<Version> {
     let mut iter = crates.iter();
     let first = iter.next().expect("crates is non-empty").version.clone();
@@ -211,17 +182,14 @@ fn single_version(crates: &[CrateInfo]) -> Result<Version> {
     Ok(first)
 }
 
-/// Pure topological sort over an abstract graph, factored out so cycle behavior is
-/// unit-testable **without** running `cargo`.
+/// Pure topological sort over an abstract graph (unit-testable without `cargo`).
 ///
-/// - `nodes`: the node identifiers (crate names). Defines membership and the
-///   deterministic tie-break order for nodes with no ordering constraint.
-/// - `edges`: `(a, b)` meaning "a depends on b" → `b` precedes `a` in the output.
+/// - `nodes`: node identifiers; also the deterministic tie-break order for nodes
+///   with no ordering constraint.
+/// - `edges`: `(a, b)` meaning "a depends on b" → `b` precedes `a`. Edges
+///   referencing an unknown node are ignored.
 ///
-/// Edges referencing a node not in `nodes` are ignored.
-///
-/// Returns `Ok(order)` with every dependency before its dependents, or
-/// `Err(Cycle)` naming the crates that participate in a cycle.
+/// Returns `Err(Cycle)` naming the crates in a cycle.
 pub fn topo_sort(
     nodes: &[String],
     edges: &[(String, String)],
@@ -236,8 +204,8 @@ pub fn topo_sort(
     for (a, b) in edges {
         let (a, b) = (a.as_str(), b.as_str());
         if !node_set.contains(a) || !node_set.contains(b) || a == b {
-            // self-loop a==b is a degenerate cycle; let it fall through to the
-            // cycle detector below by NOT skipping it.
+            // Self-loop (a==b) is a degenerate cycle: keep it so the cycle
+            // detector below catches it.
             if a == b && node_set.contains(a) {
                 *remaining.get_mut(a).unwrap() += 1;
                 dependents.entry(a).or_default().push(a);
@@ -276,8 +244,7 @@ pub fn topo_sort(
     }
 
     if order.len() != nodes.len() {
-        // Whatever still has a non-zero remaining count is in (or downstream of) a
-        // cycle.
+        // Anything with a non-zero remaining count is in (or downstream of) a cycle.
         let mut cycle: Vec<String> = remaining
             .iter()
             .filter(|&(_, &r)| r > 0)
@@ -321,8 +288,7 @@ mod tests {
         assert_eq!(order, s(&["a", "b", "c"]));
     }
 
-    /// A diamond still yields a valid order where every dependency precedes its
-    /// dependents. Determinism is also checked: ties break by input order.
+    /// Diamond: a valid order; ties break by input order (determinism).
     #[test]
     fn topo_sort_diamond() {
         // d -> b, d -> c, b -> a, c -> a   (a is foundational, d is top)
@@ -354,8 +320,7 @@ mod tests {
         }
     }
 
-    /// A self-loop is a degenerate cycle and must be reported, not silently
-    /// dropped.
+    /// A self-loop is a degenerate cycle and must be reported.
     #[test]
     fn topo_sort_self_loop_is_cycle() {
         let nodes = s(&["a", "b"]);
@@ -380,9 +345,8 @@ mod tests {
     fn discover_finds_version_members_and_publishability() {
         let ws = Workspace::discover(&repo_root()).expect("discover real workspace");
 
-        // The workspace version is a single inherited value; compare against
-        // xtask's own compile-time version (it inherits `version.workspace`) so this
-        // does not need updating on every release bump.
+        // Compare against xtask's own compile-time version (it inherits
+        // `version.workspace`) so this needn't change on every release bump.
         assert_eq!(
             ws.version,
             Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
@@ -394,12 +358,17 @@ mod tests {
         // `xtask` is a member and, being `publish = false`, is not publishable.
         assert!(!by("xtask").expect("xtask is a member").is_publishable);
 
-        // A representative sample of lumina's publishable library crates. Asserting
-        // a sample (rather than the full member list) keeps this test robust as
-        // crates are added/removed.
-        for n in ["lumina-utils", "lumina-node", "lumina-node-wasm", "celestia-types"] {
+        // A representative sample of publishable library crates (robust to churn).
+        for n in [
+            "lumina-utils",
+            "lumina-node",
+            "lumina-node-wasm",
+            "celestia-types",
+        ] {
             assert!(
-                by(n).unwrap_or_else(|| panic!("{n} should be a member")).is_publishable,
+                by(n)
+                    .unwrap_or_else(|| panic!("{n} should be a member"))
+                    .is_publishable,
                 "{n} should be publishable"
             );
         }
@@ -410,10 +379,8 @@ mod tests {
         assert!(utils.manifest_path.ends_with("Cargo.toml"));
     }
 
-    /// Topological publish order over normal+build in-workspace deps, then filter
-    /// to publishable crates dropping `publish = false`. Asserts the order is a
-    /// *valid* topological sort rather than an exact fixture: `xtask` is excluded,
-    /// and every in-workspace dependency precedes its dependent.
+    /// Publish order is a *valid* topological sort (not an exact fixture): `xtask`
+    /// is excluded and every dependency precedes its dependent.
     #[test]
     fn publish_order_is_valid_topological_order() {
         let ws = Workspace::discover(&repo_root()).expect("discover real workspace");
@@ -443,9 +410,7 @@ mod tests {
             assert!(order.contains(name), "{name} missing from publish order");
         }
 
-        // The order respects every in-workspace edge: for `a depends on b`, `b`
-        // must be published before `a`. (Edges to non-publishable crates are
-        // irrelevant since such crates are absent from `order`.)
+        // Every in-workspace edge is respected: for "a depends on b", b precedes a.
         let pos = |name: &str| order.iter().position(|n| *n == name);
         for (a, b) in &ws.edges {
             if let (Some(pa), Some(pb)) = (pos(a), pos(b)) {

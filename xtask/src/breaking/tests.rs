@@ -1,10 +1,5 @@
-//! Unit tests for the pure logic of `breaking`.
-//!
-//! These exercise the pure helpers (`intent_signal`, `interpret_semver_checks`,
-//! `strip_ansi`, `combine`, `reconstruct_subject`, `has_library_target`) and the
-//! never-published path of `analyze`. The live `cargo-semver-checks` run is
-//! deliberately NOT exercised — interpretation is tested via the seam with
-//! synthetic strings, ANSI stripping included.
+//! Unit tests for the pure logic of `breaking`. The live `cargo-semver-checks` run
+//! is not exercised — interpretation is tested via the seam with synthetic strings.
 
 use super::*;
 use crate::commit::ParsedCommit;
@@ -289,7 +284,7 @@ fn library_target_explicit_lib_crate_type() {
 
 #[test]
 fn library_target_cdylib_only_is_not_a_library() {
-    // The thin wasm cdylib (toy-kv-wasm) → Skipped.
+    // The thin wasm cdylib (lumina-node-wasm) → Skipped.
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("Cargo.toml");
     std::fs::write(
@@ -384,7 +379,7 @@ fn analyze_cdylib_skips_api_and_uses_intent() {
     )
     .unwrap();
     let crate_info = workspace::CrateInfo {
-        name: "toy-kv-wasm".to_string(),
+        name: "lumina-node-wasm".to_string(),
         version: semver::Version::new(0, 2, 0),
         manifest_dir: dir.path().to_path_buf(),
         manifest_path: manifest,
@@ -415,7 +410,7 @@ fn analyze_no_changes_skips_api_and_is_not_breaking() {
     )
     .unwrap();
     let crate_info = workspace::CrateInfo {
-        name: "toy-kv-utils".to_string(),
+        name: "lumina-utils".to_string(),
         version: semver::Version::new(0, 2, 0),
         manifest_dir: dir.path().to_path_buf(),
         manifest_path: manifest,

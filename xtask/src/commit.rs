@@ -1,122 +1,82 @@
 //! Path-scoped git-log collection and Conventional-Commit parsing.
 //!
-//! Two responsibilities:
-//!
-//! 1. [`collect`] — shell out to `git log` to gather the commits touching a
-//!    directory over a range. The only function that performs I/O.
-//! 2. [`parse`] — a pure Conventional-Commit parser that turns a [`Commit`]
-//!    into a [`ParsedCommit`] (type, scope, breaking markers, description,
-//!    breaking footer).
-//!
-//! A collected [`Commit`] captures the hash, subject, and body so a single commit
-//! set serves both consumers: the changelog generator renders from the subject,
-//! while breaking-change detection scans the body for a `BREAKING CHANGE:` footer.
+//! [`collect`] gathers the commits touching a directory (via [`crate::gitops::Git`]);
+//! [`parse`] turns a [`Commit`] into a [`ParsedCommit`]. A [`Commit`] keeps the hash,
+//! subject, and body so one set serves both changelog generation and breaking-change
+//! detection (which scans the body for a `BREAKING CHANGE:` footer).
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+
+use crate::gitops::Git;
 
 /// Field separator emitted by `git log` (`%x1f`, ASCII unit separator).
 const FIELD_SEP: char = '\u{1f}';
 /// Record separator emitted by `git log` (`%x1e`, ASCII record separator).
 const RECORD_SEP: char = '\u{1e}';
 
-/// A raw commit collected from git.
-///
-/// This is the only git-derived data in the module; everything else is derived
-/// from it by [`parse`] (which is pure).
+/// A raw commit collected from git; everything else is derived from it by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
     /// Full commit hash (`%H`).
     pub hash: String,
-    /// Commit subject — the first line of the message (`%s`).
+    /// Commit subject, the first line of the message (`%s`).
     pub subject: String,
-    /// Commit body — everything after the subject (`%b`); may be empty.
-    ///
-    /// Carries footers such as `BREAKING CHANGE:` consumed by breaking-change
-    /// detection.
+    /// Commit body after the subject (`%b`); may be empty. Carries `BREAKING
+    /// CHANGE:` footers.
     pub body: String,
 }
 
-/// The result of parsing a [`Commit`].
-///
-/// Note: Keep-a-Changelog *grouping* (feat → Added, fix → Fixed, …) is not
-/// represented here — the changelog generator does its own grouping through
-/// git-cliff's `commit_parsers` table (see [`crate::changelog`]). This struct
-/// carries only what the breaking-change detector and the parser's own callers
-/// consume: the type, scope, breaking markers, and description.
+/// The result of parsing a [`Commit`]. Keep-a-Changelog grouping is not here; the
+/// changelog generator groups via git-cliff (see [`crate::changelog`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedCommit {
-    /// The bare, lowercased commit type (e.g. `"feat"`). `None` for a
-    /// non-conventional message (no `:` in the subject).
+    /// The bare, lowercased commit type (e.g. `"feat"`). `None` if non-conventional.
     pub kind: Option<String>,
-    /// The scope inside `(...)`, preserved verbatim (e.g. `"core"`). `None` if
-    /// absent.
+    /// The scope inside `(...)`, verbatim (e.g. `"core"`). `None` if absent.
     pub scope: Option<String>,
     /// `true` if a `!` breaking marker appeared before the `:` in the type token.
     pub breaking_bang: bool,
-    /// The trimmed bullet text: the description after the first `:` for a
-    /// conventional commit, or the whole subject line for a non-conventional one.
+    /// Trimmed bullet text: the description after the first `:`, or the whole
+    /// subject for a non-conventional commit.
     pub description: String,
-    /// The trimmed text following the first `BREAKING CHANGE:` /
-    /// `BREAKING-CHANGE:` footer in the body, if any.
+    /// Trimmed text following the first `BREAKING CHANGE:` / `BREAKING-CHANGE:`
+    /// footer, if any.
     pub breaking_footer: Option<String>,
 }
 
-/// Collect the commits that belong to the package rooted at `dir`, newest-first,
+/// Collect the commits belonging to the package rooted at `dir`, newest-first,
 /// tracking file identity across directory renames.
 ///
-/// A plain `git log -- <dir>` silently drops a package's history the moment its
-/// directory is renamed (git does not follow directory renames), producing
-/// misleadingly empty changelogs. Instead this:
+/// A plain `git log -- <dir>` drops a package's history the moment its directory is
+/// renamed, so this lists the current tracked files, unions the commits touching
+/// each (following renames via `--follow`), and re-lists them newest-first.
 ///
-/// 1. lists the package's current tracked files (`git ls-files -- <dir>`);
-/// 2. for each file, gathers the commits that touched it following renames
-///    (`git log --follow -- <file>`), so history from the file's former locations
-///    is included;
-/// 3. unions those commit hashes and re-lists them in canonical newest-first order
-///    with full messages.
-///
-/// `range = Some("<ref>..HEAD")` restricts every step to that range; `range = None`
-/// walks all history (the never-released case). `--no-merges` is applied throughout.
-///
-/// Spawns `git` subprocesses that read the repository at `repo_root` (one
-/// `ls-files`, one `git log --follow` per package file, one final `git log`). No
-/// network access, no writes. Errors if git fails to spawn, any invocation exits
-/// non-zero, or its output is not valid UTF-8.
-pub fn collect(repo_root: &Path, range: Option<&str>, dir: &str) -> Result<Vec<Commit>> {
-    let files = tracked_files(repo_root, dir)?;
+/// `range = Some("<ref>..HEAD")` restricts every step; `None` walks all history.
+pub fn collect(git: &Git, range: Option<&str>, dir: &str) -> Result<Vec<Commit>> {
+    let files = git.tracked_files(dir)?;
     if files.is_empty() {
-        // No tracked files under `dir` (e.g. the package dir doesn't exist yet):
-        // nothing to attribute.
         return Ok(Vec::new());
     }
 
-    // Union of commit hashes that touched any of the package's current files,
-    // following each file back through renames.
     let mut wanted: HashSet<String> = HashSet::new();
     for file in &files {
-        for hash in commits_touching_file(repo_root, range, file)? {
+        for hash in git.commits_touching(range, file)? {
             wanted.insert(hash);
         }
     }
 
-    // Re-list the wanted commits in git's canonical newest-first order, with full
-    // messages, by filtering a single whole-repo `git log` over the same range.
-    let ordered = all_commits(repo_root, range)?;
+    let ordered = all_commits(git, range)?;
     Ok(ordered
         .into_iter()
         .filter(|c| wanted.contains(&c.hash))
         .collect())
 }
 
-/// Derive the `git log` pathspec for a package from its absolute `manifest_dir`,
-/// made relative to `repo_root`. Falls back to `.` (whole tree) when the manifest
-/// dir is the repo root or is not under it.
-///
-/// Callers pass the result as the `dir` argument to [`collect`].
+/// Derive the `git log` pathspec for a package: `manifest_dir` made relative to
+/// `repo_root`. Falls back to `.` when the manifest dir is the root or outside it.
 pub fn pathspec(repo_root: &Path, manifest_dir: &Path) -> String {
     match manifest_dir.strip_prefix(repo_root) {
         Ok(rel) if !rel.as_os_str().is_empty() => rel.to_string_lossy().into_owned(),
@@ -124,64 +84,11 @@ pub fn pathspec(repo_root: &Path, manifest_dir: &Path) -> String {
     }
 }
 
-/// Run `git -C <repo_root> <args>`, require a zero exit, and return stdout decoded
-/// as UTF-8. The single spawn/check/decode point for this module.
-fn run_git(repo_root: &Path, args: &[&str]) -> Result<String> {
-    let pretty = args.join(" ");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to spawn `git {pretty}` (is git installed and on PATH?)"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("`git {pretty}` failed: {}", stderr.trim());
-    }
-    String::from_utf8(output.stdout)
-        .with_context(|| format!("`git {pretty}` produced non-UTF-8 output"))
-}
-
-/// Run `git log [range] --no-merges <tail…>` and return its raw stdout. Shared by
-/// the per-file rename-following walk and the whole-repo ordering walk.
-fn git_log(repo_root: &Path, range: Option<&str>, tail: &[&str]) -> Result<String> {
-    let mut args: Vec<&str> = vec!["log"];
-    if let Some(range) = range {
-        args.push(range);
-    }
-    args.push("--no-merges");
-    args.extend_from_slice(tail);
-    run_git(repo_root, &args)
-}
-
-/// Repo-relative paths of every tracked file currently under `dir`
-/// (`git ls-files -z -- <dir>`). NUL-delimited to tolerate unusual filenames.
-fn tracked_files(repo_root: &Path, dir: &str) -> Result<Vec<String>> {
-    let stdout = run_git(repo_root, &["ls-files", "-z", "--", dir])?;
-    Ok(stdout
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-/// Commit hashes (newest-first) that touched `file`, following it across renames
-/// (`git log [range] --no-merges --follow --format=%H -- <file>`).
-fn commits_touching_file(repo_root: &Path, range: Option<&str>, file: &str) -> Result<Vec<String>> {
-    let stdout = git_log(repo_root, range, &["--follow", "--format=%H", "--", file])?;
-    Ok(stdout
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-/// All commits in `range` across the whole repo, newest-first, with full messages
-/// — the canonical ordering used to sort the unioned per-file commit set.
-fn all_commits(repo_root: &Path, range: Option<&str>) -> Result<Vec<Commit>> {
+/// All commits in `range` across the repo, newest-first — the canonical ordering
+/// used to sort the unioned per-file commit set.
+fn all_commits(git: &Git, range: Option<&str>) -> Result<Vec<Commit>> {
     let pretty = format!("--pretty=format:%H{FIELD_SEP}%s{FIELD_SEP}%b{RECORD_SEP}");
-    let stdout = git_log(repo_root, range, &[&pretty])?;
+    let stdout = git.log(range, &[&pretty])?;
     parse_log_output(&stdout)
 }
 
@@ -189,8 +96,7 @@ fn all_commits(repo_root: &Path, range: Option<&str>) -> Result<Vec<Commit>> {
 fn parse_log_output(stdout: &str) -> Result<Vec<Commit>> {
     let mut commits = Vec::new();
     for record in stdout.split(RECORD_SEP) {
-        // The final record after the trailing separator is empty; skip records
-        // that are blank (whitespace only) between/around the control bytes.
+        // Skip the empty record after the trailing separator (and any blank ones).
         if record.trim().is_empty() {
             continue;
         }
@@ -210,12 +116,10 @@ fn parse_log_output(stdout: &str) -> Result<Vec<Commit>> {
     Ok(commits)
 }
 
-/// Parse a [`Commit`] into a [`ParsedCommit`]. Pure — no I/O.
+/// Parse a [`Commit`] into a [`ParsedCommit`]. Pure; no I/O.
 ///
-/// Any input yields a `ParsedCommit`; a non-conventional message yields
-/// `kind = None` with the whole subject as the description.
-///
-/// Subject grammar: `<type>[(scope)][!]: <description>`. Body footers
+/// Subject grammar: `<type>[(scope)][!]: <description>`. A non-conventional message
+/// yields `kind = None` with the whole subject as the description. Body footers
 /// (`BREAKING CHANGE:` / `BREAKING-CHANGE:`) are scanned separately.
 pub fn parse(commit: &Commit) -> ParsedCommit {
     let breaking_footer = parse_breaking_footer(&commit.body);
@@ -233,9 +137,8 @@ pub fn parse(commit: &Commit) -> ParsedCommit {
 
     let description = description.trim().to_string();
 
-    // Strip a trailing `!` (breaking marker), then a trailing `(scope)`, in
-    // either order, to recover the bare type. This tolerates both `feat!` and
-    // `feat(core)!`.
+    // Strip a trailing `!`, then a trailing `(scope)`, to recover the bare type
+    // (tolerates both `feat!` and `feat(core)!`).
     let mut token = type_token.trim();
     let mut breaking_bang = false;
     if let Some(stripped) = token.strip_suffix('!') {
@@ -262,23 +165,18 @@ pub fn parse(commit: &Commit) -> ParsedCommit {
     }
 }
 
-/// Whether the parsed commit declares a breaking change.
-///
-/// Returns `true` if the `!` marker is present or a `BREAKING CHANGE:` /
-/// `BREAKING-CHANGE:` footer was captured; either alone marks a commit breaking.
+/// Whether the parsed commit declares a breaking change: the `!` marker or a
+/// `BREAKING CHANGE:` footer, either alone.
 pub fn is_breaking(parsed: &ParsedCommit) -> bool {
     parsed.breaking_bang || parsed.breaking_footer.is_some()
 }
 
-/// Scan a commit body for the first `BREAKING CHANGE:` / `BREAKING-CHANGE:`
-/// footer and return its full trimmed value.
+/// Scan a commit body for the first `BREAKING CHANGE:` / `BREAKING-CHANGE:` footer
+/// and return its full trimmed value.
 ///
-/// Per Conventional Commits, a footer value may wrap onto following lines; the
-/// value runs from the text after the token up to — but not including — a blank
-/// line, the next footer token (e.g. a trailing `Co-Authored-By:`), or the end of
-/// the body. Continuation lines are preserved as newlines, so a multi-line
-/// `BREAKING CHANGE:` footer is captured in full rather than truncated at the
-/// first line. The two spellings are equivalent.
+/// The value runs from the text after the token up to — but not including — a blank
+/// line, the next footer token, or the end of the body. Continuation lines are kept
+/// (joined by newlines), so a multi-line footer is captured in full.
 fn parse_breaking_footer(body: &str) -> Option<String> {
     let mut lines = body.lines();
     // Advance to the footer's opening line, keeping the text after the token.
@@ -325,10 +223,9 @@ fn is_footer_token_line(line: &str) -> bool {
     false
 }
 
-/// A git-trailer / Conventional-Commit footer token: hyphen-joined alphanumeric
-/// words starting with a letter (e.g. `Reviewed-by`, `Closes`). Deliberately
-/// rejects tokens containing spaces so prose like `Note: something` mid-sentence
-/// is not mistaken for a footer.
+/// A footer token: hyphen-joined alphanumeric words starting with a letter (e.g.
+/// `Reviewed-by`). Rejects tokens with spaces so prose like `Note: something`
+/// mid-sentence isn't mistaken for a footer.
 fn is_footer_token(token: &str) -> bool {
     !token.is_empty()
         && token.starts_with(|c: char| c.is_ascii_alphabetic())
@@ -528,8 +425,7 @@ mod tests {
         assert_eq!(p.breaking_footer.as_deref(), Some("first one"));
     }
 
-    // A footer value that wraps across lines is captured in full, not truncated
-    // at the first line.
+    // A footer wrapping across lines is captured in full.
     #[test]
     fn multiline_footer_is_captured_in_full() {
         let p = parse(&with_body(
@@ -544,8 +440,7 @@ mod tests {
         );
     }
 
-    // The footer value stops at a blank line, so a trailing trailer (e.g.
-    // `Co-Authored-By:`) after a blank line is not folded into the value.
+    // The footer stops at a blank line, so a following trailer isn't folded in.
     #[test]
     fn footer_stops_at_blank_line_before_trailer() {
         let p = parse(&with_body(
@@ -555,8 +450,7 @@ mod tests {
         assert_eq!(p.breaking_footer.as_deref(), Some("line one\nline two"));
     }
 
-    // The footer value stops at the next footer token even without a blank line
-    // between them.
+    // The footer stops at the next footer token, even without a blank line.
     #[test]
     fn footer_stops_at_next_footer_token() {
         let p = parse(&with_body(
@@ -592,7 +486,8 @@ mod tests {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("xtask has a parent dir");
-        let commits = collect(repo_root, None, "node/").expect("git log succeeds");
+        let git = Git::new(repo_root);
+        let commits = collect(&git, None, "node/").expect("git log succeeds");
         assert!(
             !commits.is_empty(),
             "node/ has real history, expected commits"

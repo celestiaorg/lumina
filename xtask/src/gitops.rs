@@ -1,10 +1,9 @@
-//! Typed wrappers around the `git` CLI for the release commands: branch checks,
-//! create-or-reset of the release branch, a stage-all + commit helper, push, and
-//! tag existence/creation. Pure primitives — the commands decide when to call them.
+//! Every `git` CLI call the release commands make. GitHub REST/GraphQL lives in
+//! [`crate::forge`]; everything shelling out to `git` lives here.
 //!
 //! Every method runs `git` in [`Git::repo_root`], so behavior never depends on the
-//! process's current directory. Tokens/secrets are never handled here: [`Git::push`]
-//! and the remote checks rely on git's ambient credential configuration.
+//! process's current directory. Tokens are never handled here; the remote calls rely
+//! on git's ambient credential configuration.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -13,32 +12,25 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 /// Selects which side(s) of an existence check to consult.
-///
-/// Encodes the network intent explicitly: some checks only touch the local repo,
-/// others also (or only) hit the remote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Where {
-    /// Consult only the local repository (no network).
+    /// Only the local repository (no network).
     Local,
-    /// Consult only the named remote (touches the network).
+    /// Only the named remote (network).
     Remote(String),
-    /// True if it exists locally **or** on the named remote. Local is checked
-    /// first and short-circuits, so a local hit avoids any network call.
+    /// Local **or** the named remote. Local is checked first and short-circuits, so
+    /// a local hit avoids any network call.
     Both(String),
 }
 
-/// The set of staged changes relative to `HEAD`, split into upserts (added or
-/// modified paths, whose content is uploaded) and deletions (removed paths).
-///
-/// Feeds the GitHub-signed commit path: [`crate::forge::create_commit_on_branch`]
-/// takes file *additions* (path + content) and *deletions* (path only), so the
-/// working-tree change set is enumerated as these two lists. Renames are decomposed
-/// into a deletion + an addition (the diff is taken `--no-renames`).
+/// Staged changes relative to `HEAD`, split into upserts and deletions. Feeds the
+/// GitHub-signed commit path. Renames are decomposed into a deletion + an addition
+/// (the diff is taken `--no-renames`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StagedPaths {
-    /// Added/modified/type-changed paths (git status `A`/`M`/`T`/`C`), repo-relative.
+    /// Added/modified/type-changed paths, repo-relative.
     pub upserts: Vec<String>,
-    /// Deleted paths (git status `D`), repo-relative.
+    /// Deleted paths, repo-relative.
     pub deletions: Vec<String>,
 }
 
@@ -47,17 +39,14 @@ pub struct StagedPaths {
 pub struct PushOptions {
     /// Pass `--set-upstream` so the local branch tracks the pushed remote branch.
     pub set_upstream: bool,
-    /// Force the push using `--force-with-lease` (the safe force that refuses to
-    /// clobber a remote that moved unexpectedly). Never a bare `--force`.
+    /// Force with `--force-with-lease` (never a bare `--force`), which refuses to
+    /// clobber a remote that moved unexpectedly.
     pub force: bool,
 }
 
-/// A git author/committer identity to inject into the release commit and
-/// annotated tags via `git -c user.name=… -c user.email=…`, so they are
-/// attributed to a specific account regardless of the runner's ambient git
-/// config. Resolved from the GitHub token owner by
-/// [`crate::forge::token_committer`], mirroring how release-plz attributes the
-/// release commit/tags to the account that owns the token.
+/// A git author/committer identity injected into the release commit and annotated
+/// tags via `git -c user.name=… -c user.email=…`, so they are attributed to a
+/// specific account regardless of the runner's ambient git config.
 #[derive(Debug, Clone)]
 pub struct GitIdentity {
     pub name: String,
@@ -65,8 +54,8 @@ pub struct GitIdentity {
 }
 
 impl GitIdentity {
-    /// The `-c user.name=… -c user.email=…` prefix args for a `git` invocation.
-    /// These override any repo/global `user.*` config for that single command.
+    /// The `-c user.name=… -c user.email=…` prefix args, overriding repo/global
+    /// `user.*` config for a single command.
     fn config_args(&self) -> Vec<String> {
         vec![
             "-c".to_string(),
@@ -81,14 +70,12 @@ impl GitIdentity {
 #[derive(Debug, Clone)]
 pub struct Git {
     repo_root: PathBuf,
-    /// Identity injected into `commit` / annotated `tag` invocations. `None` ⇒
-    /// rely on the ambient repo/global `user.name` / `user.email`.
+    /// Identity for `commit` / annotated `tag`. `None` ⇒ ambient git config.
     identity: Option<GitIdentity>,
 }
 
 impl Git {
-    /// Create a `Git` bound to `repo_root`. Performs **no** I/O or validation; the
-    /// path is only stored. Validation surfaces from the first real command.
+    /// Create a `Git` bound to `repo_root`. Performs no I/O or validation.
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         Self {
             repo_root: repo_root.into(),
@@ -96,16 +83,14 @@ impl Git {
         }
     }
 
-    /// Set the committer/author identity used for `commit` and annotated `tag`
-    /// invocations (see [`GitIdentity`]). `None` leaves the ambient git config in
-    /// charge.
+    /// Set the identity used for `commit` and annotated `tag`. `None` leaves the
+    /// ambient git config in charge.
     pub fn with_identity(mut self, identity: Option<GitIdentity>) -> Self {
         self.identity = identity;
         self
     }
 
-    /// The `-c user.name/user.email` prefix args for the configured identity, or an
-    /// empty vec when none is set (fall back to ambient git config).
+    /// The `-c user.name/user.email` args for the configured identity, or empty.
     fn identity_args(&self) -> Vec<String> {
         self.identity
             .as_ref()
@@ -118,10 +103,8 @@ impl Git {
         &self.repo_root
     }
 
-    /// Run `git` with the given args in [`Self::repo_root`], capturing output.
-    ///
-    /// Returns the raw [`std::process::Output`]; callers decide how to interpret a
-    /// non-zero exit. Errors only when the process could not be spawned.
+    /// Run `git` in [`Self::repo_root`], capturing output. Callers interpret the
+    /// exit code; errors only when the process could not be spawned.
     fn run<I, S>(&self, args: I) -> Result<std::process::Output>
     where
         I: IntoIterator<Item = S>,
@@ -139,8 +122,8 @@ impl Git {
             .with_context(|| format!("failed to spawn `git {}`", pretty.join(" ")))
     }
 
-    /// Run `git`, requiring a zero exit; on failure return an error carrying the
-    /// subcommand and captured stderr.
+    /// Run `git`, requiring a zero exit; on failure return an error with the
+    /// subcommand and stderr.
     fn run_checked<I, S>(&self, args: I) -> Result<std::process::Output>
     where
         I: IntoIterator<Item = S>,
@@ -164,25 +147,15 @@ impl Git {
         Ok(out)
     }
 
-    /// Check whether a branch exists.
-    ///
-    /// - Local: true iff `refs/heads/<name>` resolves. Absent ⇒ `Ok(false)`.
-    /// - Remote: true iff `git ls-remote --heads <remote> <name>` matches
-    ///   (**network**).
-    /// - [`Where::Both`]: local first, short-circuiting before any network call.
-    ///
-    /// # Errors
-    /// The `git` process could not be spawned, or the remote lookup failed for a
-    /// reason other than "ref absent" (unknown remote, auth/network failure). An
-    /// absent ref is never an error.
+    /// Check whether a branch exists (see [`Where`]). An absent ref is never an
+    /// error; the remote side touches the network.
     pub fn branch_exists(&self, name: &str, where_: Where) -> Result<bool> {
         self.ref_exists("refs/heads/", "--heads", name, where_)
     }
 
-    /// Shared existence check for a ref in the `refs_prefix` namespace
-    /// (`refs/heads/` or `refs/tags/`), consulting local and/or the remote per
-    /// `where_`. `ls_flag` is the matching `git ls-remote` selector (`--heads` /
-    /// `--tags`). [`Where::Both`] checks local first, short-circuiting the network.
+    /// Shared existence check for a ref in `refs_prefix` (`refs/heads/` or
+    /// `refs/tags/`). `ls_flag` is the `git ls-remote` selector. [`Where::Both`]
+    /// checks local first, short-circuiting the network.
     fn ref_exists(
         &self,
         refs_prefix: &str,
@@ -203,37 +176,14 @@ impl Git {
         }
     }
 
-    /// Check whether a tag exists. Mirrors [`Self::branch_exists`] for the tag
-    /// namespace; used by the publish idempotency scan.
-    ///
-    /// - Local: true iff `refs/tags/<name>` resolves. Absent ⇒ `Ok(false)`.
-    /// - Remote: true iff `git ls-remote --tags <remote> <name>` matches
-    ///   (**network**).
-    /// - [`Where::Both`]: local first, short-circuiting before any network call.
-    ///
-    /// # Errors
-    /// As for [`Self::branch_exists`].
+    /// Check whether a tag exists (see [`Self::branch_exists`], tag namespace).
     pub fn tag_exists(&self, name: &str, where_: Where) -> Result<bool> {
         self.ref_exists("refs/tags/", "--tags", name, where_)
     }
 
-    /// List tag names.
-    ///
-    /// - [`Where::Local`]: `git tag --list` — every local tag.
-    /// - [`Where::Remote`]: `git ls-remote --tags <remote>` (**network**). The raw
-    ///   ref lines are parsed: the `refs/tags/` prefix is stripped, the dereferenced
-    ///   `^{}` peel suffix that annotated tags add is dropped, and the result is
-    ///   deduplicated.
-    /// - [`Where::Both`]: the union of local and remote names, deduplicated.
-    ///
-    /// Returns the **raw** tag names with no version parsing or ordering — callers
-    /// (e.g. `cmd_prepare` current-version discovery) parse them with `semver` and
-    /// pick the highest. Order is unspecified.
-    ///
-    /// # Errors
-    /// The `git` process could not be spawned, or `git ls-remote` failed (unknown
-    /// remote, auth/network failure). A repo with no tags yields an empty `Vec`, not
-    /// an error.
+    /// List tag names (local, remote via network, or the deduplicated union). Returns
+    /// raw names with no version parsing or ordering; callers parse them. A repo with
+    /// no tags yields an empty `Vec`.
     pub fn list_tags(&self, where_: Where) -> Result<Vec<String>> {
         match where_ {
             Where::Local => self.list_local_tags(),
@@ -246,7 +196,7 @@ impl Git {
         }
     }
 
-    /// Local tag names via `git tag --list` (one per line).
+    /// Local tag names via `git tag --list`.
     fn list_local_tags(&self) -> Result<Vec<String>> {
         let out = self.run_checked(["tag", "--list"])?;
         let tags = String::from_utf8_lossy(&out.stdout)
@@ -258,9 +208,8 @@ impl Git {
         Ok(tags)
     }
 
-    /// Remote tag names via `git ls-remote --tags <remote>` (**network**). Each line
-    /// is `<sha>\t<ref>`; we keep the ref, strip `refs/tags/`, drop the `^{}`
-    /// annotated-tag peel suffix, and deduplicate.
+    /// Remote tag names via `git ls-remote --tags <remote>` (network). Strips
+    /// `refs/tags/`, drops the `^{}` annotated-tag peel suffix, and deduplicates.
     fn list_remote_tags(&self, remote: &str) -> Result<Vec<String>> {
         let out = self.run_checked(["ls-remote", "--tags", remote])?;
         let tags = String::from_utf8_lossy(&out.stdout)
@@ -277,8 +226,7 @@ impl Git {
     /// Local existence of a fully-qualified ref via `git show-ref --verify --quiet`.
     fn local_ref_exists(&self, fqref: &str) -> Result<bool> {
         let out = self.run(["show-ref", "--verify", "--quiet", fqref])?;
-        // `show-ref --verify --quiet` exits 0 if the ref exists, 1 if it does not.
-        // A code other than 0/1 (or a signal) indicates a real failure.
+        // Exit 0 = ref exists, 1 = absent; anything else is a real failure.
         match out.status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
@@ -293,42 +241,24 @@ impl Git {
         }
     }
 
-    /// Remote existence of a ref via `git ls-remote <flag> <remote> <name>`.
-    /// `flag` is `--heads` or `--tags`. Non-empty stdout ⇒ the ref exists.
+    /// Remote existence via `git ls-remote <flag> <remote> <name>`. Non-empty stdout
+    /// ⇒ the ref exists.
     fn remote_ref_exists(&self, remote: &str, flag: &str, name: &str) -> Result<bool> {
         let out = self.run_checked(["ls-remote", flag, remote, name])?;
         Ok(!out.stdout.is_empty())
     }
 
-    /// Create branch `name` at `base`, **resetting** it there if it already exists,
-    /// and check it out. Implemented as `git checkout -B <name> <base>`, which is
-    /// create-or-reset in one atomic call.
-    ///
-    /// Recreating from scratch preserves the "one commit on the release branch"
-    /// guarantee: prior commits unique to a stale `name` become unreachable from it.
-    ///
-    /// Postcondition: HEAD is on `name`, pointing at `base`. Local only (no
-    /// network).
-    ///
-    /// # Errors
-    /// `base` does not resolve, or git refuses the switch; spawn/exec failure.
+    /// Create branch `name` at `base`, resetting it there if it already exists, and
+    /// check it out (`git checkout -B`). Recreating from scratch preserves the
+    /// one-commit-on-the-release-branch guarantee. Local only.
     pub fn create_or_reset_branch(&self, name: &str, base: &str) -> Result<()> {
         self.run_checked(["checkout", "-B", name, base])?;
         Ok(())
     }
 
-    /// `git add -A` followed by `git commit -m <message>`, producing exactly one
-    /// commit, and return the new commit's full SHA.
-    ///
-    /// The committer/author identity comes from [`Self::with_identity`] when set
-    /// (injected as `git -c user.name/user.email`); otherwise it relies on the
-    /// ambient repo/global config.
-    ///
-    /// # Errors
-    /// Nothing staged ("nothing to commit") is reported as an error — the release
-    /// flow is expected to have real changes, so an empty release commit signals an
-    /// upstream bug. Also: missing committer identity, non-zero commit exit,
-    /// spawn/exec failure. Local only (no network).
+    /// `git add -A` then `git commit -m <message>`, producing exactly one commit, and
+    /// return its full SHA. Identity comes from [`Self::with_identity`] when set.
+    /// Nothing staged is reported as an error. Local only.
     pub fn stage_all_and_commit(&self, message: &str) -> Result<String> {
         self.run_checked(["add", "-A"])?;
         let mut args: Vec<String> = self.identity_args();
@@ -340,16 +270,9 @@ impl Git {
         Ok(sha)
     }
 
-    /// Push `branch` to `remote`, honoring [`PushOptions`].
-    ///
-    /// Runs `git push [--set-upstream] [--force-with-lease] <remote> <branch>`.
-    /// **Network operation** — called only in `--push` mode. Authentication is
-    /// whatever `git` is already configured to use; no token is passed by this
-    /// module.
-    ///
-    /// # Errors
-    /// Unknown remote, rejected push (non-fast-forward / failed lease), auth/network
-    /// failure, spawn/exec failure.
+    /// Push `branch` to `remote`, honoring [`PushOptions`]
+    /// (`git push [--set-upstream] [--force-with-lease] <remote> <branch>`). Network
+    /// operation; uses git's ambient credentials.
     pub fn push(&self, remote: &str, branch: &str, opts: PushOptions) -> Result<()> {
         let mut args: Vec<&str> = vec!["push"];
         if opts.set_upstream {
@@ -364,31 +287,26 @@ impl Git {
         Ok(())
     }
 
-    /// `git add -A` — stage every working-tree change (adds, modifications,
-    /// deletions), so the staged set can be enumerated by [`Self::staged_paths`]
-    /// for the GitHub-signed commit path. Local only (no network).
+    /// `git add -A` — stage every working-tree change, so [`Self::staged_paths`] can
+    /// enumerate it. Local only.
     pub fn stage_all(&self) -> Result<()> {
         self.run_checked(["add", "-A"])?;
         Ok(())
     }
 
-    /// Resolve `rev` to a full commit SHA via `git rev-parse <rev>`.
-    ///
-    /// Used to capture the base commit the release branch was reset to, which
-    /// becomes the `expectedHeadOid` of the GitHub-signed commit. Local only.
+    /// Resolve `rev` to a full commit SHA via `git rev-parse <rev>`. Used to capture
+    /// the base commit that becomes the `expectedHeadOid` of the signed commit.
+    /// Local only.
     pub fn rev_parse(&self, rev: &str) -> Result<String> {
         let out = self.run_checked(["rev-parse", rev])?;
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
-    /// Enumerate the currently **staged** changes relative to `HEAD` as a
-    /// [`StagedPaths`] (upserts vs deletions). Call [`Self::stage_all`] first.
-    ///
-    /// Runs `git diff --cached --name-status --no-renames -z HEAD`. `--no-renames`
-    /// decomposes renames into a delete + an add (the GitHub file-changes API has no
-    /// rename primitive), and `-z` gives NUL-separated `status\0path\0…` records so
-    /// paths with spaces/newlines are handled verbatim. Status `D` → deletion;
-    /// anything else (`A`/`M`/`T`/`C`) → upsert. Local only (no network).
+    /// Enumerate the staged changes relative to `HEAD` as a [`StagedPaths`]. Call
+    /// [`Self::stage_all`] first. `--no-renames` decomposes renames into a delete + an
+    /// add (the GitHub file-changes API has no rename primitive), and `-z` gives
+    /// NUL-separated records so unusual paths survive. Status `D` → deletion, else →
+    /// upsert. Local only.
     pub fn staged_paths(&self) -> Result<StagedPaths> {
         let out = self.run_checked([
             "diff",
@@ -412,56 +330,31 @@ impl Git {
         Ok(staged)
     }
 
-    /// Force-push commit `sha` to `remote`'s `branch`, creating or resetting the
-    /// remote branch to point at that commit (`git push --force <remote>
-    /// <sha>:refs/heads/<branch>`).
-    ///
-    /// Used by the signed-commit path to publish the release branch at its **base**
-    /// commit before a single GitHub-signed commit is created on top of it via the
-    /// API. **Network operation.** Authentication is git's ambient credential config;
-    /// no token is passed here.
+    /// Force-push commit `sha` to `remote`'s `branch` (`git push --force <remote>
+    /// <sha>:refs/heads/<branch>`), publishing the release branch at its base commit
+    /// before the signed commit is created on top via the API. Network operation.
     pub fn push_commit_to_branch(&self, remote: &str, sha: &str, branch: &str) -> Result<()> {
         let refspec = format!("{sha}:refs/heads/{branch}");
         self.run_checked(["push", "--force", remote, &refspec])?;
         Ok(())
     }
 
-    /// Create a git tag `name` at `target_sha`.
+    /// Create a git tag `name` at `target_sha`: `Some(m)` → annotated
+    /// (`git tag -a … -m`), `None` → lightweight. Local only — does not push.
     ///
-    /// `message`:
-    /// - `Some(m)` → annotated tag (`git tag -a <name> <target_sha> -m <m>`),
-    /// - `None` → lightweight tag (`git tag <name> <target_sha>`).
-    ///
-    /// Local only — does **not** push the tag (pushing tags / cutting GitHub
-    /// releases is the forge module's job).
-    ///
-    /// ## Idempotency
-    /// Creating an already-existing tag is a graceful no-op, not a panic and not an
-    /// error.
-    ///
-    /// - If the tag already exists locally, return `Ok(())` without invoking
-    ///   `git tag`.
-    /// - Otherwise run `git tag`; as a race guard, an "already exists" failure from
-    ///   `git tag` is also mapped to `Ok(())`.
-    /// - The existing tag is **not** re-pointed even if it targets a different SHA
-    ///   (a no-op; re-pointing would be a destructive surprise).
-    ///
-    /// # Errors
-    /// `target_sha` does not resolve, or git refuses for a reason other than "tag
-    /// already exists"; spawn/exec failure.
+    /// Idempotent: an already-existing tag is a graceful no-op (checked up front, and
+    /// an "already exists" failure from `git tag` is mapped to `Ok(())` as a race
+    /// guard). The existing tag is never re-pointed. Errors if `target_sha` does not
+    /// resolve.
     pub fn create_tag(&self, name: &str, target_sha: &str, message: Option<&str>) -> Result<()> {
-        // Graceful no-op if the tag is already present locally.
         if self.tag_exists(name, Where::Local)? {
             return Ok(());
         }
 
-        // Identity matters for the tagger of an annotated (`-a`) tag; harmless for
-        // a lightweight tag.
+        // Identity matters for the tagger of an annotated tag; harmless otherwise.
         let mut args: Vec<String> = self.identity_args();
         match message {
-            Some(msg) => {
-                args.extend(["tag", "-a", name, target_sha, "-m", msg].map(String::from))
-            }
+            Some(msg) => args.extend(["tag", "-a", name, target_sha, "-m", msg].map(String::from)),
             None => args.extend(["tag", name, target_sha].map(String::from)),
         };
         let out = self.run(&args)?;
@@ -470,8 +363,7 @@ impl Git {
         }
 
         let stderr = String::from_utf8_lossy(&out.stderr);
-        // Race guard: another writer created the tag between our check and our
-        // attempt — treat "already exists" as success.
+        // Race guard: treat "already exists" as success.
         if stderr.contains("already exists") {
             return Ok(());
         }
@@ -481,10 +373,97 @@ impl Git {
             stderr.trim()
         );
     }
+
+    /// The repository's default branch — the release-branch base and PR base. Never
+    /// returns `"HEAD"` (an invalid PR base). Tried in order:
+    /// `refs/remotes/origin/HEAD` → set it from the remote and re-read → the current
+    /// branch → `"main"`.
+    pub fn default_branch(&self) -> String {
+        if let Some(b) = self.origin_head_branch() {
+            return b;
+        }
+        let _ = self.run(["remote", "set-head", "origin", "--auto"]);
+        if let Some(b) = self.origin_head_branch() {
+            return b;
+        }
+        match self.current_branch() {
+            Some(cur) if cur != "HEAD" => cur,
+            _ => "main".to_string(),
+        }
+    }
+
+    /// `refs/remotes/origin/HEAD` as a plain branch name, or `None` if unset.
+    fn origin_head_branch(&self) -> Option<String> {
+        let out = self.capture_ok(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])?;
+        let s = out.trim();
+        let base = s.strip_prefix("origin/").unwrap_or(s);
+        (!base.is_empty()).then(|| base.to_string())
+    }
+
+    /// The currently checked-out branch, or `None` when detached.
+    fn current_branch(&self) -> Option<String> {
+        let s = self.capture_ok(["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let s = s.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    }
+
+    /// The `origin` remote URL, or `None` if there is no origin.
+    pub fn origin_url(&self) -> Option<String> {
+        let url = self.capture_ok(["config", "--get", "remote.origin.url"])?;
+        let url = url.trim();
+        (!url.is_empty()).then(|| url.to_string())
+    }
+
+    /// Repo-relative paths of every tracked file under `dir` (`git ls-files -z`).
+    pub fn tracked_files(&self, dir: &str) -> Result<Vec<String>> {
+        let out = self.run_checked(["ls-files", "-z", "--", dir])?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Commit hashes (newest-first) that touched `file`, following it across renames
+    /// (`git log [range] --no-merges --follow --format=%H -- <file>`).
+    pub fn commits_touching(&self, range: Option<&str>, file: &str) -> Result<Vec<String>> {
+        let out = self.log(range, &["--follow", "--format=%H", "--", file])?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Raw `git log [range] --no-merges <tail…>` stdout. `range` is an optional
+    /// `<ref>..HEAD`; `None` walks all history.
+    pub fn log(&self, range: Option<&str>, tail: &[&str]) -> Result<String> {
+        let mut args: Vec<&str> = vec!["log"];
+        if let Some(range) = range {
+            args.push(range);
+        }
+        args.push("--no-merges");
+        args.extend_from_slice(tail);
+        let out = self.run_checked(args)?;
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Run `git <args>`, returning stdout on a zero exit, else `None`. For
+    /// best-effort local reads.
+    fn capture_ok<I, S>(&self, args: I) -> Option<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let out = self.run(args).ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
 }
 
-/// Deduplicate tag names while preserving first-seen order. Used to fold the `^{}`
-/// peel lines of annotated tags and the local+remote union into a clean list.
+/// Deduplicate tag names while preserving first-seen order.
 fn dedup_preserving_order(tags: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     tags.into_iter()
@@ -498,9 +477,8 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
-    /// Spin up a fresh, hermetic git repo in a temp dir with a dummy identity and a
-    /// single initial commit on branch `main`. Returns the tempdir (kept alive) and
-    /// a `Git` bound to it. All operations are local — no network, no shared state.
+    /// A fresh, hermetic git repo in a temp dir with a dummy identity and one initial
+    /// commit on branch `main`. Returns the (kept-alive) tempdir and a bound `Git`.
     fn fresh_repo() -> (TempDir, Git) {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path();
@@ -519,15 +497,14 @@ mod tests {
             );
         };
 
-        // Force a deterministic default branch name regardless of host git config.
+        // Deterministic default branch regardless of host git config.
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.name", "Test User"]);
         run(&["config", "user.email", "test@example.com"]);
-        // Keep the suite hermetic: never sign commits/tags (the host may have
-        // `commit.gpgsign`/`tag.gpgsign` enabled, which fails without a usable key).
+        // Never sign: the host may have gpgsign enabled without a usable key.
         run(&["config", "commit.gpgsign", "false"]);
         run(&["config", "tag.gpgsign", "false"]);
-        // Make an initial commit so HEAD/main exist and we can branch/tag from it.
+        // Initial commit so HEAD/main exist.
         std::fs::write(path.join("README.md"), "init\n").expect("write file");
         run(&["add", "-A"]);
         run(&["commit", "-q", "-m", "chore: init"]);
@@ -629,14 +606,14 @@ mod tests {
         git.create_tag("v0.1.0", &sha, None).unwrap();
         git.create_tag("v0.2.0", &sha, Some("release 0.2.0"))
             .unwrap();
-        git.create_tag("toy-kv-v0.1.0", &sha, None).unwrap();
+        git.create_tag("lumina-v0.1.0", &sha, None).unwrap();
 
         let mut tags = git.list_tags(Where::Local).unwrap();
         tags.sort();
         assert_eq!(
             tags,
             vec![
-                "toy-kv-v0.1.0".to_string(),
+                "lumina-v0.1.0".to_string(),
                 "v0.1.0".to_string(),
                 "v0.2.0".to_string(),
             ],
@@ -693,8 +670,7 @@ mod tests {
         assert!(!git.tag_exists("v3.0.0", Where::Local).unwrap());
     }
 
-    // release-plz-style attribution: the release commit and annotated tag are
-    // authored by the configured identity (resolved from the GitHub token owner),
+    // The release commit and annotated tag are authored by the configured identity,
     // overriding the runner's ambient git config.
 
     fn bot_identity() -> GitIdentity {
@@ -740,13 +716,13 @@ mod tests {
         let (_d, git) = fresh_repo();
         let git = git.with_identity(Some(bot_identity()));
         let sha = head_sha(&git);
-        git.create_tag("toy-kv-v9.9.9", &sha, Some("release 9.9.9"))
+        git.create_tag("lumina-v9.9.9", &sha, Some("release 9.9.9"))
             .unwrap();
         let out = git
             .run_checked([
                 "for-each-ref",
                 "--format=%(taggername)|%(taggeremail)",
-                "refs/tags/toy-kv-v9.9.9",
+                "refs/tags/lumina-v9.9.9",
             ])
             .unwrap();
         assert_eq!(
@@ -758,8 +734,7 @@ mod tests {
     #[test]
     fn staged_paths_splits_upserts_and_deletions() {
         let (_d, git) = fresh_repo();
-        // fresh_repo committed README.md. Modify it, add a new file, delete... nothing
-        // yet, so add a second committed file we can then remove.
+        // Add a second committed file we can later remove.
         std::fs::write(git.repo_root().join("keep.txt"), "keep\n").unwrap();
         git.stage_all_and_commit("chore: add keep.txt").unwrap();
 
@@ -791,7 +766,6 @@ mod tests {
         assert_eq!(git.rev_parse("HEAD").unwrap(), head_sha(&git));
     }
 
-    // remote/push are intentionally NOT exercised: branch_exists/tag_exists with
-    // Where::Remote(..)/Both(..) and push() touch the network and are excluded from
-    // the hermetic suite by design.
+    // remote/push paths (Where::Remote/Both, push()) touch the network and are
+    // excluded from the hermetic suite by design.
 }

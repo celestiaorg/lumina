@@ -1,12 +1,13 @@
-//! GitHub API primitives over blocking HTTP: open/update the release PR and
-//! create a GitHub release for a tag. The token is read from the env var whose
-//! name is passed in; a literal token is never accepted and never logged.
+//! GitHub API primitives over blocking HTTP: derive the repo `owner/name`,
+//! open/update the release PR, and create a GitHub release for a tag. The token is
+//! read from the env var whose name is passed in; a literal token is never accepted
+//! and never logged.
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::gitops::GitIdentity;
+use crate::gitops::{Git, GitIdentity};
 
 /// Base URL of the GitHub REST API.
 const API_BASE: &str = "https://api.github.com";
@@ -22,9 +23,9 @@ const ACCEPT: &str = "application/vnd.github+json";
 /// Identifies a GitHub repository: `owner/name`.
 #[derive(Debug, Clone)]
 pub struct Repo {
-    /// Repository owner (user or org), e.g. `mcrakhman`.
+    /// Repository owner (user or org), e.g. `celestiaorg`.
     pub owner: String,
-    /// Repository name, e.g. `toy-kv`.
+    /// Repository name, e.g. `lumina`.
     pub name: String,
 }
 
@@ -40,19 +41,70 @@ impl Repo {
     }
 }
 
+/// Resolve the [`Repo`] from the `origin` remote URL, falling back to the workspace
+/// `repository` metadata (root `Cargo.toml`) when `origin` is absent or unparseable.
+pub fn derive(git: &Git) -> Result<Repo> {
+    if let Some(repo) = git.origin_url().as_deref().and_then(repo_from_url) {
+        return Ok(repo);
+    }
+    if let Some(repo) = workspace_repository_url(git.repo_root()).and_then(|u| repo_from_url(&u)) {
+        return Ok(repo);
+    }
+    Err(anyhow!(
+        "could not determine the GitHub owner/name: no parseable `origin` remote URL \
+         and no usable workspace `repository` metadata in {}",
+        git.repo_root().display()
+    ))
+}
+
+/// Parse a GitHub remote URL into a [`Repo`]. Accepts https/http, `git@host:owner/repo`,
+/// `ssh://git@host/owner/repo`, and `git://` forms, with an optional `.git` suffix and
+/// trailing slash. `None` for an unrecognized scheme or an owner-less / over-deep URL.
+fn repo_from_url(url: &str) -> Option<Repo> {
+    let url = url.trim();
+    let tail = if let Some(rest) = url.strip_prefix("git@") {
+        rest.split_once(':').map(|(_host, path)| path)?
+    } else if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("ssh://git@"))
+        .or_else(|| url.strip_prefix("git://"))
+    {
+        rest.split_once('/').map(|(_host, path)| path)?
+    } else {
+        return None;
+    };
+
+    let tail = tail.trim_end_matches('/');
+    let tail = tail.strip_suffix(".git").unwrap_or(tail);
+
+    let (owner, name) = tail.split_once('/')?;
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(Repo {
+        owner: owner.to_string(),
+        name: name.to_string(),
+    })
+}
+
+/// Read `[workspace.package].repository` from the root `Cargo.toml`. `None` if the
+/// manifest cannot be read/parsed or the field is absent.
+fn workspace_repository_url(repo_root: &std::path::Path) -> Option<String> {
+    let src = std::fs::read_to_string(repo_root.join("Cargo.toml")).ok()?;
+    let doc = src.parse::<toml_edit::DocumentMut>().ok()?;
+    doc.get("workspace")?
+        .get("package")?
+        .get("repository")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Result of opening or updating a pull request.
 #[derive(Debug, Clone)]
 pub struct PrRef {
     /// `html_url` of the PR.
     pub url: String,
-}
-
-/// Returns `true` iff `version` carries a prerelease component (e.g.
-/// `1.2.0-rc.1`), `false` for a clean release (e.g. `1.2.0`).
-///
-/// The caller passes the result as the `prerelease` flag of [`create_release`].
-pub fn is_prerelease(version: &semver::Version) -> bool {
-    !version.pre.is_empty()
 }
 
 /// Resolve a GitHub token by reading the env var **named** by `name`.
@@ -207,7 +259,11 @@ fn create_pr_with_retry(
         match auth(ureq::post(&pulls_create_url(repo)), token)
             .send_json(create_pr_body(head, base, title, body))
         {
-            Ok(resp) => return resp.into_json().context("GitHub: decode created pull request"),
+            Ok(resp) => {
+                return resp
+                    .into_json()
+                    .context("GitHub: decode created pull request");
+            }
             Err(ureq::Error::Status(422, resp)) if attempt < PR_CREATE_RETRIES => {
                 let detail = resp.into_string().unwrap_or_default();
                 if !is_no_commits_race(&detail) {
@@ -281,8 +337,8 @@ pub fn token_committer(github_token_env: &str) -> Result<Option<GitIdentity>> {
 }
 
 /// Create a GitHub release for `tag`. The `prerelease` flag is decided by the
-/// caller from the semver (see [`is_prerelease`]); `body` is the crate's
-/// changelog entry.
+/// caller from the semver (see [`crate::version::is_prerelease`]); `body` is the
+/// crate's changelog entry.
 ///
 /// Graceful existing-release handling: if a release for the tag already exists
 /// (GitHub returns HTTP 422 `already_exists`), the call is treated as an
@@ -306,8 +362,13 @@ pub fn create_release(
 ) -> Result<()> {
     let token = token_from_env(github_token_env)?;
 
-    let resp = auth(ureq::post(&releases_create_url(repo)), &token)
-        .send_json(create_release_body(tag, target_commitish, name, body, prerelease));
+    let resp = auth(ureq::post(&releases_create_url(repo)), &token).send_json(create_release_body(
+        tag,
+        target_commitish,
+        name,
+        body,
+        prerelease,
+    ));
 
     match resp {
         Ok(_) => Ok(()),
@@ -420,21 +481,70 @@ mod tests {
 
     fn repo() -> Repo {
         Repo {
-            owner: "mcrakhman".to_string(),
-            name: "toy-kv".to_string(),
+            owner: "celestiaorg".to_string(),
+            name: "lumina".to_string(),
         }
     }
 
-    #[test]
-    fn is_prerelease_false_for_stable() {
-        let v = semver::Version::parse("1.2.0").unwrap();
-        assert!(!is_prerelease(&v));
+    #[track_caller]
+    fn assert_repo(url: &str, owner: &str, name: &str) {
+        let r = repo_from_url(url).unwrap_or_else(|| panic!("expected Some for {url:?}"));
+        assert_eq!(r.owner, owner, "owner mismatch for {url:?}");
+        assert_eq!(r.name, name, "name mismatch for {url:?}");
     }
 
     #[test]
-    fn is_prerelease_true_for_rc() {
-        let v = semver::Version::parse("1.2.0-rc.1").unwrap();
-        assert!(is_prerelease(&v));
+    fn repo_from_url_parses_all_forms() {
+        assert_repo(
+            "https://github.com/celestiaorg/lumina",
+            "celestiaorg",
+            "lumina",
+        );
+        assert_repo(
+            "https://github.com/celestiaorg/lumina.git",
+            "celestiaorg",
+            "lumina",
+        );
+        assert_repo(
+            "https://github.com/celestiaorg/lumina/",
+            "celestiaorg",
+            "lumina",
+        );
+        assert_repo(
+            "http://github.com/celestiaorg/lumina",
+            "celestiaorg",
+            "lumina",
+        );
+        assert_repo(
+            "git@github.com:celestiaorg/lumina.git",
+            "celestiaorg",
+            "lumina",
+        );
+        assert_repo("git@github.com:celestiaorg/lumina", "celestiaorg", "lumina");
+        assert_repo(
+            "ssh://git@github.com/celestiaorg/lumina.git",
+            "celestiaorg",
+            "lumina",
+        );
+        assert_repo(
+            "git://github.com/celestiaorg/lumina.git",
+            "celestiaorg",
+            "lumina",
+        );
+        assert_repo(
+            "  https://github.com/celestiaorg/lumina\n",
+            "celestiaorg",
+            "lumina",
+        );
+    }
+
+    #[test]
+    fn repo_from_url_rejects_garbage() {
+        assert!(repo_from_url("not-a-url").is_none());
+        assert!(repo_from_url("https://github.com/onlyowner").is_none());
+        assert!(repo_from_url("").is_none());
+        // Extra path depth is rejected (we never guess).
+        assert!(repo_from_url("https://github.com/owner/repo/extra").is_none());
     }
 
     #[test]
@@ -456,7 +566,7 @@ mod tests {
     fn pulls_list_url_encodes_owner_qualified_head() {
         assert_eq!(
             pulls_list_url(&repo(), "release-0.2.0", "main"),
-            "https://api.github.com/repos/mcrakhman/toy-kv/pulls?state=open&head=mcrakhman:release-0.2.0&base=main"
+            "https://api.github.com/repos/celestiaorg/lumina/pulls?state=open&head=celestiaorg:release-0.2.0&base=main"
         );
     }
 
@@ -464,7 +574,7 @@ mod tests {
     fn pulls_create_url_is_repo_pulls() {
         assert_eq!(
             pulls_create_url(&repo()),
-            "https://api.github.com/repos/mcrakhman/toy-kv/pulls"
+            "https://api.github.com/repos/celestiaorg/lumina/pulls"
         );
     }
 
@@ -472,7 +582,7 @@ mod tests {
     fn pull_update_url_includes_number() {
         assert_eq!(
             pull_update_url(&repo(), 42),
-            "https://api.github.com/repos/mcrakhman/toy-kv/pulls/42"
+            "https://api.github.com/repos/celestiaorg/lumina/pulls/42"
         );
     }
 
@@ -480,7 +590,7 @@ mod tests {
     fn releases_create_url_is_repo_releases() {
         assert_eq!(
             releases_create_url(&repo()),
-            "https://api.github.com/repos/mcrakhman/toy-kv/releases"
+            "https://api.github.com/repos/celestiaorg/lumina/releases"
         );
     }
 
@@ -529,7 +639,7 @@ mod tests {
         assert!(is_no_commits_race("No Commits Between main and x"));
         // A different 422 (already-exists) is NOT the race → surfaced, not retried.
         assert!(!is_no_commits_race(
-            "A pull request already exists for mcrakhman:release-0.1.0-rc.1"
+            "A pull request already exists for celestiaorg:release-0.1.0-rc.1"
         ));
         assert!(!is_no_commits_race(""));
     }
@@ -537,7 +647,7 @@ mod tests {
     #[test]
     fn token_from_env_resolves_named_var() {
         // Unique name to avoid clashing with other tests running in parallel.
-        let name = "TOYKV_FORGE_TEST_TOKEN_RESOLVE";
+        let name = "XTASK_FORGE_TEST_TOKEN_RESOLVE";
         // SAFETY: single-threaded test-local mutation of a uniquely named var.
         unsafe { std::env::set_var(name, "s3cr3t") };
         let got = token_from_env(name).unwrap();
@@ -547,7 +657,7 @@ mod tests {
 
     #[test]
     fn token_from_env_errors_when_missing() {
-        let name = "TOYKV_FORGE_TEST_TOKEN_MISSING";
+        let name = "XTASK_FORGE_TEST_TOKEN_MISSING";
         // SAFETY: ensure it is unset; uniquely named so no other test touches it.
         unsafe { std::env::remove_var(name) };
         let err = token_from_env(name).unwrap_err();

@@ -95,12 +95,6 @@ pub fn decide_action(tag_exists: bool, is_published: bool) -> CrateAction {
     }
 }
 
-/// The per-crate tag convention: `{crate_name}-v{version}`, e.g. `toy-kv-v0.2.0`.
-/// Whatever reads these tags back must use the same convention.
-pub fn tag_name(crate_name: &str, version: &str) -> String {
-    format!("{crate_name}-v{version}")
-}
-
 /// What happened for one crate during the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CrateOutcome {
@@ -199,7 +193,6 @@ pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
     let order = ws
         .publish_order()
         .context("computing the topological publish order")?;
-    let repo = crate::repo::derive(repo_root)?;
     // Attribute the annotated tags to the GitHub token owner, the way release-plz
     // does. The default Actions `GITHUB_TOKEN` is an installation token with no
     // associated user (`token_committer` -> None), so the tagger then falls back
@@ -207,6 +200,7 @@ pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
     let identity = crate::forge::token_committer(&opts.github_token_env)
         .context("resolving the tagger from the GitHub token")?;
     let git = Git::new(repo_root).with_identity(identity);
+    let repo = forge::derive(&git)?;
 
     // The version we publish is read from the checked-out tree, but every tag and
     // release targets `opts.sha`. If those are different commits we'd tag a commit
@@ -217,7 +211,7 @@ pub fn run(repo_root: &Path, opts: &ReleaseOptions) -> Result<ReleaseOutcome> {
     // then apply the decision — skip, publish + tag, or tag-only (orphan-tag fix).
     let mut crates = Vec::with_capacity(order.len());
     for crate_info in &order {
-        let tag = tag_name(&crate_info.name, &version);
+        let tag = crate::version::tag_name(&crate_info.name, &version);
 
         let tag_exists = git
             .tag_exists(&tag, Where::Both(REMOTE.to_string()))
@@ -305,7 +299,7 @@ fn create_tag_and_release(
         .with_context(|| format!("creating tag `{tag}` at {}", opts.sha))?;
 
     let body = release_body(crate_info, version);
-    let prerelease = forge::is_prerelease(&crate_info.version);
+    let prerelease = crate::version::is_prerelease(&crate_info.version);
     forge::create_release(
         repo,
         tag,
@@ -455,21 +449,8 @@ mod tests {
         }
     }
 
-    // Tag-name convention
-
-    #[test]
-    fn tag_name_uses_crate_v_version_convention() {
-        assert_eq!(tag_name("toy-kv-utils", "0.2.0"), "toy-kv-utils-v0.2.0");
-        assert_eq!(tag_name("toy-kv", "0.2.0"), "toy-kv-v0.2.0");
-        assert_eq!(tag_name("toy-kv-wasm", "0.2.0"), "toy-kv-wasm-v0.2.0");
-    }
-
-    #[test]
-    fn tag_name_preserves_prerelease_versions() {
-        assert_eq!(tag_name("toy-kv", "1.0.0-rc.1"), "toy-kv-v1.0.0-rc.1");
-    }
-
-    // Repo-URL parsing now lives in `crate::repo`; see its unit tests there.
+    // Tag naming, repo-URL parsing, and the prerelease flag are tested in
+    // `crate::version` / `crate::forge`.
 
     // npm gate (skip when no component / no token)
 
@@ -499,14 +480,14 @@ mod tests {
         assert_eq!(npmops::dist_tag("0.2.0-rc.1"), "rc");
     }
 
-    // prerelease flag wiring (forge::is_prerelease)
+    // prerelease flag wiring (version::is_prerelease)
 
     #[test]
     fn prerelease_flag_wiring() {
         let stable = semver::Version::parse("0.2.0").unwrap();
         let rc = semver::Version::parse("0.2.0-rc.1").unwrap();
-        assert!(!forge::is_prerelease(&stable));
-        assert!(forge::is_prerelease(&rc));
+        assert!(!crate::version::is_prerelease(&stable));
+        assert!(crate::version::is_prerelease(&rc));
     }
 
     // release-note body extraction
@@ -575,5 +556,4 @@ mod tests {
         assert!(o.npm_token_env.is_none());
         assert_eq!(o.publish_timeout, DEFAULT_PUBLISH_TIMEOUT);
     }
-
 }

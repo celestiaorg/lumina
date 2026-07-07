@@ -1,16 +1,14 @@
 //! The `xtask` command surface.
 //!
-//! A [`clap`] (derive) parser for the two subcommands, interactive prompts for the
-//! non-secret inputs (branch prefix, next version, commit SHA), and the
-//! `--*-token-env` resolution that turns an optional flag into the name of an
-//! environment variable holding a token — never a literal token.
-//!
-//! The CLI only parses, prompts, maps arguments onto
+//! A [`clap`] (derive) parser for the two subcommands plus the `--*-token-env`
+//! resolution that turns an optional flag into the name of an environment variable
+//! holding a token — never a literal token. The CLI only parses, maps arguments onto
 //! [`crate::cmd_prepare::PrepareOptions`] / [`crate::cmd_release::ReleaseOptions`],
-//! dispatches to the flows, and prints an outcome summary. The git / network /
-//! registry / npm side effects live in the command modules.
+//! dispatches to the flows, and prints an outcome summary. It is non-interactive:
+//! every input is a flag. The git / network / registry / npm side effects live in
+//! the command modules.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -36,9 +34,8 @@ const REGISTRY_TOKEN_ENV: &str = "CARGO_REGISTRY_TOKEN";
     about = "In-house release tooling for the lumina workspace.",
     long_about = "Drives the two release flows: `prepare-release` (build a \
                   single-commit release PR) and `release` (publish crates + npm). \
-                  Both prompt for their non-secret inputs when the matching flag \
-                  is omitted; credentials are always passed as the NAME of an env \
-                  var, never as a literal token."
+                  Fully non-interactive; credentials are always passed as the NAME \
+                  of an env var, never as a literal token."
 )]
 pub struct Cli {
     /// The subcommand to run.
@@ -57,19 +54,19 @@ pub enum Commands {
 
 /// Arguments for `cargo xtask prepare-release`.
 ///
-/// Missing non-secret inputs (`--branch-prefix`, `--version`) are prompted for;
-/// the token flag carries the **name** of an env var (default `GH_TOKEN`).
+/// The token flag carries the **name** of an env var (default `GH_TOKEN`).
 #[derive(Debug, Args, Default, Clone)]
 pub struct PrepareArgs {
-    /// Release-branch prefix (branch = `<prefix><version>`). Prompted if omitted.
+    /// Release-branch prefix (branch = `<prefix><version>`). Defaults to the config
+    /// value, else `release-`.
     #[arg(long)]
     pub branch_prefix: Option<String>,
 
-    /// The next version this release will carry. Prompted if omitted.
+    /// The next version this release will carry.
     #[arg(long)]
-    pub version: Option<String>,
+    pub version: String,
 
-    /// Auto-confirm destructive prompts (e.g. deleting a stale release branch).
+    /// Delete and recreate an existing release branch instead of erroring.
     #[arg(long)]
     pub yes: bool,
 
@@ -95,14 +92,14 @@ pub struct PrepareArgs {
 
 /// Arguments for `cargo xtask release`.
 ///
-/// The commit SHA is prompted for when `--sha` is omitted; each token flag carries
-/// the **name** of an env var. `--npm-token-env` is optional (only needed when an
-/// npm component is configured).
+/// Each token flag carries the **name** of an env var. `--npm-token-env` is optional
+/// (only needed when an npm component is configured).
 #[derive(Debug, Args, Default, Clone)]
 pub struct ReleaseArgs {
-    /// Commit to release from and to place every tag on. Prompted if omitted.
-    #[arg(long)]
-    pub sha: Option<String>,
+    /// Commit to release from and to place every tag on (defaults to `HEAD`, which
+    /// the flow requires to be the checked-out commit anyway).
+    #[arg(long, default_value = "HEAD")]
+    pub sha: String,
 
     /// NAME of the env var holding the GitHub token (default: `GITHUB_TOKEN`).
     #[arg(long)]
@@ -119,55 +116,24 @@ pub struct ReleaseArgs {
     pub npm_token_env: Option<String>,
 }
 
-/// Parse argv, resolve prompts + token-env defaults, dispatch, and summarize.
+/// Parse argv, resolve token-env defaults, dispatch, and summarize.
 ///
-/// Returns `Ok(())` on a successful flow; any error from parsing-time prompting or
-/// the flows themselves propagates as an [`anyhow::Error`] for `main` to map onto a
-/// non-zero exit code.
+/// Returns `Ok(())` on a successful flow; any error from the flows propagates as an
+/// [`anyhow::Error`] for `main` to map onto a non-zero exit code.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let repo_root = std::env::current_dir().context("failed to read current directory")?;
+    let mut out = io::stdout();
 
     match cli.command {
         Commands::PrepareRelease(args) => {
-            let stdin = io::stdin();
-            let mut reader = stdin.lock();
-            let mut out = io::stdout();
-
-            let branch_prefix = match args.branch_prefix.clone() {
-                Some(p) => Some(p),
-                None => Some(resolve_or_prompt(
-                    None,
-                    "Release-branch prefix (e.g. release-): ",
-                    &mut reader,
-                    &mut out,
-                )?),
-            };
-            let version = resolve_or_prompt(
-                args.version.clone(),
-                "Next version (e.g. 0.2.0): ",
-                &mut reader,
-                &mut out,
-            )?;
-
-            let opts = to_prepare_options(args, branch_prefix, version);
+            let opts = to_prepare_options(args);
             let outcome =
                 cmd_prepare::run(&repo_root, &opts).context("prepare-release flow failed")?;
             print_prepare_summary(&opts, &outcome, &mut out)?;
         }
         Commands::Release(args) => {
-            let stdin = io::stdin();
-            let mut reader = stdin.lock();
-            let mut out = io::stdout();
-
-            let sha = resolve_or_prompt(
-                args.sha.clone(),
-                "Commit SHA to release: ",
-                &mut reader,
-                &mut out,
-            )?;
-
-            let opts = to_release_options(args, sha);
+            let opts = to_release_options(args);
             let outcome = cmd_release::run(&repo_root, &opts).context("release flow failed")?;
             print_release_summary(&outcome, &mut out)?;
         }
@@ -176,44 +142,19 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Return `value` if present (the prompt is **skipped** — this is what keeps CI
-/// non-interactive), otherwise write `prompt` and read a trimmed line from `reader`.
-///
-/// The reader / writer are injected so the "flag value vs. stdin read" decision is
-/// unit-testable without a real terminal.
-pub(crate) fn resolve_or_prompt(
-    value: Option<String>,
-    prompt: &str,
-    reader: &mut impl BufRead,
-    writer: &mut impl Write,
-) -> io::Result<String> {
-    if let Some(v) = value {
-        return Ok(v);
-    }
-    write!(writer, "{prompt}")?;
-    writer.flush()?;
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
-}
-
 /// Resolve a `--*-token-env` flag to the env-var name to forward, falling back to
 /// the default name when the flag was omitted.
 pub(crate) fn resolve_token_env(flag: Option<String>, default_name: &str) -> String {
     flag.unwrap_or_else(|| default_name.to_string())
 }
 
-/// Map parsed `prepare-release` args (+ the resolved prefix/version) onto
-/// [`PrepareOptions`]. The GitHub token env defaults to `GH_TOKEN`; `date` is always
-/// `None` (the CLI exposes no date override — the prepare flow defaults to today UTC).
-pub(crate) fn to_prepare_options(
-    args: PrepareArgs,
-    branch_prefix: Option<String>,
-    version: String,
-) -> PrepareOptions {
+/// Map parsed `prepare-release` args onto [`PrepareOptions`]. The GitHub token env
+/// defaults to `GH_TOKEN`; `date` is always `None` (the prepare flow defaults to
+/// today UTC).
+pub(crate) fn to_prepare_options(args: PrepareArgs) -> PrepareOptions {
     PrepareOptions {
-        branch_prefix,
-        version,
+        branch_prefix: args.branch_prefix,
+        version: args.version,
         yes: args.yes,
         push: args.push,
         github_token_env: resolve_token_env(args.github_token_env, PREPARE_GITHUB_TOKEN_ENV),
@@ -223,13 +164,12 @@ pub(crate) fn to_prepare_options(
     }
 }
 
-/// Map parsed `release` args (+ the resolved SHA) onto [`ReleaseOptions`].
-/// The GitHub / registry token envs default to `GITHUB_TOKEN` /
-/// `CARGO_REGISTRY_TOKEN`; the npm token env is forwarded as-is (`None` ⇒ npm step
-/// skipped). `publish_timeout` gets its default via [`ReleaseOptions::new`].
-pub(crate) fn to_release_options(args: ReleaseArgs, sha: String) -> ReleaseOptions {
+/// Map parsed `release` args onto [`ReleaseOptions`]. The GitHub / registry token
+/// envs default to `GITHUB_TOKEN` / `CARGO_REGISTRY_TOKEN`; the npm token env is
+/// forwarded as-is (`None` ⇒ npm step skipped).
+pub(crate) fn to_release_options(args: ReleaseArgs) -> ReleaseOptions {
     ReleaseOptions::new(
-        sha,
+        args.sha,
         resolve_token_env(args.github_token_env, RELEASE_GITHUB_TOKEN_ENV),
         resolve_token_env(args.registry_token_env, REGISTRY_TOKEN_ENV),
         args.npm_token_env,
@@ -293,7 +233,6 @@ fn print_release_summary(
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use std::io::Cursor;
 
     /// Parse a `prepare-release` invocation, asserting it succeeds, and return the
     /// inner `PrepareArgs`.
@@ -353,19 +292,25 @@ mod tests {
             "MY_PAT",
         ]);
         assert_eq!(args.branch_prefix.as_deref(), Some("rel-"));
-        assert_eq!(args.version.as_deref(), Some("0.2.0"));
+        assert_eq!(args.version, "0.2.0");
         assert!(args.yes);
         assert!(args.push);
         assert_eq!(args.github_token_env.as_deref(), Some("MY_PAT"));
     }
 
     #[test]
+    fn prepare_version_is_required() {
+        // Omitting --version is a usage error (there is no prompt fallback).
+        let err = Cli::try_parse_from(["xtask", "prepare-release"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
     fn prepare_bools_default_false_and_optionals_none() {
-        let args = parse_prepare(&["xtask", "prepare-release"]);
+        let args = parse_prepare(&["xtask", "prepare-release", "--version", "0.2.0"]);
         assert!(!args.yes, "--yes defaults false");
         assert!(!args.push, "--push defaults false");
         assert_eq!(args.branch_prefix, None);
-        assert_eq!(args.version, None);
         assert_eq!(args.github_token_env, None);
     }
 
@@ -383,16 +328,16 @@ mod tests {
             "--npm-token-env",
             "NPMT",
         ]);
-        assert_eq!(args.sha.as_deref(), Some("deadbeef"));
+        assert_eq!(args.sha, "deadbeef");
         assert_eq!(args.github_token_env.as_deref(), Some("GHT"));
         assert_eq!(args.registry_token_env.as_deref(), Some("RGT"));
         assert_eq!(args.npm_token_env.as_deref(), Some("NPMT"));
     }
 
     #[test]
-    fn release_optionals_default_none() {
+    fn release_optionals_default() {
         let args = parse_release(&["xtask", "release"]);
-        assert_eq!(args.sha, None);
+        assert_eq!(args.sha, "HEAD", "--sha defaults to HEAD");
         assert_eq!(args.github_token_env, None);
         assert_eq!(args.registry_token_env, None);
         assert_eq!(args.npm_token_env, None, "npm token has no default");
@@ -417,21 +362,37 @@ mod tests {
     fn prepare_github_default_is_gh_token() {
         // No --github-token-env ⇒ PAT default `GH_TOKEN` (re-triggers PR CI).
         let args = parse_prepare(&["xtask", "prepare-release", "--version", "0.2.0"]);
-        let opts = to_prepare_options(args, Some("release-".into()), "0.2.0".into());
+        let opts = to_prepare_options(args);
         assert_eq!(opts.github_token_env, "GH_TOKEN");
     }
 
     #[test]
     fn prepare_github_explicit_overrides_default() {
-        let args = parse_prepare(&["xtask", "prepare-release", "--github-token-env", "MY_PAT"]);
-        let opts = to_prepare_options(args, None, "0.2.0".into());
+        let args = parse_prepare(&[
+            "xtask",
+            "prepare-release",
+            "--version",
+            "0.2.0",
+            "--github-token-env",
+            "MY_PAT",
+        ]);
+        let opts = to_prepare_options(args);
         assert_eq!(opts.github_token_env, "MY_PAT");
     }
 
     #[test]
-    fn prepare_options_forward_bools_and_null_date() {
-        let args = parse_prepare(&["xtask", "prepare-release", "--yes", "--push"]);
-        let opts = to_prepare_options(args, Some("release-".into()), "0.2.0".into());
+    fn prepare_options_forward_flags_and_null_date() {
+        let args = parse_prepare(&[
+            "xtask",
+            "prepare-release",
+            "--version",
+            "0.2.0",
+            "--branch-prefix",
+            "release-",
+            "--yes",
+            "--push",
+        ]);
+        let opts = to_prepare_options(args);
         assert!(opts.yes);
         assert!(opts.push);
         assert_eq!(opts.version, "0.2.0");
@@ -446,7 +407,7 @@ mod tests {
     fn release_token_defaults_match_spec() {
         // release GitHub default differs from prepare: GITHUB_TOKEN (not GH_TOKEN).
         let args = parse_release(&["xtask", "release", "--sha", "abc123"]);
-        let opts = to_release_options(args, "abc123".into());
+        let opts = to_release_options(args);
         assert_eq!(opts.github_token_env, "GITHUB_TOKEN");
         assert_eq!(opts.registry_token_env, "CARGO_REGISTRY_TOKEN");
         assert_eq!(opts.sha, "abc123");
@@ -456,46 +417,14 @@ mod tests {
     fn release_npm_token_absent_stays_none() {
         // No --npm-token-env ⇒ Option<String> None ⇒ the release flow skips the npm step.
         let args = parse_release(&["xtask", "release"]);
-        let opts = to_release_options(args, "sha".into());
+        let opts = to_release_options(args);
         assert_eq!(opts.npm_token_env, None);
     }
 
     #[test]
     fn release_npm_token_present_is_some_name() {
         let args = parse_release(&["xtask", "release", "--npm-token-env", "NPM_REGISTRY_TOKEN"]);
-        let opts = to_release_options(args, "sha".into());
+        let opts = to_release_options(args);
         assert_eq!(opts.npm_token_env.as_deref(), Some("NPM_REGISTRY_TOKEN"));
-    }
-
-    // resolve_or_prompt: skip when flag present, read otherwise
-
-    #[test]
-    fn resolve_or_prompt_skips_reader_when_value_present() {
-        // A non-empty reader must NOT be consumed when the value is already known
-        // (this is what keeps a fully-flagged CI run non-interactive).
-        let mut reader = Cursor::new(b"should-not-be-read\n".to_vec());
-        let mut out: Vec<u8> = Vec::new();
-        let got = resolve_or_prompt(Some("flag-value".into()), "prompt: ", &mut reader, &mut out)
-            .unwrap();
-        assert_eq!(got, "flag-value");
-        assert_eq!(reader.position(), 0, "reader untouched");
-        assert!(out.is_empty(), "no prompt written when value supplied");
-    }
-
-    #[test]
-    fn resolve_or_prompt_reads_and_trims_when_value_absent() {
-        let mut reader = Cursor::new(b"0.3.0\r\n".to_vec());
-        let mut out: Vec<u8> = Vec::new();
-        let got = resolve_or_prompt(None, "Next version: ", &mut reader, &mut out).unwrap();
-        assert_eq!(got, "0.3.0", "trailing CR/LF trimmed");
-        assert_eq!(out, b"Next version: ", "prompt written to writer");
-    }
-
-    #[test]
-    fn resolve_or_prompt_empty_line_yields_empty_string() {
-        let mut reader = Cursor::new(b"\n".to_vec());
-        let mut out: Vec<u8> = Vec::new();
-        let got = resolve_or_prompt(None, "p: ", &mut reader, &mut out).unwrap();
-        assert_eq!(got, "");
     }
 }
