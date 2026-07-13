@@ -239,7 +239,8 @@ jobs:
       run: cargo clippy --workspace --all-features -- -D missing-docs
 
     - name: Missing docs for wasm32
-      run: cargo clippy --workspace --all-features --target=wasm32-unknown-unknown -- -D missing-docs
+      # xtask is a native-only release tool (ureq/git-cliff-core, no wasm support).
+      run: cargo clippy --workspace --exclude xtask --all-features --target=wasm32-unknown-unknown -- -D missing-docs
 
     - name: Run rustdoc check
       env:

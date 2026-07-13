@@ -1,4 +1,4 @@
-//! Per-package `CHANGELOG.md` generation via [`git-cliff-core`].
+//! Per-package `CHANGELOG.md` generation via the `git-cliff-core` crate.
 //!
 //! git-cliff renders the entry; this module adds the workspace-specific
 //! responsibilities it does not handle:

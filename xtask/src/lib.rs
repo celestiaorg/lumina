@@ -5,6 +5,10 @@
 //! tags/releases). The modules are layered: I/O primitives, then pure feature
 //! logic, then command orchestration, then the CLI.
 
+// xtask is `publish = false` internal tooling, not a documented public API, so we
+// opt out of the workspace-wide `-D missing-docs` gate rather than doc every field.
+#![allow(missing_docs)]
+
 // I/O primitives — git, cargo/registry, GitHub, npm, workspace discovery.
 pub mod cargoops;
 pub mod commit;

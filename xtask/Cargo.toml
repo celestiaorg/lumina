@@ -20,14 +20,16 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }      # workspace serde lacks `derive`
-serde_json = "1"
+# Shared crates use the workspace versions so xtask never diverges from the rest
+# of the tree; the tool-only deps below are xtask's alone.
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }   # workspace serde lacks `derive`
+serde_json.workspace = true
+base64.workspace = true                               # GitHub-signed commit file contents
 toml = "0.8"
 semver = "1"
 cargo_metadata = "0.18"
 ureq = { version = "2", features = ["json"] }
-base64 = "0.22"                                       # GitHub-signed commit file contents
 toml_edit = "0.22"                                    # format-preserving version bump
 clap = { version = "4", features = ["derive"] }
 git-cliff-core = { version = "2", default-features = false }  # changelog rendering engine
