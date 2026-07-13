@@ -1,6 +1,6 @@
 name: Prepare release
 
-# Flow 1 — Prepare release PR (release-spec/orchestrator.md §Flow 1).
+# Flow 1 — Prepare release PR (see xtask/README.md, Flow 1).
 # Manual, thin wrapper over `cargo xtask prepare-release`. It opens or refreshes a
 # release PR and publishes nothing. The `--push` flag is what makes CI push the
 # branch and open the PR.
@@ -33,7 +33,7 @@ jobs:
     env:
       # Map the repo PAT secret onto the env var the xtask reads. A PAT (NOT the
       # default GITHUB_TOKEN) is required so the release-branch commit re-triggers
-      # PR CI (orchestrator.md §"Why a PAT for prepare but not release").
+      # PR CI (a PAT is needed for prepare but not for release).
       GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
     steps:
       - name: Checkout

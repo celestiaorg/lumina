@@ -1,6 +1,6 @@
 name: Release
 
-# Flow 2 — Release (release-spec/orchestrator.md §Flow 2).
+# Flow 2 — Release (see xtask/README.md, Flow 2).
 # Manual, thin wrapper over `cargo xtask release`. Run it after a release PR has
 # been merged into the default branch: it publishes crates (+ npm) and creates
 # tags + GitHub releases. The `release` subcommand is idempotent, so a re-run
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # The env-var NAMEs below MUST equal the names passed to --*-token-env so the
-      # xtask reads the right env var (orchestrator.md §Credentials).
+      # xtask reads the right env var.
       # Same PAT as prepare-release: tags + GitHub releases are attributed to the
       # PAT owner rather than github-actions[bot].
       GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

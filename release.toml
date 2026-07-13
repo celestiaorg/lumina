@@ -1,8 +1,7 @@
 # release.toml — config for the `cargo xtask` release tooling.
 #
-# Read from the repo root by the release tool (see release-spec/orchestrator.md,
-# §Portability & configuration). Everything here is optional; a crate-only
-# workspace could omit the file entirely.
+# Read from the repo root by the release tool. Everything here is optional; a
+# crate-only workspace could omit the file entirely.
 
 [defaults]
 # Fallback for `prepare-release`'s --branch-prefix when not passed/prompted.
