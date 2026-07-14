@@ -602,7 +602,7 @@ impl CallLogEntry {
     fn println(&self) {
         println!(
             "logging call: {}, {:?}, {:?}",
-            self.kind, self.seq, &self.ids
+            self.kind, self.seq, self.ids
         );
     }
 }

@@ -317,11 +317,7 @@ fn round_up_to_power_of_2(x: u64) -> Option<u64> {
         if po2 >= x {
             return Some(po2);
         }
-        if let Some(next_po2) = po2.checked_shl(1) {
-            po2 = next_po2;
-        } else {
-            return None;
-        }
+        po2 = po2.checked_shl(1)?;
     }
 }
 
