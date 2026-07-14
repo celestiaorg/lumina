@@ -345,18 +345,26 @@ mod tests {
     fn discover_finds_version_members_and_publishability() {
         let ws = Workspace::discover(&repo_root()).expect("discover real workspace");
 
-        // Compare against xtask's own compile-time version (it inherits
-        // `version.workspace`) so this needn't change on every release bump.
+        // Cross-check discover() against `[workspace.package].version` read straight
+        // from the root manifest, so this needn't change on every release bump.
+        // (xtask is its own workspace now, so its own version can't stand in.)
+        let root_manifest =
+            std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("read root manifest");
+        let root: toml::Value = toml::from_str(&root_manifest).expect("parse root manifest");
+        let expected_version = root["workspace"]["package"]["version"]
+            .as_str()
+            .expect("workspace.package.version");
         assert_eq!(
             ws.version,
-            Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+            Version::parse(expected_version).unwrap(),
             "single workspace version"
         );
 
         let by = |name: &str| ws.crates.iter().find(|c| c.name == name);
 
-        // `xtask` is a member and, being `publish = false`, is not publishable.
-        assert!(!by("xtask").expect("xtask is a member").is_publishable);
+        // xtask is its own workspace (excluded from the main one), so it must not
+        // show up as a member here.
+        assert!(by("xtask").is_none(), "xtask is excluded from the workspace");
 
         // A representative sample of publishable library crates (robust to churn).
         for n in [

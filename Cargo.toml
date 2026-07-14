@@ -14,8 +14,11 @@ members = [
   "types",
   "utils",
   "rsema1d",
-  "xtask",
 ]
+# xtask is its own workspace (heavier release-tooling deps that float independently);
+# see xtask/Cargo.toml. Kept out of the main tree so it doesn't affect the published
+# crates' dependency resolution or minimal-version contract.
+exclude = ["xtask"]
 
 [workspace.package]
 version = "1.1.0-rc.1"

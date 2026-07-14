@@ -148,13 +148,11 @@ pub struct ReleaseOutcome {
 /// errors — release notes are non-critical.
 fn release_body(crate_info: &CrateInfo, version: &str) -> String {
     let path = crate_info.manifest_dir.join("CHANGELOG.md");
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-        if let Some(body) = top_changelog_entry(&contents) {
-            if !body.trim().is_empty() {
+    if let Ok(contents) = std::fs::read_to_string(&path)
+        && let Some(body) = top_changelog_entry(&contents)
+            && !body.trim().is_empty() {
                 return body;
             }
-        }
-    }
     format!("Release {} v{}.", crate_info.name, version)
 }
 

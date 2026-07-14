@@ -1,10 +1,15 @@
+# xtask is its own workspace, deliberately excluded from the main lumina workspace
+# (see the root Cargo.toml `exclude`). Its release-tooling deps (git-cliff-core,
+# tera, ureq, …) are heavier and float independently, so keeping them out of the
+# main tree stops them from dragging the published crates' minimal-version contract
+# upward. It has its own Cargo.lock.
+[workspace]
+
 [package]
 name = "xtask"
 description = "In-house release tooling for the lumina workspace (cargo xtask prepare-release / release)."
-version.workspace = true
-edition.workspace = true
-# The lumina `[workspace.package]` table only defines `version` and `edition`,
-# so the remaining metadata is set here directly. `xtask` is never published.
+version = "0.1.0"
+edition = "2024"
 license = "Apache-2.0"
 authors = ["Celestia <contact@celestia.org>"]
 repository = "https://github.com/celestiaorg/lumina"
@@ -20,12 +25,10 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
-# Shared crates use the workspace versions so xtask never diverges from the rest
-# of the tree; the tool-only deps below are xtask's alone.
-anyhow.workspace = true
-serde = { workspace = true, features = ["derive"] }   # workspace serde lacks `derive`
-serde_json.workspace = true
-base64.workspace = true                               # GitHub-signed commit file contents
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"                                       # GitHub-signed commit file contents
 toml = "0.8"
 semver = "1"
 cargo_metadata = "0.18"

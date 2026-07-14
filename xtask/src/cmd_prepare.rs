@@ -443,11 +443,10 @@ fn apply_version_bump(manifest_src: &str, new_version: &str) -> Result<String> {
 fn repin_exact_dep(item: &mut toml_edit::Item, new_version: &str) {
     // Inline-table / table form: `{ version = "=x", path = "…" }`.
     if let Some(tbl) = item.as_table_like_mut() {
-        if let Some(v) = tbl.get_mut("version") {
-            if v.as_str().is_some_and(|s| s.starts_with('=')) {
+        if let Some(v) = tbl.get_mut("version")
+            && v.as_str().is_some_and(|s| s.starts_with('=')) {
                 set_string_value(v, &format!("={new_version}"));
             }
-        }
         return;
     }
     // Bare string form: `dep = "=x"`.

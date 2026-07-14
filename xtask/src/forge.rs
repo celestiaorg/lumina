@@ -64,15 +64,13 @@ fn repo_from_url(url: &str) -> Option<Repo> {
     let url = url.trim();
     let tail = if let Some(rest) = url.strip_prefix("git@") {
         rest.split_once(':').map(|(_host, path)| path)?
-    } else if let Some(rest) = url
+    } else {
+        let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .or_else(|| url.strip_prefix("ssh://git@"))
-        .or_else(|| url.strip_prefix("git://"))
-    {
+        .or_else(|| url.strip_prefix("git://"))?;
         rest.split_once('/').map(|(_host, path)| path)?
-    } else {
-        return None;
     };
 
     let tail = tail.trim_end_matches('/');
@@ -448,11 +446,10 @@ pub fn create_commit_on_branch(
 
     // GraphQL reports failures in a top-level `errors` array with HTTP 200, so a
     // successful HTTP status does not imply the mutation succeeded.
-    if let Some(errors) = resp.get("errors").and_then(Value::as_array) {
-        if !errors.is_empty() {
+    if let Some(errors) = resp.get("errors").and_then(Value::as_array)
+        && !errors.is_empty() {
             bail!("GitHub: createCommitOnBranch returned errors: {errors:?}");
         }
-    }
 
     resp.pointer("/data/createCommitOnBranch/commit/oid")
         .and_then(Value::as_str)

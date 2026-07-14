@@ -239,8 +239,7 @@ jobs:
       run: cargo clippy --workspace --all-features -- -D missing-docs
 
     - name: Missing docs for wasm32
-      # xtask is a native-only release tool (ureq/git-cliff-core, no wasm support).
-      run: cargo clippy --workspace --exclude xtask --all-features --target=wasm32-unknown-unknown -- -D missing-docs
+      run: cargo clippy --workspace --all-features --target=wasm32-unknown-unknown -- -D missing-docs
 
     - name: Run rustdoc check
       env:
@@ -350,6 +349,29 @@ jobs:
       run: cargo msrv verify --manifest-path ./${{ matrix.crate.dir }}/Cargo.toml --all-features --target wasm32-unknown-unknown
 
 
+  xtask:
+    runs-on: ubuntu-latest
+
+    # xtask is its own workspace (excluded from the main one), so the clippy/test
+    # matrices above don't reach it. Lint and test it here via its manifest path.
+    name: xtask
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        components: clippy
+        # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
+        rustflags: ""
+
+    - name: Clippy
+      run: cargo clippy --manifest-path xtask/Cargo.toml --all-targets --all-features -- -D warnings
+
+    - name: Test
+      run: cargo test --manifest-path xtask/Cargo.toml --all-features
+
+
   required:
     runs-on: ubuntu-latest
 
@@ -366,6 +388,7 @@ jobs:
     - unused-deps
     - minimal-versions
     - msrv
+    - xtask
 
     steps:
     - name: On failure

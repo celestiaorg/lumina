@@ -136,11 +136,10 @@ pub fn classify_bump(current: &Version, next: &Version) -> Result<Bump, VersionE
         CurrentShape::Rc(n) => {
             // Continue the rc series: same core, rc.(N+1).
             if same_core(next, current) {
-                if let CurrentShape::Rc(m) = rc_number(next) {
-                    if m == n + 1 {
+                if let CurrentShape::Rc(m) = rc_number(next)
+                    && m == n + 1 {
                         return Ok(Bump::RcContinue);
                     }
-                }
                 // Promote to final: same core, no pre-release, no build.
                 if next.pre.is_empty() && next.build.is_empty() {
                     return Ok(Bump::RcPromote);
