@@ -42,6 +42,7 @@ tendermint.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dhat = { version = "0.3.3", optional = true }
 tonic = { workspace = true, features = ["transport"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -64,8 +65,15 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test.workspace = true
 
+[[bench]]
+name = "submit_blob_allocations"
+harness = false
+required-features = ["allocation-profiling"]
+
 [features]
 default = ['tls-native-roots']
+# Enable the native DHAT blob-submission allocation benchmark.
+allocation-profiling = ["dep:dhat"]
 # Add system trust roots to `rustls` in `tonic`.
 #
 # Selecting this feature enables TLS support in grpc client.
