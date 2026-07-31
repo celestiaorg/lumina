@@ -131,6 +131,8 @@ values are improvements.
 | exact share-vector preallocation | full construct + submit | -17,990,904 | -24 | +2 |
 | stack-backed share construction | one commitment pass | -7,797,248 | -15,229 | 0 |
 | stack-backed share construction | full construct + submit | -15,594,493 | -30,458 | +1 |
+| retained raw blobs | direct gRPC submit | -7,340,112 | -4 | +440 |
+| retained raw blobs | stale-sequence retry | -14,680,274 | -9 | +442 |
 
 ### Largest 7 MiB allocation sites
 
