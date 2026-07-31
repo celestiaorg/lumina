@@ -2,7 +2,7 @@ use std::io::Cursor;
 use std::num::NonZeroU64;
 
 use base64::prelude::*;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::Buf;
 use celestia_proto::serializers::cow_str::CowStr;
 use nmt_rs::NamespaceMerkleHasher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -212,36 +212,43 @@ fn build_sparse_share(
 ) -> Result<Share> {
     let is_first_share = data.position() == 0;
     let data_len = cursor_inner_length(data);
-    let mut bytes = BytesMut::with_capacity(appconsts::SHARE_SIZE);
+    let mut bytes = [0; appconsts::SHARE_SIZE];
+    let mut offset = 0;
 
     // Write the namespace
-    bytes.put_slice(namespace.as_bytes());
+    let namespace_bytes = namespace.as_bytes();
+    bytes[offset..offset + namespace_bytes.len()].copy_from_slice(namespace_bytes);
+    offset += namespace_bytes.len();
+
     // Write the info byte
     let info_byte = InfoByte::new(share_version, is_first_share)?;
-    bytes.put_u8(info_byte.as_u8());
+    bytes[offset] = info_byte.as_u8();
+    offset += appconsts::SHARE_INFO_BYTES;
 
     // If this share is first in the sequence, write the bytes len of the sequence
     if is_first_share {
-        let data_len = data_len
+        let data_len: u32 = data_len
             .try_into()
             .map_err(|_| Error::ShareSequenceLenExceeded(data_len))?;
-        bytes.put_u32(data_len);
+        bytes[offset..offset + appconsts::SEQUENCE_LEN_BYTES]
+            .copy_from_slice(&data_len.to_be_bytes());
+        offset += appconsts::SEQUENCE_LEN_BYTES;
+
         // additionally, if share_version is 1, put the signer after sequence len
         if share_version == appconsts::SHARE_VERSION_ONE {
-            let signer = signer.as_ref().ok_or(Error::MissingSigner)?;
-            bytes.put_slice(signer.as_bytes());
+            let signer = signer.ok_or(Error::MissingSigner)?;
+            let signer_bytes = signer.as_bytes();
+            bytes[offset..offset + signer_bytes.len()].copy_from_slice(signer_bytes);
+            offset += signer_bytes.len();
         }
     }
 
     // Calculate amount of bytes to read
-    let current_size = bytes.len();
-    let available_space = appconsts::SHARE_SIZE - current_size;
+    let available_space = appconsts::SHARE_SIZE - offset;
     let read_amount = available_space.min(data.remaining());
 
-    // Resize to share size with 0 padding
-    bytes.resize(appconsts::SHARE_SIZE, 0);
     // Read the share data
-    data.copy_to_slice(&mut bytes[current_size..current_size + read_amount]);
+    data.copy_to_slice(&mut bytes[offset..offset + read_amount]);
 
     Share::from_raw(&bytes)
 }
