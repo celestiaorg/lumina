@@ -129,6 +129,8 @@ values are improvements.
 | --- | --- | ---: | ---: | ---: |
 | exact share-vector preallocation | one commitment pass | -8,995,455 | -12 | -592,515 |
 | exact share-vector preallocation | full construct + submit | -17,990,904 | -24 | +2 |
+| stack-backed share construction | one commitment pass | -7,797,248 | -15,229 | 0 |
+| stack-backed share construction | full construct + submit | -15,594,493 | -30,458 | +1 |
 
 ### Largest 7 MiB allocation sites
 
