@@ -451,9 +451,7 @@ impl GrpcClient {
         let blobs = blobs.to_vec();
 
         AsyncGrpcCall::new(move |context| async move {
-            let tx = this
-                .submit_blobs_impl(&blobs, cfg.clone(), &context)
-                .await?;
+            let tx = this.submit_blobs_impl(blobs, cfg.clone(), &context).await?;
             this.confirm_tx(tx, cfg, &context).await
         })
     }
@@ -495,7 +493,7 @@ impl GrpcClient {
         AsyncGrpcCall::new(move |context| async move {
             let broadcasted_tx = this
                 .clone()
-                .submit_blobs_impl(&blobs, cfg.clone(), &context)
+                .submit_blobs_impl(blobs, cfg.clone(), &context)
                 .await?;
 
             Ok(SubmittedTx::new(
@@ -623,18 +621,18 @@ impl GrpcClient {
 
     async fn submit_blobs_impl(
         &self,
-        blobs: &[Blob],
+        blobs: Vec<Blob>,
         cfg: TxConfig,
         context: &Context,
     ) -> Result<BroadcastedTx> {
         if blobs.is_empty() {
             return Err(Error::TxEmptyBlobList);
         }
-        for blob in blobs {
+        for blob in &blobs {
             blob.validate()?;
         }
 
-        self.sign_and_broadcast_blobs(blobs.to_vec(), cfg.clone(), context)
+        self.sign_and_broadcast_blobs(blobs, cfg.clone(), context)
             .await
     }
 
