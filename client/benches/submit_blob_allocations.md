@@ -91,7 +91,7 @@ Run
 `cargo bench -p celestia-client --bench submit_blob_allocations --features allocation-profiling -- --help`
 for endpoint, key, output-directory, and size options.
 
-### Measured 7 MiB profiles
+### Baseline 7 MiB profiles
 
 `Total` is cumulative allocator traffic during the profiled region. `Peak` is
 the high-water mark of allocations from that region that were live together.
@@ -119,6 +119,16 @@ Construction scales with payload size:
 | 1 KiB | 13.21 KiB | 23 | 6.10 KiB |
 | 1 MiB | 9.17 MiB | 11,105 | 3.05 MiB |
 | 7 MiB | 52.31 MiB | 77,132 | 15.12 MiB |
+
+### Incremental optimization results
+
+Each row is the median delta from the immediately preceding stage. Negative
+values are improvements.
+
+| Optimization | Affected measurement | Total bytes | Allocations | Peak bytes |
+| --- | --- | ---: | ---: | ---: |
+| exact share-vector preallocation | one commitment pass | -8,995,455 | -12 | -592,515 |
+| exact share-vector preallocation | full construct + submit | -17,990,904 | -24 | +2 |
 
 ### Largest 7 MiB allocation sites
 
