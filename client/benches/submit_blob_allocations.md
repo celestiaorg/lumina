@@ -133,6 +133,8 @@ values are improvements.
 | stack-backed share construction | full construct + submit | -15,594,493 | -30,458 | +1 |
 | retained raw blobs | direct gRPC submit | -7,340,112 | -4 | +440 |
 | retained raw blobs | stale-sequence retry | -14,680,274 | -9 | +442 |
+| private ownership flow | direct gRPC submit | -7,340,115 | -2 | -7,340,122 |
+| private ownership flow | full construct + submit | -7,340,115 | -2 | -7,340,122 |
 
 ### Largest 7 MiB allocation sites
 
