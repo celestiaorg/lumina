@@ -29,6 +29,7 @@ use celestia_proto::cosmos::base::node::v1beta1::service_client::ServiceClient a
 use celestia_proto::cosmos::base::tendermint::v1beta1::service_client::ServiceClient as TendermintServiceClient;
 use celestia_proto::cosmos::staking::v1beta1::query_client::QueryClient as StakingQueryClient;
 use celestia_proto::cosmos::tx::v1beta1::service_client::ServiceClient as TxServiceClient;
+use celestia_proto::cosmos::tx::v1beta1::{BroadcastTxRequest, BroadcastTxResponse};
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetResponse;
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::block_api_client::BlockApiClient as FibreBlockApiClient;
 use celestia_types::blob::{BlobParams, MsgPayForBlobs, RawBlobTx, RawMsgPayForBlobs};
@@ -78,6 +79,49 @@ struct AccountGuard<'a> {
     base: MutexGuard<'a, BaseAccount>,
     pubkey: &'a VerifyingKey,
     signer: &'a BoxedDocSigner,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BroadcastTxCodec {
+    buffer_settings: tonic::codec::BufferSettings,
+}
+
+impl BroadcastTxCodec {
+    fn new(request: &BroadcastTxRequest) -> Self {
+        let frame_size = request
+            .encoded_len()
+            .checked_add(5)
+            .expect("protobuf request is limited to 256 MiB");
+
+        Self {
+            buffer_settings: tonic::codec::BufferSettings::new(frame_size, frame_size),
+        }
+    }
+}
+
+impl tonic::codec::Codec for BroadcastTxCodec {
+    type Encode = BroadcastTxRequest;
+    type Decode = BroadcastTxResponse;
+    type Encoder = <tonic::codec::ProstCodec<
+        BroadcastTxRequest,
+        BroadcastTxResponse,
+    > as tonic::codec::Codec>::Encoder;
+    type Decoder = <tonic::codec::ProstCodec<
+        BroadcastTxRequest,
+        BroadcastTxResponse,
+    > as tonic::codec::Codec>::Decoder;
+
+    fn encoder(&mut self) -> Self::Encoder {
+        tonic::codec::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_encoder(
+            self.buffer_settings,
+        )
+    }
+
+    fn decoder(&mut self) -> Self::Decoder {
+        tonic::codec::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_decoder(
+            tonic::codec::BufferSettings::default(),
+        )
+    }
 }
 
 impl AccountState {
@@ -208,8 +252,78 @@ impl GrpcClient {
     // cosmos.tx
 
     /// Broadcast prepared and serialised transaction
-    #[grpc_method(TxServiceClient::broadcast_tx)]
-    fn broadcast_tx(&self, tx_bytes: Vec<u8>, mode: BroadcastMode) -> AsyncGrpcCall<TxResponse>;
+    pub fn broadcast_tx(
+        &self,
+        tx_bytes: Vec<u8>,
+        mode: BroadcastMode,
+    ) -> AsyncGrpcCall<TxResponse> {
+        let failover = self.inner.failover.clone();
+        let param = BroadcastTxRequest {
+            tx_bytes,
+            mode: mode.into(),
+        };
+
+        AsyncGrpcCall::new(move |call_context: Context| async move {
+            // 256 MiB, future proof as Celestia blocks grow.
+            const MAX_MSG_SIZE: usize = 256 * 1024 * 1024;
+
+            failover
+                .run(move |transport: Arc<BoxedTransport>| {
+                    let param = param.clone();
+                    let call_context = call_context.clone();
+
+                    async move {
+                        let transport_context = &transport.metadata.context;
+                        let mut merged_context = transport_context.clone();
+                        merged_context.extend(&call_context);
+
+                        let mut request = tonic::Request::from_parts(
+                            merged_context.metadata.clone(),
+                            tonic::Extensions::new(),
+                            param,
+                        );
+                        request.extensions_mut().insert(tonic::GrpcMethod::new(
+                            "cosmos.tx.v1beta1.Service",
+                            "BroadcastTx",
+                        ));
+
+                        if let Some(timeout) = merged_context.timeout {
+                            request.set_timeout(timeout);
+                        } else {
+                            request.set_timeout(Duration::from_secs(30));
+                        }
+
+                        let codec = BroadcastTxCodec::new(request.get_ref());
+                        let path = http::uri::PathAndQuery::from_static(
+                            "/cosmos.tx.v1beta1.Service/BroadcastTx",
+                        );
+                        let mut client = tonic::client::Grpc::new((*transport).clone())
+                            .max_decoding_message_size(MAX_MSG_SIZE)
+                            .max_encoding_message_size(MAX_MSG_SIZE);
+
+                        client.ready().await.map_err(|error| {
+                            tonic::Status::unknown(format!(
+                                "Service was not ready: {}",
+                                Into::<tonic::codegen::StdError>::into(error)
+                            ))
+                        })?;
+
+                        let future = client.unary(request, path, codec);
+
+                        #[cfg(target_arch = "wasm32")]
+                        let future = send_wrapper::SendWrapper::new(future);
+
+                        match future.await {
+                            Ok(response) => crate::grpc::FromGrpcResponse::try_from_response(
+                                response.into_inner(),
+                            ),
+                            Err(error) => Err(Error::from(error)),
+                        }
+                    }
+                })
+                .await
+        })
+    }
 
     /// Get Tx
     #[grpc_method(TxServiceClient::get_tx)]

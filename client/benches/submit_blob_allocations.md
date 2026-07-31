@@ -135,6 +135,8 @@ values are improvements.
 | retained raw blobs | stale-sequence retry | -14,680,274 | -9 | +442 |
 | private ownership flow | direct gRPC submit | -7,340,115 | -2 | -7,340,122 |
 | private ownership flow | full construct + submit | -7,340,115 | -2 | -7,340,122 |
+| exact tonic encode buffer | transport-only broadcast | -14,688,522 | -2 | -7,339,536 |
+| exact tonic encode buffer | stale-sequence retry | -29,378,964 | -5 | -7,339,932 |
 
 ### Largest 7 MiB allocation sites
 
