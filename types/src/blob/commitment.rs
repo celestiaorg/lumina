@@ -4,15 +4,15 @@ use std::num::NonZeroU64;
 use base64::prelude::*;
 use bytes::Buf;
 use celestia_proto::serializers::cow_str::CowStr;
-use nmt_rs::NamespaceMerkleHasher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use tendermint::crypto::sha256::HASH_SIZE;
 use tendermint::{crypto, merkle};
 #[cfg(all(feature = "wasm-bindgen", target_arch = "wasm32"))]
 use wasm_bindgen::prelude::*;
 
 use crate::consts::appconsts;
-use crate::nmt::{Namespace, NamespacedHashExt, NamespacedSha2Hasher, Nmt, RawNamespacedHash};
+use crate::nmt::{NS_SIZE, Namespace, RawNamespacedHash};
 use crate::state::{AccAddress, AddressTrait};
 use crate::{Error, Result};
 use crate::{InfoByte, Share};
@@ -91,25 +91,11 @@ impl Commitment {
         let subtree_width = subtree_width(shares.len() as u64, subtree_root_threshold);
         let tree_sizes = merkle_mountain_range_sizes(shares.len() as u64, subtree_width);
 
-        let mut leaf_sets: Vec<&[_]> = Vec::with_capacity(tree_sizes.len());
-
+        let mut subtree_roots = Vec::with_capacity(tree_sizes.len());
         for size in tree_sizes {
-            let (leafs, rest) = shares.split_at(size as usize);
-            leaf_sets.push(leafs);
+            let (leaf_set, rest) = shares.split_at(size as usize);
+            subtree_roots.push(nmt_subtree_root(namespace, leaf_set));
             shares = rest;
-        }
-
-        // create the commitments by pushing each leaf set onto an nmt
-        let mut subtree_roots: Vec<RawNamespacedHash> = Vec::with_capacity(leaf_sets.len());
-        for leaf_set in leaf_sets {
-            // create the nmt
-            let mut tree = Nmt::with_hasher(NamespacedSha2Hasher::with_ignore_max_ns(true));
-            for leaf_share in leaf_set {
-                tree.push_leaf(leaf_share.as_ref(), namespace.into())
-                    .map_err(Error::Nmt)?;
-            }
-            // add the root
-            subtree_roots.push(tree.root().to_array());
         }
 
         let hash = merkle::simple_hash_from_byte_vectors::<crypto::default::Sha256>(&subtree_roots);
@@ -121,6 +107,57 @@ impl Commitment {
     pub fn hash(&self) -> &merkle::Hash {
         &self.hash
     }
+}
+
+fn nmt_subtree_root(namespace: Namespace, shares: &[Share]) -> RawNamespacedHash {
+    debug_assert!(!shares.is_empty());
+    debug_assert!(shares.len().is_power_of_two());
+
+    let mut levels = [None; usize::BITS as usize];
+
+    for share in shares {
+        let mut node = namespaced_leaf_hash(namespace, share);
+        let mut level = 0;
+
+        while let Some(left) = levels[level].take() {
+            node = namespaced_node_hash(namespace, &left, &node);
+            level += 1;
+        }
+
+        levels[level] = Some(node);
+    }
+
+    levels[shares.len().ilog2() as usize].expect("power-of-two leaf set has one root")
+}
+
+fn namespaced_leaf_hash(namespace: Namespace, share: &Share) -> RawNamespacedHash {
+    let mut output = [0; std::mem::size_of::<RawNamespacedHash>()];
+    output[..NS_SIZE].copy_from_slice(namespace.as_bytes());
+    output[NS_SIZE..2 * NS_SIZE].copy_from_slice(namespace.as_bytes());
+
+    let mut hasher = Sha256::new();
+    hasher.update([0]);
+    hasher.update(namespace.as_bytes());
+    hasher.update(share.as_ref());
+    output[2 * NS_SIZE..].copy_from_slice(&hasher.finalize());
+    output
+}
+
+fn namespaced_node_hash(
+    namespace: Namespace,
+    left: &RawNamespacedHash,
+    right: &RawNamespacedHash,
+) -> RawNamespacedHash {
+    let mut output = [0; std::mem::size_of::<RawNamespacedHash>()];
+    output[..NS_SIZE].copy_from_slice(namespace.as_bytes());
+    output[NS_SIZE..2 * NS_SIZE].copy_from_slice(namespace.as_bytes());
+
+    let mut hasher = Sha256::new();
+    hasher.update([1]);
+    hasher.update(left);
+    hasher.update(right);
+    output[2 * NS_SIZE..].copy_from_slice(&hasher.finalize());
+    output
 }
 
 #[cfg(all(feature = "wasm-bindgen", target_arch = "wasm32"))]
@@ -348,6 +385,36 @@ fn round_down_to_power_of_2(x: NonZeroU64) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
+fn commitment_from_shares_reference(
+    namespace: Namespace,
+    mut shares: &[Share],
+) -> Result<Commitment> {
+    use nmt_rs::NamespaceMerkleHasher;
+
+    use crate::nmt::{NamespacedHashExt, NamespacedSha2Hasher, Nmt};
+
+    let subtree_width = subtree_width(shares.len() as u64, appconsts::SUBTREE_ROOT_THRESHOLD);
+    let tree_sizes = merkle_mountain_range_sizes(shares.len() as u64, subtree_width);
+    let mut subtree_roots = Vec::with_capacity(tree_sizes.len());
+
+    for size in tree_sizes {
+        let (leaf_set, rest) = shares.split_at(size as usize);
+        let mut tree = Nmt::with_hasher(NamespacedSha2Hasher::with_ignore_max_ns(true));
+
+        for share in leaf_set {
+            tree.push_leaf(share.as_ref(), namespace.into())
+                .map_err(Error::Nmt)?;
+        }
+
+        subtree_roots.push(tree.root().to_array());
+        shares = rest;
+    }
+
+    let hash = merkle::simple_hash_from_byte_vectors::<crypto::default::Sha256>(&subtree_roots);
+    Ok(Commitment { hash })
+}
+
 #[cfg(feature = "uniffi")]
 mod uniffi_types {
     use super::{Commitment as RustCommitment, HASH_SIZE};
@@ -386,6 +453,8 @@ mod uniffi_types {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{RngCore, SeedableRng};
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test as test;
@@ -575,6 +644,55 @@ mod tests {
                 assert_eq!(shares.capacity(), expected, "blob size {size}");
             }
         }
+    }
+
+    #[test]
+    fn root_only_nmt_matches_reference_implementation() {
+        let signer = AccAddress::from([9; appconsts::SIGNER_SIZE]);
+        let mut rng = StdRng::seed_from_u64(0x862);
+
+        for namespace in [
+            Namespace::new_v0(b"root-only").unwrap(),
+            Namespace::PARITY_SHARE,
+        ] {
+            for (share_version, signer) in [(0, None), (1, Some(&signer))] {
+                let first_share_content = appconsts::FIRST_SPARSE_SHARE_CONTENT_SIZE
+                    - signer.is_some() as usize * appconsts::SIGNER_SIZE;
+                let continuation = appconsts::CONTINUATION_SPARSE_SHARE_CONTENT_SIZE;
+                let mut sizes = vec![
+                    1,
+                    first_share_content,
+                    first_share_content + 1,
+                    first_share_content + continuation,
+                    first_share_content + continuation + 1,
+                ];
+
+                for share_count in [4, 7, 8, 15, 16, 17, 63, 64, 65, 127, 128, 129] {
+                    sizes.push(first_share_content + (share_count - 2) * continuation + 1);
+                }
+
+                for size in sizes {
+                    let mut data = vec![0; size];
+                    rng.fill_bytes(&mut data);
+                    let shares =
+                        split_blob_to_shares(namespace, share_version, &data, signer).unwrap();
+
+                    let actual = Commitment::from_shares(namespace, &shares).unwrap();
+                    let reference = commitment_from_shares_reference(namespace, &shares).unwrap();
+
+                    assert_eq!(
+                        actual, reference,
+                        "namespace {namespace:?}, share version {share_version}, data size {size}"
+                    );
+                }
+            }
+        }
+
+        let namespace = Namespace::new_v0(b"root-only").unwrap();
+        assert_eq!(
+            Commitment::from_shares(namespace, &[]).unwrap(),
+            commitment_from_shares_reference(namespace, &[]).unwrap()
+        );
     }
 
     #[test]

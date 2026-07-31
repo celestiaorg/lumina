@@ -137,6 +137,8 @@ values are improvements.
 | private ownership flow | full construct + submit | -7,340,115 | -2 | -7,340,122 |
 | exact tonic encode buffer | transport-only broadcast | -14,688,522 | -2 | -7,339,536 |
 | exact tonic encode buffer | stale-sequence retry | -29,378,964 | -5 | -7,339,932 |
+| root-only NMT accumulation | one commitment pass | -22,896,820 | -61,882 | -96,612 |
+| root-only NMT accumulation | full construct + submit | -45,794,822 | -123,767 | -30 |
 
 ### Largest 7 MiB allocation sites
 
