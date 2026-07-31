@@ -734,6 +734,11 @@ impl GrpcClient {
             ..RawTxBody::default()
         };
         let blobs: Vec<_> = blobs.into_iter().map(Into::into).collect();
+        let mut blob_tx = RawBlobTx {
+            tx: Vec::new(),
+            blobs,
+            type_id: BLOB_TX_TYPE_ID.to_string(),
+        };
 
         // in case parallel submission failed because of the sequence mismatch,
         // we update the account, resign and broadcast transaction
@@ -769,15 +774,11 @@ impl GrpcClient {
             )
             .await?;
 
-            let blob_tx = RawBlobTx {
-                tx: tx.encode_to_vec(),
-                blobs: blobs.clone(),
-                type_id: BLOB_TX_TYPE_ID.to_string(),
-            }
-            .encode_to_vec();
+            blob_tx.tx = tx.encode_to_vec();
+            let encoded_blob_tx = blob_tx.encode_to_vec();
 
             let res = self
-                .broadcast_tx_with_account(blob_tx, &cfg, &mut account, context)
+                .broadcast_tx_with_account(encoded_blob_tx, &cfg, &mut account, context)
                 .await;
 
             if let Some(new_sequence) = res.as_ref().err().and_then(extract_sequence_on_mismatch) {
