@@ -31,6 +31,7 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
+use bytes::Bytes;
 use celestia_client::Client;
 use celestia_client::tx::TxConfig;
 use celestia_grpc::GrpcClient;
@@ -61,8 +62,10 @@ enum Phase {
     Broadcast,
     GrpcSubmit,
     GrpcSubmitOwned,
+    GrpcSubmitBytes,
     ClientSubmit,
     ClientSubmitOwned,
+    ClientSubmitBytes,
     Full,
     FullOwned,
 }
@@ -74,8 +77,10 @@ impl Phase {
             "broadcast" => Ok(Self::Broadcast),
             "grpc-submit" => Ok(Self::GrpcSubmit),
             "grpc-submit-owned" => Ok(Self::GrpcSubmitOwned),
+            "grpc-submit-bytes" => Ok(Self::GrpcSubmitBytes),
             "client-submit" => Ok(Self::ClientSubmit),
             "client-submit-owned" => Ok(Self::ClientSubmitOwned),
+            "client-submit-bytes" => Ok(Self::ClientSubmitBytes),
             "full" => Ok(Self::Full),
             "full-owned" => Ok(Self::FullOwned),
             _ => Err(argument_error(format!("unknown phase: {value}"))),
@@ -88,8 +93,10 @@ impl Phase {
             Self::Broadcast => "broadcast",
             Self::GrpcSubmit => "grpc-submit",
             Self::GrpcSubmitOwned => "grpc-submit-owned",
+            Self::GrpcSubmitBytes => "grpc-submit-bytes",
             Self::ClientSubmit => "client-submit",
             Self::ClientSubmitOwned => "client-submit-owned",
+            Self::ClientSubmitBytes => "client-submit-bytes",
             Self::Full => "full",
             Self::FullOwned => "full-owned",
         }
@@ -257,8 +264,10 @@ pub(super) async fn run() -> Result<()> {
         Phase::Broadcast => profile_broadcast(&config, &profile_path).await?,
         Phase::GrpcSubmit => profile_grpc_submit(&config, &profile_path).await?,
         Phase::GrpcSubmitOwned => profile_grpc_submit_owned(&config, &profile_path).await?,
+        Phase::GrpcSubmitBytes => profile_grpc_submit_bytes(&config, &profile_path).await?,
         Phase::ClientSubmit => profile_client_submit(&config, &profile_path).await?,
         Phase::ClientSubmitOwned => profile_client_submit_owned(&config, &profile_path).await?,
+        Phase::ClientSubmitBytes => profile_client_submit_bytes(&config, &profile_path).await?,
         Phase::Full => profile_full(&config, &profile_path).await?,
         Phase::FullOwned => profile_full_owned(&config, &profile_path).await?,
     };
@@ -363,6 +372,27 @@ async fn profile_grpc_submit_owned(config: &Config, profile_path: &Path) -> Resu
     Ok(summary)
 }
 
+async fn profile_grpc_submit_bytes(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
+    let client = build_grpc(config, Scenario::Happy)?;
+    warm_grpc(&client).await?;
+    if config.scenario == Scenario::StaleSequence {
+        advance_sequence(config).await?;
+    }
+
+    let data = Bytes::from(vec![0xA5; config.size]);
+    let tx_config = submission_config(config.scenario);
+
+    let profiler = start_profiler(profile_path);
+    let result = client
+        .submit_blob_bytes(benchmark_namespace(), data, tx_config)
+        .await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    black_box(result?);
+    Ok(summary)
+}
+
 async fn profile_client_submit(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
     let client = build_client(config).await?;
     warm_client(&client).await?;
@@ -399,6 +429,31 @@ async fn profile_client_submit_owned(
     let result = client
         .state()
         .submit_pay_for_blob_owned(vec![blob], tx_config)
+        .await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    black_box(result?);
+    Ok(summary)
+}
+
+async fn profile_client_submit_bytes(
+    config: &Config,
+    profile_path: &Path,
+) -> Result<ProfileSummary> {
+    let client = build_client(config).await?;
+    warm_client(&client).await?;
+    if config.scenario == Scenario::StaleSequence {
+        advance_sequence(config).await?;
+    }
+
+    let data = Bytes::from(vec![0xA5; config.size]);
+    let tx_config = submission_config(config.scenario);
+
+    let profiler = start_profiler(profile_path);
+    let result = client
+        .state()
+        .submit_pay_for_blob_bytes(benchmark_namespace(), data, tx_config)
         .await;
     black_box(&result);
     let summary = finish_profiler(profiler);
@@ -593,8 +648,9 @@ USAGE:
 
 OPTIONS:
   --phase <PHASE>              construct | broadcast | grpc-submit |
-                               grpc-submit-owned | client-submit |
-                               client-submit-owned | full | full-owned
+                               grpc-submit-owned | grpc-submit-bytes |
+                               client-submit | client-submit-owned |
+                               client-submit-bytes | full | full-owned
                                [default: construct]
   --scenario <SCENARIO>        happy | stale-sequence | failover [default: happy]
   --size <BYTES|KiB|MiB>       Payload size [default: 7MiB]

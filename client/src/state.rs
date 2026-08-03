@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use celestia_rpc::{HeaderClient, StateClient};
 use celestia_types::hash::Hash;
 
@@ -11,6 +12,7 @@ use crate::proto::cosmos::staking::v1beta1::{
 };
 use crate::tx::{GasEstimate, GetTxResponse, IntoProtobufAny, TxConfig, TxInfo, TxPriority};
 use crate::types::Blob;
+use crate::types::nmt::Namespace;
 use crate::types::state::{
     AccAddress, Address, Coin, PageRequest, QueryDelegationResponse, QueryRedelegationsResponse,
     QueryUnbondingDelegationResponse, ValAddress,
@@ -275,6 +277,28 @@ impl StateApi {
             Ok(inner
                 .grpc()?
                 .submit_blobs_owned(blobs, cfg)
+                .context(&context)
+                .await?)
+        })
+    }
+
+    /// Builds, signs and submits one shared byte buffer as a PayForBlob transaction.
+    ///
+    /// The blob uses share version 1 and the client's signing account as its
+    /// blob signer. The payload remains shared internally throughout
+    /// submission.
+    pub fn submit_pay_for_blob_bytes(
+        &self,
+        namespace: Namespace,
+        data: Bytes,
+        cfg: TxConfig,
+    ) -> AsyncGrpcCall<TxInfo> {
+        let inner = self.inner.clone();
+
+        AsyncGrpcCall::new(move |context| async move {
+            Ok(inner
+                .grpc()?
+                .submit_blob_bytes(namespace, data, cfg)
                 .context(&context)
                 .await?)
         })
@@ -764,6 +788,11 @@ mod tests {
         ensure_serializable_deserializable(api.submit_pay_for_blob(&blobs, cfg).await.unwrap());
         ensure_serializable_deserializable(
             api.submit_pay_for_blob_owned(blobs, cfg).await.unwrap(),
+        );
+        ensure_serializable_deserializable(
+            api.submit_pay_for_blob_bytes(Namespace::new_v0(b"bytes").unwrap(), Bytes::new(), cfg)
+                .await
+                .unwrap(),
         );
 
         ensure_serializable_deserializable(

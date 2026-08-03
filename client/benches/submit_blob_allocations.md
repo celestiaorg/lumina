@@ -89,6 +89,14 @@ cargo bench -p celestia-client --bench submit_blob_allocations \
   --features allocation-profiling -- \
   --phase full-owned --size 7MiB
 
+# Exercise the shared-payload path
+cargo bench -p celestia-client --bench submit_blob_allocations \
+  --features allocation-profiling -- \
+  --phase grpc-submit-bytes --size 7MiB
+cargo bench -p celestia-client --bench submit_blob_allocations \
+  --features allocation-profiling -- \
+  --phase client-submit-bytes --size 7MiB
+
 # Isolate transport request cloning and force exceptional paths
 cargo bench -p celestia-client --bench submit_blob_allocations \
   --features allocation-profiling -- \
@@ -152,6 +160,25 @@ values are improvements.
 | root-only NMT accumulation | full construct + submit | -45,794,822 | -123,767 | -30 |
 | owned delegation | borrowed full construct + submit | -7,340,160 | -2 | -7,340,160 |
 | owned input | owned vs borrowed full path | -7,340,032 | -1 | -7,340,032 |
+| shared transport payload | direct Bytes vs owned Blob | -14,681,028 | -1 | -14,680,948 |
+| end-to-end Bytes input | client Bytes vs full owned Blob | -29,846,641 | -10 | -22,020,948 |
+| shared retry payload | Bytes vs borrowed Blob stale retry | -36,701,922 | -2 | -22,020,984 |
+
+### Final 7 MiB comparison
+
+The borrowed methods retain their original signatures. The owned and Bytes
+rows are additive APIs for callers that can transfer or share their input.
+
+| Full high-level path | Total bytes | Allocations | Peak bytes |
+| --- | ---: | ---: | ---: |
+| baseline borrowed Blob | 175,917,618 | 154,612 | 66,073,361 |
+| optimized borrowed Blob | 59,827,550 | 353 | 44,053,461 |
+| optimized owned Blob | 52,487,518 | 352 | 36,713,429 |
+| optimized Bytes | 22,640,877 | 342 | 14,692,481 |
+
+The optimized borrowed path cuts cumulative allocation by 65.99%. The Bytes
+path cuts it by 87.13%, cuts peak bytes by 77.76%, and reduces allocation count
+by 99.779% relative to the baseline.
 
 ### Largest 7 MiB allocation sites
 

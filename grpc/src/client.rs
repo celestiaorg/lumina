@@ -1,7 +1,9 @@
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use ::tendermint::chain::Id;
+use bytes::Bytes;
 use celestia_types::any::IntoProtobufAny;
 use k256::ecdsa::VerifyingKey;
 use lumina_utils::failover::Failover;
@@ -36,6 +38,7 @@ use celestia_types::blob::{BlobParams, MsgPayForBlobs, RawBlobTx, RawMsgPayForBl
 use celestia_types::block::Block;
 use celestia_types::consts::appconsts;
 use celestia_types::hash::Hash;
+use celestia_types::nmt::Namespace;
 use celestia_types::state::auth::{Account, AuthParams, BaseAccount};
 use celestia_types::state::{
     AbciQueryResponse, PageRequest, QueryDelegationResponse, QueryRedelegationsResponse,
@@ -44,7 +47,7 @@ use celestia_types::state::{
 use celestia_types::state::{
     AccAddress, Address, AddressTrait, BOND_DENOM, Coin, ErrorCode, TxResponse,
 };
-use celestia_types::{Blob, ExtendedHeader};
+use celestia_types::{Blob, Commitment, ExtendedHeader};
 
 use crate::abci_proofs::ProofChain;
 use crate::boxed::BoxedTransport;
@@ -81,47 +84,85 @@ struct AccountGuard<'a> {
     signer: &'a BoxedDocSigner,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct BroadcastTxCodec {
-    buffer_settings: tonic::codec::BufferSettings,
+#[derive(Clone, PartialEq, prost::Message)]
+struct BytesBlob {
+    #[prost(bytes = "vec", tag = "1")]
+    namespace_id: Vec<u8>,
+    #[prost(bytes = "bytes", tag = "2")]
+    data: Bytes,
+    #[prost(uint32, tag = "3")]
+    share_version: u32,
+    #[prost(uint32, tag = "4")]
+    namespace_version: u32,
+    #[prost(bytes = "vec", tag = "5")]
+    signer: Vec<u8>,
 }
 
-impl BroadcastTxCodec {
-    fn new(request: &BroadcastTxRequest) -> Self {
+#[derive(Clone, PartialEq, prost::Message)]
+struct BytesBlobTx {
+    #[prost(bytes = "vec", tag = "1")]
+    tx: Vec<u8>,
+    #[prost(message, repeated, tag = "2")]
+    blobs: Vec<BytesBlob>,
+    #[prost(string, tag = "3")]
+    type_id: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct BytesBroadcastTxRequest {
+    #[prost(bytes = "bytes", tag = "1")]
+    tx_bytes: Bytes,
+    #[prost(enumeration = "BroadcastMode", tag = "2")]
+    mode: i32,
+}
+
+struct ExactProstCodec<T, U> {
+    buffer_settings: tonic::codec::BufferSettings,
+    marker: PhantomData<fn() -> (T, U)>,
+}
+
+impl<T: Message, U> ExactProstCodec<T, U> {
+    fn new(request: &T) -> Self {
         let frame_size = request
             .encoded_len()
             .checked_add(5)
-            .expect("protobuf request is limited to 256 MiB");
+            .expect("gRPC frame size overflow");
 
         Self {
             buffer_settings: tonic::codec::BufferSettings::new(frame_size, frame_size),
+            marker: PhantomData,
         }
     }
 }
 
-impl tonic::codec::Codec for BroadcastTxCodec {
-    type Encode = BroadcastTxRequest;
-    type Decode = BroadcastTxResponse;
-    type Encoder = <tonic::codec::ProstCodec<
-        BroadcastTxRequest,
-        BroadcastTxResponse,
-    > as tonic::codec::Codec>::Encoder;
-    type Decoder = <tonic::codec::ProstCodec<
-        BroadcastTxRequest,
-        BroadcastTxResponse,
-    > as tonic::codec::Codec>::Decoder;
+impl<T, U> tonic::codec::Codec for ExactProstCodec<T, U>
+where
+    T: Message + Send + 'static,
+    U: Message + Default + Send + 'static,
+{
+    type Encode = T;
+    type Decode = U;
+    type Encoder = <tonic::codec::ProstCodec<T, U> as tonic::codec::Codec>::Encoder;
+    type Decoder = <tonic::codec::ProstCodec<T, U> as tonic::codec::Codec>::Decoder;
 
     fn encoder(&mut self) -> Self::Encoder {
-        tonic::codec::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_encoder(
-            self.buffer_settings,
-        )
+        tonic::codec::ProstCodec::<T, U>::raw_encoder(self.buffer_settings)
     }
 
     fn decoder(&mut self) -> Self::Decoder {
-        tonic::codec::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_decoder(
-            tonic::codec::BufferSettings::default(),
-        )
+        tonic::codec::ProstCodec::<T, U>::raw_decoder(tonic::codec::BufferSettings::default())
     }
+}
+
+struct BytesBroadcastedTx {
+    tx: Bytes,
+    hash: Hash,
+    sequence: u64,
+}
+
+enum RetainedTx {
+    Vec(Vec<u8>),
+    Bytes(Bytes),
 }
 
 impl AccountState {
@@ -257,11 +298,28 @@ impl GrpcClient {
         tx_bytes: Vec<u8>,
         mode: BroadcastMode,
     ) -> AsyncGrpcCall<TxResponse> {
-        let failover = self.inner.failover.clone();
-        let param = BroadcastTxRequest {
+        self.broadcast_tx_request(BroadcastTxRequest {
             tx_bytes,
             mode: mode.into(),
-        };
+        })
+    }
+
+    fn broadcast_tx_bytes(
+        &self,
+        tx_bytes: Bytes,
+        mode: BroadcastMode,
+    ) -> AsyncGrpcCall<TxResponse> {
+        self.broadcast_tx_request(BytesBroadcastTxRequest {
+            tx_bytes,
+            mode: mode.into(),
+        })
+    }
+
+    fn broadcast_tx_request<T>(&self, param: T) -> AsyncGrpcCall<TxResponse>
+    where
+        T: Message + Clone + Send + Sync + 'static,
+    {
+        let failover = self.inner.failover.clone();
 
         AsyncGrpcCall::new(move |call_context: Context| async move {
             // 256 MiB, future proof as Celestia blocks grow.
@@ -293,7 +351,8 @@ impl GrpcClient {
                             request.set_timeout(Duration::from_secs(30));
                         }
 
-                        let codec = BroadcastTxCodec::new(request.get_ref());
+                        let codec =
+                            ExactProstCodec::<T, BroadcastTxResponse>::new(request.get_ref());
                         let path = http::uri::PathAndQuery::from_static(
                             "/cosmos.tx.v1beta1.Service/BroadcastTx",
                         );
@@ -574,6 +633,28 @@ impl GrpcClient {
         AsyncGrpcCall::new(move |context| async move {
             let tx = this.submit_blobs_impl(blobs, cfg.clone(), &context).await?;
             this.confirm_tx(tx, cfg, &context).await
+        })
+    }
+
+    /// Submit one shared byte buffer to the Celestia network.
+    ///
+    /// The blob uses share version 1 and the client's signing account as its
+    /// blob signer. Unlike [`GrpcClient::submit_blobs_owned`], this path keeps
+    /// the payload in [`Bytes`] throughout submission so internal clones share
+    /// the same allocation.
+    pub fn submit_blob_bytes(
+        &self,
+        namespace: Namespace,
+        data: Bytes,
+        cfg: TxConfig,
+    ) -> AsyncGrpcCall<TxInfo> {
+        let this = self.clone();
+
+        AsyncGrpcCall::new(move |context| async move {
+            let tx = this
+                .sign_and_broadcast_blob_bytes(namespace, data, cfg.clone(), &context)
+                .await?;
+            this.confirm_bytes_tx(tx, cfg, &context).await
         })
     }
 
@@ -909,6 +990,89 @@ impl GrpcClient {
         }
     }
 
+    async fn sign_and_broadcast_blob_bytes(
+        &self,
+        namespace: Namespace,
+        data: Bytes,
+        cfg: TxConfig,
+        context: &Context,
+    ) -> Result<BytesBroadcastedTx> {
+        let ChainState { chain_id, .. } = self.load_chain_state(context).await?;
+        let mut account = self.lock_account(context).await?;
+        let signer = account.base.address;
+        let share_version = appconsts::SHARE_VERSION_ONE;
+        let commitment = Commitment::from_blob(namespace, &data, share_version, Some(&signer))?;
+        let blob_size =
+            u32::try_from(data.len()).map_err(|_| celestia_types::Error::BlobTooLarge)?;
+
+        let pfb = MsgPayForBlobs {
+            signer,
+            namespaces: vec![namespace],
+            blob_sizes: vec![blob_size],
+            share_commitments: vec![commitment],
+            share_versions: vec![u32::from(share_version)],
+        };
+        let pfb = RawTxBody {
+            messages: vec![RawMsgPayForBlobs::from(pfb).into_any()],
+            memo: cfg.memo.clone().unwrap_or_default(),
+            ..RawTxBody::default()
+        };
+        let mut blob_tx = BytesBlobTx {
+            tx: Vec::new(),
+            blobs: vec![BytesBlob {
+                namespace_id: namespace.id().to_vec(),
+                data,
+                share_version: u32::from(share_version),
+                namespace_version: u32::from(namespace.version()),
+                signer: signer.as_bytes().to_vec(),
+            }],
+            type_id: BLOB_TX_TYPE_ID.to_string(),
+        };
+
+        loop {
+            let res = self
+                .calculate_transaction_gas_params(
+                    &pfb,
+                    &cfg,
+                    chain_id.clone(),
+                    &mut account,
+                    context,
+                )
+                .await;
+
+            if let Some(new_sequence) = res.as_ref().err().and_then(extract_sequence_on_mismatch) {
+                account.base.sequence = new_sequence?;
+                continue;
+            }
+
+            let (gas_limit, gas_price) = res?;
+            let fee = (gas_limit as f64 * gas_price).ceil() as u64;
+            let tx = sign_tx(
+                pfb.clone(),
+                chain_id.clone(),
+                &account.base,
+                account.pubkey,
+                account.signer,
+                gas_limit,
+                fee,
+            )
+            .await?;
+
+            blob_tx.tx = tx.encode_to_vec();
+            let encoded_blob_tx = Bytes::from(blob_tx.encode_to_vec());
+            let res = self
+                .broadcast_bytes_with_account(encoded_blob_tx, &cfg, &mut account, context)
+                .await;
+
+            if let Some(new_sequence) = res.as_ref().err().and_then(extract_sequence_on_mismatch) {
+                account.base.sequence = new_sequence?;
+                continue;
+            }
+
+            break res;
+        }
+    }
+
     async fn sign_and_broadcast_tx(
         &self,
         tx: RawTxBody,
@@ -997,6 +1161,33 @@ impl GrpcClient {
         Ok(BroadcastedTx { tx, hash, sequence })
     }
 
+    async fn broadcast_bytes_with_account(
+        &self,
+        tx: Bytes,
+        cfg: &TxConfig,
+        account: &mut AccountGuard<'_>,
+        context: &Context,
+    ) -> Result<BytesBroadcastedTx> {
+        let sequence = account.base.sequence;
+        let res = self
+            .broadcast_bytes_with_cfg(tx.clone(), cfg, context)
+            .await;
+
+        let hash = match res {
+            Ok(resp) => {
+                account.base.sequence += 1;
+                resp.txhash
+            }
+            Err(Error::TxBroadcastFailed(hash, ErrorCode::TxInMempoolCache, _)) => {
+                account.base.sequence += 1;
+                hash
+            }
+            Err(error) => return Err(error),
+        };
+
+        Ok(BytesBroadcastedTx { tx, hash, sequence })
+    }
+
     async fn broadcast_tx_with_cfg(
         &self,
         tx: Vec<u8>,
@@ -1008,6 +1199,24 @@ impl GrpcClient {
             .context(context)
             .await?;
 
+        Self::validate_broadcast_response(resp, cfg)
+    }
+
+    async fn broadcast_bytes_with_cfg(
+        &self,
+        tx: Bytes,
+        cfg: &TxConfig,
+        context: &Context,
+    ) -> Result<TxResponse> {
+        let resp = self
+            .broadcast_tx_bytes(tx, BroadcastMode::Sync)
+            .context(context)
+            .await?;
+
+        Self::validate_broadcast_response(resp, cfg)
+    }
+
+    fn validate_broadcast_response(resp: TxResponse, cfg: &TxConfig) -> Result<TxResponse> {
         if resp.code != ErrorCode::Success {
             // if transaction failed due to insufficient fee, include info
             // whether gas price was estimated or explicitely set
@@ -1034,6 +1243,29 @@ impl GrpcClient {
         context: &Context,
     ) -> Result<TxInfo> {
         let BroadcastedTx { tx, hash, sequence } = tx;
+        self.confirm_retained_tx(RetainedTx::Vec(tx), hash, sequence, cfg, context)
+            .await
+    }
+
+    async fn confirm_bytes_tx(
+        &self,
+        tx: BytesBroadcastedTx,
+        cfg: TxConfig,
+        context: &Context,
+    ) -> Result<TxInfo> {
+        let BytesBroadcastedTx { tx, hash, sequence } = tx;
+        self.confirm_retained_tx(RetainedTx::Bytes(tx), hash, sequence, cfg, context)
+            .await
+    }
+
+    async fn confirm_retained_tx(
+        &self,
+        tx: RetainedTx,
+        hash: Hash,
+        sequence: u64,
+        cfg: TxConfig,
+        context: &Context,
+    ) -> Result<TxInfo> {
         let mut interval = Interval::new(Duration::from_millis(cfg.confirmation_interval_ms));
 
         loop {
@@ -1078,7 +1310,7 @@ impl GrpcClient {
                 // https://github.com/celestiaorg/celestia-app/pull/5783#discussion_r2360546232
                 TxStatus::Evicted => {
                     if self
-                        .broadcast_tx_with_cfg(tx.clone(), &cfg, context)
+                        .rebroadcast_retained_tx(&tx, &cfg, context)
                         .await
                         .is_err()
                     {
@@ -1103,13 +1335,28 @@ impl GrpcClient {
                 // however we handle it the same as evicted for extra safety
                 TxStatus::Unknown => {
                     if self
-                        .broadcast_tx_with_cfg(tx.clone(), &cfg, context)
+                        .rebroadcast_retained_tx(&tx, &cfg, context)
                         .await
                         .is_err()
                     {
                         return Err(Error::TxNotFound(hash));
                     }
                 }
+            }
+        }
+    }
+
+    async fn rebroadcast_retained_tx(
+        &self,
+        tx: &RetainedTx,
+        cfg: &TxConfig,
+        context: &Context,
+    ) -> Result<TxResponse> {
+        match tx {
+            RetainedTx::Vec(tx) => self.broadcast_tx_with_cfg(tx.clone(), cfg, context).await,
+            RetainedTx::Bytes(tx) => {
+                self.broadcast_bytes_with_cfg(tx.clone(), cfg, context)
+                    .await
             }
         }
     }
@@ -1194,24 +1441,70 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use bytes::Bytes;
     use celestia_proto::cosmos::bank::v1beta1::MsgSend;
+    use celestia_proto::cosmos::tx::v1beta1::BroadcastTxRequest;
     use celestia_rpc::HeaderClient;
     use celestia_types::Blob;
+    use celestia_types::blob::{RawBlob, RawBlobTx};
+    use celestia_types::consts::appconsts;
     use celestia_types::nmt::Namespace;
     use celestia_types::state::{Coin, ErrorCode};
     use futures::FutureExt;
     use lumina_utils::test_utils::async_test;
     use lumina_utils::time::sleep;
+    use prost::Message;
     use rand::{Rng, RngCore};
     use tonic::Code;
 
-    use super::GrpcClient;
-    use crate::grpc::Context;
+    use super::{BLOB_TX_TYPE_ID, BytesBlob, BytesBlobTx, BytesBroadcastTxRequest, GrpcClient};
+    use crate::grpc::{BroadcastMode, Context};
     use crate::test_utils::{
         CELESTIA_GRPC_URL, TestAccount, load_account, new_grpc_client, new_rpc_client,
         new_tx_client, spawn,
     };
     use crate::{Error, TxConfig};
+
+    #[test]
+    fn bytes_messages_are_wire_compatible() {
+        let bytes_blob = BytesBlob {
+            namespace_id: vec![1, 2, 3],
+            data: Bytes::from_static(b"shared payload"),
+            share_version: 1,
+            namespace_version: 0,
+            signer: vec![4; appconsts::SIGNER_SIZE],
+        };
+        let raw_blob = RawBlob::decode(bytes_blob.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(raw_blob.data, bytes_blob.data);
+        assert_eq!(
+            BytesBlob::decode(raw_blob.encode_to_vec().as_slice()).unwrap(),
+            bytes_blob
+        );
+
+        let bytes_blob_tx = BytesBlobTx {
+            tx: vec![5, 6, 7],
+            blobs: vec![bytes_blob],
+            type_id: BLOB_TX_TYPE_ID.to_owned(),
+        };
+        let raw_blob_tx = RawBlobTx::decode(bytes_blob_tx.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(raw_blob_tx.blobs[0].data, bytes_blob_tx.blobs[0].data);
+        assert_eq!(
+            BytesBlobTx::decode(raw_blob_tx.encode_to_vec().as_slice()).unwrap(),
+            bytes_blob_tx
+        );
+
+        let bytes_request = BytesBroadcastTxRequest {
+            tx_bytes: Bytes::from_static(b"encoded blob tx"),
+            mode: BroadcastMode::Sync.into(),
+        };
+        let raw_request =
+            BroadcastTxRequest::decode(bytes_request.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(raw_request.tx_bytes, bytes_request.tx_bytes);
+        assert_eq!(
+            BytesBroadcastTxRequest::decode(raw_request.encode_to_vec().as_slice()).unwrap(),
+            bytes_request
+        );
+    }
 
     #[async_test]
     async fn per_call_context_works() {
@@ -1687,6 +1980,15 @@ mod tests {
         is_send(
             &tx_client
                 .submit_blobs_owned(Vec::new(), TxConfig::default())
+                .into_future(),
+        );
+        is_send(
+            &tx_client
+                .submit_blob_bytes(
+                    Namespace::new_v0(b"bytes").unwrap(),
+                    Bytes::new(),
+                    TxConfig::default(),
+                )
                 .into_future(),
         );
         is_send(

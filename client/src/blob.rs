@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_stream::try_stream;
+use bytes::Bytes;
 use celestia_rpc::BlobClient;
 use futures_util::{Stream, StreamExt};
 
@@ -69,6 +70,28 @@ impl BlobApi {
             Ok(inner
                 .grpc()?
                 .submit_blobs_owned(blobs, cfg)
+                .context(&context)
+                .await?)
+        })
+    }
+
+    /// Submit one shared byte buffer to the Celestia network.
+    ///
+    /// The blob uses share version 1 and the client's signing account as its
+    /// blob signer. The payload remains shared internally throughout
+    /// submission.
+    pub fn submit_bytes(
+        &self,
+        namespace: Namespace,
+        data: Bytes,
+        cfg: TxConfig,
+    ) -> AsyncGrpcCall<TxInfo> {
+        let inner = self.inner.clone();
+
+        AsyncGrpcCall::new(move |context| async move {
+            Ok(inner
+                .grpc()?
+                .submit_blob_bytes(namespace, data, cfg)
                 .context(&context)
                 .await?)
         })
@@ -217,6 +240,29 @@ mod tests {
     }
 
     #[async_test]
+    async fn blob_submit_bytes_and_retrieve() {
+        let client = new_client().await;
+        let namespace = Namespace::new_v0(b"bytes-api").unwrap();
+        let data = Bytes::from_static(b"shared data to store");
+        let signer = client.address().unwrap();
+        let commitment = Commitment::from_blob(namespace, &data, 1, Some(&signer)).unwrap();
+
+        let tx_info = client
+            .blob()
+            .submit_bytes(namespace, data.clone(), TxConfig::default())
+            .await
+            .unwrap();
+        let received = client
+            .blob()
+            .get(tx_info.height, namespace, commitment)
+            .await
+            .unwrap();
+
+        assert_eq!(received.data, data);
+        received.validate_with_commitment(&commitment).unwrap();
+    }
+
+    #[async_test]
     async fn blob_retrieve_unknown() {
         let client = new_client().await;
 
@@ -244,6 +290,11 @@ mod tests {
         let cfg = ensure_serializable_deserializable(unimplemented!());
         ensure_serializable_deserializable(api.submit(&blobs, cfg).await.unwrap());
         ensure_serializable_deserializable(api.submit_owned(blobs, cfg).await.unwrap());
+        ensure_serializable_deserializable(
+            api.submit_bytes(Namespace::new_v0(b"bytes").unwrap(), Bytes::new(), cfg)
+                .await
+                .unwrap(),
+        );
 
         let namespace = ensure_serializable_deserializable(unimplemented!());
         let commitment = ensure_serializable_deserializable(unimplemented!());
