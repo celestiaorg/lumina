@@ -144,37 +144,37 @@ Construction scales with payload size:
 Each row is the median delta from the immediately preceding stage. Negative
 values are improvements.
 
-| Optimization | Affected measurement | Total bytes | Allocations | Peak bytes |
-| --- | --- | ---: | ---: | ---: |
-| exact share-vector preallocation | one commitment pass | -8,995,455 | -12 | -592,515 |
-| exact share-vector preallocation | full construct + submit | -17,990,904 | -24 | +2 |
-| stack-backed share construction | one commitment pass | -7,797,248 | -15,229 | 0 |
-| stack-backed share construction | full construct + submit | -15,594,493 | -30,458 | +1 |
-| retained raw blobs | direct gRPC submit | -7,340,112 | -4 | +440 |
-| retained raw blobs | stale-sequence retry | -14,680,274 | -9 | +442 |
-| private ownership flow | direct gRPC submit | -7,340,115 | -2 | -7,340,122 |
-| private ownership flow | full construct + submit | -7,340,115 | -2 | -7,340,122 |
-| exact tonic encode buffer | transport-only broadcast | -14,688,522 | -2 | -7,339,536 |
-| exact tonic encode buffer | stale-sequence retry | -29,378,964 | -5 | -7,339,932 |
-| root-only NMT accumulation | one commitment pass | -22,896,820 | -61,882 | -96,612 |
-| root-only NMT accumulation | full construct + submit | -45,794,822 | -123,767 | -30 |
-| owned delegation | borrowed full construct + submit | -7,340,160 | -2 | -7,340,160 |
-| owned input | owned vs borrowed full path | -7,340,032 | -1 | -7,340,032 |
-| shared transport payload | direct Bytes vs owned Blob | -14,681,028 | -1 | -14,680,948 |
-| end-to-end Bytes input | client Bytes vs full owned Blob | -29,846,641 | -10 | -22,020,948 |
-| shared retry payload | Bytes vs borrowed Blob stale retry | -36,701,922 | -2 | -22,020,984 |
+| Optimization | Affected measurement | Total bytes | Allocations | Peak bytes | Commit |
+| --- | --- | ---: | ---: | ---: | --- |
+| exact share-vector preallocation | one commitment pass | -8,995,455 | -12 | -592,515 | `4bd2a9a` |
+| exact share-vector preallocation | full construct + submit | -17,990,904 | -24 | +2 | `4bd2a9a` |
+| stack-backed share construction | one commitment pass | -7,797,248 | -15,229 | 0 | `cfd1400` |
+| stack-backed share construction | full construct + submit | -15,594,493 | -30,458 | +1 | `cfd1400` |
+| retained raw blobs | direct gRPC submit | -7,340,112 | -4 | +440 | `7dd1e44` |
+| retained raw blobs | stale-sequence retry | -14,680,274 | -9 | +442 | `7dd1e44` |
+| private ownership flow | direct gRPC submit | -7,340,115 | -2 | -7,340,122 | `282f61e` |
+| private ownership flow | full construct + submit | -7,340,115 | -2 | -7,340,122 | `282f61e` |
+| exact tonic encode buffer | transport-only broadcast | -14,688,522 | -2 | -7,339,536 | `d43b2f1` |
+| exact tonic encode buffer | stale-sequence retry | -29,378,964 | -5 | -7,339,932 | `d43b2f1` |
+| root-only NMT accumulation | one commitment pass | -22,896,820 | -61,882 | -96,612 | `5ac130a` |
+| root-only NMT accumulation | full construct + submit | -45,794,822 | -123,767 | -30 | `5ac130a` |
+| owned delegation | borrowed full construct + submit | -7,340,160 | -2 | -7,340,160 | `e483894` |
+| owned input | owned vs borrowed full path | -7,340,032 | -1 | -7,340,032 | `e483894` |
+| shared transport payload | direct Bytes vs owned Blob | -14,681,028 | -1 | -14,680,948 | `893196a` |
+| end-to-end Bytes input | client Bytes vs full owned Blob | -29,846,641 | -10 | -22,020,948 | `893196a` |
+| shared retry payload | Bytes vs borrowed Blob stale retry | -36,701,922 | -2 | -22,020,984 | `893196a` |
 
 ### Final 7 MiB comparison
 
 The borrowed methods retain their original signatures. The owned and Bytes
 rows are additive APIs for callers that can transfer or share their input.
 
-| Full high-level path | Total bytes | Allocations | Peak bytes |
-| --- | ---: | ---: | ---: |
-| baseline borrowed Blob | 175,917,618 | 154,612 | 66,073,361 |
-| optimized borrowed Blob | 59,827,550 | 353 | 44,053,461 |
-| optimized owned Blob | 52,487,518 | 352 | 36,713,429 |
-| optimized Bytes | 22,640,877 | 342 | 14,692,481 |
+| Full high-level path | Total bytes | Allocations | Peak bytes | Commit |
+| --- | ---: | ---: | ---: | --- |
+| baseline borrowed Blob | 175,917,618 | 154,612 | 66,073,361 | `83a57fd` |
+| optimized borrowed Blob | 59,827,550 | 353 | 44,053,461 | `e483894` |
+| optimized owned Blob | 52,487,518 | 352 | 36,713,429 | `e483894` |
+| optimized Bytes | 22,640,877 | 342 | 14,692,481 | `893196a` |
 
 The optimized borrowed path cuts cumulative allocation by 65.99%. The Bytes
 path cuts it by 87.13%, cuts peak bytes by 77.76%, and reduces allocation count
