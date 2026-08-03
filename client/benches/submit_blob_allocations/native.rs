@@ -60,8 +60,11 @@ enum Phase {
     Construct,
     Broadcast,
     GrpcSubmit,
+    GrpcSubmitOwned,
     ClientSubmit,
+    ClientSubmitOwned,
     Full,
+    FullOwned,
 }
 
 impl Phase {
@@ -70,8 +73,11 @@ impl Phase {
             "construct" => Ok(Self::Construct),
             "broadcast" => Ok(Self::Broadcast),
             "grpc-submit" => Ok(Self::GrpcSubmit),
+            "grpc-submit-owned" => Ok(Self::GrpcSubmitOwned),
             "client-submit" => Ok(Self::ClientSubmit),
+            "client-submit-owned" => Ok(Self::ClientSubmitOwned),
             "full" => Ok(Self::Full),
+            "full-owned" => Ok(Self::FullOwned),
             _ => Err(argument_error(format!("unknown phase: {value}"))),
         }
     }
@@ -81,8 +87,11 @@ impl Phase {
             Self::Construct => "construct",
             Self::Broadcast => "broadcast",
             Self::GrpcSubmit => "grpc-submit",
+            Self::GrpcSubmitOwned => "grpc-submit-owned",
             Self::ClientSubmit => "client-submit",
+            Self::ClientSubmitOwned => "client-submit-owned",
             Self::Full => "full",
+            Self::FullOwned => "full-owned",
         }
     }
 
@@ -247,8 +256,11 @@ pub(super) async fn run() -> Result<()> {
         Phase::Construct => profile_construct(&config, &profile_path).await?,
         Phase::Broadcast => profile_broadcast(&config, &profile_path).await?,
         Phase::GrpcSubmit => profile_grpc_submit(&config, &profile_path).await?,
+        Phase::GrpcSubmitOwned => profile_grpc_submit_owned(&config, &profile_path).await?,
         Phase::ClientSubmit => profile_client_submit(&config, &profile_path).await?,
+        Phase::ClientSubmitOwned => profile_client_submit_owned(&config, &profile_path).await?,
         Phase::Full => profile_full(&config, &profile_path).await?,
+        Phase::FullOwned => profile_full_owned(&config, &profile_path).await?,
     };
 
     println!("profile: {}", profile_path.display());
@@ -329,6 +341,28 @@ async fn profile_grpc_submit(config: &Config, profile_path: &Path) -> Result<Pro
     Ok(summary)
 }
 
+async fn profile_grpc_submit_owned(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
+    let client = build_grpc(config, Scenario::Happy)?;
+    warm_grpc(&client).await?;
+    if config.scenario == Scenario::StaleSequence {
+        advance_sequence(config).await?;
+    }
+
+    let address = client
+        .get_account_address()
+        .ok_or_else(|| argument_error("benchmark client has no signer"))?;
+    let blob = make_blob(config.size, address)?;
+    let tx_config = submission_config(config.scenario);
+
+    let profiler = start_profiler(profile_path);
+    let result = client.submit_blobs_owned(vec![blob], tx_config).await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    black_box(result?);
+    Ok(summary)
+}
+
 async fn profile_client_submit(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
     let client = build_client(config).await?;
     warm_client(&client).await?;
@@ -341,6 +375,31 @@ async fn profile_client_submit(config: &Config, profile_path: &Path) -> Result<P
 
     let profiler = start_profiler(profile_path);
     let result = client.state().submit_pay_for_blob(&[blob], tx_config).await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    black_box(result?);
+    Ok(summary)
+}
+
+async fn profile_client_submit_owned(
+    config: &Config,
+    profile_path: &Path,
+) -> Result<ProfileSummary> {
+    let client = build_client(config).await?;
+    warm_client(&client).await?;
+    if config.scenario == Scenario::StaleSequence {
+        advance_sequence(config).await?;
+    }
+
+    let blob = make_blob(config.size, client.address()?)?;
+    let tx_config = submission_config(config.scenario);
+
+    let profiler = start_profiler(profile_path);
+    let result = client
+        .state()
+        .submit_pay_for_blob_owned(vec![blob], tx_config)
+        .await;
     black_box(&result);
     let summary = finish_profiler(profiler);
 
@@ -366,6 +425,35 @@ async fn profile_full(config: &Config, profile_path: &Path) -> Result<ProfileSum
         client
             .state()
             .submit_pay_for_blob(&[blob], tx_config)
+            .await
+            .map_err(DynError::from)
+    }
+    .await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    black_box(result?);
+    Ok(summary)
+}
+
+async fn profile_full_owned(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
+    let client = build_client(config).await?;
+    warm_client(&client).await?;
+    if config.scenario == Scenario::StaleSequence {
+        advance_sequence(config).await?;
+    }
+
+    let payload = vec![0xA5; config.size];
+    let address = client.address()?;
+    let namespace = benchmark_namespace();
+    let tx_config = submission_config(config.scenario);
+
+    let profiler = start_profiler(profile_path);
+    let result = async {
+        let blob = Blob::new(namespace, payload.to_vec(), Some(address))?;
+        client
+            .state()
+            .submit_pay_for_blob_owned(vec![blob], tx_config)
             .await
             .map_err(DynError::from)
     }
@@ -505,7 +593,9 @@ USAGE:
 
 OPTIONS:
   --phase <PHASE>              construct | broadcast | grpc-submit |
-                               client-submit | full [default: construct]
+                               grpc-submit-owned | client-submit |
+                               client-submit-owned | full | full-owned
+                               [default: construct]
   --scenario <SCENARIO>        happy | stale-sequence | failover [default: happy]
   --size <BYTES|KiB|MiB>       Payload size [default: 7MiB]
   --rpc-url <URL>              RPC endpoint [default: ws://localhost:26658]

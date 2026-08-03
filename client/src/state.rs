@@ -256,13 +256,25 @@ impl StateApi {
     ///
     /// [`BlobApi::submit`]: crate::api::BlobApi::submit
     pub fn submit_pay_for_blob(&self, blobs: &[Blob], cfg: TxConfig) -> AsyncGrpcCall<TxInfo> {
+        self.submit_pay_for_blob_owned(blobs.to_vec(), cfg)
+    }
+
+    /// Builds, signs and submits a PayForBlob transaction from owned blobs.
+    ///
+    /// This is equivalent to [`StateApi::submit_pay_for_blob`], but avoids
+    /// cloning blob payloads when the caller can transfer ownership of the
+    /// input.
+    pub fn submit_pay_for_blob_owned(
+        &self,
+        blobs: Vec<Blob>,
+        cfg: TxConfig,
+    ) -> AsyncGrpcCall<TxInfo> {
         let inner = self.inner.clone();
-        let blobs = blobs.to_vec();
 
         AsyncGrpcCall::new(move |context| async move {
             Ok(inner
                 .grpc()?
-                .submit_blobs(&blobs, cfg)
+                .submit_blobs_owned(blobs, cfg)
                 .context(&context)
                 .await?)
         })
@@ -750,6 +762,9 @@ mod tests {
 
         let blobs: Vec<_> = ensure_serializable_deserializable(unimplemented!());
         ensure_serializable_deserializable(api.submit_pay_for_blob(&blobs, cfg).await.unwrap());
+        ensure_serializable_deserializable(
+            api.submit_pay_for_blob_owned(blobs, cfg).await.unwrap(),
+        );
 
         ensure_serializable_deserializable(
             api.cancel_unbonding_delegation(&val_addr, 0, 0, cfg)

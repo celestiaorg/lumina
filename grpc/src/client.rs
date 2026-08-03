@@ -561,8 +561,15 @@ impl GrpcClient {
     /// # }
     /// ```
     pub fn submit_blobs(&self, blobs: &[Blob], cfg: TxConfig) -> AsyncGrpcCall<TxInfo> {
+        self.submit_blobs_owned(blobs.to_vec(), cfg)
+    }
+
+    /// Submit owned blobs to the Celestia network.
+    ///
+    /// This is equivalent to [`GrpcClient::submit_blobs`], but avoids cloning
+    /// blob payloads when the caller can transfer ownership of the input.
+    pub fn submit_blobs_owned(&self, blobs: Vec<Blob>, cfg: TxConfig) -> AsyncGrpcCall<TxInfo> {
         let this = self.clone();
-        let blobs = blobs.to_vec();
 
         AsyncGrpcCall::new(move |context| async move {
             let tx = this.submit_blobs_impl(blobs, cfg.clone(), &context).await?;
@@ -1369,8 +1376,8 @@ mod tests {
         let (_lock, tx_client) = new_tx_client().await;
 
         let tx = tx_client
-            .submit_blobs(
-                &[random_blob(10..=1000)],
+            .submit_blobs_owned(
+                vec![random_blob(10..=1000)],
                 TxConfig::default().with_memo("foo"),
             )
             .await
@@ -1675,6 +1682,11 @@ mod tests {
         is_send(
             &tx_client
                 .submit_blobs(&[], TxConfig::default())
+                .into_future(),
+        );
+        is_send(
+            &tx_client
+                .submit_blobs_owned(Vec::new(), TxConfig::default())
                 .into_future(),
         );
         is_send(

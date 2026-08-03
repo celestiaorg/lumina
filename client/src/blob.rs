@@ -55,13 +55,20 @@ impl BlobApi {
     ///
     /// [`StateApi::submit_pay_for_blob`]: crate::api::StateApi::submit_pay_for_blob
     pub fn submit(&self, blobs: &[Blob], cfg: TxConfig) -> AsyncGrpcCall<TxInfo> {
+        self.submit_owned(blobs.to_vec(), cfg)
+    }
+
+    /// Submit owned blobs to the Celestia network.
+    ///
+    /// This is equivalent to [`BlobApi::submit`], but avoids cloning blob
+    /// payloads when the caller can transfer ownership of the input.
+    pub fn submit_owned(&self, blobs: Vec<Blob>, cfg: TxConfig) -> AsyncGrpcCall<TxInfo> {
         let inner = self.inner.clone();
-        let blobs = blobs.to_vec();
 
         AsyncGrpcCall::new(move |context| async move {
             Ok(inner
                 .grpc()?
-                .submit_blobs(&blobs, cfg)
+                .submit_blobs_owned(blobs, cfg)
                 .context(&context)
                 .await?)
         })
@@ -194,7 +201,7 @@ mod tests {
         let submitted_commitment = blob.commitment;
         let tx_info = client
             .blob()
-            .submit(&[blob], TxConfig::default())
+            .submit_owned(vec![blob], TxConfig::default())
             .await
             .unwrap();
 
@@ -236,6 +243,7 @@ mod tests {
         let blobs: Vec<_> = ensure_serializable_deserializable(unimplemented!());
         let cfg = ensure_serializable_deserializable(unimplemented!());
         ensure_serializable_deserializable(api.submit(&blobs, cfg).await.unwrap());
+        ensure_serializable_deserializable(api.submit_owned(blobs, cfg).await.unwrap());
 
         let namespace = ensure_serializable_deserializable(unimplemented!());
         let commitment = ensure_serializable_deserializable(unimplemented!());

@@ -78,6 +78,17 @@ cargo bench -p celestia-client --bench submit_blob_allocations \
   --features allocation-profiling -- \
   --phase full --size 7MiB
 
+# Compare the additive owned-input APIs
+cargo bench -p celestia-client --bench submit_blob_allocations \
+  --features allocation-profiling -- \
+  --phase grpc-submit-owned --size 7MiB
+cargo bench -p celestia-client --bench submit_blob_allocations \
+  --features allocation-profiling -- \
+  --phase client-submit-owned --size 7MiB
+cargo bench -p celestia-client --bench submit_blob_allocations \
+  --features allocation-profiling -- \
+  --phase full-owned --size 7MiB
+
 # Isolate transport request cloning and force exceptional paths
 cargo bench -p celestia-client --bench submit_blob_allocations \
   --features allocation-profiling -- \
@@ -139,6 +150,8 @@ values are improvements.
 | exact tonic encode buffer | stale-sequence retry | -29,378,964 | -5 | -7,339,932 |
 | root-only NMT accumulation | one commitment pass | -22,896,820 | -61,882 | -96,612 |
 | root-only NMT accumulation | full construct + submit | -45,794,822 | -123,767 | -30 |
+| owned delegation | borrowed full construct + submit | -7,340,160 | -2 | -7,340,160 |
+| owned input | owned vs borrowed full path | -7,340,032 | -1 | -7,340,032 |
 
 ### Largest 7 MiB allocation sites
 
