@@ -50,8 +50,9 @@ impl SignatureSet {
         required_bytes_signed: Vec<u8>,
     ) -> Self {
         let total_voting_power: i64 = validators.iter().map(|v| v.voting_power).sum();
-        let min_required_voting_power = total_voting_power * target_voting_power.numerator as i64
-            / target_voting_power.denominator as i64;
+        let min_required_voting_power = total_voting_power
+            * target_voting_power.numerator.get() as i64
+            / target_voting_power.denominator.get() as i64;
 
         let capacity = validators.len();
         Self {
@@ -143,6 +144,8 @@ impl ValidatorSet {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+
+    use crate::test_utils::fraction;
     use rand::RngCore;
 
     /// Helper: generate a ValidatorInfo with a fresh ed25519 keypair.
@@ -178,14 +181,7 @@ mod tests {
         let data = b"hello world";
         let sig = sign(&sk, data);
 
-        let ss = SignatureSet::new(
-            vec![val.clone()],
-            Fraction {
-                numerator: 1,
-                denominator: 2,
-            },
-            data.to_vec(),
-        );
+        let ss = SignatureSet::new(vec![val.clone()], fraction(1, 2), data.to_vec());
 
         let result = ss.add(&val, &sig);
         assert!(result.is_ok(), "valid signature should be accepted");
@@ -199,14 +195,7 @@ mod tests {
         let (wrong_sk, _) = make_validator(10);
         let bad_sig = sign(&wrong_sk, data);
 
-        let ss = SignatureSet::new(
-            vec![val.clone()],
-            Fraction {
-                numerator: 1,
-                denominator: 2,
-            },
-            data.to_vec(),
-        );
+        let ss = SignatureSet::new(vec![val.clone()], fraction(1, 2), data.to_vec());
 
         let result = ss.add(&val, &bad_sig);
         assert!(result.is_err(), "invalid signature should be rejected");
@@ -230,10 +219,7 @@ mod tests {
 
         let ss = SignatureSet::new(
             vec![v1.clone(), v2.clone(), v3.clone()],
-            Fraction {
-                numerator: 2,
-                denominator: 3,
-            },
+            fraction(2, 3),
             data.to_vec(),
         );
 
@@ -260,10 +246,7 @@ mod tests {
 
         let ss = SignatureSet::new(
             vec![v1.clone(), v2.clone(), v3.clone()],
-            Fraction {
-                numerator: 1,
-                denominator: 3,
-            },
+            fraction(1, 3),
             data.to_vec(),
         );
 
@@ -291,14 +274,7 @@ mod tests {
 
         let data = b"fail test";
 
-        let ss = SignatureSet::new(
-            vec![v1.clone(), v2.clone()],
-            Fraction {
-                numerator: 2,
-                denominator: 3,
-            },
-            data.to_vec(),
-        );
+        let ss = SignatureSet::new(vec![v1.clone(), v2.clone()], fraction(2, 3), data.to_vec());
 
         // Only v1 signs. Total power = 10, required = 30 * 2 / 3 = 20.
         ss.add(&v1, &sign(&sk1, data)).unwrap();
@@ -324,14 +300,7 @@ mod tests {
         let (sk, v) = make_validator(25);
         let data = b"dup test";
 
-        let ss = SignatureSet::new(
-            vec![v.clone()],
-            Fraction {
-                numerator: 2,
-                denominator: 3,
-            },
-            data.to_vec(),
-        );
+        let ss = SignatureSet::new(vec![v.clone()], fraction(2, 3), data.to_vec());
 
         // min_required = 25 * 2 / 3 = 16 (integer division).
         // First add: power = 25 >= 16 => true

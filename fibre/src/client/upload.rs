@@ -10,6 +10,8 @@
 use std::sync::Arc;
 
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
+use celestia_types::nmt::Namespace;
+use celestia_types::state::AccAddress;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +35,7 @@ impl FibreClient {
     pub async fn upload(
         &self,
         signing_key: &k256::ecdsa::SigningKey,
-        namespace: &[u8],
+        namespace: Namespace,
         blob: Blob,
     ) -> Result<SignedPaymentPromise, FibreError> {
         if self.cancel_token.is_cancelled() {
@@ -55,7 +57,7 @@ impl FibreClient {
         let mut promise = PaymentPromise {
             chain_id: self.cfg.chain_id.clone(),
             height: val_set.height,
-            namespace: namespace.to_vec(),
+            namespace,
             upload_size: upload_size_u32,
             blob_version: blob.config().blob_version as u32,
             commitment: blob.id().commitment(),
@@ -110,9 +112,9 @@ impl FibreClient {
     pub async fn upload_and_prepare(
         &self,
         signing_key: &k256::ecdsa::SigningKey,
-        namespace: &[u8],
+        namespace: Namespace,
         data: &[u8],
-        signer_address: &str,
+        signer_address: &AccAddress,
     ) -> Result<MsgPayForFibre, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
@@ -264,6 +266,7 @@ impl FibreClient {
 mod tests {
     use std::sync::Arc;
 
+    use celestia_types::nmt::Namespace;
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
@@ -302,8 +305,8 @@ mod tests {
 
         let sk = test_signing_key();
         let blob = make_test_blob();
-        let namespace = vec![0u8; 29];
-        let result = client.upload(&sk, &namespace, blob).await;
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
+        let result = client.upload(&sk, namespace, blob).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             FibreError::ClientClosed => {}
@@ -332,9 +335,9 @@ mod tests {
         let sk = test_signing_key();
         let client = build_test_client(val_set, connector, "test-chain");
         let blob = make_test_blob();
-        let namespace = vec![0u8; 29];
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
-        let result = client.upload(&sk, &namespace, blob).await;
+        let result = client.upload(&sk, namespace, blob).await;
         assert!(result.is_ok(), "upload should succeed: {:?}", result.err());
 
         let signed = result.unwrap();
@@ -381,11 +384,11 @@ mod tests {
 
         let client = build_test_client(val_set, connector, "test-chain");
         let blob = make_test_blob();
-        let namespace = vec![0u8; 29];
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
         // Upload returns once signature threshold is met.
         client
-            .upload(&test_signing_key(), &namespace, blob)
+            .upload(&test_signing_key(), namespace, blob)
             .await
             .unwrap();
 
@@ -428,9 +431,9 @@ mod tests {
 
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let blob = make_test_blob();
-        let namespace = vec![0u8; 29];
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
-        let result = client.upload(&test_signing_key(), &namespace, blob).await;
+        let result = client.upload(&test_signing_key(), namespace, blob).await;
         assert!(
             result.is_ok(),
             "upload should succeed with 3/5 validators: {:?}",
@@ -484,9 +487,9 @@ mod tests {
 
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let blob = make_test_blob();
-        let namespace = vec![0u8; 29];
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
-        let result = client.upload(&test_signing_key(), &namespace, blob).await;
+        let result = client.upload(&test_signing_key(), namespace, blob).await;
         assert!(
             result.is_err(),
             "upload should fail when not enough signatures"
@@ -511,11 +514,15 @@ mod tests {
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();
 
-        let namespace = vec![0u8; 29];
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
         let data = vec![1u8; 100];
         let sk = test_signing_key();
+        let signer: celestia_types::state::AccAddress =
+            "celestia1377k5an3f94v6wyaceu0cf4nq6gk2jtpc46g7h"
+                .parse()
+                .unwrap();
         let result = client
-            .upload_and_prepare(&sk, &namespace, &data, "celestia1test")
+            .upload_and_prepare(&sk, namespace, &data, &signer)
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {

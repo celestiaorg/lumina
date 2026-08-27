@@ -85,8 +85,8 @@ impl ValidatorSet {
             .map(|v| {
                 let num = (original_rows as i64)
                     * v.voting_power
-                    * (liveness_threshold.denominator as i64);
-                let den = total_voting_power * (liveness_threshold.numerator as i64);
+                    * (liveness_threshold.denominator.get() as i64);
+                let den = total_voting_power * (liveness_threshold.numerator.get() as i64);
                 let rows = ((num + den - 1) / den) as usize;
                 (rows.max(min_rows).min(original_rows), v)
             })
@@ -145,8 +145,8 @@ impl ValidatorSet {
 
         let total_voting_power = self.total_voting_power();
         let total_distributed_rows = (original_rows as i64)
-            * (liveness_threshold.denominator as i64)
-            / (liveness_threshold.numerator as i64);
+            * (liveness_threshold.denominator.get() as i64)
+            / (liveness_threshold.numerator.get() as i64);
         let min_stake = ((min_rows as i64) * total_voting_power + total_distributed_rows - 1)
             / total_distributed_rows;
 
@@ -355,10 +355,7 @@ mod assignment_tests {
     }
 
     fn default_liveness() -> Fraction {
-        Fraction {
-            numerator: 1,
-            denominator: 3,
-        }
+        crate::test_utils::fraction(1, 3)
     }
 
     #[test]
@@ -561,16 +558,7 @@ mod assignment_tests {
             *byte = (i + 1) as u8;
         }
 
-        let map = set.assign(
-            commitment,
-            16,
-            8,
-            2,
-            Fraction {
-                numerator: 1,
-                denominator: 3,
-            },
-        );
+        let map = set.assign(commitment, 16, 8, 2, crate::test_utils::fraction(1, 3));
 
         assert_eq!(map.get(0).unwrap(), &vec![3, 13, 15, 12, 1, 7, 0, 8]);
         assert_eq!(map.get(1).unwrap(), &vec![4, 10, 11, 2, 9, 14, 6, 5]);
@@ -615,10 +603,7 @@ mod selection_tests {
     }
 
     fn default_liveness() -> Fraction {
-        Fraction {
-            numerator: 1,
-            denominator: 3,
-        }
+        crate::test_utils::fraction(1, 3)
     }
 
     #[test]

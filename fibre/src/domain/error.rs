@@ -77,18 +77,10 @@ pub enum FibreError {
         reason: String,
     },
 
-    /// Signature verification failed (e.g., validator or payment promise signature).
-    #[error("signature verification failed")]
-    SignatureVerificationFailed,
-
     // -- PaymentPromise errors --
     /// The payment promise failed validation.
     #[error("payment promise validation failed: {0}")]
     InvalidPaymentPromise(String),
-
-    /// Signing the payment promise failed.
-    #[error("signing payment promise failed: {0}")]
-    SigningFailed(String),
 
     // -- Connection errors --
     /// No host address was found for a validator.

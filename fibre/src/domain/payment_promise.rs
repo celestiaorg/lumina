@@ -6,6 +6,7 @@
 
 use std::time::SystemTime;
 
+use celestia_types::nmt::{NS_SIZE, Namespace};
 use k256::ecdsa::signature::Signer;
 use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -20,9 +21,6 @@ pub const SIGN_BYTES_PREFIX: &[u8] = b"fibre/pp:v0";
 /// Size of the secp256k1 compressed public key (33 bytes).
 const PUBKEY_SIZE: usize = 33;
 
-/// Size of the Celestia namespace (29 bytes).
-const NAMESPACE_SIZE: usize = 29;
-
 /// Size of a secp256k1 signature in compact format (32 bytes r + 32 bytes s).
 const SIGNATURE_SIZE: usize = 64;
 
@@ -33,8 +31,7 @@ const MAX_CHAIN_ID_SIZE: usize = 20;
 const TIMESTAMP_BINARY_SIZE: usize = 15;
 
 /// Fixed-size portion of sign bytes (excluding prefix and variable-length chain_id).
-const SIGN_BYTES_FIXED_SIZE: usize =
-    PUBKEY_SIZE + NAMESPACE_SIZE + 4 + 32 + 4 + 8 + TIMESTAMP_BINARY_SIZE;
+const SIGN_BYTES_FIXED_SIZE: usize = PUBKEY_SIZE + NS_SIZE + 4 + 32 + 4 + 8 + TIMESTAMP_BINARY_SIZE;
 
 /// A promise to pay for fibre blob storage.
 ///
@@ -46,8 +43,8 @@ pub struct PaymentPromise {
     pub chain_id: String,
     /// Height used to determine the validator set.
     pub height: u64,
-    /// The 29-byte namespace the blob is associated with.
-    pub namespace: Vec<u8>,
+    /// The namespace the blob is associated with.
+    pub namespace: Namespace,
     /// Upload size of the blob (with padding, without parity), matching `Blob::upload_size()`.
     pub upload_size: u32,
     /// Version of the blob format.
@@ -70,14 +67,6 @@ impl PaymentPromise {
     /// suitable for wrapping with CometBFT domain separation via
     /// [`raw_bytes_message_sign_bytes`].
     fn stripped_sign_bytes(&self) -> Result<Vec<u8>, FibreError> {
-        if self.namespace.len() != NAMESPACE_SIZE {
-            return Err(FibreError::InvalidPaymentPromise(format!(
-                "namespace must be {} bytes, got {}",
-                NAMESPACE_SIZE,
-                self.namespace.len()
-            )));
-        }
-
         let timestamp_bytes = marshal_binary_time(self.creation_timestamp)?;
 
         let mut buf = Vec::with_capacity(SIGN_BYTES_FIXED_SIZE);
@@ -88,7 +77,7 @@ impl PaymentPromise {
         buf.extend_from_slice(&pubkey_bytes);
 
         // Append namespace (29 bytes)
-        buf.extend_from_slice(&self.namespace);
+        buf.extend_from_slice(self.namespace.as_bytes());
 
         // Append blob_size (4 bytes, big-endian)
         buf.extend_from_slice(&self.upload_size.to_be_bytes());
@@ -137,7 +126,7 @@ impl PaymentPromise {
             height = self.height,
             upload_size = self.upload_size,
             blob_version = self.blob_version,
-            namespace_hex = %hex::encode(&self.namespace),
+            namespace_hex = %hex::encode(self.namespace.as_bytes()),
             commitment_hex = %hex::encode(self.commitment),
             pubkey_hex = %hex::encode(self.signer_pubkey.to_sec1_bytes().as_ref()),
             "signing payment promise"
@@ -172,15 +161,6 @@ impl PaymentPromise {
                 "chain id length {} exceeds maximum {}",
                 self.chain_id.len(),
                 MAX_CHAIN_ID_SIZE
-            )));
-        }
-
-        // Namespace must be exactly NAMESPACE_SIZE bytes
-        if self.namespace.len() != NAMESPACE_SIZE {
-            return Err(FibreError::InvalidPaymentPromise(format!(
-                "namespace must be {} bytes, got {}",
-                NAMESPACE_SIZE,
-                self.namespace.len()
             )));
         }
 
@@ -260,7 +240,8 @@ pub struct SignedPaymentPromise {
     /// The payment commitment promise that was signed by validators.
     pub promise: PaymentPromise,
     /// Signatures from validators confirming they received and stored the blob.
-    /// Ordered by validator set position; `None` entries for non-signers.
+    /// Ordered by validator set position (the on-chain code maps
+    /// `signatures[i]` to `validator[i]`); `None` entries for non-signers.
     pub validator_signatures: Vec<Option<Vec<u8>>>,
 }
 
@@ -372,7 +353,7 @@ mod tests {
         let promise = PaymentPromise {
             chain_id: "test-chain-1".to_string(),
             height: 12345,
-            namespace: vec![0u8; NAMESPACE_SIZE],
+            namespace: Namespace::from_raw(&[0u8; NS_SIZE]).unwrap(),
             upload_size: 1024,
             blob_version: 0,
             commitment: [1u8; 32],
@@ -422,10 +403,10 @@ mod tests {
 
         // Namespace (29 bytes)
         assert_eq!(
-            &stripped[offset..offset + NAMESPACE_SIZE],
-            &promise.namespace
+            &stripped[offset..offset + NS_SIZE],
+            promise.namespace.as_bytes()
         );
-        offset += NAMESPACE_SIZE;
+        offset += NS_SIZE;
 
         // Upload size (4 bytes BE)
         assert_eq!(
@@ -490,20 +471,6 @@ mod tests {
         promise.chain_id = String::new();
         promise.sign(&signing_key).unwrap();
         assert!(promise.validate().is_err());
-    }
-
-    #[test]
-    fn validate_fails_with_wrong_namespace_length() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.namespace = vec![0u8; 10]; // wrong length
-        promise.sign(&signing_key).unwrap_err(); // stripped_sign_bytes fails
-    }
-
-    #[test]
-    fn stripped_sign_bytes_fails_with_wrong_namespace_length() {
-        let (_, mut promise) = make_test_promise();
-        promise.namespace = vec![0u8; 30]; // wrong length
-        assert!(promise.sign_bytes().is_err());
     }
 
     #[test]
@@ -630,7 +597,7 @@ mod tests {
         let mut promise = PaymentPromise {
             chain_id: "mocha-4".to_string(),
             height: 100,
-            namespace: vec![0u8; NAMESPACE_SIZE],
+            namespace: Namespace::from_raw(&[0u8; NS_SIZE]).unwrap(),
             upload_size: 1024,
             blob_version: 0,
             commitment: [0xABu8; 32],
@@ -739,7 +706,7 @@ mod tests {
         let mut promise = PaymentPromise {
             chain_id: "mocha-4".to_string(),
             height: 100,
-            namespace: vec![0u8; NAMESPACE_SIZE],
+            namespace: Namespace::from_raw(&[0u8; NS_SIZE]).unwrap(),
             upload_size: 1024,
             blob_version: 0,
             commitment: [0xABu8; 32],
@@ -782,7 +749,7 @@ mod tests {
         let reconstructed = PaymentPromise {
             chain_id: decoded_proto.chain_id,
             height: decoded_proto.height as u64,
-            namespace: decoded_proto.namespace,
+            namespace: Namespace::from_raw(&decoded_proto.namespace).unwrap(),
             upload_size: decoded_proto.blob_size,
             blob_version: decoded_proto.blob_version,
             commitment: decoded_proto.commitment.try_into().unwrap(),

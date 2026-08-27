@@ -9,6 +9,7 @@ use celestia_fibre::{
     Blob, BlobID, DownloadOptions, FibreClient, FibreError, SignedPaymentPromise,
 };
 use celestia_grpc::{SubmittedTx, TxConfig};
+use celestia_types::nmt::Namespace;
 use k256::ecdsa::SigningKey;
 
 use crate::Error;
@@ -38,7 +39,7 @@ impl FibreApi {
     pub async fn upload(
         &self,
         signing_key: &SigningKey,
-        namespace: &[u8],
+        namespace: Namespace,
         blob: Blob,
     ) -> Result<SignedPaymentPromise, FibreError> {
         self.fibre_client.upload(signing_key, namespace, blob).await
@@ -55,7 +56,7 @@ impl FibreApi {
     pub async fn put(
         &self,
         signing_key: &SigningKey,
-        namespace: &[u8],
+        namespace: Namespace,
         data: &[u8],
     ) -> Result<SubmittedTx, Error> {
         let grpc = self.inner.grpc()?;
@@ -65,7 +66,7 @@ impl FibreApi {
 
         let msg = self
             .fibre_client
-            .upload_and_prepare(signing_key, namespace, data, &signer_address.to_string())
+            .upload_and_prepare(signing_key, namespace, data, &signer_address)
             .await
             .map_err(fibre_err)?;
 
