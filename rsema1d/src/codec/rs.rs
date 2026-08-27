@@ -111,7 +111,8 @@ pub fn extend_rlcs(rlc_orig: &[GF128], k: usize, n: usize) -> Result<Vec<GF128>>
     }
 
     let mut shards = vec![0u8; k * 64];
-    for (dst_shard, rlc) in shards.chunks_exact_mut(64).zip(rlc_orig.iter()) {
+    let (dst_shards, _) = shards.as_chunks_mut::<64>();
+    for (dst_shard, rlc) in dst_shards.iter_mut().zip(rlc_orig.iter()) {
         let packed = pack_gf128_to_shard(rlc);
         dst_shard.copy_from_slice(&packed);
     }
@@ -121,9 +122,10 @@ pub fn extend_rlcs(rlc_orig: &[GF128], k: usize, n: usize) -> Result<Vec<GF128>>
     let (orig, parity) = extended_shards.split_at_mut(split_at);
     orig.copy_from_slice(&shards);
     fill_parity(orig, parity, k, n, 64)?;
-    Ok(extended_shards
-        .chunks_exact(64)
-        .map(unpack_shard_to_gf128)
+    let (extended, _) = extended_shards.as_chunks::<64>();
+    Ok(extended
+        .iter()
+        .map(|shard| unpack_shard_to_gf128(shard))
         .collect())
 }
 

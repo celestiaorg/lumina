@@ -824,6 +824,8 @@ fn calc_overlap(
 }
 
 #[cfg(test)]
+// One-element arrays here really are arrays of ranges, not a shorthand for a range of values.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 
