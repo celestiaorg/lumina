@@ -584,6 +584,8 @@ where
 }
 
 #[cfg(test)]
+// One-element arrays here really are arrays of ranges, not a shorthand for a range of values.
+#[allow(clippy::single_range_in_vec_init)]
 mod test {
     use blockstore::block::{Block, CidError};
     use celestia_types::test_utils::ExtendedHeaderGenerator;

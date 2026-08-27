@@ -4,6 +4,7 @@
 //! roundtrip tests.
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
@@ -231,18 +232,20 @@ pub(crate) fn test_blob_config() -> BlobConfig {
     BlobConfig::new_test(0, 4, 4, 4096, 4, 64)
 }
 
+/// Shorthand for building a [`Fraction`] in tests.
+pub(crate) fn fraction(numerator: u64, denominator: u64) -> Fraction {
+    Fraction::new(
+        NonZeroU64::new(numerator).unwrap(),
+        NonZeroU64::new(denominator).unwrap(),
+    )
+}
+
 /// Standard test client configuration.
 pub(crate) fn test_client_config(chain_id: &str) -> FibreClientConfig {
     FibreClientConfig {
         chain_id: chain_id.to_string(),
-        safety_threshold: Fraction {
-            numerator: 2,
-            denominator: 3,
-        },
-        liveness_threshold: Fraction {
-            numerator: 1,
-            denominator: 3,
-        },
+        safety_threshold: fraction(2, 3),
+        liveness_threshold: fraction(1, 3),
         min_rows_per_validator: 1,
         max_message_size: 1 << 20,
         upload_concurrency: 10,

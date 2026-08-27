@@ -976,6 +976,8 @@ mod v4 {
 }
 
 #[cfg(test)]
+// One-element arrays here really are arrays of ranges, not a shorthand for a range of values.
+#[allow(clippy::single_range_in_vec_init)]
 pub mod tests {
     use super::*;
     use crate::test_utils::ExtendedHeaderGeneratorExt;

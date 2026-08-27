@@ -30,7 +30,7 @@ impl From<&PaymentPromise> for proto::PaymentPromise {
         proto::PaymentPromise {
             chain_id: pp.chain_id.clone(),
             height: pp.height as i64,
-            namespace: pp.namespace.clone(),
+            namespace: pp.namespace.as_bytes().to_vec(),
             blob_size: pp.upload_size,
             blob_version: pp.blob_version,
             commitment: pp.commitment.to_vec(),
@@ -195,7 +195,7 @@ mod tests {
         let pp = PaymentPromise {
             chain_id: "test-chain".into(),
             height: 42,
-            namespace: vec![0u8; 29],
+            namespace: celestia_types::nmt::Namespace::from_raw(&[0u8; 29]).unwrap(),
             upload_size: 1024,
             blob_version: 0,
             commitment: [7u8; 32],

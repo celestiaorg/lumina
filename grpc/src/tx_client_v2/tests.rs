@@ -369,7 +369,7 @@ impl ServerReturn {
 type ActionFunc =
     dyn for<'a> Fn(&'a RoutedCall, &mut NetworkState) -> ActionResult + Send + Sync + 'static;
 type MatchFunc = dyn for<'a> Fn(&'a RoutedCall) -> bool + Send + Sync + 'static;
-type PeriodicFunc = dyn for<'a> Fn(&mut NetworkState) + Send + Sync + 'static;
+type PeriodicFunc = dyn Fn(&mut NetworkState) + Send + Sync + 'static;
 
 struct ActionResult {
     ret: ServerReturn,
@@ -464,7 +464,7 @@ struct PeriodicCall {
 impl PeriodicCall {
     fn new<F>(call: F) -> Self
     where
-        F: for<'a> Fn(&mut NetworkState) + Send + Sync + 'static,
+        F: Fn(&mut NetworkState) + Send + Sync + 'static,
     {
         Self {
             call: Arc::new(call),
@@ -602,7 +602,7 @@ impl CallLogEntry {
     fn println(&self) {
         println!(
             "logging call: {}, {:?}, {:?}",
-            self.kind, self.seq, &self.ids
+            self.kind, self.seq, self.ids
         );
     }
 }

@@ -3,23 +3,22 @@
 //! Defines the fundamental protocol constants from which all other
 //! configuration values are derived.
 
+use std::num::NonZeroU64;
+
 /// Fraction represented as numerator/denominator.
+///
+/// Both fields are non-zero: threshold math divides by each of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fraction {
     /// The numerator of the fraction.
-    pub numerator: u64,
+    pub numerator: NonZeroU64,
     /// The denominator of the fraction.
-    pub denominator: u64,
+    pub denominator: NonZeroU64,
 }
 
 impl Fraction {
     /// Creates a new `Fraction`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `denominator` is zero.
-    pub const fn new(numerator: u64, denominator: u64) -> Self {
-        assert!(denominator != 0, "Fraction denominator must not be zero");
+    pub const fn new(numerator: NonZeroU64, denominator: NonZeroU64) -> Self {
         Self {
             numerator,
             denominator,
@@ -59,8 +58,8 @@ pub const DEFAULT_PROTOCOL_PARAMS: ProtocolParams = ProtocolParams {
     encoding_ratio: 0.25, // 3x parity (12288 parity rows, 16384 total)
     max_validator_count: 100,
     unique_decoding_security_bits: 100,
-    safety_threshold: Fraction::new(2, 3),
-    liveness_threshold: Fraction::new(1, 3),
+    safety_threshold: Fraction::new(NonZeroU64::new(2).unwrap(), NonZeroU64::new(3).unwrap()),
+    liveness_threshold: Fraction::new(NonZeroU64::new(1).unwrap(), NonZeroU64::new(3).unwrap()),
     max_blob_size: 1 << 27, // 128 MiB
     min_row_size: 64,       // 1 << 6
 };
@@ -85,13 +84,18 @@ impl ProtocolParams {
     /// Returns the maximum number of rows a single validator could receive.
     pub fn max_rows_per_validator(&self) -> usize {
         // maxStake = 1 - safety_threshold
-        let max_stake_num =
-            (self.safety_threshold.denominator - self.safety_threshold.numerator) as usize;
-        let max_stake_den = self.safety_threshold.denominator as usize;
+        let max_stake_num = self
+            .safety_threshold
+            .denominator
+            .get()
+            .checked_sub(self.safety_threshold.numerator.get())
+            .expect("safety threshold numerator must not exceed denominator")
+            as usize;
+        let max_stake_den = self.safety_threshold.denominator.get() as usize;
 
         // rows = ceil(rows * max_stake / liveness_threshold)
-        let num = self.rows * max_stake_num * self.liveness_threshold.denominator as usize;
-        let den = max_stake_den * self.liveness_threshold.numerator as usize;
+        let num = self.rows * max_stake_num * self.liveness_threshold.denominator.get() as usize;
+        let den = max_stake_den * self.liveness_threshold.numerator.get() as usize;
         ceil_div(num, den)
     }
 
@@ -126,8 +130,8 @@ impl ProtocolParams {
 
     /// Returns the minimum number of validators needed to reconstruct the original data.
     pub fn validators_for_reconstruction(&self) -> usize {
-        let num = self.liveness_threshold.numerator as usize;
-        let den = self.liveness_threshold.denominator as usize;
+        let num = self.liveness_threshold.numerator.get() as usize;
+        let den = self.liveness_threshold.denominator.get() as usize;
         1usize.max(ceil_div(self.max_validator_count * num, den))
     }
 
@@ -447,43 +451,32 @@ mod tests {
     #[test]
     fn fibre_client_config_default() {
         let cfg = FibreClientConfig::default();
-        assert_eq!(
-            cfg.safety_threshold,
-            Fraction {
-                numerator: 2,
-                denominator: 3
-            }
-        );
-        assert_eq!(
-            cfg.liveness_threshold,
-            Fraction {
-                numerator: 1,
-                denominator: 3
-            }
-        );
+        assert_eq!(cfg.safety_threshold, crate::test_utils::fraction(2, 3));
+        assert_eq!(cfg.liveness_threshold, crate::test_utils::fraction(1, 3));
         assert_eq!(cfg.min_rows_per_validator, 148);
         assert_eq!(cfg.upload_concurrency, 100);
         assert_eq!(cfg.download_concurrency, 100);
     }
 
     #[test]
-    fn fraction_new_valid() {
-        let f = Fraction::new(1, 3);
-        assert_eq!(f.numerator, 1);
-        assert_eq!(f.denominator, 3);
-    }
+    #[should_panic(expected = "safety threshold numerator must not exceed denominator")]
+    fn safety_threshold_above_one_panics() {
+        let params = ProtocolParams {
+            safety_threshold: Fraction::new(
+                NonZeroU64::new(3).unwrap(),
+                NonZeroU64::new(2).unwrap(),
+            ),
+            ..DEFAULT_PROTOCOL_PARAMS
+        };
 
-    #[test]
-    #[should_panic(expected = "Fraction denominator must not be zero")]
-    fn fraction_new_zero_denominator_panics() {
-        Fraction::new(1, 0);
+        params.max_rows_per_validator();
     }
 
     #[test]
     fn liveness_threshold_must_exceed_encoding_ratio() {
         let p = &DEFAULT_PROTOCOL_PARAMS;
-        let liveness_ratio =
-            p.liveness_threshold.numerator as f64 / p.liveness_threshold.denominator as f64;
+        let liveness_ratio = p.liveness_threshold.numerator.get() as f64
+            / p.liveness_threshold.denominator.get() as f64;
         assert!(
             liveness_ratio >= p.encoding_ratio,
             "LivenessThreshold ({liveness_ratio}) must be >= EncodingRatio ({})",

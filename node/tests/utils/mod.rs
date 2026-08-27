@@ -86,21 +86,28 @@ where
         .await
         .unwrap();
 
-    node.wait_connected_trusted().await.unwrap();
+    timeout(Duration::from_secs(30), node.wait_connected_trusted())
+        .await
+        .expect("node did not connect within 30s — is the devnet reachable? (docker compose -f ci/docker-compose.yml up)")
+        .unwrap();
 
     // Wait until node reaches height 3
-    loop {
-        if node
-            .get_network_head_header()
-            .await
-            .unwrap()
-            .is_some_and(|head| head.height() >= 3)
-        {
-            break;
-        }
+    timeout(Duration::from_secs(60), async {
+        loop {
+            if node
+                .get_network_head_header()
+                .await
+                .unwrap()
+                .is_some_and(|head| head.height() >= 3)
+            {
+                break;
+            }
 
-        sleep(Duration::from_secs(1)).await;
-    }
+            sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .expect("node did not reach height 3 within 60s");
 
     (node, events)
 }

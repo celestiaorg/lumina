@@ -39,7 +39,7 @@ async fn upload_then_download_roundtrip() {
     let signed = client
         .upload(
             &k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng),
-            &[0u8; 29],
+            celestia_types::nmt::Namespace::from_raw(&[0u8; 29]).unwrap(),
             blob,
         )
         .await;
@@ -117,7 +117,7 @@ async fn roundtrip_with_partial_validator_failure() {
     let signed = client
         .upload(
             &k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng),
-            &[0u8; 29],
+            celestia_types::nmt::Namespace::from_raw(&[0u8; 29]).unwrap(),
             blob,
         )
         .await;

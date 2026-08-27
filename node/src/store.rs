@@ -342,6 +342,8 @@ fn to_headers_range(bounds: impl RangeBounds<u64>, last_index: u64) -> Result<Ra
 }
 
 #[cfg(test)]
+// One-element arrays here really are arrays of ranges, not a shorthand for a range of values.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
     use crate::test_utils::ExtendedHeaderGeneratorExt;
