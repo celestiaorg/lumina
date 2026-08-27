@@ -98,7 +98,10 @@ async fn peer_discovery() {
         .await
         .unwrap();
 
-    node1.wait_connected().await.unwrap();
+    timeout(Duration::from_secs(30), node1.wait_connected())
+        .await
+        .expect("node1 did not connect within 30s — is the devnet reachable? (docker compose -f ci/docker-compose.yml up)")
+        .unwrap();
 
     let node1_addrs = node1.listeners().await.unwrap();
 
@@ -111,7 +114,10 @@ async fn peer_discovery() {
         .await
         .unwrap();
 
-    node2.wait_connected().await.unwrap();
+    timeout(Duration::from_secs(30), node2.wait_connected())
+        .await
+        .expect("node2 did not connect to node1 within 30s")
+        .unwrap();
 
     // Node3
     //
@@ -122,7 +128,10 @@ async fn peer_discovery() {
         .await
         .unwrap();
 
-    node3.wait_connected().await.unwrap();
+    timeout(Duration::from_secs(30), node3.wait_connected())
+        .await
+        .expect("node3 did not connect to node1 within 30s")
+        .unwrap();
 
     let node1_peer_id = *node1.local_peer_id();
     let node2_peer_id = *node2.local_peer_id();
