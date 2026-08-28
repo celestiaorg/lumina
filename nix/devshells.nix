@@ -15,11 +15,16 @@ let
     "aarch64-apple-ios-sim"
   ];
 
+  # keep the devshell on the same rustc as CI
+  channel = (lib.importTOML ../rust-toolchain.toml).toolchain.channel;
+  # hash of the rust dist manifest for `channel`; nix prints the correct value on mismatch
+  channelSha256 = "sha256-P30Tm3O7vQAE725YtDCDHGjNrSsfZO4us11UwJGZSJo=";
+
   rustToolchain =
     with pkgs;
     fenix.combine [
       # components
-      (fenix.stable.withComponents [
+      ((fenix.toolchainOf { inherit channel; sha256 = channelSha256; }).withComponents [
         "cargo"
         "clippy"
         "rustc"
@@ -27,14 +32,16 @@ let
         "rust-analyzer"
       ])
       # extra targets
-      (lib.lists.map (target: fenix.targets."${target}".stable.rust-std) extraTargets)
+      (lib.lists.map (
+        target: (fenix.targets."${target}".toolchainOf { inherit channel; sha256 = channelSha256; }).rust-std
+      ) extraTargets)
     ];
 
   # rustup-like-ish wrapper for cargo to allow `+nightly` syntax
   cargoWrapper =
     with pkgs;
     writeShellScriptBin "cargo" ''
-      if [ "$1" == "+nightly" ]; then
+      if [[ "$1" == +nightly* ]]; then
           shift
           exec env PATH="${fenix.minimal.toolchain}/bin:$PATH" cargo "$@"
       fi

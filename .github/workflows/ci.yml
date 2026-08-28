@@ -215,6 +215,14 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Setup toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        components: rustfmt
+        # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
+        rustflags: ""
+
     - name: Run fmt
       run: cargo fmt -- --check
 
@@ -229,11 +237,13 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         components: clippy
-        # TODO: pinned due to https://gitlab.com/ijackson/rust-shellexpand/-/issues/13
-        toolchain: nightly-2026-02-01, stable
         target: wasm32-unknown-unknown
         # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
         rustflags: ""
+
+    # TODO: pinned due to https://gitlab.com/ijackson/rust-shellexpand/-/issues/13
+    - name: Install nightly for rustdoc
+      run: rustup toolchain install --profile minimal nightly-2026-02-01
 
     - name: Missing docs for native
       run: cargo clippy --workspace --all-features -- -D missing-docs
