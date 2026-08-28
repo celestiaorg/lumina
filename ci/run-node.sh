@@ -57,16 +57,39 @@ whitelist_localhost_nodes() {
 
 write_jwt_token() {
   echo "Saving jwt token to $NODE_JWT_FILE"
-  celestia "$NODE_TYPE" auth admin --p2p.network "$P2P_NETWORK" > "$NODE_JWT_FILE"
+  # `CELESTIA_CUSTOM` makes the cli print a warning to stdout, keep only the token
+  celestia "$NODE_TYPE" auth admin --p2p.network "$P2P_NETWORK" | tail -n 1 > "$NODE_JWT_FILE"
+}
+
+# Retries the given command until it succeeds or the attempts run out
+retry() {
+  local attempts="$1"
+  shift
+
+  for (( i = 1; i <= attempts; i++ )); do
+    if "$@"; then
+      return 0
+    fi
+    echo "Attempt $i/$attempts of '$*' failed, retrying" >&2
+    sleep 1
+  done
+
+  echo "'$*' did not succeed after $attempts attempts" >&2
+  return 1
 }
 
 common_node_addr() {
   local peer_id
 
-  # wait for node to spin up
-  sleep 4
-  # get PeerId of the common node
-  celestia p2p info --token skip-auth --url 'ws://node-0:26658' | jq -r '.result.id'
+  # get PeerId of the common node. `depends_on` in docker-compose ensures
+  # node-0 is healthy before we start, but keep retrying just in case
+  peer_id="$(retry 30 celestia p2p info --token skip-auth --url 'ws://node-0:26658' | jq -r '.result.id')"
+  if [[ -z "$peer_id" || "$peer_id" == null ]]; then
+    echo "Could not get the peer id of node-0" >&2
+    return 1
+  fi
+
+  echo "$peer_id"
 }
 
 main() {
@@ -96,9 +119,10 @@ main() {
     if [ "$NODE_TYPE" == bridge ]; then
       # this should run in background after node is started
       (
+        # wait for our own node to start its rpc, then connect
         sleep 4
         echo "Connecting to common $peer_id node"
-        celestia p2p connect "$peer_id" /dns/node-0/tcp/2121
+        retry 30 celestia p2p connect "$peer_id" /dns/node-0/tcp/2121
       )&
     else
       extra_flags+=( --headers.trusted-peers "/dns/node-0/tcp/2121/p2p/$peer_id" )

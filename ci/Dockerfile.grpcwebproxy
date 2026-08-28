@@ -1,8 +1,9 @@
-FROM docker.io/alpine:3.19.1
+FROM docker.io/alpine:3.20
 
 RUN apk update && apk add --no-cache wget unzip
 
-RUN wget -O grpcwebproxy.zip https://github.com/improbable-eng/grpc-web/releases/download/v0.15.0/grpcwebproxy-v0.15.0-linux-x86_64.zip && \
+# retry the download, github release assets are occasionally flaky in CI
+RUN wget --tries=5 --waitretry=5 --retry-connrefused -O grpcwebproxy.zip https://github.com/improbable-eng/grpc-web/releases/download/v0.15.0/grpcwebproxy-v0.15.0-linux-x86_64.zip && \
   unzip grpcwebproxy.zip && \
   mv dist/grpcwebproxy* /usr/local/bin/grpcwebproxy && \
   rm grpcwebproxy.zip
