@@ -583,6 +583,8 @@ where
                     return Err(e.into());
                 }
 
+                debug!(from_height, to_height, ?took, error = %e, "Fetching headers failed");
+
                 self.event_pub.send(NodeEvent::FetchingHeadersFailed {
                     from_height,
                     to_height,
@@ -628,6 +630,8 @@ where
                 took,
             });
         }
+
+        debug!(from_height, to_height, ?took, "Fetched headers");
 
         self.event_pub.send(NodeEvent::FetchingHeadersFinished {
             from_height,
