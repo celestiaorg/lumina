@@ -62,17 +62,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `devnet: true` for crates whose tests talk to the local celestia devnet
         crate:
-          - celestia-proto
-          - celestia-types
-          - celestia-rpc
-          - celestia-grpc
-          - celestia-grpc-macros
-          - celestia-client
-          - lumina-node
-          - lumina-node-wasm
-          - lumina-utils
-          - lumina-cli
+          - name: celestia-proto
+          - name: celestia-types
+          - name: celestia-rpc
+            devnet: true
+          - name: celestia-grpc
+            devnet: true
+          - name: celestia-grpc-macros
+          - name: celestia-client
+            devnet: true
+          - name: lumina-node
+            devnet: true
+          - name: lumina-node-wasm
+            devnet: true
+          - name: lumina-utils
+          - name: lumina-cli
 
     steps:
     - uses: actions/checkout@v4
@@ -80,23 +86,30 @@ jobs:
     - name: Setup toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        cache-key: ${{ matrix.crate }}
+        cache-key: ${{ matrix.crate.name }}
 
     - name: Celestia devnet
+      if: matrix.crate.devnet
       uses: ./.github/actions/local-devnet
 
     - name: Run tests
       env:
-        LUMINA_TEST_LOG: ${{ github.workspace }}/test-${{ matrix.crate }}.log
-      run: cargo test --all-features -p ${{ matrix.crate }}
+        LUMINA_TEST_LOG: ${{ github.workspace }}/test-${{ matrix.crate.name }}.log
+      run: cargo test --all-features -p ${{ matrix.crate.name }}
 
     - name: Upload test logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: test-logs-${{ matrix.crate }}
-        path: test-${{ matrix.crate }}.log
+        name: test-logs-${{ matrix.crate.name }}
+        path: test-${{ matrix.crate.name }}.log
         if-no-files-found: ignore
+
+    - name: Dump devnet logs
+      if: failure() && matrix.crate.devnet
+      uses: ./.github/actions/local-devnet-logs
+      with:
+        artifact-name: devnet-logs-test-${{ matrix.crate.name }}
 
 
   test-wasm:
@@ -105,6 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `devnet: true` for crates whose tests talk to the local celestia devnet
         crate:
           - name: celestia-proto
             dir: proto
@@ -114,17 +128,22 @@ jobs:
           - name: celestia-rpc
             dir: rpc
             wasm-pack-test-flags: --features=wasm-bindgen
+            devnet: true
           - name: celestia-grpc
             dir: grpc
+            devnet: true
           - name: celestia-client
             dir: client
+            devnet: true
           - name: lumina-node
             dir: node
+            devnet: true
           - name: lumina-node-wasm
             dir: node-wasm
             # We're running node-wasm tests in release mode to get around a failing debug assertion
             # https://github.com/libp2p/rust-libp2p/issues/5618
             wasm-pack-test-flags: --release
+            devnet: true
           - name: lumina-utils
             dir: utils
 
@@ -149,10 +168,17 @@ jobs:
       uses: nanasess/setup-chromedriver@v2
 
     - name: Celestia devnet
+      if: matrix.crate.devnet
       uses: ./.github/actions/local-devnet
 
     - name: Run wasm-pack tests
       run: wasm-pack test --headless --chrome ${{ matrix.crate.dir }}  ${{ matrix.crate.wasm-pack-test-flags }}
+
+    - name: Dump devnet logs
+      if: failure() && matrix.crate.devnet
+      uses: ./.github/actions/local-devnet-logs
+      with:
+        artifact-name: devnet-logs-test-wasm-${{ matrix.crate.name }}
 
 
   build-wasm:
@@ -208,6 +234,12 @@ jobs:
 
     - name: Run javascript tests
       run: npm test
+
+    - name: Dump devnet logs
+      if: failure()
+      uses: ./.github/actions/local-devnet-logs
+      with:
+        artifact-name: devnet-logs-test-js
 
 
   fmt:
