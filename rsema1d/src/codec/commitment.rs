@@ -110,7 +110,7 @@ impl ExtendedData {
         let row_tree = build_row_tree(&extended_rows, params);
         let row_root = row_tree.root();
 
-        let coeffs = derive_coefficients(&row_root, params.symbols_per_row());
+        let coeffs = derive_coefficients(&row_root, params.k, params.n, params.row_size);
         let rlc_orig: Vec<GF128> = (0..params.k)
             .into_par_iter()
             .map(|i| compute_rlc(row_slice(&extended_rows, i), &coeffs))
