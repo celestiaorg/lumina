@@ -267,16 +267,50 @@ impl Blob {
 
         rsema1d::verify_row_inclusion_proof(&proof, &self.id.commitment(), &params)?;
 
+        self.store_row(proof.index, proof.row)
+    }
+
+    pub(crate) fn set_shard(
+        &mut self,
+        rows: Vec<rsema1d::RowProof<'static>>,
+        rlcs: &[rsema1d::GF128],
+    ) -> Result<usize, FibreError> {
+        let Some(first) = rows.first() else {
+            return Ok(0);
+        };
+
+        let params = rsema1d::Parameters::new(
+            self.cfg.original_rows,
+            self.cfg.parity_rows,
+            first.row.len(),
+        )?;
+        let context = rsema1d::VerificationContext::new(rlcs, &params)?;
+        let commitment = self.id.commitment();
+
+        for proof in &rows {
+            rsema1d::verify_row_with_context(proof, &commitment, &context)?;
+        }
+
+        let mut applied = 0;
+        for proof in rows {
+            if self.store_row(proof.index, proof.row.into_owned())? {
+                applied += 1;
+            }
+        }
+        Ok(applied)
+    }
+
+    fn store_row(&mut self, index: usize, row: Vec<u8>) -> Result<bool, FibreError> {
         if let Some(ref mut rows) = self.rows {
-            if proof.index < rows.len() {
-                if rows[proof.index].is_some() {
+            if index < rows.len() {
+                if rows[index].is_some() {
                     return Ok(false);
                 }
-                rows[proof.index] = Some(proof.row);
+                rows[index] = Some(row);
             } else {
                 return Err(FibreError::Other(format!(
                     "row index {} out of bounds (total rows: {})",
-                    proof.index,
+                    index,
                     rows.len()
                 )));
             }
@@ -365,6 +399,8 @@ impl Blob {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     #[test]
@@ -488,6 +524,32 @@ mod tests {
         }
     }
 
+    struct TestShard {
+        rows: Vec<rsema1d::RowProof<'static>>,
+        rlcs: Vec<rsema1d::GF128>,
+    }
+
+    fn shard_of(blob: &Blob, indices: &[usize]) -> TestShard {
+        TestShard {
+            rows: indices
+                .iter()
+                .map(|&i| {
+                    let proof = blob.row(i).unwrap();
+                    rsema1d::RowProof {
+                        index: proof.index,
+                        row: Cow::Owned(proof.row),
+                        row_proof: proof.row_proof,
+                    }
+                })
+                .collect(),
+            rlcs: blob.rlc_coeffs().unwrap().to_vec(),
+        }
+    }
+
+    fn set_shard(blob: &mut Blob, shard: TestShard) -> Result<usize, FibreError> {
+        blob.set_shard(shard.rows, &shard.rlcs)
+    }
+
     #[test]
     fn set_row_returns_true_for_new_row() {
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
@@ -561,5 +623,61 @@ mod tests {
         assert_eq!(unique, 4, "only genuinely new rows should be counted");
         empty.reconstruct().unwrap();
         assert_eq!(empty.data().unwrap(), &data);
+    }
+
+    #[test]
+    fn set_shard_counts_only_new_rows() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+
+        let unique = set_shard(&mut empty, shard_of(&blob, &[0, 1, 2])).unwrap()
+            + set_shard(&mut empty, shard_of(&blob, &[2, 3])).unwrap();
+
+        assert_eq!(unique, 4);
+        empty.reconstruct().unwrap();
+        assert_eq!(empty.data().unwrap(), &data);
+    }
+
+    #[test]
+    fn set_shard_failing_shard_stores_nothing() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+
+        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+
+        // Tamper with the second row; the whole shard must be rejected.
+        let mut shard = shard_of(&blob, &[0, 1]);
+        shard.rows[1].row.to_mut()[0] ^= 1;
+        assert!(set_shard(&mut empty, shard).is_err());
+
+        // Row 0 was valid in the failing shard but must not have been stored.
+        assert_eq!(set_shard(&mut empty, shard_of(&blob, &[0])).unwrap(), 1);
+    }
+
+    #[test]
+    fn set_shard_rejects_wrong_rlc_count() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+        let mut shard = shard_of(&blob, &[0]);
+        shard.rlcs.pop();
+
+        assert!(set_shard(&mut empty, shard).is_err());
+    }
+
+    #[test]
+    fn set_shard_rejects_wrong_rlc_value() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+        let mut shard = shard_of(&blob, &[0]);
+        shard.rlcs[0].limbs[0] ^= 1;
+
+        assert!(set_shard(&mut empty, shard).is_err());
     }
 }

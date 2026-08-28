@@ -12,12 +12,10 @@ use std::sync::Arc;
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
 use celestia_types::nmt::Namespace;
 use celestia_types::state::AccAddress;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::BoxFuture;
-
-use crate::client::task::spawn_task;
+use crate::client::task::{TaskSet, spawn_task};
 
 use crate::blob::Blob;
 use crate::client::FibreClient;
@@ -170,10 +168,7 @@ impl FibreClient {
         let rlc_coeffs: Arc<Vec<rsema1d::GF128>> =
             Arc::new(blob.rlc_coeffs().map(|c| c.to_vec()).unwrap_or_default());
 
-        #[allow(clippy::type_complexity)]
-        let mut futures: FuturesUnordered<
-            BoxFuture<'static, (usize, Option<Result<Vec<u8>, FibreError>>)>,
-        > = FuturesUnordered::new();
+        let mut futures: TaskSet<usize, Result<Vec<u8>, FibreError>> = TaskSet::new();
 
         // Phase 1: Spawn all upload tasks up-front so that every validator is
         // contacted regardless of how quickly the signature threshold is met.

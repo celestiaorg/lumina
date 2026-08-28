@@ -3,12 +3,10 @@
 //! Retrieves a blob from validators and reconstructs it using erasure coding
 //! with an adaptive fan-out strategy.
 
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::BoxFuture;
-
-use crate::client::task::spawn_task;
+use crate::client::task::{TaskSet, spawn_task};
 
 use crate::ValidatorInfo;
 use crate::blob::{Blob, BlobID};
@@ -17,6 +15,7 @@ use crate::client::FibreClient;
 use crate::config::BlobConfig;
 use crate::error::FibreError;
 use crate::validator::ValidatorSet;
+use crate::validator_client::DownloadResponse;
 
 /// Options for configuring blob download behavior.
 #[derive(Default)]
@@ -116,16 +115,7 @@ impl FibreClient {
         }
 
         let blob_id = blob.id().clone();
-        #[allow(clippy::type_complexity)]
-        let mut futures: FuturesUnordered<
-            BoxFuture<
-                'static,
-                (
-                    usize,
-                    Option<Result<Vec<rsema1d::RowInclusionProof>, FibreError>>,
-                ),
-            >,
-        > = FuturesUnordered::new();
+        let mut futures: TaskSet<usize, Result<DownloadResponse, FibreError>> = TaskSet::new();
 
         let mut cur_idx = 0;
         let mut unique_rows: usize = 0;
@@ -156,35 +146,41 @@ impl FibreClient {
                     spawn_task(&mut futures, val_idx, async move {
                         let _global = global_permit;
                         let conn = connector.connect(&validator).await?;
-                        let resp = conn.download_shard(&blob_id).await?;
-                        if resp.rows.is_empty() {
+                        let shard = conn.download_shard(&blob_id).await?;
+                        if shard.rows.is_empty() {
                             return Err(FibreError::EmptyShardResponse);
                         }
-                        Ok(resp.rows.into_iter().map(|r| r.proof).collect())
+                        Ok(shard)
                     });
                 }
                 task_result = futures.next(), if !futures.is_empty() => {
                     match task_result {
-                        Some((val_idx, Some(Ok(proofs)))) => {
+                        Some((val_idx, Some(Ok(shard)))) => {
                             let (rows, info) = selected[val_idx];
                             inflight_rows = inflight_rows.saturating_sub(rows);
-                            let total = proofs.len();
-                            let mut applied = 0usize;
-                            for proof in proofs {
-                                if matches!(blob.set_row(proof), Ok(true)) {
-                                    applied += 1;
+                            match blob.set_shard(shard.rows, &shard.rlcs) {
+                                Ok(applied) => {
+                                    // Shards are never empty here, so zero
+                                    // applied means all rows were duplicates.
+                                    if applied == 0 {
+                                        tracing::warn!(
+                                            validator = %hex::encode(info.address),
+                                            "no rows applied from validator response"
+                                        );
+                                    }
+                                    unique_rows += applied;
+                                    if unique_rows >= original_rows {
+                                        break;
+                                    }
                                 }
-                            }
-                            unique_rows += applied;
-                            if applied == 0 && total > 0 {
-                                tracing::warn!(
-                                    validator = %hex::encode(info.address),
-                                    total,
-                                    "no rows applied from validator response"
-                                );
-                            }
-                            if unique_rows >= original_rows {
-                                break;
+                                Err(e) => {
+                                    tracing::warn!(
+                                        validator = %hex::encode(info.address),
+                                        error = %e,
+                                        "shard verification failed"
+                                    );
+                                    // Invariant violated — loop will spawn more validators.
+                                }
                             }
                         }
                         Some((val_idx, Some(Err(e)))) => {
@@ -232,6 +228,8 @@ impl FibreClient {
 mod tests {
     use std::sync::Arc;
 
+    use tokio_util::sync::CancellationToken;
+
     use crate::blob::{Blob, BlobID};
     use crate::config::BlobConfig;
     use crate::error::FibreError;
@@ -256,7 +254,11 @@ mod tests {
             for i in 0..total_rows {
                 proofs.push(blob.row(i).unwrap());
             }
-            conn.store_proofs(blob_id.commitment(), proofs);
+            conn.store_proofs(
+                blob_id.commitment(),
+                proofs,
+                blob.rlc_coeffs().unwrap().to_vec(),
+            );
         }
 
         blob_id
@@ -335,7 +337,11 @@ mod tests {
             for i in 0..total_rows {
                 proofs.push(blob.row(i).unwrap());
             }
-            conn.store_proofs(blob_id.commitment(), proofs);
+            conn.store_proofs(
+                blob_id.commitment(),
+                proofs,
+                blob.rlc_coeffs().unwrap().to_vec(),
+            );
         }
 
         let mut connector = MockConnector::new();
@@ -347,6 +353,69 @@ mod tests {
 
         let client = build_test_client(val_set, connector, "test-chain");
         let result = client.download_with_config(&blob_id, cfg).await.unwrap();
+
+        assert_eq!(result.data().unwrap(), &data);
+    }
+
+    #[tokio::test]
+    async fn download_handles_tampered_shard() {
+        let cfg = test_blob_config();
+        let data: Vec<u8> = (0u8..=199).collect();
+
+        let validators = [make_validator(100, 1), make_validator(100, 2)];
+        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
+        let val_set = ValidatorSet {
+            validators: val_infos.clone(),
+            height: 1,
+        };
+
+        let conns: Vec<Arc<MockValidatorConnection>> = validators
+            .iter()
+            .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
+            .collect();
+
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let blob_id = blob.id().clone();
+        let total_rows = cfg.total_rows();
+
+        for (i, conn) in conns.iter().enumerate() {
+            let mut proofs = Vec::new();
+            for row in 0..total_rows {
+                let mut proof = blob.row(row).unwrap();
+                if i == 0 {
+                    proof.row[0] ^= 1;
+                }
+                proofs.push(proof);
+            }
+            conn.store_proofs(
+                blob_id.commitment(),
+                proofs,
+                blob.rlc_coeffs().unwrap().to_vec(),
+            );
+        }
+
+        let mut connector = MockConnector::new();
+        for (i, (_, v)) in validators.iter().enumerate() {
+            connector.add(v.address, conns[i].clone());
+        }
+
+        let client = build_test_client(val_set, connector, "test-chain");
+        let mut result = Blob::empty_with_config(blob_id, cfg.clone());
+        let selected = [
+            (cfg.original_rows, &val_infos[0]),
+            (cfg.original_rows, &val_infos[1]),
+        ];
+
+        client
+            .download_blob(
+                &selected,
+                cfg.original_rows,
+                &mut result,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        result.reconstruct().unwrap();
 
         assert_eq!(result.data().unwrap(), &data);
     }
@@ -437,7 +506,11 @@ mod tests {
             for i in 0..total_rows {
                 proofs.push(blob.row(i).unwrap());
             }
-            conn.store_proofs(blob_id.commitment(), proofs);
+            conn.store_proofs(
+                blob_id.commitment(),
+                proofs,
+                blob.rlc_coeffs().unwrap().to_vec(),
+            );
         }
 
         let mut connector = MockConnector::new();
@@ -485,7 +558,11 @@ mod tests {
                 for i in 0..total_rows {
                     proofs.push(blob.row(i).unwrap());
                 }
-                conn.store_proofs(blob_id.commitment(), proofs);
+                conn.store_proofs(
+                    blob_id.commitment(),
+                    proofs,
+                    blob.rlc_coeffs().unwrap().to_vec(),
+                );
                 conn
             })
             .collect();

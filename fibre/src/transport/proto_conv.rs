@@ -18,6 +18,7 @@ use crate::error::FibreError;
 use crate::payment_promise::PaymentPromise;
 #[cfg(test)]
 use crate::validator::ValidatorInfo;
+use crate::validator_client::DownloadResponse;
 
 impl From<&PaymentPromise> for proto::PaymentPromise {
     fn from(pp: &PaymentPromise) -> Self {
@@ -50,12 +51,10 @@ pub(crate) fn row_proof_to_blob_row(proof: &rsema1d::RowInclusionProof) -> proto
     }
 }
 
-/// Convert a proto [`proto::BlobRow`] and an RLC root into a
-/// [`rsema1d::RowInclusionProof`].
+/// Convert a proto [`proto::BlobRow`] into a [`rsema1d::RowProof`].
 pub(crate) fn blob_row_to_row_proof(
     row: proto::BlobRow,
-    rlc_root: [u8; 32],
-) -> Result<rsema1d::RowInclusionProof, FibreError> {
+) -> Result<rsema1d::RowProof<'static>, FibreError> {
     let row_proof = row
         .proof
         .into_iter()
@@ -69,70 +68,59 @@ pub(crate) fn blob_row_to_row_proof(
         })
         .collect::<Result<Vec<[u8; 32]>, FibreError>>()?;
 
-    Ok(rsema1d::RowInclusionProof {
+    Ok(rsema1d::RowProof {
         index: row.index as usize,
-        row: row.data,
+        row: std::borrow::Cow::Owned(row.data),
         row_proof,
-        rlc_root,
     })
 }
 
 /// Build a proto [`proto::BlobShard`] for an upload request.
 ///
-/// Upload shards carry RLC coefficients (not a root) so the validator can
-/// verify each row without having enough rows to reconstruct.
+/// Shards carry the RLC vector of the K original rows (16 bytes per row) so
+/// the validator can verify each row without having enough rows to reconstruct.
 pub(crate) fn build_upload_shard(
     proofs: &[rsema1d::RowInclusionProof],
-    rlc_coeffs: &[rsema1d::GF128],
+    rlc_vector: &[rsema1d::GF128],
 ) -> proto::BlobShard {
     let rows = proofs.iter().map(row_proof_to_blob_row).collect();
 
-    // Flatten RLC coefficients: 16 bytes per original row (GF128 → bytes)
-    let mut coefficients = Vec::with_capacity(rlc_coeffs.len() * 16);
-    for coeff in rlc_coeffs {
-        coefficients.extend_from_slice(&coeff.to_bytes());
+    // Flatten the RLC vector: 16 bytes per original row (GF128 → bytes)
+    let mut rlcs = Vec::with_capacity(rlc_vector.len() * 16);
+    for rlc in rlc_vector {
+        rlcs.extend_from_slice(&rlc.to_bytes());
     }
 
-    proto::BlobShard {
-        rows,
-        rlc: Some(proto::blob_shard::Rlc::Coefficients(coefficients)),
-    }
+    proto::BlobShard { rows, rlcs }
 }
 
-/// Parse a proto [`proto::DownloadShardResponse`] into a list of
-/// [`rsema1d::RowInclusionProof`]s.
-///
-/// Download shards carry an RLC root (not coefficients) — the client has
-/// enough rows to reconstruct and can verify the root after reconstruction.
+/// Parse a proto [`proto::DownloadShardResponse`] into a [`DownloadResponse`].
 pub(crate) fn parse_download_response(
     resp: proto::DownloadShardResponse,
-) -> Result<Vec<rsema1d::RowInclusionProof>, FibreError> {
+) -> Result<DownloadResponse, FibreError> {
     let shard = resp
         .shard
         .ok_or_else(|| FibreError::InvalidData("download response missing shard".into()))?;
 
-    let rlc_root = match shard.rlc {
-        Some(proto::blob_shard::Rlc::Root(ref root)) => {
-            let arr: [u8; 32] = root.as_slice().try_into().map_err(|_| {
-                FibreError::InvalidData(format!(
-                    "rlc root has invalid length {}, expected 32",
-                    root.len()
-                ))
-            })?;
-            arr
-        }
-        _ => {
-            return Err(FibreError::InvalidData(
-                "download response shard missing rlc root".into(),
-            ));
-        }
-    };
+    if shard.rlcs.is_empty() || !shard.rlcs.len().is_multiple_of(16) {
+        return Err(FibreError::InvalidData(format!(
+            "rlc vector has invalid length {}, expected a non-zero multiple of 16",
+            shard.rlcs.len()
+        )));
+    }
+    let rlcs = shard
+        .rlcs
+        .chunks_exact(16)
+        .map(|c| rsema1d::GF128::from_bytes(c.try_into().expect("chunks_exact yields 16 bytes")))
+        .collect();
 
-    shard
+    let rows = shard
         .rows
         .into_iter()
-        .map(|row| blob_row_to_row_proof(row, rlc_root))
-        .collect()
+        .map(blob_row_to_row_proof)
+        .collect::<Result<Vec<_>, FibreError>>()?;
+
+    Ok(DownloadResponse { rows, rlcs })
 }
 
 fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
@@ -234,11 +222,10 @@ mod tests {
         assert_eq!(blob_row.data, vec![42u8; 64]);
         assert_eq!(blob_row.proof.len(), 2);
 
-        let back = blob_row_to_row_proof(blob_row, [3u8; 32]).unwrap();
+        let back = blob_row_to_row_proof(blob_row).unwrap();
         assert_eq!(back.index, 5);
-        assert_eq!(back.row, vec![42u8; 64]);
+        assert_eq!(back.row.as_ref(), &[42u8; 64][..]);
         assert_eq!(back.row_proof, vec![[1u8; 32], [2u8; 32]]);
-        assert_eq!(back.rlc_root, [3u8; 32]);
     }
 
     #[test]
@@ -248,33 +235,27 @@ mod tests {
             data: vec![0u8; 64],
             proof: vec![vec![0u8; 31]], // wrong length
         };
-        let result = blob_row_to_row_proof(row, [0u8; 32]);
+        let result = blob_row_to_row_proof(row);
         assert!(result.is_err());
     }
 
     #[test]
-    fn build_upload_shard_includes_coefficients() {
+    fn build_upload_shard_includes_rlc_vector() {
         let proofs = vec![rsema1d::RowInclusionProof {
             index: 0,
             row: vec![0u8; 64],
             row_proof: vec![[0u8; 32]],
             rlc_root: [0u8; 32],
         }];
-        let coeffs = vec![rsema1d::GF128::zero(); 2];
+        let rlcs = vec![rsema1d::GF128::zero(); 2];
 
-        let shard = build_upload_shard(&proofs, &coeffs);
+        let shard = build_upload_shard(&proofs, &rlcs);
         assert_eq!(shard.rows.len(), 1);
-        match shard.rlc {
-            Some(proto::blob_shard::Rlc::Coefficients(c)) => {
-                assert_eq!(c.len(), 32); // 2 coefficients × 16 bytes
-            }
-            _ => panic!("expected Coefficients variant"),
-        }
+        assert_eq!(shard.rlcs.len(), 32); // 2 RLC values × 16 bytes
     }
 
     #[test]
     fn parse_download_response_success() {
-        let rlc_root = [9u8; 32];
         let resp = proto::DownloadShardResponse {
             shard: Some(proto::BlobShard {
                 rows: vec![proto::BlobRow {
@@ -282,14 +263,15 @@ mod tests {
                     data: vec![1u8; 64],
                     proof: vec![vec![2u8; 32]],
                 }],
-                rlc: Some(proto::blob_shard::Rlc::Root(rlc_root.to_vec())),
+                rlcs: vec![9u8; 32], // 2 RLC values
             }),
         };
 
-        let proofs = parse_download_response(resp).unwrap();
-        assert_eq!(proofs.len(), 1);
-        assert_eq!(proofs[0].index, 3);
-        assert_eq!(proofs[0].rlc_root, rlc_root);
+        let shard = parse_download_response(resp).unwrap();
+        assert_eq!(shard.rows.len(), 1);
+        assert_eq!(shard.rows[0].index, 3);
+        assert_eq!(shard.rlcs.len(), 2);
+        assert_eq!(shard.rlcs[0], rsema1d::GF128::from_bytes(&[9u8; 16]));
     }
 
     #[test]
@@ -299,14 +281,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_download_response_missing_rlc_root() {
-        let resp = proto::DownloadShardResponse {
-            shard: Some(proto::BlobShard {
-                rows: vec![],
-                rlc: None,
-            }),
-        };
-        assert!(parse_download_response(resp).is_err());
+    fn parse_download_response_invalid_rlc_length() {
+        for rlcs in [vec![], vec![1u8; 15]] {
+            let resp = proto::DownloadShardResponse {
+                shard: Some(proto::BlobShard { rows: vec![], rlcs }),
+            };
+            assert!(parse_download_response(resp).is_err());
+        }
     }
 
     #[test]

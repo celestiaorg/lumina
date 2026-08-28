@@ -23,15 +23,10 @@ pub struct UploadResponse {
 /// Response from a validator when downloading a shard.
 #[derive(Debug, Clone)]
 pub struct DownloadResponse {
-    /// The blob shard containing rows with inclusion proofs.
-    pub rows: Vec<DownloadedRow>,
-}
-
-/// A single row from a download response.
-#[derive(Debug, Clone)]
-pub struct DownloadedRow {
-    /// The row inclusion proof from rsema1d.
-    pub proof: rsema1d::RowInclusionProof,
+    /// Rows and their Merkle proofs.
+    pub rows: Vec<rsema1d::RowProof<'static>>,
+    /// RLC vector for the original rows.
+    pub rlcs: Vec<rsema1d::GF128>,
 }
 
 /// A connection to a single validator's fibre service.
@@ -49,7 +44,7 @@ pub trait ValidatorConnection: Send + Sync {
         rlc_coeffs: &[rsema1d::GF128],
     ) -> Result<UploadResponse, FibreError>;
 
-    /// Download rows for a blob by its ID.
+    /// Download a shard (rows plus RLC vector) for a blob by its ID.
     async fn download_shard(&self, blob_id: &BlobID) -> Result<DownloadResponse, FibreError>;
 }
 
