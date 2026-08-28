@@ -110,8 +110,10 @@ pub(crate) fn parse_download_response(
     }
     let rlcs = shard
         .rlcs
-        .chunks_exact(16)
-        .map(|c| rsema1d::GF128::from_bytes(c.try_into().expect("chunks_exact yields 16 bytes")))
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(rsema1d::GF128::from_bytes)
         .collect();
 
     let rows = shard

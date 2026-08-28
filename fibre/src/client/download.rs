@@ -164,7 +164,7 @@ impl FibreClient {
                                     // applied means all rows were duplicates.
                                     if applied == 0 {
                                         tracing::warn!(
-                                            validator = %hex::encode(info.address),
+                                            validator = %info.address_hex(),
                                             "no rows applied from validator response"
                                         );
                                     }
@@ -173,22 +173,22 @@ impl FibreClient {
                                         break;
                                     }
                                 }
-                                Err(e) => {
+                                Err(error) => {
                                     tracing::warn!(
-                                        validator = %hex::encode(info.address),
-                                        error = %e,
+                                        validator = %info.address_hex(),
+                                        %error,
                                         "shard verification failed"
                                     );
                                     // Invariant violated — loop will spawn more validators.
                                 }
                             }
                         }
-                        Some((val_idx, Some(Err(e)))) => {
+                        Some((val_idx, Some(Err(error)))) => {
                             let (rows, info) = selected[val_idx];
                             inflight_rows = inflight_rows.saturating_sub(rows);
                             tracing::warn!(
-                                validator = %hex::encode(info.address),
-                                error = %e,
+                                validator = %info.address_hex(),
+                                %error,
                                 "shard download failed"
                             );
                             // Invariant violated — loop will spawn more validators.
@@ -197,7 +197,7 @@ impl FibreClient {
                             let (rows, info) = selected[val_idx];
                             inflight_rows = inflight_rows.saturating_sub(rows);
                             tracing::warn!(
-                                validator = %hex::encode(info.address),
+                                validator = %info.address_hex(),
                                 "download task dropped unexpectedly"
                             );
                         }
