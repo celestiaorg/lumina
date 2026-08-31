@@ -1,11 +1,14 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use celestia_types::ExtendedHeader;
 use celestia_types::test_utils::{invalidate, unverify};
+use libp2p::PeerId;
 use lumina_node::{
-    node::{HeaderExError, NodeError, P2pError},
-    store::{Store, VerifiedExtendedHeaders},
+    blockstore::InMemoryBlockstore,
+    node::{HeaderExError, Node, NodeError, P2pError},
+    store::{InMemoryStore, Store, VerifiedExtendedHeaders},
     test_utils::{gen_filled_store, listening_test_node_builder, test_node_builder},
 };
 use tokio::time::{sleep, timeout};
@@ -197,6 +200,14 @@ async fn head_selection_with_multiple_peers() {
 
     client.wait_connected().await.unwrap();
 
+    // head selection needs the client's own view of the peers, so wait until
+    // it registers all the servers
+    let server_ids = servers
+        .iter()
+        .map(|s| s.local_peer_id().to_owned())
+        .collect::<Vec<_>>();
+    wait_peers_connected(&client, &server_ids).await;
+
     // give client node a sec to breathe, otherwise occiasionally rogue node has problems with connecting
     sleep(Duration::from_millis(100)).await;
     let client_addr = client.listeners().await.unwrap();
@@ -210,12 +221,13 @@ async fn head_selection_with_multiple_peers() {
         .unwrap();
 
     rogue_node.wait_connected().await.unwrap();
-    // small delay needed for client to include rogue_node in head selection process
-    sleep(Duration::from_millis(50)).await;
+    // wait for client to include rogue_node in head selection process
+    wait_peers_connected(&client, &[rogue_node.local_peer_id().to_owned()]).await;
 
     // client should prefer heighest head received from 2+ peers
-    let network_head = client.request_head_header().await.unwrap();
-    assert_eq!(common_server_headers.last().unwrap(), &network_head);
+    let expected_head = common_server_headers.last().unwrap();
+    let network_head = request_head_with_retries(&client, expected_head).await;
+    assert_eq!(expected_head, &network_head);
 
     // new node from group B joins, head should go up
     let new_b_node = test_node_builder()
@@ -231,12 +243,56 @@ async fn head_selection_with_multiple_peers() {
     client.set_peer_trust(new_b_peer_id, true).await.unwrap();
 
     new_b_node.wait_connected().await.unwrap();
-    // small delay needed for client to include new_b_node in head selection process
-    sleep(Duration::from_millis(250)).await;
+    // wait for client to include new_b_node in head selection process
+    wait_peers_connected(&client, &[new_b_peer_id]).await;
 
     // now 2 nodes agree on head with height 25
-    let network_head = client.request_head_header().await.unwrap();
-    assert_eq!(additional_server_headers.last().unwrap(), &network_head);
+    let expected_head = additional_server_headers.last().unwrap();
+    let network_head = request_head_with_retries(&client, expected_head).await;
+    assert_eq!(expected_head, &network_head);
+}
+
+/// Request the network head, retrying until `expected` is returned or the
+/// deadline passes. The last received head is returned either way, so the
+/// caller can `assert_eq!` on it.
+///
+/// A single request is not deterministic even when all the peers are connected
+/// and trusted: it may join a HEAD round that is still in flight and was
+/// scheduled with an older set of peers (e.g. syncer's initialization round),
+/// and individual responses within a round can fail without being retried.
+async fn request_head_with_retries(
+    node: &Node<InMemoryBlockstore, InMemoryStore>,
+    expected: &ExtendedHeader,
+) -> ExtendedHeader {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let head = node.request_head_header().await.unwrap();
+        if &head == expected || Instant::now() >= deadline {
+            return head;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Wait until `node` sees all `peers` as connected.
+///
+/// `wait_connected()` on the other end of a connection is not enough: it only
+/// says that the *peer's* swarm registered the connection, while `node`
+/// processes its own `ConnectionEstablished` event asynchronously and can lag
+/// behind under load. Peer selection (e.g. for HEAD requests) uses `node`'s
+/// own view, so tests must wait for it.
+async fn wait_peers_connected(node: &Node<InMemoryBlockstore, InMemoryStore>, peers: &[PeerId]) {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let connected = node.connected_peers().await.unwrap();
+            if peers.iter().all(|peer| connected.contains(peer)) {
+                return;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("peers didn't connect in time");
 }
 
 #[tokio::test]
