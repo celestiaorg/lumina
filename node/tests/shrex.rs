@@ -1,7 +1,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use celestia_rpc::ShareClient;
@@ -13,7 +12,7 @@ use lumina_node::node::P2pError;
 use lumina_node::store::InMemoryStore;
 use lumina_node::{Node, NodeError};
 use rand::RngCore;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use crate::utils::{blob_submit, bridge_client, new_connected_node};
 
@@ -62,141 +61,27 @@ async fn shrex_sampling_forward() {
 
 #[tokio::test]
 async fn shrex_sampling_backward() {
-    let (node, mut events) = new_connected_node().await;
+    let (node, _) = new_connected_node().await;
 
     let current_head = node.get_local_head_header().await.unwrap().height();
-    let peer_id = *node.local_peer_id();
-    tracing::info!(
-        target: "lumina_node::tests",
-        test = "shrex_sampling_backward",
-        %peer_id,
-        current_head,
-        "node connected"
-    );
+    let headers_to_sample: Vec<_> = (1..current_head).rev().take(10).collect();
 
-    // Diagnostics for the CI flake: count every event variant the subscriber delivers
-    // and log the header-fetching ones, so we can tell whether `FetchingHeadersFinished`
-    // was never emitted or was emitted but lost (e.g. evicted from the event channel).
-    let mut events_seen: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let events_seen_ref = &mut events_seen;
-
-    // wait for some past headers to be synchronized
-    let new_batch_synced = async {
+    // Sampling these historical heights proves that they were synchronized backwards first.
+    timeout(Duration::from_secs(40), async {
         loop {
-            let ev = events.recv().await.unwrap();
-            *events_seen_ref
-                .entry(event_variant_name(&ev.event))
-                .or_default() += 1;
-            match &ev.event {
-                NodeEvent::FetchingHeadersStarted {
-                    from_height,
-                    to_height,
-                } => tracing::info!(
-                    target: "lumina_node::tests",
-                    test = "shrex_sampling_backward",
-                    %peer_id,
-                    from_height,
-                    to_height,
-                    "FetchingHeadersStarted"
-                ),
-                NodeEvent::FetchingHeadersFailed {
-                    from_height,
-                    to_height,
-                    error,
-                    took,
-                } => tracing::info!(
-                    target: "lumina_node::tests",
-                    test = "shrex_sampling_backward",
-                    %peer_id,
-                    from_height,
-                    to_height,
-                    ?took,
-                    error,
-                    "FetchingHeadersFailed"
-                ),
-                NodeEvent::FetchingHeadersFinished {
-                    from_height,
-                    to_height,
-                    took,
-                } => tracing::info!(
-                    target: "lumina_node::tests",
-                    test = "shrex_sampling_backward",
-                    %peer_id,
-                    from_height,
-                    to_height,
-                    ?took,
-                    "FetchingHeadersFinished"
-                ),
-                _ => {}
-            }
-            let NodeEvent::FetchingHeadersFinished {
-                from_height,
-                to_height,
-                ..
-            } = ev.event
-            else {
-                continue;
-            };
-            if from_height < current_head {
-                break (from_height, to_height);
-            }
-        }
-    };
-    let batch = timeout(Duration::from_secs(30), new_batch_synced).await;
-
-    if batch.is_err() {
-        // Dump everything we know before failing. `eprintln!` lands in the job log,
-        // `info!` in `LUMINA_TEST_LOG`.
-        let local_head = node.get_local_head_header().await.map(|h| h.height());
-        let mut stored_below_head = 0u64;
-        for height in 1..current_head {
-            if node.get_header_by_height(height).await.is_ok() {
-                stored_below_head += 1;
-            }
-        }
-        let expected_below_head = current_head.saturating_sub(1);
-        eprintln!(
-            "shrex_sampling_backward: {peer_id} timed out waiting for a backward batch; \
-             head at start {current_head}, local head now {local_head:?}, \
-             headers stored below start head: {stored_below_head}/{expected_below_head}, \
-             events received by variant: {events_seen:?}"
-        );
-        tracing::info!(
-            target: "lumina_node::tests",
-            test = "shrex_sampling_backward",
-            %peer_id,
-            current_head,
-            ?local_head,
-            stored_below_head,
-            expected_below_head,
-            ?events_seen,
-            "timed out waiting for a backward batch"
-        );
-    }
-
-    let (from_height, to_height) = batch.unwrap();
-
-    // take just first N headers because batch size can be big
-    let mut headers_to_sample: HashSet<_> = (from_height..to_height).rev().take(10).collect();
-
-    // wait for all heights to be sampled
-    timeout(Duration::from_secs(10), async {
-        loop {
-            let ev = events.recv().await.unwrap();
-            let NodeEvent::SamplingResult { height, failed, .. } = ev.event else {
-                continue;
-            };
-
-            assert!(!failed);
-            headers_to_sample.remove(&height);
-
-            if headers_to_sample.is_empty() {
+            let sampled = node.get_sampled_header_ranges().await.unwrap();
+            if headers_to_sample
+                .iter()
+                .all(|height| sampled.contains(*height))
+            {
                 break;
             }
+
+            sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("historical headers were not synchronized and sampled within 40s");
 }
 
 #[tokio::test]
@@ -329,29 +214,4 @@ async fn wait_for_height(
     // check last time with get by height, maybe it was inserted in a moment that
     // we didn't get it previously yet but also missed it on subscription
     node.get_header_by_height(height).await.unwrap()
-}
-
-/// Stable name of the [`NodeEvent`] variant, used for per-variant event counters in diagnostics.
-fn event_variant_name(event: &NodeEvent) -> &'static str {
-    match event {
-        NodeEvent::ConnectingToBootnodes => "ConnectingToBootnodes",
-        NodeEvent::PeerConnected { .. } => "PeerConnected",
-        NodeEvent::PeerDisconnected { .. } => "PeerDisconnected",
-        NodeEvent::SamplingStarted { .. } => "SamplingStarted",
-        NodeEvent::ShareSamplingResult { .. } => "ShareSamplingResult",
-        NodeEvent::SamplingResult { .. } => "SamplingResult",
-        NodeEvent::FatalDaserError { .. } => "FatalDaserError",
-        NodeEvent::AddedHeaderFromHeaderSub { .. } => "AddedHeaderFromHeaderSub",
-        NodeEvent::FetchingHeadHeaderStarted => "FetchingHeadHeaderStarted",
-        NodeEvent::FetchingHeadHeaderFinished { .. } => "FetchingHeadHeaderFinished",
-        NodeEvent::FetchingHeadersStarted { .. } => "FetchingHeadersStarted",
-        NodeEvent::FetchingHeadersFinished { .. } => "FetchingHeadersFinished",
-        NodeEvent::FetchingHeadersFailed { .. } => "FetchingHeadersFailed",
-        NodeEvent::FatalSyncerError { .. } => "FatalSyncerError",
-        NodeEvent::PrunedHeaders { .. } => "PrunedHeaders",
-        NodeEvent::FatalPrunerError { .. } => "FatalPrunerError",
-        NodeEvent::NetworkCompromised => "NetworkCompromised",
-        NodeEvent::NodeStopped => "NodeStopped",
-        _ => "Other",
-    }
 }

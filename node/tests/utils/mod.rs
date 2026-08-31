@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use blockstore::Blockstore;
 use celestia_rpc::{Client, TxConfig, prelude::*};
@@ -80,26 +80,15 @@ where
 {
     let (_, bridge_ma) = fetch_bridge_info().await;
 
-    let started_at = Instant::now();
     let (node, events) = builder
         .bootnodes([bridge_ma])
         .start_subscribed()
         .await
         .unwrap();
-    let peer_id = *node.local_peer_id();
-    tracing::info!(target: "lumina_node::tests", %peer_id, "test node started, connecting to bridge");
-
     timeout(Duration::from_secs(30), node.wait_connected_trusted())
         .await
         .expect("node did not connect within 30s — is the devnet reachable? (docker compose -f ci/docker-compose.yml up)")
         .unwrap();
-    tracing::info!(
-        target: "lumina_node::tests",
-        %peer_id,
-        elapsed = ?started_at.elapsed(),
-        "test node connected to trusted peer"
-    );
-
     // Wait until node reaches height 3
     timeout(Duration::from_secs(60), async {
         loop {
@@ -117,13 +106,6 @@ where
     })
     .await
     .expect("node did not reach height 3 within 60s");
-    tracing::info!(
-        target: "lumina_node::tests",
-        %peer_id,
-        elapsed = ?started_at.elapsed(),
-        "test node reached height >= 3"
-    );
-
     (node, events)
 }
 
