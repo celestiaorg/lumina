@@ -29,7 +29,14 @@ futures.workspace = true
 lumina-utils = { workspace = true, features = ["executor"] }
 
 # gRPC
+der = { version = "0.7.2", features = ["derive"] }
+hyper = { version = "1.8", features = ["client", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+http.workspace = true
+tokio-rustls = { version = "0.26.1", default-features = false, features = ["logging", "ring"] }
 tonic = { workspace = true, features = ["codegen"] }
+tower = { version = "0.5.2", features = ["util"] }
+x509-parser = "0.17"
 prost.workspace = true
 tendermint-proto.workspace = true
 
@@ -41,15 +48,20 @@ async-trait.workspace = true
 bech32 = "0.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-der = { version = "0.7.2", features = ["derive"] }
-hyper-util = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["net"] }
-tokio-rustls = { version = "0.26.1", default-features = false, features = ["logging", "ring", "tls12"] }
-tonic = { workspace = true, features = ["transport"] }
-tower = { version = "0.5.2", features = ["util"] }
-x509-parser = "0.17"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-net = { version = "0.6", default-features = false, features = ["websocket"], optional = true }
+ring = { version = "0.17.14", features = ["wasm32_unknown_unknown_js"] }
+rustls-pki-types = { version = "1", features = ["web"] }
+send_wrapper.workspace = true
+
+[dev-dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[features]
+wasm-browser = ["dep:gloo-net"]

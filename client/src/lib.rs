@@ -33,10 +33,15 @@ pub mod api {
 
     /// Fibre API related types.
     pub mod fibre {
+        #[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+        pub use celestia_fibre::BrowserWebSocketConnector;
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use celestia_fibre::NativeTcpConnector;
         #[doc(inline)]
         pub use celestia_fibre::{
-            Blob as FibreBlob, BlobID, DownloadOptions, FibreClient, FibreClientConfig, FibreError,
-            PaymentPromise, SignedPaymentPromise,
+            Blob as FibreBlob, BlobID, BoxedFibreIo, DownloadOptions, FibreClient,
+            FibreClientConfig, FibreError, FibreIo, FibreIoConnector, PaymentPromise,
+            SignedPaymentPromise,
         };
     }
 

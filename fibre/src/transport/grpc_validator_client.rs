@@ -15,6 +15,7 @@ use crate::error::FibreError;
 use crate::host_registry::HostRegistry;
 use crate::payment_promise::PaymentPromise;
 use crate::proto_conv;
+use crate::transport::io_connector::FibreIoConnector;
 use crate::validator::ValidatorInfo;
 use crate::validator_client::{
     DownloadResponse, DownloadedRow, UploadResponse, ValidatorConnection, ValidatorConnector,
@@ -23,23 +24,32 @@ use crate::validator_client::{
 /// Factory that resolves validator hosts and caches gRPC connections.
 pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
-    #[cfg(not(target_arch = "wasm32"))]
     chain_id: String,
+    io_connector: Arc<dyn FibreIoConnector>,
     connections: tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorConnection>>>,
 }
 
 impl GrpcValidatorConnector {
     /// Create a new connector backed by the given host registry.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(host_registry: Arc<dyn HostRegistry>, chain_id: impl Into<String>) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let chain_id = chain_id.into();
-        #[cfg(target_arch = "wasm32")]
-        let _ = chain_id;
+        Self::new_with_io_connector(
+            host_registry,
+            chain_id,
+            Arc::new(crate::transport::io_connector::NativeTcpConnector),
+        )
+    }
 
+    /// Create a new connector over a caller-provided byte-stream transport.
+    pub fn new_with_io_connector(
+        host_registry: Arc<dyn HostRegistry>,
+        chain_id: impl Into<String>,
+        io_connector: Arc<dyn FibreIoConnector>,
+    ) -> Self {
         Self {
             host_registry,
-            #[cfg(not(target_arch = "wasm32"))]
-            chain_id,
+            chain_id: chain_id.into(),
+            io_connector,
             connections: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -68,15 +78,12 @@ impl ValidatorConnector for GrpcValidatorConnector {
         // URI, so normalise the address first.
         let url = normalize_host(&host.0);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let client =
-            crate::transport::tls::grpc_client(&url, validator.pubkey, self.chain_id.clone())?;
-
-        #[cfg(target_arch = "wasm32")]
-        let client = GrpcClient::builder()
-            .url(&url)
-            .build()
-            .map_err(|e| FibreError::Other(format!("invalid endpoint '{}': {e}", url)))?;
+        let client = crate::transport::tls::grpc_client(
+            &url,
+            validator.pubkey,
+            self.chain_id.clone(),
+            self.io_connector.clone(),
+        )?;
 
         let conn = Arc::new(GrpcValidatorConnection { client });
 

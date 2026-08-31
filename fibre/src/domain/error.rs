@@ -95,6 +95,10 @@ pub enum FibreError {
     #[error("operation cancelled")]
     Cancelled,
 
+    /// WASM transports require an explicit byte-stream connector.
+    #[error("a Fibre I/O connector is required on WASM")]
+    IoConnectorRequired,
+
     // -- Wrapped errors --
     /// A gRPC status error from tonic (per-validator connections).
     #[error("gRPC error: {0}")]

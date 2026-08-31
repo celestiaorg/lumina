@@ -84,6 +84,7 @@ tls-ring = ["celestia-grpc/tls-ring"]
 # Selecting this feature doesn't enable tls support in the client, it only guides
 # `tonic` which provider to use if tls is enabled.
 tls-aws-lc = ["celestia-grpc/tls-aws-lc"]
+wasm-browser = ["celestia-fibre/wasm-browser"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
