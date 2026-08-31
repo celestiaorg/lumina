@@ -1,9 +1,9 @@
 syntax = "proto3";
 package celestia.fibre.v1;
 
-option go_package = "github.com/celestiaorg/celestia-app-fibre/x/fibre/types";
-
 import "celestia/fibre/v1/fibre.proto";
+
+option go_package = "github.com/celestiaorg/celestia-app/x/fibre/types";
 
 // BlobRow represents a row of data in a Fibre blob.
 message BlobRow {
@@ -13,21 +13,17 @@ message BlobRow {
 }
 
 // BlobShard represents a subset of rows of a Fibre blob.
-// With two ways of proving data correctness:
-// 1. Using RLC coefficients when there is not enough rows to reconstruct the data blob. (Upload case)
-// 2. Using a Merkle root of RLC tree, when there is sufficient rows to reconstruct the data blob. (Download case)
+// Contains row data along with the RLC (random linear combination) vector
+// computed during upload: flattened, 16 bytes per original row.
 message BlobShard {
   repeated BlobRow rows = 1;
-  oneof rlc {
-    bytes coefficients = 2; // flattened rlc coefficients, 16 bytes per original row
-    bytes root = 3; // const len == 32 when present
-  }
+  bytes rlcs = 2; // flattened RLC vector, 16 bytes per original row
 }
 
 // UploadShardRequest is the request message for the UploadShard RPC method.
 message UploadShardRequest {
   celestia.fibre.v1.PaymentPromise promise = 1;
-  BlobShard shard = 2; // with rlc coefficients
+  BlobShard shard = 2;
 }
 
 // UploadShardResponse is the response message for the UploadShard RPC method.
@@ -42,10 +38,13 @@ message DownloadShardRequest {
 
 // DownloadShardResponse is the response message for the DownloadShard RPC method.
 message DownloadShardResponse {
-  BlobShard shard = 1; // with rlc root
+  BlobShard shard = 1;
 }
 
+// Fibre defines the gRPC service for uploading and downloading fibre blob shards.
 service Fibre {
+  // UploadShard uploads a blob shard with its RLC vector to a validator.
   rpc UploadShard(UploadShardRequest) returns (UploadShardResponse);
+  // DownloadShard downloads a blob shard with its RLC vector from a validator.
   rpc DownloadShard(DownloadShardRequest) returns (DownloadShardResponse);
 }

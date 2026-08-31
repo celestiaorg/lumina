@@ -6,12 +6,14 @@ use futures::stream::FuturesUnordered;
 
 use lumina_utils::cond_send::{BoxFuture, CondSend, into_boxed};
 
+pub(crate) type TaskSet<K, T> = FuturesUnordered<BoxFuture<'static, (K, Option<T>)>>;
+
 /// Spawn a task and track its tagged result in a [`FuturesUnordered`] collection.
 ///
 /// The `tag` is returned alongside the task result, allowing callers to
 /// identify which task produced each result (e.g. a validator index).
 pub(crate) fn spawn_task<K, T>(
-    unordered: &mut FuturesUnordered<BoxFuture<'static, (K, Option<T>)>>,
+    unordered: &mut TaskSet<K, T>,
     tag: K,
     fut: impl Future<Output = T> + CondSend + 'static,
 ) where

@@ -5,6 +5,7 @@ use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256, Merkl
 use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
+use std::sync::OnceLock;
 
 fn build_rlc_root(rlc_orig: &[GF128], params: &Parameters) -> [u8; 32] {
     let k_padded = params.k_padded();
@@ -28,6 +29,7 @@ pub struct VerificationContext {
     params: Parameters,
     rlc_extended: Vec<GF128>,
     rlc_root: [u8; 32],
+    coefficients: OnceLock<([u8; 32], Vec<GF128>)>,
 }
 
 impl VerificationContext {
@@ -48,6 +50,7 @@ impl VerificationContext {
             params: *params,
             rlc_extended,
             rlc_root,
+            coefficients: OnceLock::new(),
         })
     }
 
@@ -178,13 +181,25 @@ pub fn verify_with_context(
     let row_root =
         reconstruct_root_from_proof(hash_leaf(proof.row.as_ref()), tree_pos, &proof.row_proof);
 
-    let coeffs = derive_coefficients(
-        &row_root,
-        context.params.k,
-        context.params.n,
-        context.params.row_size,
-    );
-    let computed_rlc = compute_rlc(proof.row.as_ref(), &coeffs);
+    let cached_coefficients = context
+        .coefficients
+        .get()
+        .filter(|(cached_row_root, _)| cached_row_root == &row_root)
+        .map(|(_, coefficients)| coefficients.as_slice());
+    let derived_coefficients = cached_coefficients.is_none().then(|| {
+        derive_coefficients(
+            &row_root,
+            context.params.k,
+            context.params.n,
+            context.params.row_size,
+        )
+    });
+    let coefficients = cached_coefficients.unwrap_or_else(|| {
+        derived_coefficients
+            .as_deref()
+            .expect("coefficients were derived")
+    });
+    let computed_rlc = compute_rlc(proof.row.as_ref(), coefficients);
     if computed_rlc != context.rlc_extended[proof.index] {
         return Err(Error::VerificationFailed(
             "computed RLC does not match expected value".to_string(),
@@ -200,6 +215,10 @@ pub fn verify_with_context(
         return Err(Error::VerificationFailed(
             "commitment verification failed".to_string(),
         ));
+    }
+
+    if let Some(coefficients) = derived_coefficients {
+        let _ = context.coefficients.set((row_root, coefficients));
     }
 
     Ok(true)
@@ -304,5 +323,33 @@ mod tests {
 
         let proof = ext_data.generate_row_proof(4).unwrap();
         assert!(verify_with_context(&proof, &ext_data.commitment(), &context).unwrap());
+    }
+
+    #[test]
+    fn verification_context_caches_coefficients_after_valid_proof() {
+        let params = Parameters::new(4, 4, 64).unwrap();
+        let original =
+            RowMatrix::with_shape(vec![1u8; params.k * params.row_size], params.k, 64).unwrap();
+        let ext_data = ExtendedData::generate(&original, &params).unwrap();
+        let context = VerificationContext::new(ext_data.rlc_original(), &params).unwrap();
+
+        let mut invalid = ext_data.generate_row_proof(0).unwrap();
+        invalid.row.to_mut()[0] ^= 1;
+        assert!(verify_with_context(&invalid, &ext_data.commitment(), &context).is_err());
+        assert!(context.coefficients.get().is_none());
+
+        let proof = ext_data.generate_row_proof(0).unwrap();
+        assert!(verify_with_context(&proof, &ext_data.commitment(), &context).unwrap());
+        let cached = context.coefficients.get().unwrap();
+        assert_eq!(cached.0, ext_data.row_root());
+        assert_eq!(cached.1.len(), params.symbols_per_row());
+        let cached_coefficients = cached.1.as_ptr();
+
+        let proof = ext_data.generate_row_proof(4).unwrap();
+        assert!(verify_with_context(&proof, &ext_data.commitment(), &context).unwrap());
+        assert_eq!(
+            context.coefficients.get().unwrap().1.as_ptr(),
+            cached_coefficients
+        );
     }
 }

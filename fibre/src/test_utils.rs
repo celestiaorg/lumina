@@ -3,6 +3,7 @@
 //! Contains unified mock implementations used across upload, download, and
 //! roundtrip tests.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,7 @@ use crate::error::FibreError;
 use crate::payment_promise::PaymentPromise;
 use crate::validator::{SetGetter, ValidatorInfo, ValidatorSet};
 use crate::validator_client::{
-    DownloadResponse, DownloadedRow, UploadResponse, ValidatorConnection, ValidatorConnector,
+    DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
 };
 
 /// Mock [`SetGetter`] that returns a fixed validator set.
@@ -40,8 +41,8 @@ impl SetGetter for MockSetGetter {
 pub(crate) struct MockValidatorConnection {
     /// Ed25519 signing key for this mock validator.
     ed_signing_key: Ed25519SigningKey,
-    /// Rows stored by commitment hash.
-    stored: Mutex<HashMap<[u8; 32], Vec<rsema1d::RowInclusionProof>>>,
+    /// Shards (rows plus RLC vector) stored by commitment hash.
+    stored: Mutex<HashMap<[u8; 32], DownloadResponse>>,
     /// Record of what was uploaded (each call appends a list of row proofs).
     uploaded: Mutex<Vec<Vec<rsema1d::RowInclusionProof>>>,
     /// Watch channel incremented on each upload, for awaiting uploads in tests.
@@ -73,14 +74,39 @@ impl MockValidatorConnection {
         }
     }
 
-    /// Store row proofs externally (for download-only tests where upload is skipped).
-    pub fn store_proofs(&self, commitment: [u8; 32], proofs: Vec<rsema1d::RowInclusionProof>) {
-        self.stored
-            .lock()
-            .unwrap()
+    /// Store row proofs and the RLC vector externally (for download-only
+    /// tests where upload is skipped).
+    pub fn store_proofs(
+        &self,
+        commitment: [u8; 32],
+        proofs: Vec<rsema1d::RowInclusionProof>,
+        rlcs: Vec<rsema1d::GF128>,
+    ) {
+        self.store_shard(commitment, proofs, rlcs);
+    }
+
+    /// Append row proofs and set the RLC vector for a commitment.
+    fn store_shard(
+        &self,
+        commitment: [u8; 32],
+        proofs: impl IntoIterator<Item = rsema1d::RowInclusionProof>,
+        rlcs: Vec<rsema1d::GF128>,
+    ) {
+        let mut stored = self.stored.lock().unwrap();
+        let entry = stored
             .entry(commitment)
-            .or_default()
-            .extend(proofs);
+            .or_insert_with(|| DownloadResponse {
+                rows: Vec::new(),
+                rlcs: Vec::new(),
+            });
+        entry
+            .rows
+            .extend(proofs.into_iter().map(|proof| rsema1d::RowProof {
+                index: proof.index,
+                row: Cow::Owned(proof.row),
+                row_proof: proof.row_proof,
+            }));
+        entry.rlcs = rlcs;
     }
 
     /// Returns the list of uploaded row proof batches.
@@ -107,7 +133,7 @@ impl ValidatorConnection for MockValidatorConnection {
         &self,
         promise: &PaymentPromise,
         rows: &[rsema1d::RowInclusionProof],
-        _rlc_coeffs: &[rsema1d::GF128],
+        rlc_vector: &[rsema1d::GF128],
     ) -> Result<UploadResponse, FibreError> {
         if self.fail {
             return Err(FibreError::Other("mock connection failure".into()));
@@ -117,13 +143,12 @@ impl ValidatorConnection for MockValidatorConnection {
         self.uploaded.lock().unwrap().push(rows.to_vec());
         self.upload_tx.send_modify(|n| *n += 1);
 
-        // Store uploaded rows keyed by commitment.
-        self.stored
-            .lock()
-            .unwrap()
-            .entry(promise.commitment)
-            .or_default()
-            .extend(rows.to_vec());
+        // Store the uploaded shard keyed by commitment.
+        self.store_shard(
+            promise.commitment,
+            rows.iter().cloned(),
+            rlc_vector.to_vec(),
+        );
 
         // Sign the promise's sign bytes (CometBFT-wrapped, same for client and validators).
         use ed25519_dalek::Signer;
@@ -140,17 +165,12 @@ impl ValidatorConnection for MockValidatorConnection {
             return Err(FibreError::Other("mock connection failure".into()));
         }
 
-        let stored = self.stored.lock().unwrap();
-        let proofs = stored
+        self.stored
+            .lock()
+            .unwrap()
             .get(&blob_id.commitment())
-            .ok_or(FibreError::NotFound)?;
-
-        Ok(DownloadResponse {
-            rows: proofs
-                .iter()
-                .map(|p| DownloadedRow { proof: p.clone() })
-                .collect(),
-        })
+            .cloned()
+            .ok_or(FibreError::NotFound)
     }
 }
 
@@ -187,7 +207,7 @@ impl ValidatorConnector for MockConnector {
             .get(&validator.address)
             .cloned()
             .map(|c| c as Arc<dyn ValidatorConnection>)
-            .ok_or_else(|| FibreError::HostNotFound(hex::encode(validator.address)))
+            .ok_or_else(|| FibreError::HostNotFound(validator.address_hex()))
     }
 }
 
@@ -205,7 +225,7 @@ impl ValidatorConnector for FailingConnector {
         validator: &ValidatorInfo,
     ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
         if self.fail_addresses.contains(&validator.address) {
-            return Err(FibreError::HostNotFound(hex::encode(validator.address)));
+            return Err(FibreError::HostNotFound(validator.address_hex()));
         }
         self.inner.connect(validator).await
     }

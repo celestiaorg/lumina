@@ -247,10 +247,7 @@ impl BlobConfig {
     ///
     /// Panics if `blob_version` is not 0.
     pub fn from_params(blob_version: u8, params: &ProtocolParams) -> Self {
-        assert!(
-            blob_version == 0,
-            "unsupported blob version: {blob_version}"
-        );
+        assert_eq!(blob_version, 0, "unsupported blob version: {blob_version}");
 
         Self {
             blob_version,
