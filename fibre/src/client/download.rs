@@ -117,6 +117,8 @@ impl FibreClient {
 
         let blob_id = blob.id().clone();
         let verifier = Arc::new(ShardVerifier::new(blob));
+        let task_cancel = cancel_token.child_token();
+        let _task_cancel_guard = task_cancel.clone().drop_guard();
         let mut futures: TaskSet<usize, Result<VerifiedRows, FibreError>> = TaskSet::new();
 
         let mut cur_idx = 0;
@@ -146,19 +148,26 @@ impl FibreClient {
                     let blob_id = blob_id.clone();
                     let verifier = Arc::clone(&verifier);
                     let already_stored = blob.stored_rows_bitmap();
+                    let task_cancel = task_cancel.child_token();
 
                     spawn_task(&mut futures, val_idx, async move {
                         let _global = global_permit;
-                        let conn = connector.connect(&validator).await?;
-                        let shard = conn.download_shard(&blob_id).await?;
-                        if shard.rows.is_empty() {
-                            return Err(FibreError::EmptyShardResponse);
+                        tokio::select! {
+                            biased;
+                            _ = task_cancel.cancelled() => Err(FibreError::Cancelled),
+                            result = async {
+                                let conn = connector.connect(&validator).await?;
+                                let shard = conn.download_shard(&blob_id).await?;
+                                if shard.rows.is_empty() {
+                                    return Err(FibreError::EmptyShardResponse);
+                                }
+                                // Verify here so the heavy crypto runs off the
+                                // select! loop and per-task instead of serially.
+                                verifier
+                                    .verify(shard.rows, &shard.rlcs, &already_stored)
+                                    .await
+                            } => result,
                         }
-                        // Verify here so the heavy crypto runs off the
-                        // select! loop and per-task instead of serially.
-                        verifier
-                            .verify(shard.rows, &shard.rlcs, &already_stored)
-                            .await
                     });
                 }
                 task_result = futures.next(), if !futures.is_empty() => {
@@ -177,6 +186,8 @@ impl FibreClient {
                             }
                             unique_rows += applied;
                             if unique_rows >= original_rows {
+                                task_cancel.cancel();
+                                while futures.next().await.is_some() {}
                                 break;
                             }
                         }
@@ -202,6 +213,8 @@ impl FibreClient {
                     }
                 }
                 _ = cancel_token.cancelled() => {
+                    task_cancel.cancel();
+                    while futures.next().await.is_some() {}
                     return Err(FibreError::Cancelled);
                 }
             }
@@ -223,17 +236,78 @@ impl FibreClient {
 
 #[cfg(test)]
 mod tests {
+    use std::future::pending;
     use std::sync::Arc;
 
+    use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
     use crate::blob::{Blob, BlobID};
     use crate::config::BlobConfig;
     use crate::error::FibreError;
+    use crate::payment_promise::PaymentPromise;
     use crate::test_utils::{
         MockConnector, MockValidatorConnection, build_test_client, make_validator, test_blob_config,
     };
-    use crate::validator::ValidatorSet;
+    use crate::validator::{ValidatorInfo, ValidatorSet};
+    use crate::validator_client::{
+        DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
+    };
+
+    struct CoordinatedConnector {
+        fast_address: [u8; 20],
+        blocked_address: [u8; 20],
+        response: DownloadResponse,
+        barrier: Arc<Barrier>,
+    }
+
+    struct CoordinatedConnection {
+        response: Option<DownloadResponse>,
+        barrier: Arc<Barrier>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ValidatorConnector for CoordinatedConnector {
+        async fn connect(
+            &self,
+            validator: &ValidatorInfo,
+        ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
+            let response = if validator.address == self.fast_address {
+                Some(self.response.clone())
+            } else if validator.address == self.blocked_address {
+                None
+            } else {
+                return Err(FibreError::HostNotFound(validator.address_hex()));
+            };
+
+            Ok(Arc::new(CoordinatedConnection {
+                response,
+                barrier: Arc::clone(&self.barrier),
+            }))
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ValidatorConnection for CoordinatedConnection {
+        async fn upload_shard(
+            &self,
+            _promise: &PaymentPromise,
+            _rows: &[rsema1d::RowInclusionProof],
+            _rlc_coeffs: &[rsema1d::GF128],
+        ) -> Result<UploadResponse, FibreError> {
+            Err(FibreError::Other("upload not supported".into()))
+        }
+
+        async fn download_shard(&self, _blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
+            self.barrier.wait().await;
+            match &self.response {
+                Some(response) => Ok(response.clone()),
+                None => pending().await,
+            }
+        }
+    }
 
     /// Encode a blob, extract all row proofs, and store them on each mock
     /// validator connection. Returns the BlobID.
@@ -415,6 +489,57 @@ mod tests {
         result.reconstruct().unwrap();
 
         assert_eq!(result.data().unwrap(), &data);
+    }
+
+    #[tokio::test]
+    async fn download_cancels_inflight_tasks_after_reaching_threshold() {
+        let cfg = test_blob_config();
+        let data: Vec<u8> = (0u8..=199).collect();
+        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let blob_id = blob.id().clone();
+        let validators = [make_validator(100, 1), make_validator(100, 2)];
+        let val_infos: Vec<_> = validators.iter().map(|(_, info)| info.clone()).collect();
+        let val_set = ValidatorSet {
+            validators: val_infos.clone(),
+            height: 1,
+        };
+        let response = DownloadResponse {
+            rows: (0..cfg.total_rows())
+                .map(|index| {
+                    let proof = blob.row(index).unwrap();
+                    rsema1d::RowProof {
+                        index: proof.index,
+                        row: std::borrow::Cow::Owned(proof.row),
+                        row_proof: proof.row_proof,
+                    }
+                })
+                .collect(),
+            rlcs: blob.rlc_coeffs().unwrap().to_vec(),
+        };
+        let connector = CoordinatedConnector {
+            fast_address: val_infos[0].address,
+            blocked_address: val_infos[1].address,
+            response,
+            barrier: Arc::new(Barrier::new(2)),
+        };
+        let client = build_test_client(val_set, connector, "test-chain");
+        let mut result = Blob::empty_with_config(blob_id, cfg.clone());
+        let selected = [(2, &val_infos[0]), (2, &val_infos[1])];
+
+        client
+            .download_blob(
+                &selected,
+                cfg.original_rows,
+                &mut result,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.download_semaphore.available_permits(),
+            client.config().download_concurrency
+        );
     }
 
     #[tokio::test]

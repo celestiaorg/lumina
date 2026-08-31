@@ -380,6 +380,8 @@ impl Blob {
 #[derive(Debug)]
 pub(crate) struct VerifiedRows(Vec<rsema1d::RowProof<'static>>);
 
+const ROWS_PER_YIELD: usize = 16;
+
 /// Verifies downloaded shards against a blob's commitment.
 ///
 /// Shared across download tasks so the expensive
@@ -410,24 +412,16 @@ impl ShardVerifier {
     ///
     /// Rows already stored (per `already_stored`) or repeated within the
     /// response are skipped before any cryptography runs, bounding the work
-    /// to the number of still-missing rows. Yields to the executor between
-    /// rows so verification does not monopolize the thread.
+    /// to the number of still-missing rows. Yields periodically so verification
+    /// does not monopolize the executor.
     pub(crate) async fn verify(
         &self,
         rows: Vec<rsema1d::RowProof<'static>>,
         rlcs: &[rsema1d::GF128],
         already_stored: &[bool],
     ) -> Result<VerifiedRows, FibreError> {
-        let Some(first) = rows.first() else {
+        if rows.is_empty() {
             return Ok(VerifiedRows(Vec::new()));
-        };
-
-        let row_size = first.row.len();
-        let max_row_size = self.cfg.row_size(self.cfg.max_data_size);
-        if row_size == 0 || row_size > max_row_size {
-            return Err(FibreError::InvalidData(format!(
-                "row size {row_size} out of bounds (max {max_row_size})"
-            )));
         }
 
         let total_rows = self.cfg.total_rows();
@@ -449,6 +443,14 @@ impl ShardVerifier {
 
         if needed.is_empty() {
             return Ok(VerifiedRows(Vec::new()));
+        }
+
+        let row_size = needed[0].row.len();
+        let max_row_size = self.cfg.row_size(self.cfg.max_data_size);
+        if row_size == 0 || row_size > max_row_size {
+            return Err(FibreError::InvalidData(format!(
+                "row size {row_size} out of bounds (max {max_row_size})"
+            )));
         }
 
         let (context, verified) = {
@@ -476,9 +478,12 @@ impl ShardVerifier {
             }
         };
 
-        for proof in &needed[verified..] {
+        let remaining = &needed[verified..];
+        for (index, proof) in remaining.iter().enumerate() {
             rsema1d::verify_row_with_context(proof, &self.commitment, &context)?;
-            lumina_utils::executor::yield_now().await;
+            if (index + 1).is_multiple_of(ROWS_PER_YIELD) && index + 1 < remaining.len() {
+                lumina_utils::executor::yield_now().await;
+            }
         }
 
         Ok(VerifiedRows(needed))
@@ -741,6 +746,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(empty.store_rows(verified).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn verify_uses_first_needed_row_size() {
+        let (blob, mut empty) = test_blob_pair();
+        set_shard(&mut empty, shard_of(&blob, &[0])).await.unwrap();
+
+        let mut shard = shard_of(&blob, &[0, 1]);
+        shard.rows[0].row = std::borrow::Cow::Owned(vec![0; 128]);
+
+        let verifier = ShardVerifier::new(&empty);
+        let verified = verifier
+            .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+            .await
+            .unwrap();
+
+        assert_eq!(empty.store_rows(verified).unwrap(), 1);
     }
 
     #[tokio::test]
