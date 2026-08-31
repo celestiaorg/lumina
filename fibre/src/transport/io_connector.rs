@@ -37,7 +37,7 @@ impl FibreIoConnector for NativeTcpConnector {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+#[cfg(target_arch = "wasm32")]
 /// Opens Fibre connections through a WebSocket-to-TCP relay.
 ///
 /// The relay must negotiate `celestia-fibre-tcp-v1`, accept one `host:port` text frame, reply with one `ok` text frame, and then exchange only binary frames containing the TCP byte stream.
@@ -46,7 +46,7 @@ pub struct BrowserWebSocketConnector {
     relay_url: String,
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+#[cfg(target_arch = "wasm32")]
 impl BrowserWebSocketConnector {
     /// Create a connector targeting `relay_url`.
     pub fn new(relay_url: impl Into<String>) -> Self {
@@ -56,13 +56,13 @@ impl BrowserWebSocketConnector {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+#[cfg(target_arch = "wasm32")]
 struct BrowserIo {
     socket: send_wrapper::SendWrapper<gloo_net::websocket::futures::WebSocket>,
     pending: Vec<u8>,
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+#[cfg(target_arch = "wasm32")]
 impl AsyncRead for BrowserIo {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -107,7 +107,7 @@ impl AsyncRead for BrowserIo {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+#[cfg(target_arch = "wasm32")]
 impl AsyncWrite for BrowserIo {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -148,7 +148,7 @@ impl AsyncWrite for BrowserIo {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+#[cfg(target_arch = "wasm32")]
 #[async_trait::async_trait]
 impl FibreIoConnector for BrowserWebSocketConnector {
     async fn connect(&self, host: String, port: u16) -> Result<BoxedFibreIo, FibreError> {

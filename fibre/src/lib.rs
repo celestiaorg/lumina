@@ -33,7 +33,7 @@ pub use domain::payment_promise::{PaymentPromise, SignedPaymentPromise};
 pub use error::{FibreError, Result};
 pub use transport::grpc_validator_client::GrpcValidatorConnector;
 pub use transport::host_registry::{GrpcHostRegistry, Host, HostRegistry};
-#[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+#[cfg(target_arch = "wasm32")]
 pub use transport::io_connector::BrowserWebSocketConnector;
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::io_connector::NativeTcpConnector;

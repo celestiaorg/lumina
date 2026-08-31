@@ -33,7 +33,7 @@ pub mod api {
 
     /// Fibre API related types.
     pub mod fibre {
-        #[cfg(all(target_arch = "wasm32", feature = "wasm-browser"))]
+        #[cfg(target_arch = "wasm32")]
         pub use celestia_fibre::BrowserWebSocketConnector;
         #[cfg(not(target_arch = "wasm32"))]
         pub use celestia_fibre::NativeTcpConnector;
