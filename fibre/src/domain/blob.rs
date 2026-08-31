@@ -6,7 +6,7 @@
 //! - `Blob`: encoded data with Reed-Solomon erasure coding
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::blob_header::BlobHeaderV0;
 use crate::config::BlobConfig;
@@ -389,11 +389,11 @@ pub(crate) struct VerifiedRows(Vec<rsema1d::RowProof<'static>>);
 pub(crate) struct ShardVerifier {
     commitment: Commitment,
     cfg: BlobConfig,
-    /// RLC vector (and its context) proven against the commitment by a fully
-    /// verified shard. Later shards must carry the identical vector: once one
-    /// row verifies, `sha256(row_root || rlc_root)` binds the vector to the
-    /// commitment, so any other vector is invalid.
-    cache: Mutex<Option<(Vec<rsema1d::GF128>, Arc<rsema1d::VerificationContext>)>>,
+    /// RLC vector and context authenticated by a verified row. Later shards
+    /// must carry the identical vector: once one row verifies,
+    /// `sha256(row_root || rlc_root)` binds the vector to the commitment, so
+    /// any other vector is invalid.
+    cache: tokio::sync::Mutex<Option<(Vec<rsema1d::GF128>, Arc<rsema1d::VerificationContext>)>>,
 }
 
 impl ShardVerifier {
@@ -401,7 +401,7 @@ impl ShardVerifier {
         Self {
             commitment: blob.id.commitment(),
             cfg: blob.cfg.clone(),
-            cache: Mutex::new(None),
+            cache: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -451,40 +451,34 @@ impl ShardVerifier {
             return Ok(VerifiedRows(Vec::new()));
         }
 
-        let cached = self
-            .cache
-            .lock()
-            .expect("shard verifier lock poisoned")
-            .clone();
-        let context = match cached {
-            Some((cached_rlcs, context)) => {
-                if cached_rlcs != rlcs {
-                    return Err(FibreError::InvalidData(
-                        "rlc vector does not match the verified one".into(),
-                    ));
+        let (context, verified) = {
+            let mut cache = self.cache.lock().await;
+            match cache.as_ref() {
+                Some((cached_rlcs, context)) => {
+                    if cached_rlcs != rlcs {
+                        return Err(FibreError::InvalidData(
+                            "rlc vector does not match the verified one".into(),
+                        ));
+                    }
+                    (Arc::clone(context), 0)
                 }
-                context
-            }
-            None => {
-                let params = rsema1d::Parameters::new(
-                    self.cfg.original_rows,
-                    self.cfg.parity_rows,
-                    row_size,
-                )?;
-                Arc::new(rsema1d::VerificationContext::new(rlcs, &params)?)
+                None => {
+                    let params = rsema1d::Parameters::new(
+                        self.cfg.original_rows,
+                        self.cfg.parity_rows,
+                        row_size,
+                    )?;
+                    let context = Arc::new(rsema1d::VerificationContext::new(rlcs, &params)?);
+                    rsema1d::verify_row_with_context(&needed[0], &self.commitment, &context)?;
+                    *cache = Some((rlcs.to_vec(), Arc::clone(&context)));
+                    (context, 1)
+                }
             }
         };
 
-        for proof in &needed {
+        for proof in &needed[verified..] {
             rsema1d::verify_row_with_context(proof, &self.commitment, &context)?;
             lumina_utils::executor::yield_now().await;
-        }
-
-        // At least one row verified against this context, so the RLC vector
-        // is now authenticated and safe to cache.
-        let mut cache = self.cache.lock().expect("shard verifier lock poisoned");
-        if cache.is_none() {
-            *cache = Some((rlcs.to_vec(), context));
         }
 
         Ok(VerifiedRows(needed))
@@ -611,7 +605,14 @@ mod tests {
         TestShard {
             rows: indices
                 .iter()
-                .map(|&i| blob.row(i).unwrap().into())
+                .map(|&i| {
+                    let proof = blob.row(i).unwrap();
+                    rsema1d::RowProof {
+                        index: proof.index,
+                        row: std::borrow::Cow::Owned(proof.row),
+                        row_proof: proof.row_proof,
+                    }
+                })
                 .collect(),
             rlcs: blob.rlc_coeffs().unwrap().to_vec(),
         }
@@ -746,6 +747,15 @@ mod tests {
     async fn verify_caches_context_and_rejects_mismatched_rlcs() {
         let (blob, mut empty) = test_blob_pair();
         let verifier = ShardVerifier::new(&empty);
+
+        let mut shard = shard_of(&blob, &[0]);
+        shard.rows[0].row.to_mut()[0] ^= 1;
+        assert!(
+            verifier
+                .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+                .await
+                .is_err()
+        );
 
         // First shard authenticates the RLC vector and fills the cache.
         let shard = shard_of(&blob, &[0, 1]);

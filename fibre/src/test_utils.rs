@@ -3,6 +3,7 @@
 //! Contains unified mock implementations used across upload, download, and
 //! roundtrip tests.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -92,8 +93,19 @@ impl MockValidatorConnection {
         rlcs: Vec<rsema1d::GF128>,
     ) {
         let mut stored = self.stored.lock().unwrap();
-        let entry = stored.entry(commitment).or_default();
-        entry.rows.extend(proofs.into_iter().map(Into::into));
+        let entry = stored
+            .entry(commitment)
+            .or_insert_with(|| DownloadResponse {
+                rows: Vec::new(),
+                rlcs: Vec::new(),
+            });
+        entry
+            .rows
+            .extend(proofs.into_iter().map(|proof| rsema1d::RowProof {
+                index: proof.index,
+                row: Cow::Owned(proof.row),
+                row_proof: proof.row_proof,
+            }));
         entry.rlcs = rlcs;
     }
 

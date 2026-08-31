@@ -21,7 +21,7 @@ pub struct UploadResponse {
 }
 
 /// Response from a validator when downloading a shard.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DownloadResponse {
     /// Rows and their Merkle proofs.
     pub rows: Vec<rsema1d::RowProof<'static>>,

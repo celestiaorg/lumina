@@ -37,16 +37,6 @@ pub struct RowInclusionProof {
     pub rlc_root: [u8; 32],
 }
 
-impl From<RowInclusionProof> for RowProof<'static> {
-    fn from(proof: RowInclusionProof) -> Self {
-        RowProof {
-            index: proof.index,
-            row: Cow::Owned(proof.row),
-            row_proof: proof.row_proof,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::codec::ExtendedData;

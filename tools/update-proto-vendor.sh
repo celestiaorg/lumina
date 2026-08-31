@@ -50,8 +50,15 @@ extract_urls ../target/proto-vendor-src \
 
 mkdir -p vendor
 
+# celestia/fibre and celestia/valaddr are not in the CELESTIA_APP tag yet and
+# are hand-maintained; preserve them across the re-vendor until a tagged
+# celestia-app release ships them.
+mv vendor/celestia/fibre ../target/proto-vendor-src/keep-fibre
+mv vendor/celestia/valaddr ../target/proto-vendor-src/keep-valaddr
 rm -rf vendor/celestia
 cp -r "../target/proto-vendor-src/celestia-app-${CELESTIA_APP//\//-}/proto/celestia" vendor
+mv ../target/proto-vendor-src/keep-fibre vendor/celestia/fibre
+mv ../target/proto-vendor-src/keep-valaddr vendor/celestia/valaddr
 
 rm -rf vendor/go-header
 mkdir -p vendor/go-header/p2p
