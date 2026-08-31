@@ -249,7 +249,11 @@ pub struct SignedPaymentPromise {
 const COMET_RAW_BYTES_PREFIX: &[u8] = b"COMET::RAW_BYTES::SIGN";
 
 /// Construct the CometBFT domain-separated sign bytes for raw byte messages.
-fn raw_bytes_message_sign_bytes(chain_id: &str, unique_id: &[u8], raw_bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn raw_bytes_message_sign_bytes(
+    chain_id: &str,
+    unique_id: &[u8],
+    raw_bytes: &[u8],
+) -> Vec<u8> {
     use celestia_proto::tendermint_celestia_mods::privval::SignRawBytesRequest;
     use prost::Message;
 

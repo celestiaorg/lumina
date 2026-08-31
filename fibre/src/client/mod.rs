@@ -86,7 +86,10 @@ impl FibreClient {
         let host_registry = Arc::new(crate::host_registry::GrpcHostRegistry::new(
             grpc_client.clone(),
         ));
-        let connector = crate::grpc_validator_client::GrpcValidatorConnector::new(host_registry);
+        let connector = crate::grpc_validator_client::GrpcValidatorConnector::new(
+            host_registry,
+            config.chain_id.clone(),
+        );
 
         Self::builder()
             .config(config)

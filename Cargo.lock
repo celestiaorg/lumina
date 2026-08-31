@@ -753,21 +753,28 @@ dependencies = [
  "celestia-proto",
  "celestia-types",
  "chacha8rand",
+ "der",
  "ed25519-dalek",
  "futures",
  "hex",
+ "hyper-util",
  "k256",
  "lumina-utils",
  "prost",
  "rand 0.8.5",
  "rsema1d",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tendermint-proto",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tonic",
+ "tower",
  "tracing",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1416,6 +1423,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
+ "der_derive",
  "zeroize",
 ]
 
@@ -1431,6 +1439,17 @@ dependencies = [
  "num-bigint 0.4.6",
  "num-traits",
  "rusticata-macros",
+]
+
+[[package]]
+name = "der_derive"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8034092389675178f570469e6c3b0465d3d30b4505c294a6550db47f3c17ad18"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
