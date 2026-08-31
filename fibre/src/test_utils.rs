@@ -3,7 +3,6 @@
 //! Contains unified mock implementations used across upload, download, and
 //! roundtrip tests.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -19,14 +18,6 @@ use crate::validator::{SetGetter, ValidatorInfo, ValidatorSet};
 use crate::validator_client::{
     DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
 };
-
-fn row_proof_from_inclusion(proof: rsema1d::RowInclusionProof) -> rsema1d::RowProof<'static> {
-    rsema1d::RowProof {
-        index: proof.index,
-        row: Cow::Owned(proof.row),
-        row_proof: proof.row_proof,
-    }
-}
 
 /// Mock [`SetGetter`] that returns a fixed validator set.
 pub(crate) struct MockSetGetter {
@@ -90,16 +81,19 @@ impl MockValidatorConnection {
         proofs: Vec<rsema1d::RowInclusionProof>,
         rlcs: Vec<rsema1d::GF128>,
     ) {
+        self.store_shard(commitment, proofs, rlcs);
+    }
+
+    /// Append row proofs and set the RLC vector for a commitment.
+    fn store_shard(
+        &self,
+        commitment: [u8; 32],
+        proofs: impl IntoIterator<Item = rsema1d::RowInclusionProof>,
+        rlcs: Vec<rsema1d::GF128>,
+    ) {
         let mut stored = self.stored.lock().unwrap();
-        let entry = stored
-            .entry(commitment)
-            .or_insert_with(|| DownloadResponse {
-                rows: Vec::new(),
-                rlcs: Vec::new(),
-            });
-        entry
-            .rows
-            .extend(proofs.into_iter().map(row_proof_from_inclusion));
+        let entry = stored.entry(commitment).or_default();
+        entry.rows.extend(proofs.into_iter().map(Into::into));
         entry.rlcs = rlcs;
     }
 
@@ -138,19 +132,11 @@ impl ValidatorConnection for MockValidatorConnection {
         self.upload_tx.send_modify(|n| *n += 1);
 
         // Store the uploaded shard keyed by commitment.
-        {
-            let mut stored = self.stored.lock().unwrap();
-            let entry = stored
-                .entry(promise.commitment)
-                .or_insert_with(|| DownloadResponse {
-                    rows: Vec::new(),
-                    rlcs: Vec::new(),
-                });
-            entry
-                .rows
-                .extend(rows.iter().cloned().map(row_proof_from_inclusion));
-            entry.rlcs = rlc_vector.to_vec();
-        }
+        self.store_shard(
+            promise.commitment,
+            rows.iter().cloned(),
+            rlc_vector.to_vec(),
+        );
 
         // Sign the promise's sign bytes (CometBFT-wrapped, same for client and validators).
         use ed25519_dalek::Signer;
@@ -209,7 +195,7 @@ impl ValidatorConnector for MockConnector {
             .get(&validator.address)
             .cloned()
             .map(|c| c as Arc<dyn ValidatorConnection>)
-            .ok_or_else(|| FibreError::HostNotFound(hex::encode(validator.address)))
+            .ok_or_else(|| FibreError::HostNotFound(validator.address_hex()))
     }
 }
 
@@ -227,7 +213,7 @@ impl ValidatorConnector for FailingConnector {
         validator: &ValidatorInfo,
     ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
         if self.fail_addresses.contains(&validator.address) {
-            return Err(FibreError::HostNotFound(hex::encode(validator.address)));
+            return Err(FibreError::HostNotFound(validator.address_hex()));
         }
         self.inner.connect(validator).await
     }

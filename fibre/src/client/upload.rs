@@ -164,9 +164,11 @@ impl FibreClient {
             .map(|(&val_idx, row_indices)| (val_idx, row_indices.clone()))
             .collect();
 
-        // Extract RLC coefficients once for all tasks (empty if unavailable).
-        let rlc_coeffs: Arc<Vec<rsema1d::GF128>> =
-            Arc::new(blob.rlc_coeffs().map(|c| c.to_vec()).unwrap_or_default());
+        let rlc_coeffs = Arc::new(
+            blob.rlc_coeffs()
+                .ok_or_else(|| FibreError::Other("blob has no RLC coefficients to upload".into()))?
+                .to_vec(),
+        );
 
         let mut futures: TaskSet<usize, Result<Vec<u8>, FibreError>> = TaskSet::new();
 
@@ -222,7 +224,7 @@ impl FibreClient {
                                 }
                                 Err(e) => {
                                     tracing::warn!(
-                                        validator = %hex::encode(validator.address),
+                                        validator = %validator.address_hex(),
                                         error = %e,
                                         "invalid validator signature"
                                     );
@@ -232,7 +234,7 @@ impl FibreClient {
                         Some((val_idx, Some(Err(e)))) => {
                             let validator = &val_set.validators[val_idx];
                             tracing::warn!(
-                                validator = %hex::encode(validator.address),
+                                validator = %validator.address_hex(),
                                 error = %e,
                                 "shard upload failed"
                             );
@@ -240,7 +242,7 @@ impl FibreClient {
                         Some((val_idx, None)) => {
                             let validator = &val_set.validators[val_idx];
                             tracing::warn!(
-                                validator = %hex::encode(validator.address),
+                                validator = %validator.address_hex(),
                                 "upload task dropped unexpectedly"
                             );
                         }

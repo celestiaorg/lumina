@@ -3,19 +3,20 @@
 //! Retrieves a blob from validators and reconstructs it using erasure coding
 //! with an adaptive fan-out strategy.
 
+use std::sync::Arc;
+
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::task::{TaskSet, spawn_task};
 
 use crate::ValidatorInfo;
-use crate::blob::{Blob, BlobID};
+use crate::blob::{Blob, BlobID, ShardVerifier, VerifiedRows};
 use crate::client::FibreClient;
 #[cfg(test)]
 use crate::config::BlobConfig;
 use crate::error::FibreError;
 use crate::validator::ValidatorSet;
-use crate::validator_client::DownloadResponse;
 
 /// Options for configuring blob download behavior.
 #[derive(Default)]
@@ -115,7 +116,8 @@ impl FibreClient {
         }
 
         let blob_id = blob.id().clone();
-        let mut futures: TaskSet<usize, Result<DownloadResponse, FibreError>> = TaskSet::new();
+        let verifier = Arc::new(ShardVerifier::new(blob));
+        let mut futures: TaskSet<usize, Result<VerifiedRows, FibreError>> = TaskSet::new();
 
         let mut cur_idx = 0;
         let mut unique_rows: usize = 0;
@@ -142,6 +144,8 @@ impl FibreClient {
                     let connector = self.connector.clone();
                     let validator = info.clone();
                     let blob_id = blob_id.clone();
+                    let verifier = Arc::clone(&verifier);
+                    let already_stored = blob.stored_rows_bitmap();
 
                     spawn_task(&mut futures, val_idx, async move {
                         let _global = global_permit;
@@ -150,37 +154,30 @@ impl FibreClient {
                         if shard.rows.is_empty() {
                             return Err(FibreError::EmptyShardResponse);
                         }
-                        Ok(shard)
+                        // Verify here so the heavy crypto runs off the
+                        // select! loop and per-task instead of serially.
+                        verifier
+                            .verify(shard.rows, &shard.rlcs, &already_stored)
+                            .await
                     });
                 }
                 task_result = futures.next(), if !futures.is_empty() => {
                     match task_result {
-                        Some((val_idx, Some(Ok(shard)))) => {
+                        Some((val_idx, Some(Ok(verified)))) => {
                             let (rows, info) = selected[val_idx];
                             inflight_rows = inflight_rows.saturating_sub(rows);
-                            match blob.set_shard(shard.rows, &shard.rlcs) {
-                                Ok(applied) => {
-                                    // Shards are never empty here, so zero
-                                    // applied means all rows were duplicates.
-                                    if applied == 0 {
-                                        tracing::warn!(
-                                            validator = %info.address_hex(),
-                                            "no rows applied from validator response"
-                                        );
-                                    }
-                                    unique_rows += applied;
-                                    if unique_rows >= original_rows {
-                                        break;
-                                    }
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        validator = %info.address_hex(),
-                                        %error,
-                                        "shard verification failed"
-                                    );
-                                    // Invariant violated — loop will spawn more validators.
-                                }
+                            let applied = blob.store_rows(verified)?;
+                            // Shards are never empty here, so zero
+                            // applied means all rows were duplicates.
+                            if applied == 0 {
+                                tracing::warn!(
+                                    validator = %info.address_hex(),
+                                    "no rows applied from validator response"
+                                );
+                            }
+                            unique_rows += applied;
+                            if unique_rows >= original_rows {
+                                break;
                             }
                         }
                         Some((val_idx, Some(Err(error)))) => {
@@ -189,7 +186,7 @@ impl FibreClient {
                             tracing::warn!(
                                 validator = %info.address_hex(),
                                 %error,
-                                "shard download failed"
+                                "shard download or verification failed"
                             );
                             // Invariant violated — loop will spawn more validators.
                         }

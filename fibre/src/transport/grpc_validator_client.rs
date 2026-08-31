@@ -154,7 +154,7 @@ mod tests {
             self.hosts
                 .get(&validator.address)
                 .cloned()
-                .ok_or_else(|| FibreError::HostNotFound(hex::encode(validator.address)))
+                .ok_or_else(|| FibreError::HostNotFound(validator.address_hex()))
         }
     }
 
@@ -252,7 +252,7 @@ mod tests {
             Err(FibreError::HostNotFound(addr_hex)) => {
                 assert_eq!(
                     addr_hex,
-                    hex::encode(validator.address),
+                    validator.address_hex(),
                     "error should contain the validator address"
                 );
             }
