@@ -1,10 +1,9 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::time::Duration;
 
-use celestia_rpc::ShareClient;
+use celestia_rpc::{HeaderClient, ShareClient};
 use celestia_types::nmt::Namespace;
 use celestia_types::{Blob, ExtendedHeader};
 use lumina_node::blockstore::InMemoryBlockstore;
@@ -13,11 +12,14 @@ use lumina_node::node::P2pError;
 use lumina_node::store::InMemoryStore;
 use lumina_node::{Node, NodeError};
 use rand::RngCore;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use crate::utils::{blob_submit, bridge_client, new_connected_node};
 
 mod utils;
+
+const HISTORICAL_HEADERS_TO_SAMPLE: usize = 10;
+const MIN_BRIDGE_HEIGHT: u64 = HISTORICAL_HEADERS_TO_SAMPLE as u64 + 1;
 
 #[tokio::test]
 async fn shrex_sampling_forward() {
@@ -62,52 +64,44 @@ async fn shrex_sampling_forward() {
 
 #[tokio::test]
 async fn shrex_sampling_backward() {
-    let (node, mut events) = new_connected_node().await;
+    timeout(
+        Duration::from_secs(30),
+        bridge_client()
+            .await
+            .header_wait_for_height(MIN_BRIDGE_HEIGHT),
+    )
+    .await
+    .expect("bridge did not reach the minimum height within 30s")
+    .unwrap();
+
+    let (node, _) = new_connected_node().await;
 
     let current_head = node.get_local_head_header().await.unwrap().height();
+    assert!(
+        current_head >= MIN_BRIDGE_HEIGHT,
+        "node started below the required height: {current_head}"
+    );
 
-    // wait for some past headers to be synchronized
-    let new_batch_synced = async {
+    let first_historical_height = current_head - HISTORICAL_HEADERS_TO_SAMPLE as u64;
+    let headers_to_sample: Vec<_> = (first_historical_height..current_head).collect();
+    assert_eq!(headers_to_sample.len(), HISTORICAL_HEADERS_TO_SAMPLE);
+
+    // Sampling these historical heights proves that they were synchronized backwards first.
+    timeout(Duration::from_secs(40), async {
         loop {
-            let ev = events.recv().await.unwrap();
-            let NodeEvent::FetchingHeadersFinished {
-                from_height,
-                to_height,
-                ..
-            } = ev.event
-            else {
-                continue;
-            };
-            if from_height < current_head {
-                break (from_height, to_height);
-            }
-        }
-    };
-    let (from_height, to_height) = timeout(Duration::from_secs(30), new_batch_synced)
-        .await
-        .unwrap();
-
-    // take just first N headers because batch size can be big
-    let mut headers_to_sample: HashSet<_> = (from_height..to_height).rev().take(10).collect();
-
-    // wait for all heights to be sampled
-    timeout(Duration::from_secs(10), async {
-        loop {
-            let ev = events.recv().await.unwrap();
-            let NodeEvent::SamplingResult { height, failed, .. } = ev.event else {
-                continue;
-            };
-
-            assert!(!failed);
-            headers_to_sample.remove(&height);
-
-            if headers_to_sample.is_empty() {
+            let sampled = node.get_sampled_header_ranges().await.unwrap();
+            if headers_to_sample
+                .iter()
+                .all(|height| sampled.contains(*height))
+            {
                 break;
             }
+
+            sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("historical headers were not synchronized and sampled within 40s");
 }
 
 #[tokio::test]

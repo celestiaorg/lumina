@@ -502,6 +502,12 @@ where
         }
     }
 
+    /// Get the ranges of sampled headers held in the store.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn get_sampled_header_ranges(&self) -> Result<crate::block_ranges::BlockRanges> {
+        Ok(self.store().get_sampled_ranges().await?)
+    }
+
     /// Subscribe to new headers received by the node from the network.
     ///
     /// Return a stream which will yield all the headers, as they are being received by the

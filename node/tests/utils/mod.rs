@@ -85,12 +85,10 @@ where
         .start_subscribed()
         .await
         .unwrap();
-
     timeout(Duration::from_secs(30), node.wait_connected_trusted())
         .await
         .expect("node did not connect within 30s — is the devnet reachable? (docker compose -f ci/docker-compose.yml up)")
         .unwrap();
-
     // Wait until node reaches height 3
     timeout(Duration::from_secs(60), async {
         loop {
@@ -108,7 +106,6 @@ where
     })
     .await
     .expect("node did not reach height 3 within 60s");
-
     (node, events)
 }
 
