@@ -386,8 +386,8 @@ const ROWS_PER_YIELD: usize = 16;
 ///
 /// Shared across download tasks so the expensive
 /// [`rsema1d::VerificationContext`] (RS extension of the RLC vector plus a
-/// Merkle build) is computed once per blob instead of once per validator
-/// response.
+/// Merkle build and row-derived coefficients) is computed once per blob
+/// instead of once per validator response.
 pub(crate) struct ShardVerifier {
     commitment: Commitment,
     cfg: BlobConfig,
