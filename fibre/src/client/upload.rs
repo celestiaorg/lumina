@@ -12,12 +12,10 @@ use std::sync::Arc;
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
 use celestia_types::nmt::Namespace;
 use celestia_types::state::AccAddress;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use lumina_utils::cond_send::BoxFuture;
-
-use crate::client::task::spawn_task;
+use crate::client::task::{TaskSet, spawn_task};
 
 use crate::blob::Blob;
 use crate::client::FibreClient;
@@ -166,14 +164,13 @@ impl FibreClient {
             .map(|(&val_idx, row_indices)| (val_idx, row_indices.clone()))
             .collect();
 
-        // Extract RLC coefficients once for all tasks (empty if unavailable).
-        let rlc_coeffs: Arc<Vec<rsema1d::GF128>> =
-            Arc::new(blob.rlc_coeffs().map(|c| c.to_vec()).unwrap_or_default());
+        let rlc_coeffs = Arc::new(
+            blob.rlc_coeffs()
+                .ok_or_else(|| FibreError::Other("blob has no RLC coefficients to upload".into()))?
+                .to_vec(),
+        );
 
-        #[allow(clippy::type_complexity)]
-        let mut futures: FuturesUnordered<
-            BoxFuture<'static, (usize, Option<Result<Vec<u8>, FibreError>>)>,
-        > = FuturesUnordered::new();
+        let mut futures: TaskSet<usize, Result<Vec<u8>, FibreError>> = TaskSet::new();
 
         // Phase 1: Spawn all upload tasks up-front so that every validator is
         // contacted regardless of how quickly the signature threshold is met.
@@ -227,7 +224,7 @@ impl FibreClient {
                                 }
                                 Err(e) => {
                                     tracing::warn!(
-                                        validator = %hex::encode(validator.address),
+                                        validator = %validator.address_hex(),
                                         error = %e,
                                         "invalid validator signature"
                                     );
@@ -237,7 +234,7 @@ impl FibreClient {
                         Some((val_idx, Some(Err(e)))) => {
                             let validator = &val_set.validators[val_idx];
                             tracing::warn!(
-                                validator = %hex::encode(validator.address),
+                                validator = %validator.address_hex(),
                                 error = %e,
                                 "shard upload failed"
                             );
@@ -245,7 +242,7 @@ impl FibreClient {
                         Some((val_idx, None)) => {
                             let validator = &val_set.validators[val_idx];
                             tracing::warn!(
-                                validator = %hex::encode(validator.address),
+                                validator = %validator.address_hex(),
                                 "upload task dropped unexpectedly"
                             );
                         }

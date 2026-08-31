@@ -108,8 +108,9 @@ impl EventSubscriber {
         loop {
             match self.rx.recv().await {
                 Ok(val) => return Ok(val),
-                Err(broadcast::error::RecvError::Lagged(_)) => {
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     // Slow consumer. We will receive a message on the next call.
+                    tracing::warn!(skipped, "Event subscriber lagged, events were dropped");
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => return Err(RecvError::Closed),
@@ -126,8 +127,9 @@ impl EventSubscriber {
         loop {
             match self.rx.try_recv() {
                 Ok(val) => return Ok(val),
-                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
                     // Slow consumer. We will receive a message on the next call.
+                    tracing::warn!(skipped, "Event subscriber lagged, events were dropped");
                     continue;
                 }
                 Err(broadcast::error::TryRecvError::Empty) => return Err(TryRecvError::Empty),

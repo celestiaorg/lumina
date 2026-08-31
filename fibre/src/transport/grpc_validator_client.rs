@@ -18,7 +18,7 @@ use crate::proto_conv;
 use crate::transport::io_connector::FibreIoConnector;
 use crate::validator::ValidatorInfo;
 use crate::validator_client::{
-    DownloadResponse, DownloadedRow, UploadResponse, ValidatorConnection, ValidatorConnector,
+    DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
 };
 
 /// Factory that resolves validator hosts and caches gRPC connections.
@@ -145,14 +145,7 @@ impl ValidatorConnection for GrpcValidatorConnection {
             .download_shard(blob_id.as_bytes().to_vec())
             .await?;
 
-        let proofs = proto_conv::parse_download_response(response)?;
-
-        Ok(DownloadResponse {
-            rows: proofs
-                .into_iter()
-                .map(|proof| DownloadedRow { proof })
-                .collect(),
-        })
+        proto_conv::parse_download_response(response)
     }
 }
 
@@ -177,7 +170,7 @@ mod tests {
             self.hosts
                 .get(&validator.address)
                 .cloned()
-                .ok_or_else(|| FibreError::HostNotFound(hex::encode(validator.address)))
+                .ok_or_else(|| FibreError::HostNotFound(validator.address_hex()))
         }
     }
 
@@ -275,7 +268,7 @@ mod tests {
             Err(FibreError::HostNotFound(addr_hex)) => {
                 assert_eq!(
                     addr_hex,
-                    hex::encode(validator.address),
+                    validator.address_hex(),
                     "error should contain the validator address"
                 );
             }
