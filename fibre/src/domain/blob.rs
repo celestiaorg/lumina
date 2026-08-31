@@ -105,7 +105,7 @@ impl fmt::Debug for BlobID {
 ///
 /// A `Blob` can be created in two ways:
 /// - `Blob::new()` encodes data into a new blob (for upload)
-/// - `Blob::empty()` creates an empty blob for reconstruction from downloaded shards
+/// - [`FibreClient::download`](crate::FibreClient::download) reconstructs blobs from downloaded shards
 pub struct Blob {
     cfg: BlobConfig,
     extended_data: Option<rsema1d::ExtendedData>,
@@ -164,10 +164,10 @@ impl Blob {
         })
     }
 
-    /// Create an empty blob for reconstruction from downloaded shards.
+    /// Create an empty blob for internal reconstruction from downloaded shards.
     ///
     /// Returns an error if the BlobID is invalid or the blob version is not supported.
-    pub fn empty(id: BlobID) -> Result<Self, FibreError> {
+    pub(crate) fn empty(id: BlobID) -> Result<Self, FibreError> {
         id.validate()?;
         let cfg = BlobConfig::for_version(id.version())?;
         let total_rows = cfg.total_rows();
