@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::time::Duration;
 
-use celestia_rpc::ShareClient;
+use celestia_rpc::{HeaderClient, ShareClient};
 use celestia_types::nmt::Namespace;
 use celestia_types::{Blob, ExtendedHeader};
 use lumina_node::blockstore::InMemoryBlockstore;
@@ -17,6 +17,9 @@ use tokio::time::{sleep, timeout};
 use crate::utils::{blob_submit, bridge_client, new_connected_node};
 
 mod utils;
+
+const HISTORICAL_HEADERS_TO_SAMPLE: usize = 10;
+const MIN_BRIDGE_HEIGHT: u64 = HISTORICAL_HEADERS_TO_SAMPLE as u64 + 1;
 
 #[tokio::test]
 async fn shrex_sampling_forward() {
@@ -61,10 +64,27 @@ async fn shrex_sampling_forward() {
 
 #[tokio::test]
 async fn shrex_sampling_backward() {
+    timeout(
+        Duration::from_secs(30),
+        bridge_client()
+            .await
+            .header_wait_for_height(MIN_BRIDGE_HEIGHT),
+    )
+    .await
+    .expect("bridge did not reach the minimum height within 30s")
+    .unwrap();
+
     let (node, _) = new_connected_node().await;
 
     let current_head = node.get_local_head_header().await.unwrap().height();
-    let headers_to_sample: Vec<_> = (1..current_head).rev().take(10).collect();
+    assert!(
+        current_head >= MIN_BRIDGE_HEIGHT,
+        "node started below the required height: {current_head}"
+    );
+
+    let first_historical_height = current_head - HISTORICAL_HEADERS_TO_SAMPLE as u64;
+    let headers_to_sample: Vec<_> = (first_historical_height..current_head).collect();
+    assert_eq!(headers_to_sample.len(), HISTORICAL_HEADERS_TO_SAMPLE);
 
     // Sampling these historical heights proves that they were synchronized backwards first.
     timeout(Duration::from_secs(40), async {
