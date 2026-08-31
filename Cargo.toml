@@ -76,6 +76,7 @@ rand = "0.8.5"
 redb = "2.6"
 rexie = "0.6"
 rust-embed = "8"
+rustls-pki-types = "1.11"
 send_wrapper = { version = "0.6", features = ["futures"] }
 serde = "1.0.194"
 serde_json = "1.0.142"
