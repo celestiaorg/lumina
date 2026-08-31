@@ -5,13 +5,16 @@ DOTENV=".env"
 DOTENV_SAMPLE=".env.sample"
 DOCKER_COMPOSE_FILE="./ci/docker-compose.yml"
 
+# how long to wait for all services to become healthy, in seconds
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-180}"
+
 wait_for_docker_setup() {
   local services_expected
   services_expected="$(docker compose -f "$DOCKER_COMPOSE_FILE" config --services | wc -l)"
 
   printf "Waiting for docker compose services"
 
-  while :; do
+  for (( elapsed = 0; elapsed <= WAIT_TIMEOUT; elapsed++ )); do
     local status
     local healthy
     local starting
@@ -27,12 +30,21 @@ wait_for_docker_setup() {
       echo ""
       echo "Some services crashed or are unhealthy" >&2
       docker compose -f "$DOCKER_COMPOSE_FILE" ps --all
+      docker compose -f "$DOCKER_COMPOSE_FILE" logs --tail 100
       exit 1
     fi
 
     printf "."
     sleep 1
   done
+
+  if (( healthy != services_expected )); then
+    echo ""
+    echo "Services did not become healthy within ${WAIT_TIMEOUT}s" >&2
+    docker compose -f "$DOCKER_COMPOSE_FILE" ps --all
+    docker compose -f "$DOCKER_COMPOSE_FILE" logs --tail 100
+    exit 1
+  fi
 
   echo ""
   echo "All services healthy"

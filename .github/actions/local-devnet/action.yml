@@ -5,41 +5,26 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Cache Docker layers
-      uses: actions/cache@v4
-      with:
-        path: ${{ runner.temp }}/.buildx-cache
-        key: ${{ runner.os }}-buildx-${{ hashFiles('./ci/Dockerfile*', './ci/*.yml', './ci/*.sh') }}
-        restore-keys: |
-          ${{ runner.os }}-buildx-
-
     - name: Build the docker-compose stack
       shell: bash
       run: |
-        mkdir -p ${{ runner.temp }}/.buildx-cache-new
         cd ci
         for image in "validator" "node" "grpcwebproxy"; do
           docker buildx build \
             --file "Dockerfile.$image" \
             --tag "$image" \
             --load \
-            --cache-from="type=local,src=${{ runner.temp }}/.buildx-cache/$image" \
-            --cache-to="type=local,dest=${{ runner.temp }}/.buildx-cache-new/$image" \
+            --cache-from="type=gha,scope=devnet-$image" \
+            --cache-to="type=gha,mode=max,scope=devnet-$image" \
             . &
         done
         wait $(jobs -p)
 
-    # Needed because otherwise cache would grow infinitely
-    # https://github.com/moby/buildkit/issues/1896
-    - name: Overwrite cache
-      shell: bash
-      run: |
-        rm -rf ${{ runner.temp }}/.buildx-cache
-        mv ${{ runner.temp }}/.buildx-cache-new ${{ runner.temp }}/.buildx-cache
-
     - name: Run the docker-compose stack
       shell: bash
-      run: docker compose -f ci/docker-compose.yml up --no-build -d
+      # --wait fails if any service exits or becomes unhealthy,
+      # instead of hanging until the job timeout
+      run: docker compose -f ci/docker-compose.yml up --no-build -d --wait --wait-timeout 180
 
     - name: Generate auth tokens
       shell: bash

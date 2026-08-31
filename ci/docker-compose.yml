@@ -6,12 +6,13 @@ services:
       context: .
       dockerfile: Dockerfile.validator
     environment:
+      - NO_COLOR=1
       # amount of DA nodes to provision (default: 3)
       - NODE_COUNT=3
     ports:
-      - 19090:9090 # grpc
+      - 127.0.0.1:19090:9090 # grpc
       # TODO: uncomment and remove grpcwebproxy below, once CORS works with built-in grpc-web
-      #- 18080:1317 # grpc-web
+      #- 127.0.0.1:18080:1317 # grpc-web
     volumes: &vols
       - credentials:/credentials
       - genesis:/genesis
@@ -19,7 +20,8 @@ services:
       # wait for validator to fund all keys
       test: celestia-appd query block --type height 5
       interval: 1s
-      timeout: 60s
+      timeout: 10s
+      start_period: 10s
       retries: 60
 
   grpcwebproxy:
@@ -30,7 +32,10 @@ services:
       dockerfile: Dockerfile.grpcwebproxy
     command: --backend_addr=validator:9090 --run_tls_server=false --allow_all_origins
     ports:
-      - 18080:8080
+      - 127.0.0.1:18080:8080
+    depends_on:
+      validator:
+        condition: service_healthy
     # just so we can count it as healthy
     healthcheck:
       test: "true"
@@ -43,6 +48,7 @@ services:
       context: .
       dockerfile: Dockerfile.node
     environment:
+      - NO_COLOR=1
       # id of the DA node (default: 0)
       # each node should have a next natural number starting from 0
       - NODE_ID=0
@@ -52,14 +58,19 @@ services:
       # setting SKIP_AUTH to true disables the use of JWT for authentication
       - SKIP_AUTH=true
     ports:
-      - 26658:26658
+      - 127.0.0.1:26658:26658
     volumes: *vols
+    depends_on:
+      validator:
+        condition: service_healthy
     healthcheck: &healthcheck-node
-      # wait for the node to start json-rpc server
-      test: celestia header local-head
+      # wait for the node to start json-rpc server and sync a few headers.
+      # tests wait for height >= 3 anyway, so don't report healthy before that.
+      test: /opt/healthcheck.sh 3
       interval: 1s
-      timeout: 60s
-      retries: 60
+      timeout: 10s
+      start_period: 20s
+      retries: 90
 
   node-1:
     image: node
@@ -68,10 +79,16 @@ services:
       context: .
       dockerfile: Dockerfile.node
     environment:
+      - NO_COLOR=1
       - NODE_ID=1
     ports:
-      - 36658:26658
+      - 127.0.0.1:36658:26658
     volumes: *vols
+    depends_on: &depends-on-node-0
+      validator:
+        condition: service_healthy
+      node-0:
+        condition: service_healthy
     healthcheck: *healthcheck-node
 
   node-2:
@@ -81,12 +98,14 @@ services:
       context: .
       dockerfile: Dockerfile.node
     environment:
+      - NO_COLOR=1
       - NODE_ID=2
       - NODE_TYPE=light
       - SKIP_AUTH=true
     ports:
-      - 46658:26658
+      - 127.0.0.1:46658:26658
     volumes: *vols
+    depends_on: *depends-on-node-0
     healthcheck: *healthcheck-node
 
   # Uncomment for another nodes
@@ -98,10 +117,12 @@ services:
   #     context: .
   #     dockerfile: Dockerfile.node
   #   environment:
+  #     - NO_COLOR=1
   #     - NODE_ID=3
   #   ports:
-  #     - 46658:26658
+  #     - 127.0.0.1:56658:26658
   #   volumes: *vols
+  #   depends_on: *depends-on-node-0
   #   healthcheck: *healthcheck-node
 
   # This validator is started as a separate network, only to be able to test
@@ -114,6 +135,7 @@ services:
       context: .
       dockerfile: Dockerfile.validator
     environment:
+      - NO_COLOR=1
       - P2P_NETWORK=private-eviction-testing
       # amount of DA nodes to provision (default: 3)
       - NODE_COUNT=3
@@ -123,8 +145,12 @@ services:
       - SQUARE_SIZE=64
       - MEMPOOL_TX_TTL=1
     ports:
-      - 29090:9090
+      - 127.0.0.1:29090:9090
     volumes: *vols
+    # it reuses the keys created by the main validator
+    depends_on:
+      validator:
+        condition: service_healthy
     healthcheck: *healthcheck-validator
 
 volumes:

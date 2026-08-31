@@ -129,7 +129,7 @@ pub fn verify_standalone(
     let tree_pos = map_index_to_tree_position(proof.index, params.k);
     let row_root = reconstruct_root_from_proof(hash_leaf(&proof.row), tree_pos, &proof.row_proof);
 
-    let coeffs = derive_coefficients(&row_root, params.symbols_per_row());
+    let coeffs = derive_coefficients(&row_root, params.k, params.n, params.row_size);
     let rlc = compute_rlc(&proof.row, &coeffs);
     let rlc_root =
         reconstruct_root_from_proof(hash_leaf(&rlc.to_bytes()), proof.index, &proof.rlc_proof);
@@ -178,7 +178,12 @@ pub fn verify_with_context(
     let row_root =
         reconstruct_root_from_proof(hash_leaf(proof.row.as_ref()), tree_pos, &proof.row_proof);
 
-    let coeffs = derive_coefficients(&row_root, context.params.symbols_per_row());
+    let coeffs = derive_coefficients(
+        &row_root,
+        context.params.k,
+        context.params.n,
+        context.params.row_size,
+    );
     let computed_rlc = compute_rlc(proof.row.as_ref(), &coeffs);
     if computed_rlc != context.rlc_extended[proof.index] {
         return Err(Error::VerificationFailed(

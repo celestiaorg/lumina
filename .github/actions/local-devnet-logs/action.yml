@@ -1,0 +1,21 @@
+name: Dump local celestia devnet logs
+description: Prints the state of the devnet and uploads container logs as an artifact. Meant to be used on failure.
+inputs:
+  artifact-name:
+    description: Name of the artifact with the logs
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Dump devnet state
+      shell: bash
+      run: |
+        docker compose -f ci/docker-compose.yml ps --all || true
+        docker compose -f ci/docker-compose.yml logs --no-color --timestamps > "${{ runner.temp }}/devnet-logs.txt" || true
+
+    - name: Upload devnet logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/devnet-logs.txt
+        if-no-files-found: ignore

@@ -311,7 +311,8 @@ mod tests {
         for case in CASES {
             let (params, original) = make_original_rows(*case);
             let (ext_data, _, _) = encode(&original, &params).unwrap();
-            let coeffs = derive_coefficients(&ext_data.row_root(), params.symbols_per_row());
+            let coeffs =
+                derive_coefficients(&ext_data.row_root(), params.k, params.n, params.row_size);
 
             let extended_from_orig =
                 extend_rlcs(ext_data.rlc_original(), params.k, params.n).unwrap();
@@ -704,14 +705,16 @@ mod tests {
         assert_ne!(commitment_a, commitment_c);
 
         let root = ext_a.row_root();
-        let coeffs_1 = derive_coefficients(&root, params.symbols_per_row());
+        let coeffs_1 = derive_coefficients(&root, params.k, params.n, params.row_size);
 
+        // Coefficients are domain-separated per (k, n, row_size).
         let p2 = Parameters::new(8, 24, 128).unwrap();
         let p3 = Parameters::new(32, 8, 128).unwrap();
-        let coeffs_2 = derive_coefficients(&root, p2.symbols_per_row());
-        let coeffs_3 = derive_coefficients(&root, p3.symbols_per_row());
-        assert_eq!(coeffs_1, coeffs_2);
-        assert_eq!(coeffs_1, coeffs_3);
+        let coeffs_2 = derive_coefficients(&root, p2.k, p2.n, p2.row_size);
+        let coeffs_3 = derive_coefficients(&root, p3.k, p3.n, p3.row_size);
+        assert_eq!(coeffs_1.len(), coeffs_2.len());
+        assert_ne!(coeffs_1, coeffs_2);
+        assert_ne!(coeffs_2, coeffs_3);
     }
 
     #[test]
@@ -732,7 +735,7 @@ mod tests {
             seed: 8080,
         });
         let (ext_data, _, _) = encode(&original, &params).unwrap();
-        let coeffs = derive_coefficients(&ext_data.row_root(), params.symbols_per_row());
+        let coeffs = derive_coefficients(&ext_data.row_root(), params.k, params.n, params.row_size);
 
         let a = ext_data.row(0).unwrap().to_vec();
         let b = ext_data.row(1).unwrap().to_vec();
