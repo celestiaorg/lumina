@@ -349,25 +349,12 @@ impl Blob {
         // Reconstruct original rows
         let reconstructed = rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
 
-        // Verify commitment by re-encoding
-        let (ext_data, reconstructed_commitment, rlc_coeffs) =
-            rsema1d::encode(&reconstructed, &params)?;
-
-        if self.id.commitment() != reconstructed_commitment {
-            return Err(FibreError::CommitmentMismatch {
-                expected: hex::encode(self.id.commitment()),
-                actual: hex::encode(reconstructed_commitment),
-            });
-        }
-
         // Decode header and extract original data from the first K rows
         let original_rows: Vec<&[u8]> = (0..k).map(|i| reconstructed.row(i).unwrap()).collect();
         let (header, original_data) = BlobHeaderV0::decode_from_rows(&original_rows, &self.cfg)?;
 
         self.header = header;
         self.data = Some(original_data);
-        self.extended_data = Some(ext_data);
-        self.rlc_coeffs = Some(rlc_coeffs);
 
         Ok(())
     }
