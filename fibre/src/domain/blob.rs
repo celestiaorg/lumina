@@ -128,16 +128,37 @@ impl Blob {
     /// Returns `FibreError::EmptyBlobData` if data is empty.
     /// Returns `FibreError::BlobTooLarge` if the data exceeds `cfg.max_data_size`.
     pub fn new(data: &[u8], cfg: BlobConfig) -> Result<Self, FibreError> {
-        if data.is_empty() {
+        Self::validate_data_size(data.len(), &cfg)?;
+        Self::new_owned_unchecked(data.to_vec(), cfg)
+    }
+
+    /// Encode owned data into a new Blob.
+    ///
+    /// This is equivalent to [`Blob::new`] but retains the provided allocation as
+    /// the blob's original data instead of copying it.
+    ///
+    /// Returns `FibreError::EmptyBlobData` if data is empty.
+    /// Returns `FibreError::BlobTooLarge` if the data exceeds `cfg.max_data_size`.
+    pub fn new_owned(data: Vec<u8>, cfg: BlobConfig) -> Result<Self, FibreError> {
+        Self::validate_data_size(data.len(), &cfg)?;
+        Self::new_owned_unchecked(data, cfg)
+    }
+
+    fn validate_data_size(data_size: usize, cfg: &BlobConfig) -> Result<(), FibreError> {
+        if data_size == 0 {
             return Err(FibreError::EmptyBlobData);
         }
-        if data.len() > cfg.max_data_size {
+        if data_size > cfg.max_data_size {
             return Err(FibreError::BlobTooLarge {
-                size: data.len(),
+                size: data_size,
                 max: cfg.max_data_size,
             });
         }
 
+        Ok(())
+    }
+
+    fn new_owned_unchecked(data: Vec<u8>, cfg: BlobConfig) -> Result<Self, FibreError> {
         let header = BlobHeaderV0::new(data.len());
         let row_size = cfg.row_size(data.len());
 
@@ -146,7 +167,7 @@ impl Blob {
         // zeroed and will be filled by encode_in_place.
         let total_rows = cfg.original_rows + cfg.parity_rows;
         let mut flat = vec![0u8; total_rows * row_size];
-        header.encode_into_buffer(data, &mut flat);
+        header.encode_into_buffer(&data, &mut flat);
         let extended = rsema1d::RowMatrix::with_shape(flat, total_rows, row_size)?;
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
         let (ext_data, commitment, rlc_orig) = rsema1d::encode_in_place(extended, &params)?;
@@ -159,7 +180,7 @@ impl Blob {
             id,
             rlc_coeffs: Some(rlc_orig),
             header,
-            data: Some(data.to_vec()),
+            data: Some(data),
             rows: None,
         })
     }
@@ -548,6 +569,20 @@ mod tests {
         assert!(blob.upload_size().unwrap() > 0);
         assert!(blob.rlc_coeffs().is_some());
         assert!(blob.id().validate().is_ok());
+    }
+
+    #[test]
+    fn blob_new_owned_matches_borrowed_constructor() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 1024, 4, 64);
+        let data = vec![1u8; 200];
+        let borrowed = Blob::new(&data, cfg.clone()).unwrap();
+        let owned = Blob::new_owned(data, cfg).unwrap();
+
+        assert_eq!(owned.id(), borrowed.id());
+        assert_eq!(owned.data(), borrowed.data());
+        assert_eq!(owned.row_size(), borrowed.row_size());
+        assert_eq!(owned.upload_size(), borrowed.upload_size());
+        assert_eq!(owned.rlc_coeffs(), borrowed.rlc_coeffs());
     }
 
     #[test]
