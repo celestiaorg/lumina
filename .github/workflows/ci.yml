@@ -391,6 +391,29 @@ jobs:
       run: cargo msrv verify --manifest-path ./${{ matrix.crate.dir }}/Cargo.toml --all-features --target wasm32-unknown-unknown
 
 
+  xtask:
+    runs-on: ubuntu-latest
+
+    # xtask is its own workspace (excluded from the main one), so the clippy/test
+    # matrices above don't reach it. Lint and test it here via its manifest path.
+    name: xtask
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        components: clippy
+        # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
+        rustflags: ""
+
+    - name: Clippy
+      run: cargo clippy --manifest-path xtask/Cargo.toml --all-targets --all-features -- -D warnings
+
+    - name: Test
+      run: cargo test --manifest-path xtask/Cargo.toml --all-features
+
+
   required:
     runs-on: ubuntu-latest
 
@@ -407,6 +430,7 @@ jobs:
     - unused-deps
     - minimal-versions
     - msrv
+    - xtask
 
     steps:
     - name: On failure

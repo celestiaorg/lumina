@@ -8,5 +8,8 @@ node_modules
 
 /.direnv
 
+# JetBrains IDE
+.idea/
+
 # test log files
 lumina-test.log

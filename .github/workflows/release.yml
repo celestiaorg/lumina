@@ -1,0 +1,59 @@
+name: Release
+
+# Flow 2 — Release (see xtask/README.md, Flow 2).
+# Manual, thin wrapper over `cargo xtask release`. Run it after a release PR has
+# been merged into the default branch: it publishes crates (+ npm) and creates
+# tags + GitHub releases. The `release` subcommand is idempotent, so a re-run
+# safely resumes a partial release (e.g. after a transient publish/index failure).
+on:
+  # Manual trigger / resume. Runs against the selected ref's HEAD (`github.sha`);
+  # pick the branch that carries the merged release commit (normally `main`).
+  workflow_dispatch:
+
+# Tags + GitHub releases.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      # The env-var NAMEs below MUST equal the names passed to --*-token-env so the
+      # xtask reads the right env var.
+      # Same PAT as prepare-release: tags + GitHub releases are attributed to the
+      # PAT owner rather than github-actions[bot].
+      GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      # cargo publish.
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # wasm-pack publish / npm publish (lumina configures the lumina-node npm component).
+      NPM_REGISTRY_TOKEN: ${{ secrets.NPM_REGISTRY_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          # Disable the action's default `-D warnings`, which overwrites .cargo/config.toml.
+          rustflags: ""
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Release
+        run: |
+          cargo xtask release \
+            --sha "${{ github.sha }}" \
+            --github-token-env GH_TOKEN \
+            --registry-token-env CARGO_REGISTRY_TOKEN \
+            --npm-token-env NPM_REGISTRY_TOKEN

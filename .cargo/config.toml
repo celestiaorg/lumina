@@ -1,2 +1,7 @@
+[alias]
+# Run the in-house release tooling: `cargo xtask prepare-release` / `cargo xtask release`.
+# xtask is its own workspace (excluded from the main one), so target it by manifest path.
+xtask = "run --manifest-path xtask/Cargo.toml --"
+
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
