@@ -67,9 +67,6 @@ pub const DEFAULT_PROTOCOL_PARAMS: ProtocolParams = ProtocolParams {
 /// The blob header length in bytes.
 const BLOB_HEADER_LEN: usize = 5;
 
-/// Maximum size of a PaymentPromise in bytes (excluding protobuf encoding overhead).
-const MAX_PAYMENT_PROMISE_SIZE: usize = 209;
-
 impl ProtocolParams {
     /// Returns the total number of rows (K + N).
     pub fn total_rows(&self) -> usize {
@@ -96,7 +93,7 @@ impl ProtocolParams {
         // rows = ceil(rows * max_stake / liveness_threshold)
         let num = self.rows * max_stake_num * self.liveness_threshold.denominator.get() as usize;
         let den = max_stake_den * self.liveness_threshold.numerator.get() as usize;
-        ceil_div(num, den)
+        num.div_ceil(den)
     }
 
     /// Returns the minimum number of rows each validator must receive for
@@ -122,7 +119,7 @@ impl ProtocolParams {
         // We need enough rows from liveness_threshold fraction of validators to reconstruct.
         let reconstruction_samples = {
             let validators_for_reconstruction = self.validators_for_reconstruction();
-            ceil_div(self.rows, validators_for_reconstruction)
+            self.rows.div_ceil(validators_for_reconstruction)
         };
 
         unique_decode_samples.max(reconstruction_samples)
@@ -132,7 +129,7 @@ impl ProtocolParams {
     pub fn validators_for_reconstruction(&self) -> usize {
         let num = self.liveness_threshold.numerator.get() as usize;
         let den = self.liveness_threshold.denominator.get() as usize;
-        1usize.max(ceil_div(self.max_validator_count * num, den))
+        1usize.max((self.max_validator_count * num).div_ceil(den))
     }
 
     /// Computes the row size for the given blob version and total length.
@@ -151,29 +148,6 @@ impl ProtocolParams {
     pub fn max_row_size(&self, blob_version: u8) -> usize {
         self.row_size(blob_version, self.max_blob_size)
     }
-
-    /// Calculates the maximum size of a shard in bytes.
-    pub fn max_shard_size(&self) -> usize {
-        const ROW_INDEX_SIZE: usize = 4; // uint32 index per row
-        const RLC_COEFF_SIZE: usize = 16; // uint128 coefficient per row
-
-        let total_rows = self.total_rows();
-        let max_row_size = self.max_row_size(0); // version 0 is the only supported version
-        let rlc_coeffs_size = self.rows * RLC_COEFF_SIZE;
-
-        // Merkle tree depth for inclusion proofs
-        let tree_depth = usize::BITS as usize - (total_rows - 1).leading_zeros() as usize;
-        let proof_size_per_row = tree_depth * 32; // sha256::Size = 32
-
-        rlc_coeffs_size
-            + (self.max_rows_per_validator() * (ROW_INDEX_SIZE + max_row_size + proof_size_per_row))
-    }
-
-    /// Returns the maximum gRPC message size for upload requests.
-    pub fn max_message_size(&self) -> usize {
-        let msg_size = self.max_shard_size() + MAX_PAYMENT_PROMISE_SIZE;
-        msg_size + (msg_size / 50) // add 2% protobuf overhead
-    }
 }
 
 /// Runtime configuration for `FibreClient`.
@@ -187,8 +161,6 @@ pub struct FibreClientConfig {
     pub liveness_threshold: Fraction,
     /// Minimum rows each validator must receive.
     pub min_rows_per_validator: usize,
-    /// Maximum gRPC message size for upload requests.
-    pub max_message_size: usize,
     /// Maximum concurrent upload tasks.
     pub upload_concurrency: usize,
     /// Maximum concurrent download tasks.
@@ -203,7 +175,6 @@ impl FibreClientConfig {
             safety_threshold: params.safety_threshold,
             liveness_threshold: params.liveness_threshold,
             min_rows_per_validator: params.min_rows_per_validator(),
-            max_message_size: params.max_message_size(),
             upload_concurrency: params.max_validator_count,
             download_concurrency: params.max_validator_count,
         }
@@ -311,11 +282,6 @@ impl BlobConfig {
             min_row_size,
         }
     }
-}
-
-/// Returns `ceil(a / b)` using integer arithmetic.
-fn ceil_div(a: usize, b: usize) -> usize {
-    a.div_ceil(b)
 }
 
 /// Computes the row size for a given total byte length, rounding up to

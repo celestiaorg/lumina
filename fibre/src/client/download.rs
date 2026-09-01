@@ -43,18 +43,8 @@ impl FibreClient {
     /// - [`FibreError::NotEnoughShards`] if too few unique rows were collected.
     /// - Any error from reconstruction (commitment mismatch, encoding, etc.).
     pub async fn download(&self, id: &BlobID, opts: DownloadOptions) -> Result<Blob, FibreError> {
-        if self.cancel_token.is_cancelled() {
-            return Err(FibreError::ClientClosed);
-        }
-
-        let val_set = match opts.height {
-            Some(h) => self.set_getter.get_by_height(h).await?,
-            None => self.set_getter.head().await?,
-        };
-        let mut blob = Blob::empty(id.clone())?;
-        self.select_and_download(&val_set, &mut blob).await?;
-        blob.reconstruct()?;
-        Ok(blob)
+        self.download_blob_inner(Blob::empty(id.clone())?, opts.height)
+            .await
     }
 
     /// Internal download with a custom [`BlobConfig`].
@@ -67,12 +57,23 @@ impl FibreClient {
         id: &BlobID,
         blob_cfg: BlobConfig,
     ) -> Result<Blob, FibreError> {
+        self.download_blob_inner(Blob::empty_with_config(id.clone(), blob_cfg), None)
+            .await
+    }
+
+    async fn download_blob_inner(
+        &self,
+        mut blob: Blob,
+        height: Option<u64>,
+    ) -> Result<Blob, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
 
-        let val_set = self.set_getter.head().await?;
-        let mut blob = Blob::empty_with_config(id.clone(), blob_cfg);
+        let val_set = match height {
+            Some(h) => self.set_getter.get_by_height(h).await?,
+            None => self.set_getter.head().await?,
+        };
         self.select_and_download(&val_set, &mut blob).await?;
         blob.reconstruct()?;
         Ok(blob)
