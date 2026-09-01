@@ -79,7 +79,7 @@ libp2p = { workspace = true, features = [
 ] }
 redb.workspace = true
 rustls-pemfile = "2"
-rustls-pki-types = "1.11"
+rustls-pki-types.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 backoff = { version = "0.4", features = ["wasm-bindgen"] }

@@ -39,7 +39,7 @@ anyhow = "1.0.40"
 async-stream = "0.3.5"
 async-trait = "0.1.80"
 base64 = "0.22.1"
-bytes = { version = "1.6", default-features = false }
+bytes = { version = "1.7.1", default-features = false }
 cid = { version = "0.11.2", default-features = false }
 dotenvy = "0.15"
 futures = "0.3.30"
@@ -57,6 +57,7 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 hex = "0.4.3"
 http = "1"
 http-body = "1"
+hyper-util = "0.1.19"
 js-sys = "0.3.77"
 jsonrpsee = "0.26"
 jsonrpsee-core = "0.26"
@@ -75,6 +76,7 @@ rand = "0.8.5"
 redb = "2.6"
 rexie = "0.6"
 rust-embed = "8"
+rustls-pki-types = "1.11"
 send_wrapper = { version = "0.6", features = ["futures"] }
 serde = "1.0.194"
 serde_json = "1.0.142"
