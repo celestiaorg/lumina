@@ -65,6 +65,10 @@ pub struct MockNetworkConfig {
     /// Chain id: signed into the TLS identity bindings and served in the
     /// latest-block header. Must equal the clients' chain id.
     pub chain_id: String,
+    /// Process-wide byte budget for stored shards, split evenly across
+    /// validators; oldest shards are evicted beyond it. Keep it comfortably
+    /// above the client's max-in-flight count times the encoded blob size.
+    pub store_budget_bytes: u64,
 }
 
 impl Default for MockNetworkConfig {
@@ -77,6 +81,7 @@ impl Default for MockNetworkConfig {
             voting_power: 100,
             height: 1,
             chain_id: "mock-1".to_string(),
+            store_budget_bytes: 16 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -108,6 +113,10 @@ pub async fn spawn_mock_network(cfg: MockNetworkConfig) -> anyhow::Result<MockNe
         "voting_power must be greater than zero"
     );
     anyhow::ensure!(cfg.height > 0, "height must be greater than zero");
+    anyhow::ensure!(
+        cfg.store_budget_bytes as usize >= cfg.num_validators,
+        "store_budget_bytes must allow at least one byte per validator"
+    );
 
     let advertise_ip = cfg.advertise_ip.unwrap_or(cfg.listen_ip);
     anyhow::ensure!(
@@ -143,9 +152,12 @@ pub async fn spawn_mock_network(cfg: MockNetworkConfig) -> anyhow::Result<MockNe
     }
 
     for (incoming, validator) in incomings.into_iter().zip(&validators) {
-        let svc = FibreServer::new(MockFibreService::new(validator.signing_key.clone()))
-            .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+        let svc = FibreServer::new(MockFibreService::new(
+            validator.signing_key.clone(),
+            cfg.store_budget_bytes / cfg.num_validators as u64,
+        ))
+        .max_decoding_message_size(MAX_MESSAGE_SIZE)
+        .max_encoding_message_size(MAX_MESSAGE_SIZE);
         let identity = tls::endorsed_identity(&validator.signing_key, &cfg.chain_id)
             .with_context(|| format!("failed to build TLS identity for {}", validator.host))?;
         let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);

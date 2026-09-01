@@ -24,10 +24,10 @@ pub struct MockFibreService {
 
 impl MockFibreService {
     /// Create a service with an empty store, signing with the given key.
-    pub fn new(signing_key: ed25519_dalek::SigningKey) -> Self {
+    pub fn new(signing_key: ed25519_dalek::SigningKey, store_budget_bytes: u64) -> Self {
         Self {
             signing_key,
-            store: ShardStore::default(),
+            store: ShardStore::new(store_budget_bytes),
         }
     }
 }

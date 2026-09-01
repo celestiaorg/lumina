@@ -36,6 +36,10 @@ struct Args {
     /// header; must match the clients' --chain-id
     #[arg(long, default_value = "mock-1")]
     chain_id: String,
+    /// Process-wide byte budget for stored shards in GiB, split across
+    /// validators; oldest shards evicted beyond it
+    #[arg(long, default_value_t = 16)]
+    store_budget_gib: u64,
 }
 
 /// Run the mock server until ctrl-c.
@@ -53,6 +57,7 @@ pub async fn run() -> anyhow::Result<()> {
         voting_power: args.voting_power,
         height: args.height,
         chain_id: args.chain_id,
+        store_budget_bytes: args.store_budget_gib * 1024 * 1024 * 1024,
     })
     .await?;
 
