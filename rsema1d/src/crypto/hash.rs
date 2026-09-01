@@ -41,11 +41,8 @@ pub fn derive_coefficients(row_root: &[u8; 32], k: usize, n: usize, row_size: us
     buf[..32].copy_from_slice(&seed);
 
     for i in 0..num_symbols {
-        let i32: u32 = i as u32;
-        buf[32..].copy_from_slice(&i32.to_le_bytes());
-
-        let hash = Sha256::digest(buf);
-        coeffs.push(hash_to_gf128(hash.as_slice().try_into().unwrap()));
+        buf[32..].copy_from_slice(&(i as u32).to_le_bytes());
+        coeffs.push(hash_to_gf128(&sha256(&buf)));
     }
     coeffs
 }
