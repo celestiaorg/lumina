@@ -78,6 +78,10 @@ struct Cli {
     #[arg(long, default_value_t = 4, value_parser = parse_positive_usize)]
     download_concurrency: usize,
 
+    /// Skip blob download and integrity verification after payment confirmation.
+    #[arg(long)]
+    skip_download: bool,
+
     /// Timeout applied separately to each network stage.
     #[arg(long, default_value_t = 120, value_parser = parse_positive_u64)]
     operation_timeout_seconds: u64,
@@ -107,6 +111,7 @@ struct LifecycleContext {
     tx_config: TxConfig,
     encode_semaphore: Arc<Semaphore>,
     download_semaphore: Arc<Semaphore>,
+    skip_download: bool,
 }
 
 struct WorkItem {
@@ -226,6 +231,7 @@ async fn run(cli: Cli) -> Result<()> {
         tx_config,
         encode_semaphore: Arc::new(Semaphore::new(cli.encode_concurrency)),
         download_semaphore: Arc::new(Semaphore::new(cli.download_concurrency)),
+        skip_download: cli.skip_download,
     });
 
     tracing::info!(
@@ -239,6 +245,7 @@ async fn run(cli: Cli) -> Result<()> {
         queue_capacity = cli.queue_capacity,
         encode_concurrency = cli.encode_concurrency,
         download_concurrency = cli.download_concurrency,
+        download_enabled = !cli.skip_download,
         gas_limit = ?cli.gas_limit,
         gas_price = ?cli.gas_price,
         "starting Fibre evaluation"
@@ -496,6 +503,10 @@ async fn run_lifecycle(
         submitted.confirm(),
     )
     .await?;
+
+    if context.skip_download {
+        return Ok(());
+    }
 
     let download_permit = Arc::clone(&context.download_semaphore)
         .acquire_owned()
@@ -918,10 +929,18 @@ mod tests {
         assert_eq!(cli.queue_capacity, 16);
         assert_eq!(cli.encode_concurrency, 1);
         assert_eq!(cli.download_concurrency, 4);
+        assert!(!cli.skip_download);
         assert_eq!(cli.operation_timeout_seconds, 120);
         assert_eq!(cli.gas_limit, None);
         assert_eq!(cli.gas_price, None);
         assert_eq!(cli.stats_interval_seconds, 10);
+    }
+
+    #[test]
+    fn parses_skip_download() {
+        let mut args = valid_args();
+        args.push("--skip-download");
+        assert!(Cli::try_parse_from(args).unwrap().skip_download);
     }
 
     #[test]
