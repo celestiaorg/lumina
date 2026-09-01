@@ -33,5 +33,5 @@ pub use domain::payment_promise::{PaymentPromise, SignedPaymentPromise};
 pub use error::{FibreError, Result};
 pub use transport::grpc_validator_client::GrpcValidatorConnector;
 pub use transport::host_registry::{GrpcHostRegistry, Host, HostRegistry};
-pub use transport::validator_client::{ValidatorConnection, ValidatorConnector};
+pub use transport::validator_client::{DownloadResponse, ValidatorConnection, ValidatorConnector};
 pub use validator::{GrpcSetGetter, SetGetter, ValidatorInfo, ValidatorSet};
