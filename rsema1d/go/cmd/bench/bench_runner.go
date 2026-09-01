@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"time"
 
-	rsema1d "github.com/celestiaorg/celestia-app/v8/pkg/rsema1d"
+	rsema1d "github.com/celestiaorg/celestia-app/v10/pkg/rsema1d"
 )
 
 func makeTestData(k, rowSize int) [][]byte {
@@ -20,26 +20,50 @@ func makeTestData(k, rowSize int) [][]byte {
 	return data
 }
 
+// makeEncodeRows returns the K+N row slice Coder.Encode expects: original
+// data in rows[:K], allocated parity rows in rows[K:].
+func makeEncodeRows(data [][]byte, k, n, rowSize int) [][]byte {
+	rows := make([][]byte, k+n)
+	copy(rows, data)
+	for i := k; i < k+n; i++ {
+		rows[i] = make([]byte, rowSize)
+	}
+	return rows
+}
+
+// zeroParity re-zeroes rows[K:], required by Coder.Encode before each call.
+func zeroParity(rows [][]byte, k int) {
+	for _, row := range rows[k:] {
+		clear(row)
+	}
+}
+
 func benchmarkEncode(name string, k, n, rowSize int) {
 	workers := runtime.GOMAXPROCS(0)
 	data := makeTestData(k, rowSize)
 	config := &rsema1d.Config{
 		K:           k,
 		N:           n,
-		RowSize:     rowSize,
 		WorkerCount: workers,
 	}
+	coder, err := rsema1d.NewCoder(config)
+	if err != nil {
+		panic(err)
+	}
+	rows := makeEncodeRows(data, k, n, rowSize)
 
 	// Warmup
 	for i := 0; i < 10; i++ {
-		rsema1d.Encode(data, config)
+		zeroParity(rows, k)
+		coder.Encode(rows)
 	}
 
 	// Measure
 	iterations := 100
 	start := time.Now()
 	for i := 0; i < iterations; i++ {
-		_, _, _, err := rsema1d.Encode(data, config)
+		zeroParity(rows, k)
+		_, err := coder.Encode(rows)
 		if err != nil {
 			panic(err)
 		}
@@ -59,11 +83,14 @@ func benchmarkProofGen(name string, k, n, rowSize int) {
 	config := &rsema1d.Config{
 		K:           k,
 		N:           n,
-		RowSize:     rowSize,
 		WorkerCount: workers,
 	}
 
-	extData, _, _, err := rsema1d.Encode(data, config)
+	coder, err := rsema1d.NewCoder(config)
+	if err != nil {
+		panic(err)
+	}
+	extData, err := coder.Encode(makeEncodeRows(data, k, n, rowSize))
 	if err != nil {
 		panic(err)
 	}
@@ -94,14 +121,18 @@ func benchmarkVerification(name string, k, n, rowSize int) {
 	config := &rsema1d.Config{
 		K:           k,
 		N:           n,
-		RowSize:     rowSize,
 		WorkerCount: workers,
 	}
 
-	extData, commitment, _, err := rsema1d.Encode(data, config)
+	coder, err := rsema1d.NewCoder(config)
 	if err != nil {
 		panic(err)
 	}
+	extData, err := coder.Encode(makeEncodeRows(data, k, n, rowSize))
+	if err != nil {
+		panic(err)
+	}
+	commitment := extData.Commitment()
 
 	proof, err := extData.GenerateStandaloneProof(0)
 	if err != nil {

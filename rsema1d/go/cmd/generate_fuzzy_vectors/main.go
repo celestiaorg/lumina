@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/bits"
 	"math/rand"
 	"os"
 	"time"
 
-	"github.com/celestiaorg/celestia-app/v8/pkg/rsema1d"
-	"github.com/celestiaorg/celestia-app/v8/pkg/rsema1d/field"
+	"github.com/celestiaorg/celestia-app/v10/pkg/rsema1d"
+	"github.com/celestiaorg/celestia-app/v10/pkg/rsema1d/field"
+	"github.com/celestiaorg/celestia-app/v10/pkg/rsema1d/merkle"
 )
 
 type TestVector struct {
@@ -95,64 +97,19 @@ func encodeProofNodes(proof [][]byte) []string {
 	return encoded
 }
 
-func isPowerOfTwo(n int) bool {
-	return n > 0 && (n&(n-1)) == 0
-}
-
-func nextPowerOfTwo(n int) int {
-	if n <= 1 {
-		return 1
-	}
-	p := 1
-	for p < n {
-		p <<= 1
-	}
-	return p
-}
-
-func randomN(rng *rand.Rand) int {
-	// Heavily sample small/medium values for fast default tests, but keep some large values.
-	p := rng.Float64()
-	switch {
-	case p < 0.70:
-		return rng.Intn(256) + 1
-	case p < 0.95:
-		return rng.Intn(2048-256) + 257
-	default:
-		return rng.Intn(32768-2048) + 2049
-	}
-}
-
+// randomValidKN returns k and n satisfying celestia-app config validation:
+// k and k+n are powers of two, and k+n <= 65536.
 func randomValidKN(rng *rand.Rand, maxTotalRows int) (int, int) {
-	if maxTotalRows < 2 {
-		maxTotalRows = 2
+	maxTotal := min(maxTotalRows, 65536)
+	if maxTotal < 2 {
+		maxTotal = 2
 	}
+	maxExp := bits.Len(uint(maxTotal)) - 1 // largest b with 2^b <= maxTotal
 
-	for {
-		n := randomN(rng)
-		np2 := nextPowerOfTwo(n)
-
-		// Constraints:
-		// 1) k + n <= 65536 (Go config validation)
-		// 2) k + next_pow_2(n) < 65536 (cross-validation target)
-		// 3) k + n <= maxTotalRows (runtime cap for default test speed)
-		kMaxByKN := 65536 - n
-		kMaxByNp2 := 65535 - np2
-		kMaxByTotal := maxTotalRows - n
-		kMax := min(kMaxByKN, min(kMaxByNp2, kMaxByTotal))
-		if kMax < 1 {
-			continue
-		}
-
-		k := rng.Intn(kMax) + 1
-
-		// Bias towards unequal pairs.
-		if k == n && rng.Float64() < 0.90 {
-			continue
-		}
-
-		return k, n
-	}
+	// k = 2^a, k+n = 2^b with a < b, so n = 2^b - 2^a > 0.
+	b := rng.Intn(maxExp) + 1
+	a := rng.Intn(b)
+	return 1 << a, (1 << b) - (1 << a)
 }
 
 func generateTestVector(name string, k, n, rowSize int, seed int64, proofIndices []int, inclusionIndices []int) TestVector {
@@ -168,18 +125,30 @@ func generateTestVector(name string, k, n, rowSize int, seed int64, proofIndices
 	config := &rsema1d.Config{
 		K:           k,
 		N:           n,
-		RowSize:     rowSize,
 		WorkerCount: 1,
 	}
 
 	// Use only public API
-	extData, commitment, rlcOrig, err := rsema1d.Encode(originalData, config)
+	coder, err := rsema1d.NewCoder(config)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create coder: %v", err))
+	}
+	// Encode takes all K+N rows, with parity rows allocated and zeroed.
+	rows := make([][]byte, k+n)
+	copy(rows, originalData)
+	for i := k; i < k+n; i++ {
+		rows[i] = make([]byte, rowSize)
+	}
+	extData, err := coder.Encode(rows)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to encode: %v", err))
 	}
+	commitment := extData.Commitment()
+	rlcOrig := extData.RLC()
 	rlcOrigHex := make([]string, len(rlcOrig))
-	for i, rlc := range rlcOrig {
-		b := field.ToBytes128(rlc)
+	for i, v := range rlcOrig {
+		var b [field.GF128Size]byte
+		field.EncodeGF128(b[:], v)
 		rlcOrigHex[i] = hex.EncodeToString(b[:])
 	}
 
@@ -219,20 +188,28 @@ func generateTestVector(name string, k, n, rowSize int, seed int64, proofIndices
 			})
 		}
 	}
+	// celestia-app dropped GenerateRowInclusionProof; rebuild it from a row
+	// proof plus the rlcOrig root (mirrors unexported computeRLCRoot).
+	var leaf [field.GF128Size]byte
+	rlcRoot := merkle.RootFromFunc(make([]byte, k*merkle.NodeSize), func(i int, _ []byte) []byte {
+		field.EncodeGF128(leaf[:], rlcOrig[i])
+		return leaf[:]
+	})
+
 	var inclusionTests []RowInclusionTest
 	for _, idx := range inclusionIndices {
-		inclusionProof, err := extData.GenerateRowInclusionProof(idx)
+		rowProof, err := extData.GenerateRowProof(idx)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to generate inclusion proof for index %d: %v", idx, err))
 		}
 		inclusionTests = append(inclusionTests, RowInclusionTest{
-			Index:        inclusionProof.Index,
-			IsOriginal:   inclusionProof.Index < k,
-			RowHash:      hashBytes(inclusionProof.Row),
-			RowProofHash: hashMerkleProof(inclusionProof.RowProof.RowProof),
-			RowData:      hex.EncodeToString(inclusionProof.Row),
-			RowProof:     encodeProofNodes(inclusionProof.RowProof.RowProof),
-			RLCRoot:      hex.EncodeToString(inclusionProof.RLCRoot[:]),
+			Index:        rowProof.Index,
+			IsOriginal:   rowProof.Index < k,
+			RowHash:      hashBytes(rowProof.Row),
+			RowProofHash: hashMerkleProof(rowProof.RowProof),
+			RowData:      hex.EncodeToString(rowProof.Row),
+			RowProof:     encodeProofNodes(rowProof.RowProof),
+			RLCRoot:      hex.EncodeToString(rlcRoot[:]),
 		})
 	}
 
