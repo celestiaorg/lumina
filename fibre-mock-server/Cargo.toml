@@ -1,0 +1,40 @@
+[package]
+name = "fibre-mock-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone workspace: keep this crate out of the parent lumina workspace.
+[workspace]
+
+# Native-only: on wasm32 the crate compiles empty (same pattern as lumina-cli).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+celestia-fibre = { path = "../fibre" }
+celestia-proto = { path = "../proto", features = ["tonic", "tonic-server"] }
+celestia-types = { path = "../types" }
+tendermint-proto = "0.40.3"
+
+tonic = { version = "0.13", default-features = false, features = ["codegen", "prost", "server", "router", "tls-ring"] }
+prost = "0.13.3"
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "signal", "sync", "net"] }
+futures = "0.3.30"
+
+ed25519-dalek = "2.1"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10.8"
+bech32 = "0.11"
+hex = "0.4.3"
+anyhow = "1.0.40"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.15", features = ["env-filter"] }
+
+# TLS data plane: runtime cert generation endorsed by the consensus key.
+rcgen = "0.13"
+time = { version = "0.3.35", default-features = false }
+der = { version = "0.7", features = ["derive", "alloc"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+celestia-grpc = { path = "../grpc", features = ["tls-ring"] }
+x509-parser = "0.17"
