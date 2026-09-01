@@ -50,6 +50,11 @@ impl SignatureSet {
         required_bytes_signed: Vec<u8>,
     ) -> Self {
         let total_voting_power: i64 = validators.iter().map(|v| v.voting_power).sum();
+        // Floor division with a `>=` comparison, matching the on-chain check in
+        // celestia-app (fibre/validator/signature_set.go, used by
+        // `x/fibre` `validateValidatorSignatures`). Keep both sides in sync:
+        // a stricter client fails uploads the chain would accept, a looser one
+        // produces messages the chain rejects.
         let min_required_voting_power = total_voting_power
             * target_voting_power.numerator.get() as i64
             / target_voting_power.denominator.get() as i64;
@@ -291,6 +296,22 @@ mod tests {
             }
             other => panic!("expected NotEnoughSignatures, got: {other}"),
         }
+    }
+
+    #[test]
+    fn threshold_met_at_exact_floor() {
+        // Parity with celestia-app's fibre/validator/signature_set.go: the
+        // threshold is floor(total * 2/3) with a `>=` comparison, so exactly
+        // 40 out of 60 meets it. If this test starts failing after a change,
+        // check the Go side first — both must agree.
+        let (sk1, v1) = make_validator(40);
+        let (_sk2, v2) = make_validator(20);
+
+        let data = b"floor test";
+        let ss = SignatureSet::new(vec![v1.clone(), v2], fraction(2, 3), data.to_vec());
+
+        let met = ss.add(&v1, &sign(&sk1, data)).unwrap();
+        assert!(met, "40 >= floor(60 * 2/3) = 40, threshold met");
     }
 
     #[test]

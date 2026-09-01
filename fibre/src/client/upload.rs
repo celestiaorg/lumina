@@ -42,6 +42,14 @@ impl FibreClient {
 
         // 1. Get validator set
         let val_set = self.set_getter.head().await?;
+        if val_set.total_voting_power() <= 0 {
+            // Guards against a malformed node response. Without this, an empty
+            // (or zero-power) set floors the signature threshold to zero and
+            // upload "succeeds" with no signatures at all.
+            return Err(FibreError::InvalidData(
+                "validator set has no voting power".into(),
+            ));
+        }
 
         // 2. Create and sign payment promise
         let upload_size = blob
@@ -64,6 +72,9 @@ impl FibreClient {
             signature: None,
         };
         promise.sign(signing_key)?;
+        // Catch locally detectable problems (e.g. an unset chain_id) before
+        // fanning out to validators, which would all reject the promise.
+        promise.validate()?;
 
         // 3. Assign shards
         let shard_map = val_set.assign(
@@ -175,31 +186,41 @@ impl FibreClient {
         // Phase 1: Spawn all upload tasks up-front so that every validator is
         // contacted regardless of how quickly the signature threshold is met.
         for (val_idx, row_indices) in validator_tasks {
-            let permit = self
-                .upload_semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| FibreError::Other("upload semaphore closed".into()))?;
+            let permit = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Err(FibreError::Cancelled),
+                permit = self.upload_semaphore.clone().acquire_owned() => permit
+                    .map_err(|_| FibreError::Other("upload semaphore closed".into()))?,
+            };
 
             let connector = Arc::clone(&self.connector);
             let validator = val_set.validators[val_idx].clone();
             let promise = promise.clone();
             let rlc_coeffs = Arc::clone(&rlc_coeffs);
             let blob = Arc::clone(blob);
+            // Tasks outlive `upload_shards` on purpose (background delivery
+            // after the threshold is met), so they listen to the client-level
+            // token directly: only `close()` stops them.
+            let task_cancel = cancel_token.clone();
 
             spawn_task(&mut futures, val_idx, async move {
                 let _permit = permit;
-                // Generate row proofs in this task, parallelizing
-                // proof generation across validators.
-                let mut proofs = Vec::with_capacity(row_indices.len());
-                for row_idx in &row_indices {
-                    proofs.push(blob.row(*row_idx)?);
-                }
+                tokio::select! {
+                    biased;
+                    _ = task_cancel.cancelled() => Err(FibreError::Cancelled),
+                    result = async {
+                        // Generate row proofs in this task, parallelizing
+                        // proof generation across validators.
+                        let mut proofs = Vec::with_capacity(row_indices.len());
+                        for row_idx in &row_indices {
+                            proofs.push(blob.row(*row_idx)?);
+                        }
 
-                let conn = connector.connect(&validator).await?;
-                let resp = conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
-                Ok(resp.validator_signature)
+                        let conn = connector.connect(&validator).await?;
+                        let resp = conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
+                        Ok(resp.validator_signature)
+                    } => result,
+                }
             });
         }
 
@@ -262,19 +283,24 @@ impl FibreClient {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use celestia_types::nmt::Namespace;
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
-    use crate::blob::Blob;
+    use crate::blob::{Blob, BlobID};
     use crate::config::BlobConfig;
     use crate::error::FibreError;
+    use crate::payment_promise::PaymentPromise;
     use crate::test_utils::{
         FailingConnector, MockConnector, MockValidatorConnection, build_test_client,
         make_connector, make_validator,
     };
     use crate::validator::{ValidatorInfo, ValidatorSet};
+    use crate::validator_client::{
+        DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
+    };
 
     fn make_test_blob() -> Blob {
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
@@ -495,6 +521,165 @@ mod tests {
             FibreError::NotEnoughSignatures { .. } => {}
             other => panic!("expected NotEnoughSignatures, got: {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn upload_fails_on_zero_voting_power_set() {
+        let (_, val) = make_validator(0, 1);
+        let validators = vec![make_validator(0, 1)];
+        let connector = make_connector(&validators);
+
+        let val_set = ValidatorSet {
+            validators: vec![val],
+            height: 1,
+        };
+
+        let client = build_test_client(val_set, connector, "test-chain");
+        let result = client
+            .upload(
+                &test_signing_key(),
+                Namespace::from_raw(&[0u8; 29]).unwrap(),
+                make_test_blob(),
+            )
+            .await;
+
+        match result.unwrap_err() {
+            FibreError::InvalidData(msg) => {
+                assert!(msg.contains("voting power"), "unexpected message: {msg}")
+            }
+            other => panic!("expected InvalidData, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_fails_on_empty_chain_id() {
+        let validators = vec![make_validator(100, 1)];
+        let val_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|(_, info)| info.clone()).collect();
+        let connector = make_connector(&validators);
+
+        let val_set = ValidatorSet {
+            validators: val_infos,
+            height: 1,
+        };
+
+        // Empty chain_id must be rejected before any validator is contacted.
+        let client = build_test_client(val_set, connector, "");
+        let result = client
+            .upload(
+                &test_signing_key(),
+                Namespace::from_raw(&[0u8; 29]).unwrap(),
+                make_test_blob(),
+            )
+            .await;
+
+        match result.unwrap_err() {
+            FibreError::InvalidPaymentPromise(msg) => {
+                assert!(msg.contains("chain id"), "unexpected message: {msg}")
+            }
+            other => panic!("expected InvalidPaymentPromise, got: {other}"),
+        }
+    }
+
+    /// Connection whose uploads hang forever, recording when each call starts
+    /// and when its future is dropped (i.e. the task observed cancellation).
+    struct HangingConnection {
+        entered: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ValidatorConnection for HangingConnection {
+        async fn upload_shard(
+            &self,
+            _promise: &PaymentPromise,
+            _rows: &[rsema1d::RowInclusionProof],
+            _rlc_coeffs: &[rsema1d::GF128],
+        ) -> Result<UploadResponse, FibreError> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            let _guard = DropCounter(Arc::clone(&self.dropped));
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+
+        async fn download_shard(&self, _blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
+            Err(FibreError::Other("download not supported".into()))
+        }
+    }
+
+    struct HangingConnector {
+        conn: Arc<HangingConnection>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ValidatorConnector for HangingConnector {
+        async fn connect(
+            &self,
+            _validator: &ValidatorInfo,
+        ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
+            Ok(Arc::clone(&self.conn) as Arc<dyn ValidatorConnection>)
+        }
+    }
+
+    #[tokio::test]
+    async fn close_cancels_inflight_upload_tasks() {
+        let validators = [make_validator(100, 1), make_validator(100, 2)];
+        let val_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|(_, info)| info.clone()).collect();
+        let val_set = ValidatorSet {
+            validators: val_infos,
+            height: 1,
+        };
+
+        let entered = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let connector = HangingConnector {
+            conn: Arc::new(HangingConnection {
+                entered: Arc::clone(&entered),
+                dropped: Arc::clone(&dropped),
+            }),
+        };
+
+        let client = Arc::new(build_test_client(val_set, connector, "test-chain"));
+        let upload_client = Arc::clone(&client);
+        let sk = test_signing_key();
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
+        let blob = make_test_blob();
+        let handle =
+            tokio::spawn(async move { upload_client.upload(&sk, namespace, blob).await });
+
+        // Wait until both upload tasks are blocked inside upload_shard.
+        while entered.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        }
+
+        client.close();
+
+        let result = handle.await.unwrap();
+        assert!(
+            matches!(result, Err(FibreError::Cancelled)),
+            "expected Cancelled, got: {result:?}",
+        );
+
+        // The background tasks must observe cancellation and drop their
+        // in-flight upload futures instead of running forever.
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            while dropped.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("upload tasks were not cancelled by close()");
     }
 
     #[tokio::test]

@@ -170,24 +170,13 @@ impl Blob {
     pub(crate) fn empty(id: BlobID) -> Result<Self, FibreError> {
         id.validate()?;
         let cfg = BlobConfig::for_version(id.version())?;
-        let total_rows = cfg.total_rows();
-
-        Ok(Self {
-            cfg,
-            extended_data: None,
-            id,
-            rlc_coeffs: None,
-            header: BlobHeaderV0::default(),
-            data: None,
-            rows: Some(vec![None; total_rows]),
-        })
+        Ok(Self::empty_with_config(id, cfg))
     }
 
     /// Create an empty blob with a custom [`BlobConfig`] for reconstruction.
     ///
     /// This is like [`Blob::empty()`] but uses a caller-supplied config instead of
     /// deriving it from the blob version. Useful for tests that use small K/N parameters.
-    #[cfg(test)]
     pub(crate) fn empty_with_config(id: BlobID, cfg: BlobConfig) -> Self {
         let total_rows = cfg.total_rows();
         Self {
