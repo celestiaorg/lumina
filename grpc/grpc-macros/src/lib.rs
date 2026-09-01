@@ -77,27 +77,28 @@ impl GrpcMethod {
                             // Merge transport context with per-call context.
                             let mut merged_context = transport_context.clone();
                             merged_context.extend(&call_context);
+                            let request_timeout = merged_context
+                                .timeout
+                                .unwrap_or_else(|| ::std::time::Duration::from_secs(30));
 
                             let mut request = ::tonic::Request::from_parts(
                                 merged_context.metadata.clone(),
                                 ::tonic::Extensions::new(),
                                 param,
                             );
-
-                            if let Some(timeout) = merged_context.timeout {
-                                request.set_timeout(timeout);
-                            } else {
-                                request.set_timeout(::std::time::Duration::from_secs(30));
-                            }
+                            request.set_timeout(request_timeout);
 
                             let fut = client.#grpc_method_name(request);
 
                             #[cfg(target_arch = "wasm32")]
                             let fut = ::send_wrapper::SendWrapper::new(fut);
 
-                            match fut.await {
-                                Ok(resp) => crate::grpc::FromGrpcResponse::try_from_response(resp.into_inner()),
-                                Err(e) => Err(crate::Error::from(e)),
+                            match ::lumina_utils::time::timeout(request_timeout, fut).await {
+                                Ok(Ok(resp)) => crate::grpc::FromGrpcResponse::try_from_response(resp.into_inner()),
+                                Ok(Err(e)) => Err(crate::Error::from(e)),
+                                Err(_) => Err(crate::Error::from(::tonic::Status::deadline_exceeded(
+                                    "request timed out",
+                                ))),
                             }
                         }
                     })

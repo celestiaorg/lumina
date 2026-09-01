@@ -1583,7 +1583,7 @@ mod tests {
         let account = load_account();
         let client = new_grpc_client();
 
-        // defaults - no timeout
+        // default timeout is long enough for the request
         let _balance = client.get_all_balances(&account.address).await.unwrap();
 
         // per-request too short timeout
