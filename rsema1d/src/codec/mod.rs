@@ -446,7 +446,7 @@ mod tests {
             let row_proof = ext_data.generate_row_proof(i).unwrap();
             let manual = RowInclusionProof {
                 index: row_proof.index,
-                row: row_proof.row.into_owned(),
+                row: row_proof.row.into_owned().into(),
                 row_proof: row_proof.row_proof,
                 rlc_root: ext_data.rlc_root(),
             };
@@ -460,7 +460,9 @@ mod tests {
         assert!(verify_row_inclusion(&proof, &bad_commitment, &params).is_err());
 
         let mut bad_row = proof.clone();
-        bad_row.row[0] ^= 0x01;
+        let mut corrupted = bad_row.row.to_vec();
+        corrupted[0] ^= 0x01;
+        bad_row.row = corrupted.into();
         assert!(verify_row_inclusion(&bad_row, &commitment, &params).is_err());
 
         assert!(ext_data

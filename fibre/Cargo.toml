@@ -38,6 +38,7 @@ tonic = { workspace = true, features = ["codegen"] }
 tower = { version = "0.5.2", features = ["util"] }
 x509-parser = "0.17"
 prost.workspace = true
+bytes.workspace = true
 tendermint-proto.workspace = true
 
 # Error handling and utilities

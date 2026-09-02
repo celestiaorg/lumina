@@ -103,7 +103,7 @@ impl MockValidatorConnection {
             .rows
             .extend(proofs.into_iter().map(|proof| rsema1d::RowProof {
                 index: proof.index,
-                row: Cow::Owned(proof.row),
+                row: Cow::Owned(proof.row.to_vec()),
                 row_proof: proof.row_proof,
             }));
         entry.rlcs = rlcs;
