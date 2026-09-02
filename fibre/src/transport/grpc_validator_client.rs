@@ -15,6 +15,7 @@ use crate::error::FibreError;
 use crate::host_registry::HostRegistry;
 use crate::payment_promise::PaymentPromise;
 use crate::proto_conv;
+use crate::transport::io_connector::FibreIoConnector;
 use crate::validator::ValidatorInfo;
 use crate::validator_client::{
     DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
@@ -23,14 +24,32 @@ use crate::validator_client::{
 /// Factory that resolves validator hosts and caches gRPC connections.
 pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
+    chain_id: String,
+    io_connector: Arc<dyn FibreIoConnector>,
     connections: tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorConnection>>>,
 }
 
 impl GrpcValidatorConnector {
     /// Create a new connector backed by the given host registry.
-    pub fn new(host_registry: Arc<dyn HostRegistry>) -> Self {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(host_registry: Arc<dyn HostRegistry>, chain_id: impl Into<String>) -> Self {
+        Self::new_with_io_connector(
+            host_registry,
+            chain_id,
+            Arc::new(crate::transport::io_connector::NativeTcpConnector),
+        )
+    }
+
+    /// Create a new connector over a caller-provided byte-stream transport.
+    pub fn new_with_io_connector(
+        host_registry: Arc<dyn HostRegistry>,
+        chain_id: impl Into<String>,
+        io_connector: Arc<dyn FibreIoConnector>,
+    ) -> Self {
         Self {
             host_registry,
+            chain_id: chain_id.into(),
+            io_connector,
             connections: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -59,10 +78,12 @@ impl ValidatorConnector for GrpcValidatorConnector {
         // URI, so normalise the address first.
         let url = normalize_host(&host.0);
 
-        let client = GrpcClient::builder()
-            .url(&url)
-            .build()
-            .map_err(|e| FibreError::Other(format!("invalid endpoint '{}': {e}", url)))?;
+        let client = crate::transport::tls::grpc_client(
+            &url,
+            validator.pubkey,
+            self.chain_id.clone(),
+            self.io_connector.clone(),
+        )?;
 
         let conn = Arc::new(GrpcValidatorConnection { client });
 
@@ -75,21 +96,16 @@ impl ValidatorConnector for GrpcValidatorConnector {
     }
 }
 
-/// Normalise a host string into a standard `http://` URI.
+/// Normalise a host string into a standard `https://` URI.
 fn normalize_host(raw: &str) -> String {
-    // Strip the "dns:///" (or "dns://") prefix if present.
-    if let Some(rest) = raw
+    let authority = raw
         .strip_prefix("dns:///")
         .or_else(|| raw.strip_prefix("dns://"))
-    {
-        return format!("http://{rest}");
-    }
-    // Already a normal URI (http:// or https://).
-    if raw.starts_with("http://") || raw.starts_with("https://") {
-        return raw.to_string();
-    }
-    // Bare host:port — assume http.
-    format!("http://{raw}")
+        .or_else(|| raw.strip_prefix("http://"))
+        .or_else(|| raw.strip_prefix("https://"))
+        .unwrap_or(raw);
+
+    format!("https://{authority}")
 }
 
 /// A connection to a single validator's Fibre gRPC service.
@@ -181,7 +197,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         });
 
-        let connector = GrpcValidatorConnector::new(registry.clone());
+        let connector = GrpcValidatorConnector::new(registry.clone(), "test-chain");
 
         // First connect should call the registry.
         let conn1 = connector.connect(&validator).await;
@@ -219,7 +235,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         });
 
-        let connector = GrpcValidatorConnector::new(registry.clone());
+        let connector = GrpcValidatorConnector::new(registry.clone(), "test-chain");
 
         let conn_a = connector.connect(&validator_a).await;
         assert!(conn_a.is_ok(), "connect to validator A should succeed");
@@ -245,7 +261,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         });
 
-        let connector = GrpcValidatorConnector::new(registry.clone());
+        let connector = GrpcValidatorConnector::new(registry.clone(), "test-chain");
 
         let result = connector.connect(&validator).await;
         match result {
@@ -265,19 +281,19 @@ mod tests {
     fn normalize_host_strips_dns_prefix() {
         assert_eq!(
             normalize_host("dns:///138.68.236.99:9091"),
-            "http://138.68.236.99:9091"
+            "https://138.68.236.99:9091"
         );
         assert_eq!(
             normalize_host("dns://138.68.236.99:9091"),
-            "http://138.68.236.99:9091"
+            "https://138.68.236.99:9091"
         );
     }
 
     #[test]
-    fn normalize_host_preserves_http() {
+    fn normalize_host_uses_https() {
         assert_eq!(
             normalize_host("http://127.0.0.1:9090"),
-            "http://127.0.0.1:9090"
+            "https://127.0.0.1:9090"
         );
         assert_eq!(
             normalize_host("https://validator.example.com:9090"),
@@ -286,10 +302,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_host_adds_http_to_bare() {
+    fn normalize_host_adds_https_to_bare() {
         assert_eq!(
             normalize_host("138.68.236.99:9091"),
-            "http://138.68.236.99:9091"
+            "https://138.68.236.99:9091"
         );
     }
 }

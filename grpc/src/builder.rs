@@ -537,8 +537,31 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use super::*;
+    use http_body_util::Empty;
     use lumina_utils::test_utils::async_test;
+
+    #[derive(Clone, Copy)]
+    struct PendingTransport;
+
+    impl Service<http::Request<TonicBody>> for PendingTransport {
+        type Response = http::Response<Empty<Bytes>>;
+        type Error = Infallible;
+        type Future = std::future::Pending<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: http::Request<TonicBody>) -> Self::Future {
+            std::future::pending()
+        }
+    }
 
     #[test]
     fn empty_builder_returns_transport_not_set() {
@@ -676,5 +699,24 @@ mod tests {
             .build();
 
         assert!(result.is_ok());
+    }
+
+    #[async_test]
+    async fn custom_transport_enforces_per_call_timeout() {
+        let client = GrpcClientBuilder::new()
+            .transport(PendingTransport)
+            .build()
+            .unwrap();
+
+        let Error::TonicError(error) = client
+            .get_node_config()
+            .timeout(Duration::from_millis(10))
+            .await
+            .unwrap_err()
+        else {
+            panic!("expected a tonic timeout error");
+        };
+
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
     }
 }

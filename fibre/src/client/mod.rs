@@ -70,12 +70,34 @@ impl FibreClient {
         endpoint: impl Into<celestia_grpc::Endpoint>,
         config: FibreClientConfig,
     ) -> Result<Self, FibreError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (endpoint, config);
+            Err(FibreError::IoConnectorRequired)
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let grpc_client = celestia_grpc::GrpcClient::builder()
+                .endpoint(endpoint)
+                .build()
+                .map_err(|e| FibreError::Other(format!("failed to build GrpcClient: {e}")))?;
+            Self::from_grpc_client(grpc_client, config)
+        }
+    }
+
+    /// Build a [`FibreClient`] from a single gRPC endpoint and byte-stream transport.
+    pub fn from_endpoint_with_io_connector(
+        endpoint: impl Into<celestia_grpc::Endpoint>,
+        config: FibreClientConfig,
+        io_connector: Arc<dyn crate::transport::io_connector::FibreIoConnector>,
+    ) -> Result<Self, FibreError> {
         let grpc_client = celestia_grpc::GrpcClient::builder()
             .endpoint(endpoint)
             .build()
             .map_err(|e| FibreError::Other(format!("failed to build GrpcClient: {e}")))?;
 
-        Self::from_grpc_client(grpc_client, config)
+        Self::from_grpc_client_with_io_connector(grpc_client, config, io_connector)
     }
 
     /// Build a [`FibreClient`] from an existing [`celestia_grpc::GrpcClient`].
@@ -83,10 +105,36 @@ impl FibreClient {
         grpc_client: celestia_grpc::GrpcClient,
         config: FibreClientConfig,
     ) -> Result<Self, FibreError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (grpc_client, config);
+            Err(FibreError::IoConnectorRequired)
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::from_grpc_client_with_io_connector(
+                grpc_client,
+                config,
+                Arc::new(crate::transport::io_connector::NativeTcpConnector),
+            )
+        }
+    }
+
+    /// Build a [`FibreClient`] from an existing gRPC client and byte-stream transport.
+    pub fn from_grpc_client_with_io_connector(
+        grpc_client: celestia_grpc::GrpcClient,
+        config: FibreClientConfig,
+        io_connector: Arc<dyn crate::transport::io_connector::FibreIoConnector>,
+    ) -> Result<Self, FibreError> {
         let host_registry = Arc::new(crate::host_registry::GrpcHostRegistry::new(
             grpc_client.clone(),
         ));
-        let connector = crate::grpc_validator_client::GrpcValidatorConnector::new(host_registry);
+        let connector = crate::grpc_validator_client::GrpcValidatorConnector::new_with_io_connector(
+            host_registry,
+            config.chain_id.clone(),
+            io_connector,
+        );
 
         Self::builder()
             .config(config)
