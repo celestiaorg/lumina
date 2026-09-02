@@ -10,56 +10,73 @@ use std::cell::RefCell;
 /// Upper bound on the combined Leopard work set of all stripe encoders that
 /// run concurrently, in bytes.
 ///
-/// Leopard's high-rate transform keeps `k.next_multiple_of(n.next_power_of_two())`
-/// shards in a work buffer and sweeps it several times, so throughput is set by
-/// whether that buffer sits in cache or in DRAM. Encoding every row as a single
-/// shard (32 KiB rows at K=4096/N=12288) makes the buffer 512 MiB and the whole
-/// encode DRAM-bound on one core. Splitting rows into column stripes gives
-/// `row_size / stripe` independent encoders whose buffers are
-/// `work_shards * stripe` bytes each; keeping all concurrently running buffers
-/// within this budget keeps the transforms cache-resident. 32 MiB is half the
-/// L3 of a 16-core Zen 2 part and was the best value measured there (16 threads
-/// x 2 MiB or 32 threads x 1 MiB gave the same ~58 ms per 128 MiB blob).
+/// Leopard's high-rate transform keeps [`work_shards`] shards in a work buffer
+/// and sweeps it several times, so throughput is set by whether that buffer
+/// sits in cache or in DRAM. Encoding every row as a single shard (32 KiB rows
+/// at K=4096/N=12288) makes the buffer 512 MiB and the whole encode DRAM-bound
+/// on one core. Splitting rows into column stripes gives independent encoders
+/// whose buffers are `work_shards * stripe` bytes each; keeping all
+/// concurrently running buffers within this budget keeps the transforms
+/// cache-resident.
+///
+/// This knob only affects speed, never output: every stripe width that is a
+/// multiple of [`MIN_STRIPE`] yields byte-identical parity. 32 MiB measured
+/// best on a 32-thread Ryzen 9 3950X. The budget is exceeded when `MIN_STRIPE`
+/// clamps the width (large K on many threads).
 const STRIPE_WORK_BUDGET: usize = 32 << 20;
 
-/// Smallest stripe worth encoding separately. Below one 64-byte Leopard block
-/// per shard the per-shard overhead dominates.
+/// Smallest stripe worth encoding separately: one 64-byte Leopard block per
+/// shard. Stripe widths and row sizes must be multiples of this so that every
+/// stripe consists of whole Leopard blocks.
 const MIN_STRIPE: usize = 64;
 
 thread_local! {
     /// One encoder per rayon worker, reused across calls so the Leopard work
     /// buffer is allocated and page-faulted once per thread, not once per blob.
+    /// Each worker keeps its buffer (`work_shards * stripe` bytes, ~1-2 MiB at
+    /// the production shape) for the lifetime of the thread.
     static ENCODER: RefCell<Option<HighRateEncoder<DefaultEngine>>> = const { RefCell::new(None) };
 }
 
-/// Raw pointer to the parity region that can be shared across rayon tasks.
+/// Raw pointer to the parity region, shared across rayon tasks.
 ///
 /// Each stripe task writes only the byte ranges
-/// `[row * row_size + offset, row * row_size + offset + len)` of its own stripe,
-/// which are disjoint between tasks, so concurrent writes never alias.
+/// `[row * row_size + offset, row * row_size + offset + len)` of its own
+/// stripe. Stripes are disjoint within every row, so concurrent writes never
+/// alias, and the `&mut [u8]` the pointer was taken from is not used again
+/// until the parallel section has joined all tasks.
 #[derive(Clone, Copy)]
 struct ParityOut(*mut u8);
 
-// SAFETY: see the type documentation; the pointer is only dereferenced for
-// disjoint byte ranges, and the underlying `&mut [u8]` outlives the parallel
-// section that uses it.
+// SAFETY: see the type documentation.
 unsafe impl Send for ParityOut {}
 unsafe impl Sync for ParityOut {}
+
+impl ParityOut {
+    /// Copy `src` to bytes `[at, at + src.len())` of the parity region.
+    ///
+    /// # Safety
+    ///
+    /// The range must lie inside the region and no other task may write it
+    /// concurrently.
+    unsafe fn write(self, at: usize, src: &[u8]) {
+        // SAFETY: guaranteed by the caller.
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.0.add(at), src.len()) }
+    }
+}
 
 /// Page size assumed when faulting in freshly allocated parity memory.
 const TOUCH_PAGE: usize = 4096;
 /// Contiguous span each rayon worker faults in at a time.
 const TOUCH_CHUNK: usize = 2 << 20;
 
-/// Write one byte per page of `buf`, contiguous chunks per worker.
+/// Fault in `buf` one page at a time, contiguous chunks per worker.
 ///
-/// The striped scatter below has every worker writing 64-byte pieces all
-/// over the parity region at once. When that region is freshly allocated,
-/// the first touch of each page is a page fault, and many threads faulting
-/// interleaved pages of one mapping serialize in the kernel: measured 105 ms
-/// versus 6 ms for a 24 MiB parity region with 32 threads. Faulting the pages
-/// in sequentially first takes the fast path; on already-resident memory this
-/// pass costs one cached store per page.
+/// The striped scatter has every worker writing small pieces all over the
+/// parity region at once. Concurrent first-touch of interleaved pages of one
+/// fresh mapping serialises in the kernel, so the pages are faulted in
+/// sequentially first; on already-resident memory this costs one cached store
+/// per page.
 fn touch_pages(buf: &mut [u8]) {
     buf.par_chunks_mut(TOUCH_CHUNK).for_each(|chunk| {
         for page in chunk.chunks_mut(TOUCH_PAGE) {
@@ -70,6 +87,9 @@ fn touch_pages(buf: &mut [u8]) {
 }
 
 /// Number of shards in the Leopard high-rate work buffer for `(k, n)`.
+///
+/// Mirrors `HighRateEncoder::work_count` in `reed-solomon-simd`. If the two
+/// drift apart only the chosen stripe width changes, not the output.
 fn work_shards(k: usize, n: usize) -> usize {
     let chunk = n.next_power_of_two();
     k.div_ceil(chunk) * chunk
@@ -77,66 +97,14 @@ fn work_shards(k: usize, n: usize) -> usize {
 
 /// Stripe width in bytes for encoding `row_size`-byte rows with `(k, n)`.
 ///
-/// Returns the largest multiple of 64 such that all rayon workers' work
-/// buffers fit in [`STRIPE_WORK_BUDGET`], clamped to `[MIN_STRIPE, row_size]`.
+/// Returns the largest multiple of [`MIN_STRIPE`] such that all rayon workers'
+/// work buffers fit in [`STRIPE_WORK_BUDGET`], clamped to
+/// `[MIN_STRIPE, row_size]`.
 fn stripe_size(k: usize, n: usize, row_size: usize) -> usize {
-    let threads = rayon::current_num_threads().max(1);
+    let threads = rayon::current_num_threads();
     let per_encoder = STRIPE_WORK_BUDGET / (threads * work_shards(k, n));
     let stripe = (per_encoder / MIN_STRIPE) * MIN_STRIPE;
     stripe.clamp(MIN_STRIPE, row_size)
-}
-
-/// Encode one column stripe of `original_rows` into the matching stripe of
-/// the parity rows, using this thread's cached encoder.
-fn encode_stripe(
-    original_rows: &[u8],
-    parity: ParityOut,
-    k: usize,
-    n: usize,
-    row_size: usize,
-    offset: usize,
-    len: usize,
-) -> Result<()> {
-    ENCODER.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let encoder = match slot.as_mut() {
-            Some(encoder) => {
-                encoder
-                    .reset(k, n, len)
-                    .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-                encoder
-            }
-            None => slot.insert(
-                RateEncoder::new(k, n, len, DefaultEngine::new(), None)
-                    .map_err(|e| Error::ReedSolomon(e.to_string()))?,
-            ),
-        };
-
-        for row in original_rows.chunks_exact(row_size) {
-            encoder
-                .add_original_shard(&row[offset..offset + len])
-                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-        }
-
-        let result = encoder
-            .encode()
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-
-        for (i, recovery) in result.recovery_iter().enumerate() {
-            debug_assert_eq!(recovery.len(), len);
-            // SAFETY: `parity` points to `n * row_size` writable bytes that no
-            // other task touches in this stripe's byte ranges (see `ParityOut`),
-            // and `i < n`, `offset + len <= row_size`.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    recovery.as_ptr(),
-                    parity.0.add(i * row_size + offset),
-                    len,
-                );
-            }
-        }
-        Ok(())
-    })
 }
 
 fn fill_parity(
@@ -174,20 +142,93 @@ fn fill_parity(
         )));
     }
 
-    // Leopard applies the same transform independently to every 64-byte
-    // block position of a shard, so encoding column stripes of the rows
-    // separately yields exactly the parity that one encoder over whole rows
-    // would, byte for byte. The last stripe may be shorter.
     let stripe = stripe_size(k, n, row_size);
+    fill_parity_striped(original_rows, parity_rows, k, n, row_size, stripe)
+}
+
+/// Encode the parity rows in parallel, one column stripe of `stripe` bytes per
+/// rayon task.
+///
+/// Leopard applies the same transform independently to every 64-byte block
+/// position of a shard, so encoding column stripes of the rows separately
+/// yields exactly the parity that one encoder over whole rows would, byte for
+/// byte. Every stripe but the last is `stripe` bytes wide; the last one may be
+/// shorter.
+///
+/// The caller has validated `k`, `n`, `row_size` and the buffer lengths.
+/// `stripe` and `row_size` must be multiples of [`MIN_STRIPE`].
+fn fill_parity_striped(
+    original_rows: &[u8],
+    parity_rows: &mut [u8],
+    k: usize,
+    n: usize,
+    row_size: usize,
+    stripe: usize,
+) -> Result<()> {
+    assert!(stripe > 0 && stripe.is_multiple_of(MIN_STRIPE));
+    assert!(row_size.is_multiple_of(MIN_STRIPE));
+    assert_eq!(original_rows.len(), k * row_size);
+    assert_eq!(parity_rows.len(), n * row_size);
+
     touch_pages(parity_rows);
     let parity = ParityOut(parity_rows.as_mut_ptr());
+
+    // Encode `original_rows[.., offset..offset + len]` into the same columns of
+    // the parity rows, using this thread's cached encoder.
+    let encode_stripe = |offset: usize, len: usize| -> Result<()> {
+        ENCODER.with(|cell| {
+            // No rayon call may happen while this borrow is held: rayon can run
+            // another task on this worker at any rayon call point, and that task
+            // would hit a re-entrant `borrow_mut`.
+            let mut slot = cell.borrow_mut();
+            let encoder = match slot.as_mut() {
+                Some(encoder) => {
+                    encoder
+                        .reset(k, n, len)
+                        .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+                    encoder
+                }
+                None => slot.insert(
+                    RateEncoder::new(k, n, len, DefaultEngine::new(), None)
+                        .map_err(|e| Error::ReedSolomon(e.to_string()))?,
+                ),
+            };
+
+            for row in original_rows.chunks_exact(row_size) {
+                encoder
+                    .add_original_shard(&row[offset..offset + len])
+                    .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+            }
+
+            let result = encoder
+                .encode()
+                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+
+            let mut recovery = result.recovery_iter();
+            for i in 0..n {
+                let shard = recovery
+                    .next()
+                    .expect("Leopard returned fewer recovery shards than requested");
+                assert_eq!(shard.len(), len, "Leopard recovery shard has wrong length");
+                // SAFETY: `parity` covers `n * row_size` bytes; the destination
+                // `[i * row_size + offset, .. + len)` is in bounds because `i < n`
+                // and `offset + len <= row_size`, and no other task writes it
+                // (see `ParityOut`).
+                unsafe { parity.write(i * row_size + offset, shard) };
+            }
+            assert!(
+                recovery.next().is_none(),
+                "Leopard returned more recovery shards than requested"
+            );
+            Ok(())
+        })
+    };
 
     (0..row_size.div_ceil(stripe))
         .into_par_iter()
         .try_for_each(|s| {
             let offset = s * stripe;
-            let len = stripe.min(row_size - offset);
-            encode_stripe(original_rows, parity, k, n, row_size, offset, len)
+            encode_stripe(offset, stripe.min(row_size - offset))
         })
 }
 
@@ -349,45 +390,103 @@ mod tests {
         assert!(extended[k..(k + n)].iter().any(|rlc| *rlc != GF128::zero()));
     }
 
-    /// Striped, parallel parity must be byte-identical to a single Leopard
-    /// encoder over whole rows (what validators recompute on the Go side).
-    #[test]
-    fn striped_parity_matches_single_encoder() {
+    fn random_rows(k: usize, row_size: usize, seed: u64) -> Vec<u8> {
         use rand::{RngCore, SeedableRng};
-        use rand_chacha::ChaCha8Rng;
+        let mut rows = vec![0u8; k * row_size];
+        rand_chacha::ChaCha8Rng::seed_from_u64(seed).fill_bytes(&mut rows);
+        rows
+    }
 
-        // Production shape (K=4096, N=12288) with a row size that splits into
-        // several stripes under any thread count, plus a row size that is not
-        // a multiple of the stripe (last stripe shorter) and a tiny case.
+    /// Oracle: one Leopard encoder over whole rows, which is what the Go
+    /// verifier recomputes.
+    fn whole_row_parity(original: &[u8], k: usize, n: usize, row_size: usize) -> Vec<u8> {
+        let mut encoder: HighRateEncoder<DefaultEngine> =
+            RateEncoder::new(k, n, row_size, DefaultEngine::new(), None).unwrap();
+        for row in original.chunks_exact(row_size) {
+            encoder.add_original_shard(row).unwrap();
+        }
+        let result = encoder.encode().unwrap();
+        let mut expected = vec![0u8; n * row_size];
+        for (dst, src) in expected
+            .chunks_exact_mut(row_size)
+            .zip(result.recovery_iter())
+        {
+            dst.copy_from_slice(src);
+        }
+        expected
+    }
+
+    fn assert_striped_matches(
+        original: &[u8],
+        expected: &[u8],
+        k: usize,
+        n: usize,
+        row_size: usize,
+        stripe: usize,
+    ) {
+        let mut parity = vec![0u8; n * row_size];
+        fill_parity_striped(original, &mut parity, k, n, row_size, stripe).unwrap();
+        assert!(
+            parity == expected,
+            "striped parity differs for k={k} n={n} row_size={row_size} stripe={stripe}"
+        );
+    }
+
+    /// Striped, parallel parity must be byte-identical to a single Leopard
+    /// encoder over whole rows, for every stripe width. Stripe widths are
+    /// explicit so coverage does not depend on the host's thread count.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "K=4096 is too slow under Miri; see striped_parity_small_shapes"
+    )]
+    fn striped_parity_matches_single_encoder() {
+        // Production shape. 1344 = 64 * 21: stripe 64 gives 21 full stripes,
+        // 128/256/512 leave a shorter last stripe, 1344 is a single stripe.
+        let (k, n, row_size) = (4096, 12288, 64 * 21);
+        let original = random_rows(k, row_size, 1);
+        let expected = whole_row_parity(&original, k, n, row_size);
+        for stripe in [64, 128, 256, 512, row_size] {
+            assert_striped_matches(&original, &expected, k, n, row_size, stripe);
+        }
+
+        // Production entry point, with whatever width `stripe_size` picks here.
+        let mut parity = vec![0u8; n * row_size];
+        fill_parity(&original, &mut parity, k, n, row_size).unwrap();
+        assert!(
+            parity == expected,
+            "fill_parity differs from single encoder"
+        );
+    }
+
+    /// Small shapes, including a short last stripe and an odd `k`, that also
+    /// run under Miri to check the unsafe scatter for aliasing and data races:
+    ///
+    /// ```text
+    /// MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tree-borrows -Zmiri-ignore-leaks" \
+    ///     RAYON_NUM_THREADS=4 cargo +nightly miri test -p rsema1d --lib -- striped
+    /// ```
+    ///
+    /// Tree Borrows is required because `crossbeam-epoch` (rayon's deque) trips
+    /// Stacked Borrows; `ignore-leaks` because rayon's global pool threads are
+    /// never joined. Takes about ten minutes.
+    #[test]
+    fn striped_parity_small_shapes() {
         for (k, n, row_size, seed) in [
-            (4096usize, 12288usize, 512usize, 1u64),
-            (4096, 12288, 64 * 21, 2),
-            (16, 48, 4096, 3),
-            (4, 4, 64, 4),
+            (4usize, 4usize, 256usize, 2u64),
+            (3, 5, 320, 3),
+            (1, 1, 64, 4),
         ] {
-            let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let mut original = vec![0u8; k * row_size];
-            rng.fill_bytes(&mut original);
-
-            let mut expected = vec![0u8; n * row_size];
-            let mut encoder: HighRateEncoder<DefaultEngine> =
-                RateEncoder::new(k, n, row_size, DefaultEngine::new(), None).unwrap();
-            for row in original.chunks_exact(row_size) {
-                encoder.add_original_shard(row).unwrap();
+            let original = random_rows(k, row_size, seed);
+            let expected = whole_row_parity(&original, k, n, row_size);
+            for stripe in [64, 128, 192, row_size] {
+                assert_striped_matches(&original, &expected, k, n, row_size, stripe);
             }
-            let result = encoder.encode().unwrap();
-            for (dst, src) in expected
-                .chunks_exact_mut(row_size)
-                .zip(result.recovery_iter())
-            {
-                dst.copy_from_slice(src);
-            }
-
             let mut parity = vec![0u8; n * row_size];
             fill_parity(&original, &mut parity, k, n, row_size).unwrap();
             assert!(
                 parity == expected,
-                "striped parity differs for k={k} n={n} row_size={row_size}"
+                "fill_parity differs for k={k} n={n} row_size={row_size}"
             );
         }
     }
