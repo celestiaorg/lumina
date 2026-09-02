@@ -1,6 +1,6 @@
 use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
-use crate::codec::{compute_rlc, extend_rlcs};
+use crate::codec::{compute_rlc, extend_rlcs, RlcCoefficients};
 use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256, MerkleTree};
 use crate::error::{Error, Result};
 use crate::field::GF128;
@@ -29,7 +29,7 @@ pub struct VerificationContext {
     params: Parameters,
     rlc_extended: Vec<GF128>,
     rlc_root: [u8; 32],
-    coefficients: OnceLock<([u8; 32], Vec<GF128>)>,
+    coefficients: OnceLock<([u8; 32], RlcCoefficients)>,
 }
 
 impl VerificationContext {
@@ -185,21 +185,21 @@ pub fn verify_with_context(
         .coefficients
         .get()
         .filter(|(cached_row_root, _)| cached_row_root == &row_root)
-        .map(|(_, coefficients)| coefficients.as_slice());
+        .map(|(_, coefficients)| coefficients);
     let derived_coefficients = cached_coefficients.is_none().then(|| {
-        derive_coefficients(
+        RlcCoefficients::new(derive_coefficients(
             &row_root,
             context.params.k,
             context.params.n,
             context.params.row_size,
-        )
+        ))
     });
     let coefficients = cached_coefficients.unwrap_or_else(|| {
         derived_coefficients
-            .as_deref()
+            .as_ref()
             .expect("coefficients were derived")
     });
-    let computed_rlc = compute_rlc(proof.row.as_ref(), coefficients);
+    let computed_rlc = coefficients.compute_rlc(proof.row.as_ref());
     if computed_rlc != context.rlc_extended[proof.index] {
         return Err(Error::VerificationFailed(
             "computed RLC does not match expected value".to_string(),
@@ -343,12 +343,18 @@ mod tests {
         let cached = context.coefficients.get().unwrap();
         assert_eq!(cached.0, ext_data.row_root());
         assert_eq!(cached.1.len(), params.symbols_per_row());
-        let cached_coefficients = cached.1.as_ptr();
+        let cached_coefficients = cached.1.coefficients().as_ptr();
 
         let proof = ext_data.generate_row_proof(4).unwrap();
         assert!(verify_with_context(&proof, &ext_data.commitment(), &context).unwrap());
         assert_eq!(
-            context.coefficients.get().unwrap().1.as_ptr(),
+            context
+                .coefficients
+                .get()
+                .unwrap()
+                .1
+                .coefficients()
+                .as_ptr(),
             cached_coefficients
         );
     }
