@@ -55,6 +55,36 @@ async fn upload_download_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn no_store_uploads_succeed_but_downloads_fail() {
+    let handle = spawn_mock_network(MockNetworkConfig {
+        store_shards: false,
+        ..test_config()
+    })
+    .await
+    .unwrap();
+    let fibre = client(handle.control_addr);
+
+    let signing_key = k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
+    let namespace = Namespace::new_v0(b"mock").unwrap();
+    let data = b"discarded after signing ".repeat(64);
+    let blob = Blob::new(&data, BlobConfig::for_version(0).unwrap()).unwrap();
+    let blob_id = blob.id().clone();
+
+    // Upload still collects signatures (2/3 of 4 validators).
+    let signed = fibre.upload(&signing_key, namespace, blob).await.unwrap();
+    assert!(signed.validator_signatures.iter().flatten().count() >= 3);
+
+    // But the shard was discarded, so download cannot be served.
+    let result = fibre.download(&blob_id, DownloadOptions::default()).await;
+    assert!(
+        result.is_err(),
+        "download must fail when storage is disabled"
+    );
+
+    handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn download_unknown_blob_fails() {
     let handle = spawn_mock_network(test_config()).await.unwrap();
     let fibre = client(handle.control_addr);

@@ -40,6 +40,10 @@ struct Args {
     /// validators; oldest shards evicted beyond it
     #[arg(long, default_value_t = 16)]
     store_budget_gib: u64,
+    /// Discard shards after signing instead of storing them; downloads become
+    /// unavailable. For pure upload-throughput runs.
+    #[arg(long)]
+    no_store: bool,
 }
 
 /// Run the mock server until ctrl-c.
@@ -58,6 +62,7 @@ pub async fn run() -> anyhow::Result<()> {
         height: args.height,
         chain_id: args.chain_id,
         store_budget_bytes: args.store_budget_gib * 1024 * 1024 * 1024,
+        store_shards: !args.no_store,
     })
     .await?;
 

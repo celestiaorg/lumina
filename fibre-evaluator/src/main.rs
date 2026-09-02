@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::IntoFuture;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -16,7 +17,7 @@ use clap::Parser;
 use k256::ecdsa::SigningKey;
 use rand::RngCore;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tracing_subscriber::EnvFilter;
@@ -42,9 +43,9 @@ struct Cli {
     #[arg(long, value_parser = parse_non_empty)]
     core_grpc_url: String,
 
-    /// Hex-encoded secp256k1 private key for Fibre promises and payment transactions.
-    #[arg(long, value_parser = parse_private_key)]
-    private_key: String,
+    /// Hex-encoded secp256k1 private keys for Fibre promises and payment transactions.
+    #[arg(long = "private-key", required = true, value_parser = parse_private_key)]
+    private_keys: Vec<String>,
 
     /// Ten-byte ASCII suffix for a version-zero namespace.
     #[arg(long, value_parser = parse_namespace)]
@@ -100,6 +101,7 @@ struct Cli {
 }
 
 struct LifecycleContext {
+    client: usize,
     fibre: Arc<FibreClient>,
     app_grpc: GrpcClient,
     signing_key: SigningKey,
@@ -146,10 +148,17 @@ enum Event {
         elapsed: Duration,
     },
     LifecycleFailure {
+        client: usize,
+        signer: String,
         stage: &'static str,
         error: String,
         elapsed: Duration,
     },
+}
+
+enum ClientReady {
+    Ready { client: usize, signer: String },
+    Failed { client: usize, error: String },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -179,7 +188,175 @@ async fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let private_key = hex::decode(&cli.private_key).context("decoding --private-key")?;
+    let cli = Arc::new(cli);
+    let client_count = cli.private_keys.len();
+    let (ready_tx, mut ready_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let mut start_txs = Vec::with_capacity(client_count);
+    let mut client_threads = Vec::with_capacity(client_count);
+
+    for client in 1..=client_count {
+        let (start_tx, start_rx) = oneshot::channel();
+        start_txs.push(start_tx);
+
+        let cli = Arc::clone(&cli);
+        let ready_tx = ready_tx.clone();
+        let event_tx = event_tx.clone();
+        let handle = thread::Builder::new()
+            .name(format!("fibre-client-{client}"))
+            .spawn(move || run_client_thread(client, cli, ready_tx, start_rx, event_tx))
+            .with_context(|| format!("spawning client {client} thread"))?;
+        client_threads.push((client, handle));
+    }
+    drop(ready_tx);
+
+    let mut signers = BTreeMap::new();
+    let mut setup_error = None;
+    for _ in 0..client_count {
+        match ready_rx.recv().await {
+            Some(ClientReady::Ready { client, signer }) => {
+                tracing::info!(client, %signer, "Fibre client ready");
+                signers.insert(client, signer);
+            }
+            Some(ClientReady::Failed { client, error }) => {
+                setup_error.get_or_insert_with(|| anyhow!("client {client} setup failed: {error}"));
+            }
+            None => {
+                setup_error.get_or_insert_with(|| anyhow!("client thread stopped during setup"));
+                break;
+            }
+        }
+    }
+
+    if let Some(error) = setup_error {
+        drop(start_txs);
+        join_client_threads(client_threads).await?;
+        return Err(error);
+    }
+
+    let payload_size = payload_size_for_paid_size(cli.blob_size).expect("validated by clap");
+    tracing::info!(
+        clients = client_count,
+        chain_id = %cli.chain_id,
+        namespace = %cli.namespace,
+        payload_size,
+        paid_size = cli.blob_size,
+        per_client_target_blobs_per_second = cli.blobs_per_second,
+        aggregate_target_blobs_per_second = cli.blobs_per_second * client_count as f64,
+        run_for_seconds = cli.run_for_seconds,
+        max_in_flight = cli.max_in_flight,
+        queue_capacity = cli.queue_capacity,
+        encode_concurrency = cli.encode_concurrency,
+        download_concurrency = cli.download_concurrency,
+        download_enabled = !cli.skip_download,
+        gas_limit = ?cli.gas_limit,
+        gas_price = ?cli.gas_price,
+        "starting Fibre evaluation"
+    );
+
+    let started_at = Instant::now();
+    let stats_handle = tokio::spawn(run_stats_collector(
+        event_rx,
+        Duration::from_secs(cli.stats_interval_seconds),
+        started_at,
+        client_count,
+        cli.blobs_per_second,
+    ));
+
+    let mut client_error = None;
+    for (client, start_tx) in start_txs.into_iter().enumerate() {
+        if start_tx.send(started_at).is_err() {
+            let client = client + 1;
+            client_error
+                .get_or_insert_with(|| anyhow!("client {client} stopped before workload launch"));
+        }
+    }
+
+    let client_results = join_client_threads(client_threads).await?;
+    let total_elapsed = started_at.elapsed();
+    drop(event_tx);
+    let stats = stats_handle.await.context("stats task panicked")?;
+
+    let mut launch_elapsed = Duration::ZERO;
+    for (client, result) in client_results {
+        match result {
+            Ok(elapsed) => launch_elapsed = launch_elapsed.max(elapsed),
+            Err(error) => {
+                let signer = signers
+                    .get(&client)
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                tracing::error!(client, signer, %error, "Fibre client failed");
+                client_error.get_or_insert_with(|| anyhow!("client {client} failed: {error:#}"));
+            }
+        }
+    }
+
+    print_final_report(
+        &stats,
+        launch_elapsed,
+        total_elapsed,
+        client_count,
+        cli.blobs_per_second,
+    );
+    if let Some(error) = client_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn run_client_thread(
+    client: usize,
+    cli: Arc<Cli>,
+    ready_tx: mpsc::UnboundedSender<ClientReady>,
+    start_rx: oneshot::Receiver<Instant>,
+    event_tx: mpsc::UnboundedSender<Event>,
+) -> Result<Duration> {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let error = error.to_string();
+            let _ = ready_tx.send(ClientReady::Failed {
+                client,
+                error: error.clone(),
+            });
+            return Err(anyhow!(error));
+        }
+    };
+
+    runtime.block_on(async move {
+        let context = match build_lifecycle_context(client, &cli) {
+            Ok(context) => Arc::new(context),
+            Err(error) => {
+                let error = format!("{error:#}");
+                let _ = ready_tx.send(ClientReady::Failed {
+                    client,
+                    error: error.clone(),
+                });
+                return Err(anyhow!(error));
+            }
+        };
+        ready_tx
+            .send(ClientReady::Ready {
+                client,
+                signer: context.signer.to_string(),
+            })
+            .map_err(|_| anyhow!("coordinator stopped during client setup"))?;
+        drop(ready_tx);
+
+        let started_at = start_rx
+            .await
+            .context("coordinator stopped before workload launch")?;
+        run_client(context, &cli, event_tx, started_at).await
+    })
+}
+
+fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext> {
+    let private_key =
+        hex::decode(&cli.private_keys[client - 1]).context("decoding --private-key")?;
     let signing_key = SigningKey::from_slice(&private_key).context("parsing --private-key")?;
     let payload_size = payload_size_for_paid_size(cli.blob_size).expect("validated by clap");
 
@@ -198,7 +375,6 @@ async fn run(cli: Cli) -> Result<()> {
         .context("app gRPC client has no signer")?;
     let namespace = Namespace::new_v0(cli.namespace.as_bytes()).context("parsing namespace")?;
     let host_registry = Arc::new(GrpcHostRegistry::new(app_grpc.clone()));
-
     let fibre = Arc::new(
         FibreClient::builder()
             .config(FibreClientConfig {
@@ -206,7 +382,10 @@ async fn run(cli: Cli) -> Result<()> {
                 ..FibreClientConfig::default()
             })
             .set_getter(GrpcSetGetter::new(core_grpc))
-            .connector(GrpcValidatorConnector::new(host_registry, cli.chain_id))
+            .connector(GrpcValidatorConnector::new(
+                host_registry,
+                cli.chain_id.clone(),
+            ))
             .build()
             .context("building Fibre client")?,
     );
@@ -219,7 +398,8 @@ async fn run(cli: Cli) -> Result<()> {
         tx_config = tx_config.with_gas_price(gas_price);
     }
 
-    let context = Arc::new(LifecycleContext {
+    Ok(LifecycleContext {
+        client,
         fibre,
         app_grpc,
         signing_key,
@@ -232,43 +412,25 @@ async fn run(cli: Cli) -> Result<()> {
         encode_semaphore: Arc::new(Semaphore::new(cli.encode_concurrency)),
         download_semaphore: Arc::new(Semaphore::new(cli.download_concurrency)),
         skip_download: cli.skip_download,
-    });
+    })
+}
 
-    tracing::info!(
-        chain_id = %context.fibre.config().chain_id,
-        namespace = %cli.namespace,
-        payload_size = context.payload_size,
-        paid_size = context.paid_size,
-        blobs_per_second = cli.blobs_per_second,
-        run_for_seconds = cli.run_for_seconds,
-        max_in_flight = cli.max_in_flight,
-        queue_capacity = cli.queue_capacity,
-        encode_concurrency = cli.encode_concurrency,
-        download_concurrency = cli.download_concurrency,
-        download_enabled = !cli.skip_download,
-        gas_limit = ?cli.gas_limit,
-        gas_price = ?cli.gas_price,
-        "starting Fibre evaluation"
-    );
-
-    let started_at = Instant::now();
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+async fn run_client(
+    context: Arc<LifecycleContext>,
+    cli: &Cli,
+    event_tx: mpsc::UnboundedSender<Event>,
+    started_at: Instant,
+) -> Result<Duration> {
     let (work_tx, work_rx) = mpsc::channel(cli.queue_capacity);
-    let stats_handle = tokio::spawn(run_stats_collector(
-        event_rx,
-        Duration::from_secs(cli.stats_interval_seconds),
-        started_at,
-    ));
     let dispatcher_handle = tokio::spawn(run_dispatcher(
         context,
         work_rx,
         event_tx.clone(),
         cli.max_in_flight,
     ));
-
     let launch_elapsed = run_scheduler(
         work_tx,
-        event_tx.clone(),
+        event_tx,
         cli.blobs_per_second,
         Duration::from_secs(cli.run_for_seconds),
         started_at,
@@ -277,12 +439,25 @@ async fn run(cli: Cli) -> Result<()> {
     dispatcher_handle
         .await
         .context("dispatcher task panicked")??;
-    let total_elapsed = started_at.elapsed();
+    Ok(launch_elapsed)
+}
 
-    drop(event_tx);
-    let stats = stats_handle.await.context("stats task panicked")?;
-    print_final_report(&stats, launch_elapsed, total_elapsed);
-    Ok(())
+async fn join_client_threads(
+    client_threads: Vec<(usize, thread::JoinHandle<Result<Duration>>)>,
+) -> Result<Vec<(usize, Result<Duration>)>> {
+    tokio::task::spawn_blocking(move || {
+        client_threads
+            .into_iter()
+            .map(|(client, handle)| {
+                let result = handle
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow!("client thread panicked")));
+                (client, result)
+            })
+            .collect()
+    })
+    .await
+    .context("client thread join task panicked")
 }
 
 async fn run_scheduler(
@@ -425,6 +600,8 @@ async fn run_lifecycle_job(
         }
         Err(StageFailure { stage, error }) => {
             let _ = event_tx.send(Event::LifecycleFailure {
+                client: context.client,
+                signer: context.signer.to_string(),
                 stage,
                 error: format!("{error:#}"),
                 elapsed: started_at.elapsed(),
@@ -569,6 +746,8 @@ async fn run_stats_collector(
     mut events: mpsc::UnboundedReceiver<Event>,
     stats_interval: Duration,
     started_at: Instant,
+    client_count: usize,
+    blobs_per_second: f64,
 ) -> Stats {
     let mut stats = Stats::default();
     let mut ticker = time::interval(stats_interval);
@@ -581,7 +760,11 @@ async fn run_stats_collector(
                 Some(event) => stats.apply(event),
                 None => break,
             },
-            _ = ticker.tick() => stats.log_periodic(started_at.elapsed()),
+            _ = ticker.tick() => stats.log_periodic(
+                started_at.elapsed(),
+                client_count,
+                blobs_per_second,
+            ),
         }
     }
 
@@ -614,6 +797,8 @@ impl Stats {
                 self.record_latency("total", elapsed);
             }
             Event::LifecycleFailure {
+                client,
+                signer,
                 stage,
                 error,
                 elapsed,
@@ -621,7 +806,7 @@ impl Stats {
                 self.failures += 1;
                 *self.failures_by_stage.entry(stage).or_default() += 1;
                 self.record_latency("total", elapsed);
-                tracing::warn!(stage, %error, "blob lifecycle failed");
+                tracing::warn!(client, %signer, stage, %error, "blob lifecycle failed");
             }
         }
     }
@@ -630,9 +815,12 @@ impl Stats {
         self.latencies.entry(stage).or_default().push(elapsed);
     }
 
-    fn log_periodic(&self, elapsed: Duration) {
+    fn log_periodic(&self, elapsed: Duration, client_count: usize, blobs_per_second: f64) {
         let completed = self.successes + self.failures;
         tracing::info!(
+            clients = client_count,
+            per_client_target_blobs_per_second = blobs_per_second,
+            aggregate_target_blobs_per_second = blobs_per_second * client_count as f64,
             elapsed_seconds = %format_args!("{:.2}", elapsed.as_secs_f64()),
             scheduled = self.scheduled,
             admitted = self.admitted,
@@ -649,13 +837,22 @@ impl Stats {
     }
 }
 
-fn print_final_report(stats: &Stats, launch_elapsed: Duration, total_elapsed: Duration) {
+fn print_final_report(
+    stats: &Stats,
+    launch_elapsed: Duration,
+    total_elapsed: Duration,
+    client_count: usize,
+    blobs_per_second: f64,
+) {
     let dropped = stats.dropped_queue_full + stats.dropped_scheduler_late;
     let payload_bps = per_second(stats.payload_bytes, total_elapsed);
     let paid_bps = per_second(stats.paid_bytes, total_elapsed);
 
     tracing::info!("final Fibre evaluation stats");
     tracing::info!(
+        clients = client_count,
+        per_client_target_blobs_per_second = blobs_per_second,
+        aggregate_target_blobs_per_second = blobs_per_second * client_count as f64,
         scheduled = stats.scheduled,
         admitted = stats.admitted,
         dropped,
@@ -667,6 +864,7 @@ fn print_final_report(stats: &Stats, launch_elapsed: Duration, total_elapsed: Du
         "admission stats"
     );
     tracing::info!(
+        clients = client_count,
         started = stats.started,
         verified = stats.successes,
         failed = stats.failures,
@@ -895,6 +1093,8 @@ mod tests {
     use super::*;
 
     const VALID_KEY: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+    const SECOND_VALID_KEY: &str =
+        "0202020202020202020202020202020202020202020202020202020202020202";
 
     fn valid_args() -> Vec<&'static str> {
         vec![
@@ -922,6 +1122,7 @@ mod tests {
     fn parses_required_arguments_and_defaults() {
         let cli = Cli::try_parse_from(valid_args()).unwrap();
         assert_eq!(cli.chain_id, "test-chain");
+        assert_eq!(cli.private_keys, [VALID_KEY]);
         assert_eq!(cli.namespace, "fibre-eval");
         assert_eq!(cli.blobs_per_second, 2.5);
         assert_eq!(cli.blob_size, 134_217_728);
@@ -934,6 +1135,22 @@ mod tests {
         assert_eq!(cli.gas_limit, None);
         assert_eq!(cli.gas_price, None);
         assert_eq!(cli.stats_interval_seconds, 10);
+    }
+
+    #[test]
+    fn parses_repeated_private_keys() {
+        let mut args = valid_args();
+        args.extend(["--private-key", SECOND_VALID_KEY]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.private_keys, [VALID_KEY, SECOND_VALID_KEY]);
+    }
+
+    #[test]
+    fn requires_at_least_one_private_key() {
+        let mut args = valid_args();
+        let key_flag = args.iter().position(|arg| *arg == "--private-key").unwrap();
+        args.drain(key_flag..=key_flag + 1);
+        assert!(Cli::try_parse_from(args).is_err());
     }
 
     #[test]
@@ -980,11 +1197,7 @@ mod tests {
     #[test]
     fn rejects_invalid_key_and_namespace() {
         let mut invalid_key = valid_args();
-        let key_index = invalid_key
-            .iter()
-            .position(|arg| *arg == VALID_KEY)
-            .unwrap();
-        invalid_key[key_index] = "not-hex";
+        invalid_key.extend(["--private-key", "not-hex"]);
         assert!(Cli::try_parse_from(invalid_key).is_err());
 
         let mut invalid_namespace = valid_args();
@@ -1023,9 +1236,11 @@ mod tests {
     }
 
     #[test]
-    fn stats_track_admission_failures_and_latencies() {
+    fn stats_aggregate_events_from_multiple_clients() {
         let mut stats = Stats::default();
         stats.apply(Event::Scheduled { count: 4 });
+        stats.apply(Event::Scheduled { count: 3 });
+        stats.apply(Event::Admitted);
         stats.apply(Event::Admitted);
         stats.apply(Event::Dropped {
             reason: "queue_full",
@@ -1039,18 +1254,32 @@ mod tests {
             queue_latency: Duration::from_millis(2),
         });
         stats.apply(Event::LifecycleFailure {
+            client: 1,
+            signer: "signer-1".to_string(),
             stage: "download",
             error: "failed".to_string(),
             elapsed: Duration::from_millis(10),
         });
+        stats.apply(Event::LifecycleSuccess {
+            payload_bytes: 100,
+            paid_bytes: 105,
+            elapsed: Duration::from_millis(20),
+        });
 
-        assert_eq!(stats.scheduled, 4);
-        assert_eq!(stats.admitted, 1);
+        assert_eq!(stats.scheduled, 7);
+        assert_eq!(stats.admitted, 2);
         assert_eq!(stats.dropped_queue_full, 2);
         assert_eq!(stats.dropped_scheduler_late, 1);
+        assert_eq!(stats.successes, 1);
+        assert_eq!(stats.failures, 1);
+        assert_eq!(stats.payload_bytes, 100);
+        assert_eq!(stats.paid_bytes, 105);
         assert_eq!(stats.failures_by_stage["download"], 1);
         assert_eq!(stats.latencies["queue"], [Duration::from_millis(2)]);
-        assert_eq!(stats.latencies["total"], [Duration::from_millis(10)]);
+        assert_eq!(
+            stats.latencies["total"],
+            [Duration::from_millis(10), Duration::from_millis(20)]
+        );
     }
 
     #[test]

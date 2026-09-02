@@ -19,16 +19,16 @@ use crate::store::ShardStore;
 /// One validator's Fibre data-plane service.
 pub struct MockFibreService {
     signing_key: ed25519_dalek::SigningKey,
-    store: ShardStore,
+    /// `None` discards shards after signing (pure upload-throughput mode);
+    /// downloads are then unavailable.
+    store: Option<ShardStore>,
 }
 
 impl MockFibreService {
-    /// Create a service with an empty store, signing with the given key.
-    pub fn new(signing_key: ed25519_dalek::SigningKey, store_budget_bytes: u64) -> Self {
-        Self {
-            signing_key,
-            store: ShardStore::new(store_budget_bytes),
-        }
+    /// Create a service signing with the given key. `store` is `None` to
+    /// discard shards after signing instead of retaining them.
+    pub fn new(signing_key: ed25519_dalek::SigningKey, store: Option<ShardStore>) -> Self {
+        Self { signing_key, store }
     }
 }
 
@@ -58,8 +58,10 @@ impl Fibre for MockFibreService {
             .map_err(|e| Status::invalid_argument(format!("promise sign bytes: {e}")))?;
         let signature = self.signing_key.sign(&sign_bytes);
 
-        self.store.insert(commitment, shard);
-        tracing::trace!(commitment = %hex::encode(commitment), "stored shard");
+        if let Some(store) = &self.store {
+            store.insert(commitment, shard);
+            tracing::trace!(commitment = %hex::encode(commitment), "stored shard");
+        }
 
         Ok(Response::new(UploadShardResponse {
             validator_signature: signature.to_bytes().to_vec(),
@@ -78,8 +80,11 @@ impl Fibre for MockFibreService {
         }
         let commitment: [u8; 32] = blob_id[1..33].try_into().expect("length checked above");
 
-        let shard = self
+        let store = self
             .store
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("shard storage disabled (--no-store)"))?;
+        let shard = store
             .get(&commitment)
             .ok_or_else(|| Status::not_found("blob not found"))?;
 

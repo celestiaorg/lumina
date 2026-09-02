@@ -39,12 +39,20 @@ use crate::app_node::{
 use crate::chain::MockChain;
 use crate::control_plane::{MockBlockApi, MockValaddrQuery};
 use crate::fibre_service::MockFibreService;
+use crate::store::ShardStore;
 use crate::validator::MockValidator;
 
 /// Matches the fibre client's own encode/decode limits
 /// (`grpc/grpc-macros/src/lib.rs`); tonic's server default of 4 MiB is too
 /// small for v0 shards.
 const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
+
+/// HTTP/2 flow-control windows. The spec default of 64 KiB caps each
+/// connection at window/RTT (~150 MB/s at 0.4 ms), starving shard uploads on a
+/// fast link long before the NIC does. On upload the server is the receiver, so
+/// these seed the receive window and `http2_adaptive_window` grows it to the BDP.
+const STREAM_WINDOW: u32 = 16 * 1024 * 1024;
+const CONN_WINDOW: u32 = 64 * 1024 * 1024;
 
 /// Configuration for [`spawn_mock_network`].
 pub struct MockNetworkConfig {
@@ -68,7 +76,11 @@ pub struct MockNetworkConfig {
     /// Process-wide byte budget for stored shards, split evenly across
     /// validators; oldest shards are evicted beyond it. Keep it comfortably
     /// above the client's max-in-flight count times the encoded blob size.
+    /// Ignored when `store_shards` is false.
     pub store_budget_bytes: u64,
+    /// When false, shards are discarded after signing (pure upload-throughput
+    /// mode) and downloads are unavailable.
+    pub store_shards: bool,
 }
 
 impl Default for MockNetworkConfig {
@@ -82,6 +94,7 @@ impl Default for MockNetworkConfig {
             height: 1,
             chain_id: "mock-1".to_string(),
             store_budget_bytes: 16 * 1024 * 1024 * 1024,
+            store_shards: true,
         }
     }
 }
@@ -114,7 +127,7 @@ pub async fn spawn_mock_network(cfg: MockNetworkConfig) -> anyhow::Result<MockNe
     );
     anyhow::ensure!(cfg.height > 0, "height must be greater than zero");
     anyhow::ensure!(
-        cfg.store_budget_bytes as usize >= cfg.num_validators,
+        !cfg.store_shards || cfg.store_budget_bytes as usize >= cfg.num_validators,
         "store_budget_bytes must allow at least one byte per validator"
     );
 
@@ -152,12 +165,12 @@ pub async fn spawn_mock_network(cfg: MockNetworkConfig) -> anyhow::Result<MockNe
     }
 
     for (incoming, validator) in incomings.into_iter().zip(&validators) {
-        let svc = FibreServer::new(MockFibreService::new(
-            validator.signing_key.clone(),
-            cfg.store_budget_bytes / cfg.num_validators as u64,
-        ))
-        .max_decoding_message_size(MAX_MESSAGE_SIZE)
-        .max_encoding_message_size(MAX_MESSAGE_SIZE);
+        let store = cfg
+            .store_shards
+            .then(|| ShardStore::new(cfg.store_budget_bytes / cfg.num_validators as u64));
+        let svc = FibreServer::new(MockFibreService::new(validator.signing_key.clone(), store))
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE);
         let identity = tls::endorsed_identity(&validator.signing_key, &cfg.chain_id)
             .with_context(|| format!("failed to build TLS identity for {}", validator.host))?;
         let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
@@ -167,6 +180,9 @@ pub async fn spawn_mock_network(cfg: MockNetworkConfig) -> anyhow::Result<MockNe
             let server = tonic::transport::Server::builder()
                 .tls_config(tls_config)
                 .expect("static TLS config is valid")
+                .initial_stream_window_size(STREAM_WINDOW)
+                .initial_connection_window_size(CONN_WINDOW)
+                .http2_adaptive_window(Some(true))
                 .add_service(svc)
                 .serve_with_incoming_shutdown(incoming, async move {
                     let _ = rx.changed().await;
