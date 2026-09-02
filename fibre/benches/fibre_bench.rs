@@ -308,6 +308,50 @@ fn bench_parse_download_response(c: &mut Criterion) {
     group.finish();
 }
 
+/// Upload path: building one validator's `UploadShardRequest` from row
+/// proofs and serialising it with prost, i.e. everything between `blob.row()`
+/// and the bytes handed to the HTTP/2 layer. Measured per shard of 148 rows
+/// on a 128MB blob (32 KiB rows), the production shape: the request body is
+/// ~4.7 MiB, so this is dominated by how many times the row data is copied.
+fn bench_upload_shard_encode(c: &mut Criterion) {
+    use prost::Message;
+
+    let mut group = c.benchmark_group("upload_shard_encode");
+    group.measurement_time(CHEAP_MEASUREMENT);
+    group.noise_threshold(0.03);
+
+    let blob = Blob::new(
+        &generate_data(BlobConfig::v0().max_data_size),
+        BlobConfig::v0(),
+    )
+    .unwrap();
+    let rlcs = blob.rlc_coeffs().unwrap().to_vec();
+    let shard = rows_per_shard();
+    let rows: Vec<usize> = (0..shard).collect();
+
+    let request = |proofs: &[rsema1d::RowInclusionProof]| proto::UploadShardRequest {
+        promise: None,
+        shard: Some(proto_conv::build_upload_shard(proofs, &rlcs)),
+    };
+    let wire_len = {
+        let proofs: Vec<_> = rows.iter().map(|&i| blob.row(i).unwrap()).collect();
+        request(&proofs).encoded_len()
+    };
+    group.throughput(Throughput::Bytes(wire_len as u64));
+
+    group.bench_function(
+        BenchmarkId::new("proofs_build_encode", "shard_148_rows_128MB"),
+        |b| {
+            b.iter(|| {
+                let proofs: Vec<_> = rows.iter().map(|&i| blob.row(i).unwrap()).collect();
+                request(black_box(&proofs)).encode_to_vec()
+            });
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_blob_new,
@@ -315,6 +359,7 @@ criterion_group!(
     bench_payment_promise,
     bench_signature_set,
     bench_validator_assign,
-    bench_parse_download_response
+    bench_parse_download_response,
+    bench_upload_shard_encode
 );
 criterion_main!(benches);

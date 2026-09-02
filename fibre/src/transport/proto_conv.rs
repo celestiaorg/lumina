@@ -79,7 +79,8 @@ pub(crate) fn blob_row_to_row_proof(
 ///
 /// Shards carry the RLC vector of the K original rows (16 bytes per row) so
 /// the validator can verify each row without having enough rows to reconstruct.
-pub(crate) fn build_upload_shard(
+#[doc(hidden)]
+pub fn build_upload_shard(
     proofs: &[rsema1d::RowInclusionProof],
     rlc_vector: &[rsema1d::GF128],
 ) -> proto::BlobShard {
