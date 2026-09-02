@@ -753,6 +753,7 @@ dependencies = [
  "celestia-proto",
  "celestia-types",
  "chacha8rand",
+ "criterion",
  "der",
  "ed25519-dalek",
  "futures",
