@@ -24,12 +24,24 @@
 //! A fast sanity pass (each case runs once) is `-- --test`. Blob encoding is
 //! partially parallel via rayon; set `RAYON_NUM_THREADS=1` for
 //! single-threaded numbers.
+//!
+//! ## Reading criterion's change verdicts
+//!
+//! Per-group noise thresholds below are tuned from A/A runs (same binary, no
+//! code change) on a 32-core desktop: differences within the threshold are
+//! reported as noise rather than a change. Residual run-to-run variance comes
+//! from ASLR-dependent memory layout (dominant for sub-microsecond benches),
+//! turbo/thermal clocking, and background load. For tighter comparisons:
+//! run with ASLR disabled (`setarch -R cargo bench ...`), and before trusting
+//! a verdict do an A/A pass (re-run the baseline once) to see the machine's
+//! current noise floor.
 
 use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime};
 
 use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
+    BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group,
+    criterion_main,
 };
 use rand::Rng;
 use rand::rngs::OsRng;
@@ -100,6 +112,10 @@ fn bench_blob_new(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(HEAVY_MEASUREMENT);
     group.warm_up_time(HEAVY_WARM_UP);
+    // Flat sampling: iteration counts don't grow across samples, so the 128MB
+    // case fits the measurement window without criterion warning about it.
+    group.sampling_mode(SamplingMode::Flat);
+    group.noise_threshold(0.02);
 
     for (name, len) in blob_sizes() {
         let data = generate_data(len);
@@ -114,16 +130,19 @@ fn bench_blob_new(c: &mut Criterion) {
 
 /// Upload path: per-row inclusion proof generation, called once per row per
 /// validator when building upload shards.
+///
+/// Measured per shard (148 rows), not per single row: a lone ~100ns row proof
+/// is dominated by where that row's pages landed in memory, which varies
+/// between processes (ASLR) and made single-row numbers swing >15% run to
+/// run. Averaging over a shard's worth of rows removes that; divide by 148
+/// for the per-row cost.
 fn bench_blob_row_proofs(c: &mut Criterion) {
     let mut group = c.benchmark_group("blob_row_proofs");
     group.measurement_time(CHEAP_MEASUREMENT);
+    group.noise_threshold(0.03);
 
     for &(name, len) in &[("1MB", 1 << 20), ("8MB", 8 << 20)] {
         let blob = Blob::new(&generate_data(len), BlobConfig::v0()).unwrap();
-
-        group.bench_function(BenchmarkId::new("single_row", name), |b| {
-            b.iter(|| blob.row(black_box(0)).unwrap());
-        });
 
         let shard = rows_per_shard();
         group.bench_function(BenchmarkId::new(format!("shard_{shard}_rows"), name), |b| {
@@ -143,6 +162,7 @@ fn bench_blob_row_proofs(c: &mut Criterion) {
 fn bench_payment_promise(c: &mut Criterion) {
     let mut group = c.benchmark_group("payment_promise");
     group.measurement_time(CHEAP_MEASUREMENT);
+    group.noise_threshold(0.03);
 
     let signing_key = k256::ecdsa::SigningKey::random(&mut OsRng);
     let mut promise = PaymentPromise {
@@ -170,7 +190,9 @@ fn bench_payment_promise(c: &mut Criterion) {
 /// collecting a full validator set's worth of signatures.
 fn bench_signature_set(c: &mut Criterion) {
     let mut group = c.benchmark_group("signature_set");
-    group.measurement_time(CHEAP_MEASUREMENT);
+    // collect_100 runs ~3ms/iter; 100 samples need more than the cheap window.
+    group.measurement_time(Duration::from_secs(20));
+    group.noise_threshold(0.03);
 
     let (keys, validators) = make_validators(100);
     let payload = generate_data(200);
@@ -208,9 +230,15 @@ fn bench_signature_set(c: &mut Criterion) {
 
 /// Deterministic stake-weighted shard assignment (upload) and validator
 /// selection (download), scaling over validator count.
+///
+/// The `select` benches are sub-microsecond, allocation- and RNG-heavy, and
+/// show up to ~10% ASLR-driven run-to-run variance on an unquiesced machine;
+/// hence the wide noise threshold. Treat only large `select` deltas (or
+/// deltas that survive an A/A re-run) as real. `assign` is stable (<2%).
 fn bench_validator_assign(c: &mut Criterion) {
     let mut group = c.benchmark_group("validator_assign");
     group.measurement_time(CHEAP_MEASUREMENT);
+    group.noise_threshold(0.10);
 
     let cfg = BlobConfig::v0();
     let min_rows = rows_per_shard();
@@ -244,6 +272,7 @@ fn bench_validator_assign(c: &mut Criterion) {
 fn bench_parse_download_response(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_download_response");
     group.measurement_time(CHEAP_MEASUREMENT);
+    group.noise_threshold(0.03);
 
     let shard = rows_per_shard();
     let blob = Blob::new(&generate_data(1 << 20), BlobConfig::v0()).unwrap();

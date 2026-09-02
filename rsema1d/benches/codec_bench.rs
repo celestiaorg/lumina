@@ -1,4 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::time::Duration;
+
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use rand::Rng;
 use rsema1d::{
     encode, encode_in_place, reconstruct, ExtendedData, Parameters, RowMatrix, VerificationContext,
@@ -165,6 +169,9 @@ fn bench_verification_context(c: &mut Criterion) {
 fn bench_reconstruct(c: &mut Criterion) {
     let mut group = c.benchmark_group("reconstruct");
     group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+    group.warm_up_time(Duration::from_secs(5));
+    group.sampling_mode(SamplingMode::Flat);
 
     let configs = vec![
         ("1MB_k1024_n3072", 1024, 3072, 1024),
