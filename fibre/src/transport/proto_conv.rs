@@ -95,7 +95,8 @@ pub(crate) fn build_upload_shard(
 }
 
 /// Parse a proto [`proto::DownloadShardResponse`] into a [`DownloadResponse`].
-pub(crate) fn parse_download_response(
+#[doc(hidden)]
+pub fn parse_download_response(
     resp: proto::DownloadShardResponse,
 ) -> Result<DownloadResponse, FibreError> {
     let shard = resp
