@@ -294,7 +294,10 @@ fn bench_parse_download_response(c: &mut Criterion) {
         .flat_map(|rlc| rlc.to_bytes())
         .collect();
     let response = proto::DownloadShardResponse {
-        shard: Some(proto::BlobShard { rows, rlcs }),
+        shard: Some(proto::BlobShard {
+            rows,
+            rlcs: rlcs.into(),
+        }),
     };
 
     group.bench_function(format!("shard_{shard}_rows_1MB"), |b| {

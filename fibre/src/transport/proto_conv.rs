@@ -70,7 +70,7 @@ pub(crate) fn blob_row_to_row_proof(
 
     Ok(rsema1d::RowProof {
         index: row.index as usize,
-        row: std::borrow::Cow::Owned(row.data),
+        row: std::borrow::Cow::Owned(row.data.into()),
         row_proof,
     })
 }
@@ -92,7 +92,10 @@ pub fn build_upload_shard(
         rlcs.extend_from_slice(&rlc.to_bytes());
     }
 
-    proto::BlobShard { rows, rlcs }
+    proto::BlobShard {
+        rows,
+        rlcs: rlcs.into(),
+    }
 }
 
 /// Parse a proto [`proto::DownloadShardResponse`] into a [`DownloadResponse`].
@@ -216,7 +219,7 @@ mod tests {
     fn row_proof_blob_row_roundtrip() {
         let proof = rsema1d::RowInclusionProof {
             index: 5,
-            row: vec![42u8; 64],
+            row: vec![42u8; 64].into(),
             row_proof: vec![[1u8; 32], [2u8; 32]],
             rlc_root: [3u8; 32],
         };
@@ -236,7 +239,7 @@ mod tests {
     fn blob_row_to_row_proof_invalid_hash_length() {
         let row = proto::BlobRow {
             index: 0,
-            data: vec![0u8; 64],
+            data: vec![0u8; 64].into(),
             proof: vec![vec![0u8; 31]], // wrong length
         };
         let result = blob_row_to_row_proof(row);
@@ -247,7 +250,7 @@ mod tests {
     fn build_upload_shard_includes_rlc_vector() {
         let proofs = vec![rsema1d::RowInclusionProof {
             index: 0,
-            row: vec![0u8; 64],
+            row: vec![0u8; 64].into(),
             row_proof: vec![[0u8; 32]],
             rlc_root: [0u8; 32],
         }];
@@ -264,10 +267,10 @@ mod tests {
             shard: Some(proto::BlobShard {
                 rows: vec![proto::BlobRow {
                     index: 3,
-                    data: vec![1u8; 64],
+                    data: vec![1u8; 64].into(),
                     proof: vec![vec![2u8; 32]],
                 }],
-                rlcs: vec![9u8; 32], // 2 RLC values
+                rlcs: vec![9u8; 32].into(), // 2 RLC values
             }),
         };
 
@@ -288,7 +291,10 @@ mod tests {
     fn parse_download_response_invalid_rlc_length() {
         for rlcs in [vec![], vec![1u8; 15]] {
             let resp = proto::DownloadShardResponse {
-                shard: Some(proto::BlobShard { rows: vec![], rlcs }),
+                shard: Some(proto::BlobShard {
+                    rows: vec![],
+                    rlcs: rlcs.into(),
+                }),
             };
             assert!(parse_download_response(resp).is_err());
         }

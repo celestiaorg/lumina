@@ -749,6 +749,7 @@ version = "1.1.0-rc.1"
 dependencies = [
  "async-trait",
  "bech32",
+ "bytes",
  "celestia-grpc",
  "celestia-proto",
  "celestia-types",
@@ -763,6 +764,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "k256",
+ "libc",
  "lumina-utils",
  "prost",
  "rand 0.8.5",
@@ -4893,6 +4895,7 @@ dependencies = [
 name = "rsema1d"
 version = "1.1.0-rc.1"
 dependencies = [
+ "bytes",
  "criterion",
  "getrandom 0.2.17",
  "hex",
