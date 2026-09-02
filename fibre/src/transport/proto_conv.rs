@@ -2,7 +2,7 @@
 //!
 //! These functions convert between the crate's domain types and the generated
 //! protobuf types from `celestia-proto`. They are used by the gRPC transport
-//! layer ([`crate::grpc_validator_client`]) and the put flow ([`crate::upload`]).
+//! layer (`transport::grpc_validator_client`) and the put flow (`client::upload`).
 
 #[cfg(test)]
 use std::time::Duration;
