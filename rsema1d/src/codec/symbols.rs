@@ -20,7 +20,7 @@ pub fn extract_symbols(chunk: &[u8; 64]) -> [u16; 32] {
 
 /// `(a + b) mod 65535` for two logarithms.
 #[inline(always)]
-fn add_mod(a: u16, b: u16) -> u16 {
+const fn add_mod(a: u16, b: u16) -> u16 {
     let sum = a as u32 + b as u32;
     (if sum >= GF_MODULUS {
         sum - GF_MODULUS
