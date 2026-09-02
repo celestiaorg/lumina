@@ -1,13 +1,55 @@
 use crate::error::{Error, Result};
 use crate::params::Parameters;
+use bytes::Bytes;
+
+/// Backing store of a [`RowMatrix`].
+///
+/// A matrix starts out owned so it can be encoded in place. Once it is
+/// frozen, rows can be handed out as reference-counted [`Bytes`] slices
+/// without copying; mutating a frozen matrix converts it back to an owned
+/// buffer (a copy only if other `Bytes` still refer to it).
+#[derive(Debug, Clone)]
+enum Storage {
+    Owned(Vec<u8>),
+    Shared(Bytes),
+}
+
+impl Storage {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Storage::Owned(v) => v,
+            Storage::Shared(b) => b,
+        }
+    }
+
+    fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+        if let Storage::Shared(b) = self {
+            *self = Storage::Owned(Vec::from(std::mem::take(b)));
+        }
+        match self {
+            Storage::Owned(v) => v,
+            Storage::Shared(_) => unreachable!("converted to owned above"),
+        }
+    }
+}
 
 /// Contiguous row-major byte matrix (rows × row_size).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RowMatrix {
-    data: Vec<u8>,
+    data: Storage,
     row_size: usize,
     rows: usize,
 }
+
+impl PartialEq for RowMatrix {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.row_size == other.row_size
+            && self.as_row_major() == other.as_row_major()
+    }
+}
+
+impl Eq for RowMatrix {}
 
 impl RowMatrix {
     /// Create a matrix from a flat byte buffer with the given shape.
@@ -25,7 +67,7 @@ impl RowMatrix {
             )));
         }
         Ok(Self {
-            data,
+            data: Storage::Owned(data),
             row_size,
             rows,
         })
@@ -43,17 +85,36 @@ impl RowMatrix {
 
     /// Returns the underlying flat buffer as a byte slice.
     pub fn as_row_major(&self) -> &[u8] {
-        &self.data
+        self.data.as_slice()
     }
 
     /// Returns the underlying flat buffer as a mutable byte slice.
+    ///
+    /// If the matrix was frozen and rows are still shared, this copies the
+    /// buffer first.
     pub fn as_row_major_mut(&mut self) -> &mut [u8] {
-        &mut self.data
+        self.data.as_mut_vec()
     }
 
     /// Consumes the matrix and returns the underlying byte buffer.
     pub fn into_row_major(self) -> Vec<u8> {
-        self.data
+        match self.data {
+            Storage::Owned(v) => v,
+            Storage::Shared(b) => Vec::from(b),
+        }
+    }
+
+    /// Freeze the buffer so that [`row_bytes`](Self::row_bytes) can return
+    /// rows without copying. No-op if already frozen; never copies.
+    pub fn freeze(&mut self) {
+        if let Storage::Owned(v) = &mut self.data {
+            self.data = Storage::Shared(Bytes::from(std::mem::take(v)));
+        }
+    }
+
+    /// Returns `true` if the matrix has been frozen.
+    pub fn is_frozen(&self) -> bool {
+        matches!(self.data, Storage::Shared(_))
     }
 
     /// Returns the row at `index`, or an error if out of bounds.
@@ -62,6 +123,23 @@ impl RowMatrix {
             return Err(Error::InvalidIndex(index, self.rows));
         }
         Ok(self.row_unchecked(index))
+    }
+
+    /// Returns the row at `index` as a reference-counted slice of the
+    /// matrix buffer.
+    ///
+    /// Zero-copy once the matrix is [frozen](Self::freeze); copies the row
+    /// otherwise.
+    pub fn row_bytes(&self, index: usize) -> Result<Bytes> {
+        if index >= self.rows {
+            return Err(Error::InvalidIndex(index, self.rows));
+        }
+        let start = index * self.row_size;
+        let end = start + self.row_size;
+        Ok(match &self.data {
+            Storage::Shared(b) => b.slice(start..end),
+            Storage::Owned(v) => Bytes::copy_from_slice(&v[start..end]),
+        })
     }
 
     /// Returns a mutable reference to the row at `index`.
@@ -75,13 +153,13 @@ impl RowMatrix {
     pub(crate) fn row_unchecked(&self, index: usize) -> &[u8] {
         let start = index * self.row_size;
         let end = start + self.row_size;
-        &self.data[start..end]
+        &self.data.as_slice()[start..end]
     }
 
     pub(crate) fn row_mut_unchecked(&mut self, index: usize) -> &mut [u8] {
         let start = index * self.row_size;
         let end = start + self.row_size;
-        &mut self.data[start..end]
+        &mut self.data.as_mut_vec()[start..end]
     }
 
     /// Creates a new matrix containing only the rows at the given indices.

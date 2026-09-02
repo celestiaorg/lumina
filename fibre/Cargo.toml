@@ -38,6 +38,7 @@ tonic = { workspace = true, features = ["codegen"] }
 tower = { version = "0.5.2", features = ["util"] }
 x509-parser = "0.17"
 prost.workspace = true
+bytes.workspace = true
 tendermint-proto.workspace = true
 
 # Error handling and utilities
@@ -49,6 +50,9 @@ bech32 = "0.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["net"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-net = { version = "0.6", default-features = false, features = ["websocket"] }

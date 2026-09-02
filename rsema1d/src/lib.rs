@@ -14,8 +14,8 @@ pub use field::GF128;
 pub use params::Parameters;
 
 pub use codec::{
-    ExtendedData, ExtendedRowsView, OriginalRowsView, RowInclusionProof, RowMatrix, RowProof,
-    StandaloneProof, VerificationContext,
+    ExtendedData, ExtendedRowsView, OriginalRowsView, RlcCoefficients, RowInclusionProof,
+    RowMatrix, RowProof, StandaloneProof, VerificationContext,
 };
 
 pub use codec::Commitment;
