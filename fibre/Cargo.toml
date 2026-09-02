@@ -50,6 +50,9 @@ bech32 = "0.11"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["net"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-net = { version = "0.6", default-features = false, features = ["websocket"] }
 ring = { version = "0.17.14", features = ["wasm32_unknown_unknown_js"] }
