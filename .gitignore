@@ -10,3 +10,5 @@ node_modules
 
 # test log files
 lumina-test.log
+
+.idea
