@@ -112,11 +112,53 @@ pub struct Blob {
     id: BlobID,
     rlc_coeffs: Option<Vec<rsema1d::GF128>>,
     header: BlobHeaderV0,
-    /// The decoded original data (without header). `None` until encoded or reconstructed.
+    /// The reconstructed original data (without header). Only set for
+    /// downloaded blobs; encoded blobs serve `data()` from the first K rows
+    /// of the extended matrix.
     data: Option<Vec<u8>>,
     /// Rows buffer for reconstruction (indexed by row number).
     /// `None` entries indicate missing rows.
     rows: Option<Vec<Option<Vec<u8>>>>,
+}
+
+/// Allocate the zeroed `(K+N) x row_size` matrix for a new blob.
+///
+/// On Linux the interior of a large buffer is marked `MADV_HUGEPAGE` before
+/// it is first touched. With `transparent_hugepage/enabled = madvise` (the
+/// common distro default) this is what makes the kernel back the matrix with
+/// 2 MiB pages: 512x fewer page faults and TLB misses for the parity scatter,
+/// the leaf hashing and the RLC pass, all of which touch every page. The
+/// buffer comes from the global allocator, so it is an ordinary `Vec<u8>`.
+fn alloc_matrix(len: usize) -> Vec<u8> {
+    #[cfg(target_os = "linux")]
+    {
+        const HUGE_PAGE: usize = 2 << 20;
+        if len >= 2 * HUGE_PAGE {
+            use std::alloc::{Layout, alloc_zeroed, handle_alloc_error};
+
+            let layout = Layout::array::<u8>(len).expect("matrix length fits in isize");
+            // SAFETY: `layout` has non-zero size.
+            let ptr = unsafe { alloc_zeroed(layout) };
+            if ptr.is_null() {
+                handle_alloc_error(layout);
+            }
+            let start = (ptr as usize).next_multiple_of(HUGE_PAGE);
+            let end = (ptr as usize + len) & !(HUGE_PAGE - 1);
+            if end > start {
+                // SAFETY: `[start, end)` lies inside the allocation. `madvise`
+                // only changes the paging policy; if it fails the buffer is
+                // still valid, just backed by small pages.
+                unsafe {
+                    libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_HUGEPAGE);
+                }
+            }
+            // SAFETY: `ptr` was allocated by the global allocator with exactly
+            // the layout `Vec<u8>` uses for capacity `len` (`u8` has align 1),
+            // and all `len` bytes are initialised (zeroed).
+            return unsafe { Vec::from_raw_parts(ptr, len, len) };
+        }
+    }
+    vec![0u8; len]
 }
 
 impl Blob {
@@ -145,7 +187,7 @@ impl Blob {
         // Write header + data directly into the first K rows; parity rows stay
         // zeroed and will be filled by encode_in_place.
         let total_rows = cfg.original_rows + cfg.parity_rows;
-        let mut flat = vec![0u8; total_rows * row_size];
+        let mut flat = alloc_matrix(total_rows * row_size);
         header.encode_into_buffer(data, &mut flat);
         let extended = rsema1d::RowMatrix::with_shape(flat, total_rows, row_size)?;
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
@@ -159,7 +201,7 @@ impl Blob {
             id,
             rlc_coeffs: Some(rlc_orig),
             header,
-            data: Some(data.to_vec()),
+            data: None,
             rows: None,
         })
     }
@@ -218,13 +260,13 @@ impl Blob {
 
     /// Returns the size of each row in bytes, or `None` if no data is available.
     pub fn row_size(&self) -> Option<usize> {
-        self.data.as_ref().map(|d| self.cfg.row_size(d.len()))
+        self.data_size().map(|len| self.cfg.row_size(len))
     }
 
     /// Returns the size of the original data (without header), or `None` if
     /// no data is available.
     pub fn data_size(&self) -> Option<usize> {
-        self.data.as_ref().map(|d| d.len())
+        self.data().map(<[u8]>::len)
     }
 
     /// Returns the upload size (data with padding, without parity), or `None`
@@ -240,7 +282,15 @@ impl Blob {
     /// Returns `None` if the data has not been decoded yet
     /// (call `reconstruct()` first for received blobs).
     pub fn data(&self) -> Option<&[u8]> {
-        self.data.as_deref()
+        if let Some(data) = &self.data {
+            return Some(data);
+        }
+        // Encoded blobs: header + data occupy the start of the first K rows,
+        // which are contiguous in the extended matrix.
+        let ext = self.extended_data.as_ref()?;
+        let start = BlobHeaderV0::HEADER_SIZE;
+        let end = start + self.header.data_size as usize;
+        ext.rows().as_row_major().get(start..end)
     }
 
     /// Generate a `RowInclusionProof` for the given row index from the extended data.
