@@ -4,6 +4,7 @@ description = "Reed-Solomon erasure coding with Merkle commitments and Random Li
 name = "rsema1d"
 version.workspace = true
 edition = "2021"
+rust-version = "1.88"
 
 [lib]
 name = "rsema1d"

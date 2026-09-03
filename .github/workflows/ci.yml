@@ -32,10 +32,12 @@ jobs:
           - celestia-grpc
           - celestia-grpc-macros
           - celestia-client
+          - celestia-fibre
           - lumina-node
           - lumina-node-wasm
           - lumina-utils
           - lumina-cli
+          - rsema1d
 
     steps:
     - uses: actions/checkout@v4
@@ -53,7 +55,12 @@ jobs:
       run: cargo clippy --all-targets --all-features -p ${{ matrix.crate }} -- -D warnings --no-deps
 
     - name: Run clippy for wasm32
+      if: matrix.crate != 'celestia-fibre' && matrix.crate != 'rsema1d'
       run: cargo clippy --all-targets --all-features --target=wasm32-unknown-unknown -p ${{ matrix.crate }} -- -D warnings --no-deps
+
+    - name: Run clippy for wasm32 library
+      if: matrix.crate == 'celestia-fibre' || matrix.crate == 'rsema1d'
+      run: cargo clippy --lib --all-features --target=wasm32-unknown-unknown -p ${{ matrix.crate }} -- -D warnings --no-deps
 
 
   test:
@@ -73,12 +80,14 @@ jobs:
           - name: celestia-grpc-macros
           - name: celestia-client
             devnet: true
+          - name: celestia-fibre
           - name: lumina-node
             devnet: true
           - name: lumina-node-wasm
             devnet: true
           - name: lumina-utils
           - name: lumina-cli
+          - name: rsema1d
 
     steps:
     - uses: actions/checkout@v4
@@ -242,6 +251,25 @@ jobs:
         artifact-name: devnet-logs-test-js
 
 
+  test-rsema1d-go-compat:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+
+    - name: Setup Go toolchain
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: rsema1d/go/go.mod
+        cache-dependency-path: rsema1d/go/go.sum
+
+    - name: Run Go compatibility tests
+      run: ./rsema1d/scripts/run_go_compat.sh
+
+
   fmt:
     runs-on: ubuntu-latest
 
@@ -357,16 +385,18 @@ jobs:
             dir: grpc/grpc-macros
           - name: celestia-client
             dir: client
+          - name: celestia-fibre
+            dir: fibre
           - name: lumina-node
             dir: node
           - name: lumina-node-wasm
             dir: node-wasm
-          - name: lumina-node
-            dir: node
           - name: lumina-utils
             dir: utils
           - name: lumina-cli
             dir: cli
+          - name: rsema1d
+            dir: rsema1d
 
     steps:
     - uses: actions/checkout@v4
@@ -401,6 +431,7 @@ jobs:
     - test
     - test-wasm
     - test-js
+    - test-rsema1d-go-compat
     - build-wasm
     - fmt
     - docs
