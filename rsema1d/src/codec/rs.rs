@@ -1,3 +1,4 @@
+use super::default_work_budget;
 use crate::codec::rows::{OriginalRowsView, RowMatrix};
 use crate::error::{Error, Result};
 use crate::field::GF128;
@@ -6,10 +7,6 @@ use rayon::prelude::*;
 use reed_solomon_simd::engine::DefaultEngine;
 use reed_solomon_simd::rate::{HighRateEncoder, RateEncoder};
 use std::num::NonZeroUsize;
-
-/// Maximum combined Leopard work-buffer size for concurrently encoded stripes.
-/// This is a performance-tuning target; it does not include parity scratch space.
-const STRIPE_WORK_BUDGET_BYTES: usize = 32 << 20;
 
 /// Leopard operates on 64-byte blocks, so stripes stay block-aligned.
 const MIN_STRIPE: usize = 64;
@@ -50,11 +47,18 @@ fn work_shards(k: usize, n: usize) -> usize {
 }
 
 /// Choose a block-aligned stripe width and bound the number encoded at once.
-fn stripe_plan(k: usize, n: usize, row_size: usize, threads: usize) -> Result<StripePlan> {
+fn stripe_plan(
+    k: usize,
+    n: usize,
+    row_size: usize,
+    threads: usize,
+    work_budget: NonZeroUsize,
+) -> Result<StripePlan> {
     let work_shards = work_shards(k, n);
-    let max_parallelism = (STRIPE_WORK_BUDGET_BYTES / (work_shards * MIN_STRIPE)).max(1);
+    let work_budget = work_budget.get();
+    let max_parallelism = (work_budget / (work_shards * MIN_STRIPE)).max(1);
     let parallelism = threads.max(1).min(max_parallelism);
-    let per_encoder = STRIPE_WORK_BUDGET_BYTES / parallelism / work_shards;
+    let per_encoder = work_budget / parallelism / work_shards;
     let stripe = (per_encoder / MIN_STRIPE) * MIN_STRIPE;
     let stripe_size = NonZeroUsize::new(stripe.max(MIN_STRIPE).min(row_size)).ok_or_else(|| {
         Error::InvalidParameters("stripe planner produced a zero stripe size".into())
@@ -123,6 +127,24 @@ fn fill_parity(
     n: usize,
     row_size: usize,
 ) -> Result<()> {
+    fill_parity_with_work_budget(
+        original_rows,
+        parity_rows,
+        k,
+        n,
+        row_size,
+        default_work_budget(),
+    )
+}
+
+fn fill_parity_with_work_budget(
+    original_rows: &[u8],
+    parity_rows: &mut [u8],
+    k: usize,
+    n: usize,
+    row_size: usize,
+    work_budget: NonZeroUsize,
+) -> Result<()> {
     if original_rows.len() != k * row_size {
         return Err(Error::InvalidParameters(format!(
             "expected {} bytes of original rows, got {}",
@@ -154,7 +176,7 @@ fn fill_parity(
     HighRateEncoder::<DefaultEngine>::validate(k, n, MIN_STRIPE)
         .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
-    let plan = stripe_plan(k, n, row_size, rayon::current_num_threads())?;
+    let plan = stripe_plan(k, n, row_size, rayon::current_num_threads(), work_budget)?;
     fill_parity_with_plan(original_rows, parity_rows, k, n, row_size, plan)
 }
 
@@ -215,11 +237,27 @@ fn fill_parity_with_plan(
 
 /// Extend data using Reed-Solomon encoding.
 pub fn extend_data(original_rows: OriginalRowsView<'_>, params: &Parameters) -> Result<RowMatrix> {
+    extend_data_with_work_budget(original_rows, params, default_work_budget())
+}
+
+/// Extend data with an explicit combined Leopard work-buffer budget.
+pub fn extend_data_with_work_budget(
+    original_rows: OriginalRowsView<'_>,
+    params: &Parameters,
+    work_budget: NonZeroUsize,
+) -> Result<RowMatrix> {
     let mut all_rows = vec![0u8; (params.k + params.n) * params.row_size];
     let split_at = params.k * params.row_size;
     let (orig, parity) = all_rows.split_at_mut(split_at);
     orig.copy_from_slice(original_rows.as_row_major());
-    fill_parity(orig, parity, params.k, params.n, params.row_size)?;
+    fill_parity_with_work_budget(
+        orig,
+        parity,
+        params.k,
+        params.n,
+        params.row_size,
+        work_budget,
+    )?;
     RowMatrix::with_shape(all_rows, params.total_rows(), params.row_size)
 }
 
@@ -227,9 +265,25 @@ pub fn extend_data(original_rows: OriginalRowsView<'_>, params: &Parameters) -> 
 ///
 /// The first K rows must already contain original data.
 pub fn encode_parity_in_place(extended_rows: &mut RowMatrix, params: &Parameters) -> Result<()> {
+    encode_parity_in_place_with_work_budget(extended_rows, params, default_work_budget())
+}
+
+/// Encode parity rows in place with an explicit Leopard work-buffer budget.
+pub fn encode_parity_in_place_with_work_budget(
+    extended_rows: &mut RowMatrix,
+    params: &Parameters,
+    work_budget: NonZeroUsize,
+) -> Result<()> {
     let mut view = extended_rows.extended_view_mut(params)?;
     let (orig, parity) = view.split_original_parity();
-    fill_parity(orig, parity, params.k, params.n, params.row_size)
+    fill_parity_with_work_budget(
+        orig,
+        parity,
+        params.k,
+        params.n,
+        params.row_size,
+        work_budget,
+    )
 }
 
 /// Pack GF128 value into a 64-byte Leopard shard.
@@ -380,23 +434,24 @@ mod tests {
 
     #[test]
     fn stripe_plan_respects_work_budget() {
-        for (k, n, row_size, threads, expected_stripe_size, expected_parallelism) in [
-            (4096, 12288, 32768, 32, 64, 32),
-            (4096, 12288, 32768, 1, 2048, 1),
-            (4096, 12288, 32768, 0, 2048, 1),
-            (32768, 32768, 32768, 32, 64, 16),
+        for (k, n, row_size, threads, budget_mib, expected_stripe, expected_parallelism) in [
+            (4096, 12288, 32768, 32, 32, 64, 32),
+            (4096, 12288, 32768, 1, 1, 64, 1),
+            (4096, 12288, 32768, 4, 4, 64, 4),
+            (4096, 12288, 32768, 1, 32, 2048, 1),
+            (32768, 32768, 32768, 32, 32, 64, 16),
         ] {
-            let plan = stripe_plan(k, n, row_size, threads).unwrap();
+            let work_budget = NonZeroUsize::new(budget_mib << 20).unwrap();
+            let plan = stripe_plan(k, n, row_size, threads, work_budget).unwrap();
 
-            assert_eq!(plan.stripe_size(), expected_stripe_size);
+            assert_eq!(plan.stripe_size(), expected_stripe);
             assert_eq!(plan.parallelism(), expected_parallelism);
             assert!(
-                plan.parallelism() * work_shards(k, n) * plan.stripe_size()
-                    <= STRIPE_WORK_BUDGET_BYTES
+                plan.parallelism() * work_shards(k, n) * plan.stripe_size() <= work_budget.get()
             );
         }
 
-        assert!(stripe_plan(4, 4, 0, 1).is_err());
+        assert!(stripe_plan(4, 4, 0, 1, NonZeroUsize::MIN).is_err());
     }
 
     /// Striped, parallel parity must be byte-identical to a single Leopard
