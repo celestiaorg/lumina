@@ -13,6 +13,7 @@ use crate::error::Result;
 use crate::field::GF128;
 use crate::params::Parameters;
 use std::num::NonZeroUsize;
+use std::sync::OnceLock;
 
 pub use commitment::ExtendedData;
 pub use padding::map_index_to_tree_position;
@@ -51,8 +52,13 @@ fn work_budget_for_parallelism(
 /// then scales at 2 MiB per active physical core. Rayon workers above the
 /// detected physical-core count are treated as SMT siblings, not extra cache.
 pub fn default_work_budget() -> NonZeroUsize {
+    // `num_cpus::get_physical` parses /proc/cpuinfo on Linux (~0.4 ms), and
+    // this runs on every encode and every verification-context build.
+    static PHYSICAL_CORES: OnceLock<NonZeroUsize> = OnceLock::new();
+
     let threads = NonZeroUsize::new(rayon::current_num_threads()).unwrap_or(NonZeroUsize::MIN);
-    let physical_cores = NonZeroUsize::new(num_cpus::get_physical()).unwrap_or(NonZeroUsize::MIN);
+    let physical_cores = *PHYSICAL_CORES
+        .get_or_init(|| NonZeroUsize::new(num_cpus::get_physical()).unwrap_or(NonZeroUsize::MIN));
     work_budget_for_parallelism(threads, physical_cores)
 }
 

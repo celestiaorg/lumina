@@ -192,6 +192,30 @@ fn fill_parity_with_plan(
     let parallelism = plan.parallelism();
     assert!(stripe_size.is_multiple_of(MIN_STRIPE));
 
+    // A single stripe (always the case for the 64-byte RLC rows in
+    // `extend_rlcs`) gains nothing from the rayon fan-out and staging copy
+    // below; encode whole rows on the calling thread instead.
+    if stripe_size >= row_size {
+        let mut encoder: HighRateEncoder<DefaultEngine> =
+            RateEncoder::new(k, n, row_size, DefaultEngine::new(), None)
+                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+        for row in original_rows.chunks_exact(row_size) {
+            encoder
+                .add_original_shard(row)
+                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+        }
+        let result = encoder
+            .encode()
+            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+        for (dst_row, src_row) in parity_rows
+            .chunks_exact_mut(row_size)
+            .zip(result.recovery_iter())
+        {
+            dst_row.copy_from_slice(src_row);
+        }
+        return Ok(());
+    }
+
     let stripes: Vec<_> = (0..row_size)
         .step_by(stripe_size)
         .map(|offset| Stripe {
@@ -462,7 +486,8 @@ mod tests {
         use rand_chacha::ChaCha8Rng;
 
         // Plans are explicit so coverage does not depend on the CI machine's
-        // rayon pool. The second case also reuses a slot for a shorter stripe.
+        // rayon pool. The second case also reuses a slot for a shorter stripe;
+        // the last two take the single-stripe path.
         for (k, n, row_size, seed, plan) in [
             (
                 4096usize,
@@ -473,6 +498,7 @@ mod tests {
             ),
             (4096, 12288, 64 * 21, 2, test_stripe_plan(512, 2)),
             (16, 48, 4096, 3, test_stripe_plan(1024, 4)),
+            (16, 48, 256, 5, test_stripe_plan(256, 4)),
             (4, 4, 64, 4, test_stripe_plan(64, 1)),
         ] {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
