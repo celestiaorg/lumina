@@ -14,17 +14,17 @@ const STRIPE_WORK_BUDGET_BYTES: usize = 32 << 20;
 /// Leopard operates on 64-byte blocks, so stripes stay block-aligned.
 const MIN_STRIPE: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 struct StripePlan {
     stripe_size: NonZeroUsize,
     parallelism: NonZeroUsize,
 }
 
 impl StripePlan {
-    fn new(stripe_size: usize, parallelism: usize) -> Self {
+    const fn new(stripe_size: NonZeroUsize, parallelism: NonZeroUsize) -> Self {
         Self {
-            stripe_size: NonZeroUsize::new(stripe_size).expect("stripe size must be non-zero"),
-            parallelism: NonZeroUsize::new(parallelism).expect("parallelism must be non-zero"),
+            stripe_size,
+            parallelism,
         }
     }
 
@@ -50,14 +50,20 @@ fn work_shards(k: usize, n: usize) -> usize {
 }
 
 /// Choose a block-aligned stripe width and bound the number encoded at once.
-fn stripe_plan(k: usize, n: usize, row_size: usize, threads: usize) -> StripePlan {
+fn stripe_plan(k: usize, n: usize, row_size: usize, threads: usize) -> Result<StripePlan> {
     let work_shards = work_shards(k, n);
     let max_parallelism = (STRIPE_WORK_BUDGET_BYTES / (work_shards * MIN_STRIPE)).max(1);
     let parallelism = threads.max(1).min(max_parallelism);
     let per_encoder = STRIPE_WORK_BUDGET_BYTES / parallelism / work_shards;
     let stripe = (per_encoder / MIN_STRIPE) * MIN_STRIPE;
+    let stripe_size = NonZeroUsize::new(stripe.max(MIN_STRIPE).min(row_size)).ok_or_else(|| {
+        Error::InvalidParameters("stripe planner produced a zero stripe size".into())
+    })?;
+    let parallelism = NonZeroUsize::new(parallelism).ok_or_else(|| {
+        Error::InvalidParameters("stripe planner produced zero parallelism".into())
+    })?;
 
-    StripePlan::new(stripe.clamp(MIN_STRIPE, row_size), parallelism)
+    Ok(StripePlan::new(stripe_size, parallelism))
 }
 
 struct StripeEncoder {
@@ -148,7 +154,7 @@ fn fill_parity(
     HighRateEncoder::<DefaultEngine>::validate(k, n, MIN_STRIPE)
         .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
-    let plan = stripe_plan(k, n, row_size, rayon::current_num_threads());
+    let plan = stripe_plan(k, n, row_size, rayon::current_num_threads())?;
     fill_parity_with_plan(original_rows, parity_rows, k, n, row_size, plan)
 }
 
@@ -279,6 +285,13 @@ pub fn extend_rlcs(rlc_orig: &[GF128], k: usize, n: usize) -> Result<Vec<GF128>>
 mod tests {
     use super::*;
 
+    fn test_stripe_plan(stripe_size: usize, parallelism: usize) -> StripePlan {
+        StripePlan::new(
+            NonZeroUsize::new(stripe_size).expect("test stripe size must be non-zero"),
+            NonZeroUsize::new(parallelism).expect("test parallelism must be non-zero"),
+        )
+    }
+
     #[test]
     fn test_extend_data() {
         let k = 4;
@@ -367,19 +380,23 @@ mod tests {
 
     #[test]
     fn stripe_plan_respects_work_budget() {
-        for (k, n, row_size, threads, expected) in [
-            (4096, 12288, 32768, 32, StripePlan::new(64, 32)),
-            (4096, 12288, 32768, 1, StripePlan::new(2048, 1)),
-            (32768, 32768, 32768, 32, StripePlan::new(64, 16)),
+        for (k, n, row_size, threads, expected_stripe_size, expected_parallelism) in [
+            (4096, 12288, 32768, 32, 64, 32),
+            (4096, 12288, 32768, 1, 2048, 1),
+            (4096, 12288, 32768, 0, 2048, 1),
+            (32768, 32768, 32768, 32, 64, 16),
         ] {
-            let plan = stripe_plan(k, n, row_size, threads);
+            let plan = stripe_plan(k, n, row_size, threads).unwrap();
 
-            assert_eq!(plan, expected);
+            assert_eq!(plan.stripe_size(), expected_stripe_size);
+            assert_eq!(plan.parallelism(), expected_parallelism);
             assert!(
                 plan.parallelism() * work_shards(k, n) * plan.stripe_size()
                     <= STRIPE_WORK_BUDGET_BYTES
             );
         }
+
+        assert!(stripe_plan(4, 4, 0, 1).is_err());
     }
 
     /// Striped, parallel parity must be byte-identical to a single Leopard
@@ -397,11 +414,11 @@ mod tests {
                 12288usize,
                 512usize,
                 1u64,
-                StripePlan::new(128, 2),
+                test_stripe_plan(128, 2),
             ),
-            (4096, 12288, 64 * 21, 2, StripePlan::new(512, 2)),
-            (16, 48, 4096, 3, StripePlan::new(1024, 4)),
-            (4, 4, 64, 4, StripePlan::new(64, 1)),
+            (4096, 12288, 64 * 21, 2, test_stripe_plan(512, 2)),
+            (16, 48, 4096, 3, test_stripe_plan(1024, 4)),
+            (4, 4, 64, 4, test_stripe_plan(64, 1)),
         ] {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let mut original = vec![0u8; k * row_size];
