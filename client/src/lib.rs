@@ -39,9 +39,9 @@ pub mod api {
         pub use celestia_fibre::NativeTcpConnector;
         #[doc(inline)]
         pub use celestia_fibre::{
-            Blob as FibreBlob, BlobID, BoxedFibreIo, DownloadOptions, FibreClient,
-            FibreClientConfig, FibreError, FibreIo, FibreIoConnector, PaymentPromise,
-            SignedPaymentPromise,
+            Blob as FibreBlob, BlobConfig, BlobID, BoxedFibreIo, DownloadOptions,
+            EncodedBlob as EncodedFibreBlob, FibreClient, FibreClientConfig, FibreError, FibreIo,
+            FibreIoConnector, PaymentPromise, SignedPaymentPromise,
         };
     }
 

@@ -1,6 +1,6 @@
 //! Upload flow orchestration.
 //!
-//! Distributes a pre-encoded [`Blob`] to validators, collecting ed25519
+//! Distributes an [`EncodedBlob`] to validators, collecting ed25519
 //! signatures until the safety threshold is met, then returns a
 //! [`SignedPaymentPromise`].
 //!
@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::task::{TaskSet, spawn_task};
 
-use crate::blob::Blob;
+use crate::blob::EncodedBlob;
 use crate::client::FibreClient;
 use crate::config::BlobConfig;
 use crate::error::FibreError;
@@ -54,7 +54,7 @@ impl UploadCompletion {
 }
 
 impl FibreClient {
-    /// Upload a pre-encoded [`Blob`] and collect validator signatures.
+    /// Upload an [`EncodedBlob`] and collect validator signatures.
     ///
     /// Returns a [`SignedPaymentPromise`] once enough validator signatures
     /// have been collected to meet the safety threshold.
@@ -62,7 +62,7 @@ impl FibreClient {
         &self,
         signing_key: &k256::ecdsa::SigningKey,
         namespace: Namespace,
-        blob: Blob,
+        blob: EncodedBlob,
     ) -> Result<SignedPaymentPromise, FibreError> {
         let (signed_promise, _completion) = self
             .upload_with_completion(signing_key, namespace, blob)
@@ -70,7 +70,7 @@ impl FibreClient {
         Ok(signed_promise)
     }
 
-    /// Upload a pre-encoded [`Blob`] and return the threshold result and a completion handle.
+    /// Upload an [`EncodedBlob`] and return the threshold result and a completion handle.
     ///
     /// The signed payment promise is returned once enough validator signatures
     /// have been collected to meet the safety threshold. The completion handle
@@ -79,7 +79,7 @@ impl FibreClient {
         &self,
         signing_key: &k256::ecdsa::SigningKey,
         namespace: Namespace,
-        blob: Blob,
+        blob: EncodedBlob,
     ) -> Result<(SignedPaymentPromise, UploadCompletion), FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
@@ -89,9 +89,7 @@ impl FibreClient {
         let val_set = self.set_getter.head().await?;
 
         // 2. Create and sign payment promise
-        let upload_size = blob
-            .upload_size()
-            .ok_or_else(|| FibreError::Other("blob has no data to upload".into()))?;
+        let upload_size = blob.upload_size();
         let upload_size_u32 = u32::try_from(upload_size).map_err(|_| FibreError::BlobTooLarge {
             size: upload_size,
             max: u32::MAX as usize,
@@ -167,8 +165,8 @@ impl FibreClient {
             return Err(FibreError::ClientClosed);
         }
 
-        // 1. Encode data into a Blob.
-        let blob = Blob::new(data, BlobConfig::for_version(0)?)?;
+        // 1. Encode data into an EncodedBlob.
+        let blob = EncodedBlob::new(data, BlobConfig::for_version(0)?)?;
 
         // 2. Upload to validators and collect signatures.
         let signed_promise = self.upload(signing_key, namespace, blob).await?;
@@ -202,7 +200,7 @@ impl FibreClient {
         val_set: &ValidatorSet,
         shard_map: &ShardMap,
         promise: &PaymentPromise,
-        blob: &Arc<Blob>,
+        blob: &Arc<EncodedBlob>,
         sig_set: &Arc<SignatureSet>,
         cancel_token: &CancellationToken,
     ) -> Result<UploadCompletion, FibreError> {
@@ -212,12 +210,6 @@ impl FibreClient {
             .iter()
             .map(|(&val_idx, row_indices)| (val_idx, row_indices.clone()))
             .collect();
-
-        let rlc_coeffs = Arc::new(
-            blob.rlc_coeffs()
-                .ok_or_else(|| FibreError::Other("blob has no RLC coefficients to upload".into()))?
-                .to_vec(),
-        );
 
         let mut futures: TaskSet<usize, Result<Vec<u8>, FibreError>> = TaskSet::new();
         let mut stats = UploadCompletionStats::default();
@@ -235,7 +227,6 @@ impl FibreClient {
             let connector = Arc::clone(&self.connector);
             let validator = val_set.validators[val_idx].clone();
             let promise = promise.clone();
-            let rlc_coeffs = Arc::clone(&rlc_coeffs);
             let blob = Arc::clone(blob);
 
             spawn_task(&mut futures, val_idx, async move {
@@ -248,7 +239,9 @@ impl FibreClient {
                 }
 
                 let conn = connector.connect(&validator).await?;
-                let resp = conn.upload_shard(&promise, &proofs, &rlc_coeffs).await?;
+                let resp = conn
+                    .upload_shard(&promise, &proofs, blob.rlc_coeffs())
+                    .await?;
                 Ok(resp.validator_signature)
             });
         }
@@ -326,7 +319,7 @@ mod tests {
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
-    use crate::blob::Blob;
+    use crate::blob::EncodedBlob;
     use crate::config::BlobConfig;
     use crate::error::FibreError;
     use crate::test_utils::{
@@ -335,10 +328,10 @@ mod tests {
     };
     use crate::validator::{ValidatorInfo, ValidatorSet};
 
-    fn make_test_blob() -> Blob {
+    fn make_test_blob() -> EncodedBlob {
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
         let data: Vec<u8> = (0u8..200).collect();
-        Blob::new(&data, cfg).unwrap()
+        EncodedBlob::new(&data, cfg).unwrap()
     }
 
     fn test_signing_key() -> SigningKey {

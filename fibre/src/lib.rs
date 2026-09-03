@@ -29,7 +29,7 @@ pub use client::{FibreClient, FibreClientBuilder};
 pub use config::{
     BlobConfig, DEFAULT_PROTOCOL_PARAMS, FibreClientConfig, Fraction, ProtocolParams,
 };
-pub use domain::blob::{Blob, BlobID, Commitment};
+pub use domain::blob::{Blob, BlobID, Commitment, EncodedBlob};
 pub use domain::payment_promise::{PaymentPromise, SignedPaymentPromise};
 pub use error::{FibreError, Result};
 pub use transport::grpc_validator_client::GrpcValidatorConnector;
