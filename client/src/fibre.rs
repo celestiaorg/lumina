@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use celestia_fibre::{
-    Blob, BlobID, DownloadOptions, FibreClient, FibreError, SignedPaymentPromise,
+    Blob, BlobID, DownloadOptions, EncodedBlob, FibreClient, FibreError, SignedPaymentPromise,
 };
 use celestia_grpc::{SubmittedTx, TxConfig};
 use celestia_types::nmt::Namespace;
@@ -32,7 +32,7 @@ impl FibreApi {
         }
     }
 
-    /// Upload a pre-encoded [`Blob`] and collect validator signatures.
+    /// Upload an [`EncodedBlob`] and collect validator signatures.
     ///
     /// Returns a [`SignedPaymentPromise`] once enough validator signatures
     /// have been collected to meet the safety threshold.
@@ -40,7 +40,7 @@ impl FibreApi {
         &self,
         signing_key: &SigningKey,
         namespace: Namespace,
-        blob: Blob,
+        blob: EncodedBlob,
     ) -> Result<SignedPaymentPromise, FibreError> {
         self.fibre_client.upload(signing_key, namespace, blob).await
     }

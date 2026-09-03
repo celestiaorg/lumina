@@ -48,7 +48,8 @@ use rand::rngs::OsRng;
 
 use celestia_fibre::transport::proto_conv;
 use celestia_fibre::{
-    Blob, BlobConfig, FibreClientConfig, Fraction, PaymentPromise, ValidatorInfo, ValidatorSet,
+    BlobConfig, EncodedBlob, FibreClientConfig, Fraction, PaymentPromise, ValidatorInfo,
+    ValidatorSet,
 };
 use celestia_proto::celestia::fibre::v1 as proto;
 use celestia_types::nmt::Namespace;
@@ -121,7 +122,7 @@ fn bench_blob_new(c: &mut Criterion) {
         let data = generate_data(len);
         group.throughput(Throughput::Bytes(len as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), &data, |b, data| {
-            b.iter(|| Blob::new(black_box(data), BlobConfig::v0()).unwrap());
+            b.iter(|| EncodedBlob::new(black_box(data), BlobConfig::v0()).unwrap());
         });
     }
 
@@ -142,7 +143,7 @@ fn bench_blob_row_proofs(c: &mut Criterion) {
     group.noise_threshold(0.03);
 
     for &(name, len) in &[("1MB", 1 << 20), ("8MB", 8 << 20)] {
-        let blob = Blob::new(&generate_data(len), BlobConfig::v0()).unwrap();
+        let blob = EncodedBlob::new(&generate_data(len), BlobConfig::v0()).unwrap();
 
         let shard = rows_per_shard();
         group.bench_function(BenchmarkId::new(format!("shard_{shard}_rows"), name), |b| {
@@ -275,7 +276,7 @@ fn bench_parse_download_response(c: &mut Criterion) {
     group.noise_threshold(0.03);
 
     let shard = rows_per_shard();
-    let blob = Blob::new(&generate_data(1 << 20), BlobConfig::v0()).unwrap();
+    let blob = EncodedBlob::new(&generate_data(1 << 20), BlobConfig::v0()).unwrap();
 
     let rows: Vec<proto::BlobRow> = (0..shard)
         .map(|i| {
@@ -289,7 +290,6 @@ fn bench_parse_download_response(c: &mut Criterion) {
         .collect();
     let rlcs: Vec<u8> = blob
         .rlc_coeffs()
-        .unwrap()
         .iter()
         .flat_map(|rlc| rlc.to_bytes())
         .collect();
