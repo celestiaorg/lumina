@@ -16,6 +16,10 @@ cargo test
 # benchmark runner (Rust and Go)
 ./scripts/run_benchmarks.sh
 
+# wasm32 benchmarks, run in Node (needs wasm-bindgen-cli matching Cargo.lock)
+cargo bench --target wasm32-unknown-unknown --bench codec_bench
+RUN_RUST_BENCH=0 RUN_GO_BENCH=0 RUN_WASM_BENCH=1 ./scripts/run_benchmarks.sh
+
 # regenerate Go fuzzy vectors and run Rust Go-compat test
 ./scripts/run_go_compat.sh
 ```

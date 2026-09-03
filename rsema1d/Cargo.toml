@@ -32,4 +32,4 @@ harness = false
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 getrandom = { version = "0.2.10", features = ["js"] }
-wasm-bindgen-test = "0.3"
+wasm-bindgen-test.workspace = true
