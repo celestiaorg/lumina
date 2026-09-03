@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::IntoFuture;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -75,6 +74,14 @@ struct Cli {
     #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     encode_concurrency: usize,
 
+    /// Number of Tokio worker threads shared by all signers.
+    #[arg(long, default_value_t = 32, value_parser = parse_positive_usize)]
+    tokio_worker_threads: usize,
+
+    /// Number of Rayon encoding threads dedicated to each signer.
+    #[arg(long, default_value_t = 4, value_parser = parse_positive_usize)]
+    rayon_threads_per_signer: usize,
+
     /// Maximum concurrent blob downloads.
     #[arg(long, default_value_t = 4, value_parser = parse_positive_usize)]
     download_concurrency: usize,
@@ -111,6 +118,7 @@ struct LifecycleContext {
     paid_size: usize,
     operation_timeout: Duration,
     tx_config: TxConfig,
+    encode_pool: Arc<rayon::ThreadPool>,
     encode_semaphore: Arc<Semaphore>,
     download_semaphore: Arc<Semaphore>,
     skip_download: bool,
@@ -156,11 +164,6 @@ enum Event {
     },
 }
 
-enum ClientReady {
-    Ready { client: usize, signer: String },
-    Failed { client: usize, error: String },
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Stats {
     scheduled: u64,
@@ -176,62 +179,37 @@ struct Stats {
     latencies: BTreeMap<&'static str, Vec<Duration>>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    run(Cli::parse()).await
+    let cli = Cli::parse();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(cli.tokio_worker_threads)
+        .enable_all()
+        .build()
+        .context("building shared Tokio runtime")?
+        .block_on(run(cli))
 }
 
 async fn run(cli: Cli) -> Result<()> {
     let cli = Arc::new(cli);
     let client_count = cli.private_keys.len();
-    let (ready_tx, mut ready_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let mut start_txs = Vec::with_capacity(client_count);
-    let mut client_threads = Vec::with_capacity(client_count);
+    let mut contexts = Vec::with_capacity(client_count);
+    let mut signers = BTreeMap::new();
 
     for client in 1..=client_count {
-        let (start_tx, start_rx) = oneshot::channel();
-        start_txs.push(start_tx);
-
-        let cli = Arc::clone(&cli);
-        let ready_tx = ready_tx.clone();
-        let event_tx = event_tx.clone();
-        let handle = thread::Builder::new()
-            .name(format!("fibre-client-{client}"))
-            .spawn(move || run_client_thread(client, cli, ready_tx, start_rx, event_tx))
-            .with_context(|| format!("spawning client {client} thread"))?;
-        client_threads.push((client, handle));
-    }
-    drop(ready_tx);
-
-    let mut signers = BTreeMap::new();
-    let mut setup_error = None;
-    for _ in 0..client_count {
-        match ready_rx.recv().await {
-            Some(ClientReady::Ready { client, signer }) => {
-                tracing::info!(client, %signer, "Fibre client ready");
-                signers.insert(client, signer);
-            }
-            Some(ClientReady::Failed { client, error }) => {
-                setup_error.get_or_insert_with(|| anyhow!("client {client} setup failed: {error}"));
-            }
-            None => {
-                setup_error.get_or_insert_with(|| anyhow!("client thread stopped during setup"));
-                break;
-            }
-        }
-    }
-
-    if let Some(error) = setup_error {
-        drop(start_txs);
-        join_client_threads(client_threads).await?;
-        return Err(error);
+        let context = Arc::new(
+            build_lifecycle_context(client, &cli)
+                .with_context(|| format!("client {client} setup failed"))?,
+        );
+        tracing::info!(client, signer = %context.signer, "Fibre client ready");
+        signers.insert(client, context.signer.to_string());
+        contexts.push(context);
     }
 
     let payload_size = payload_size_for_paid_size(cli.blob_size).expect("validated by clap");
@@ -247,12 +225,34 @@ async fn run(cli: Cli) -> Result<()> {
         max_in_flight = cli.max_in_flight,
         queue_capacity = cli.queue_capacity,
         encode_concurrency = cli.encode_concurrency,
+        tokio_worker_threads = cli.tokio_worker_threads,
+        rayon_threads_per_signer = cli.rayon_threads_per_signer,
         download_concurrency = cli.download_concurrency,
         download_enabled = !cli.skip_download,
         gas_limit = ?cli.gas_limit,
         gas_price = ?cli.gas_price,
         "starting Fibre evaluation"
     );
+
+    let mut start_txs = Vec::with_capacity(client_count);
+    let mut client_tasks = JoinSet::new();
+    for context in contexts {
+        let (start_tx, start_rx) = oneshot::channel();
+        start_txs.push(start_tx);
+        let client = context.client;
+        let cli = Arc::clone(&cli);
+        let event_tx = event_tx.clone();
+        client_tasks.spawn(async move {
+            let result = async {
+                let started_at = start_rx
+                    .await
+                    .context("coordinator stopped before workload launch")?;
+                run_client(context, &cli, event_tx, started_at).await
+            }
+            .await;
+            (client, result)
+        });
+    }
 
     let started_at = Instant::now();
     let stats_handle = tokio::spawn(run_stats_collector(
@@ -272,7 +272,10 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
 
-    let client_results = join_client_threads(client_threads).await?;
+    let mut client_results = Vec::with_capacity(client_count);
+    while let Some(result) = client_tasks.join_next().await {
+        client_results.push(result.context("client task panicked")?);
+    }
     let total_elapsed = started_at.elapsed();
     drop(event_tx);
     let stats = stats_handle.await.context("stats task panicked")?;
@@ -303,55 +306,6 @@ async fn run(cli: Cli) -> Result<()> {
         return Err(error);
     }
     Ok(())
-}
-
-fn run_client_thread(
-    client: usize,
-    cli: Arc<Cli>,
-    ready_tx: mpsc::UnboundedSender<ClientReady>,
-    start_rx: oneshot::Receiver<Instant>,
-    event_tx: mpsc::UnboundedSender<Event>,
-) -> Result<Duration> {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            let error = error.to_string();
-            let _ = ready_tx.send(ClientReady::Failed {
-                client,
-                error: error.clone(),
-            });
-            return Err(anyhow!(error));
-        }
-    };
-
-    runtime.block_on(async move {
-        let context = match build_lifecycle_context(client, &cli) {
-            Ok(context) => Arc::new(context),
-            Err(error) => {
-                let error = format!("{error:#}");
-                let _ = ready_tx.send(ClientReady::Failed {
-                    client,
-                    error: error.clone(),
-                });
-                return Err(anyhow!(error));
-            }
-        };
-        ready_tx
-            .send(ClientReady::Ready {
-                client,
-                signer: context.signer.to_string(),
-            })
-            .map_err(|_| anyhow!("coordinator stopped during client setup"))?;
-        drop(ready_tx);
-
-        let started_at = start_rx
-            .await
-            .context("coordinator stopped before workload launch")?;
-        run_client(context, &cli, event_tx, started_at).await
-    })
 }
 
 fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext> {
@@ -398,6 +352,12 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
         tx_config = tx_config.with_gas_price(gas_price);
     }
 
+    let encode_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(cli.rayon_threads_per_signer)
+        .thread_name(move |worker| format!("fibre-encode-{client}-{worker}"))
+        .build()
+        .context("building signer Rayon pool")?;
+
     Ok(LifecycleContext {
         client,
         fibre,
@@ -409,6 +369,7 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
         paid_size: cli.blob_size,
         operation_timeout: Duration::from_secs(cli.operation_timeout_seconds),
         tx_config,
+        encode_pool: Arc::new(encode_pool),
         encode_semaphore: Arc::new(Semaphore::new(cli.encode_concurrency)),
         download_semaphore: Arc::new(Semaphore::new(cli.download_concurrency)),
         skip_download: cli.skip_download,
@@ -440,24 +401,6 @@ async fn run_client(
         .await
         .context("dispatcher task panicked")??;
     Ok(launch_elapsed)
-}
-
-async fn join_client_threads(
-    client_threads: Vec<(usize, thread::JoinHandle<Result<Duration>>)>,
-) -> Result<Vec<(usize, Result<Duration>)>> {
-    tokio::task::spawn_blocking(move || {
-        client_threads
-            .into_iter()
-            .map(|(client, handle)| {
-                let result = handle
-                    .join()
-                    .unwrap_or_else(|_| Err(anyhow!("client thread panicked")));
-                (client, result)
-            })
-            .collect()
-    })
-    .await
-    .context("client thread join task panicked")
 }
 
 async fn run_scheduler(
@@ -615,100 +558,130 @@ async fn run_lifecycle(
     sequence: u64,
     event_tx: &mpsc::UnboundedSender<Event>,
 ) -> std::result::Result<(), StageFailure> {
-    let encode_started = Instant::now();
+    let encode_wait_started = Instant::now();
     let encode_permit = Arc::clone(&context.encode_semaphore)
         .acquire_owned()
         .await
         .map_err(|error| StageFailure {
-            stage: "encode",
+            stage: "encode_wait",
             error: anyhow!(error),
         })?;
+    let _ = event_tx.send(Event::StageFinished {
+        stage: "encode_wait",
+        elapsed: encode_wait_started.elapsed(),
+    });
+
+    let encode_compute_started = Instant::now();
     let payload_size = context.payload_size;
+    let encode_pool = Arc::clone(&context.encode_pool);
     let encoded = tokio::task::spawn_blocking(move || {
         let _permit = encode_permit;
         let payload = make_payload(sequence, payload_size);
-        Blob::new_owned(payload, BlobConfig::v0())
+        encode_pool.install(|| Blob::new_owned(payload, BlobConfig::v0()))
     })
     .await;
     let _ = event_tx.send(Event::StageFinished {
-        stage: "encode",
-        elapsed: encode_started.elapsed(),
+        stage: "encode_compute",
+        elapsed: encode_compute_started.elapsed(),
     });
     let blob = encoded
         .map_err(|error| StageFailure {
-            stage: "encode",
+            stage: "encode_compute",
             error: anyhow!(error),
         })?
         .map_err(|error| StageFailure {
-            stage: "encode",
+            stage: "encode_compute",
             error: anyhow!(error),
         })?;
     let id = blob.id().clone();
 
-    let signed = run_timed_stage(
+    let full_fanout_started = Instant::now();
+    let (signed, completion) = run_timed_stage(
         "fibre_upload",
         context.operation_timeout,
         event_tx,
         context
             .fibre
-            .upload(&context.signing_key, context.namespace, blob),
+            .upload_with_completion(&context.signing_key, context.namespace, blob),
     )
     .await?;
-    let message = MsgPayForFibre {
-        signer: context.signer.to_string(),
-        payment_promise: Some((&signed.promise).into()),
-        validator_signatures: signed
-            .validator_signatures
-            .iter()
-            .map(|signature| signature.clone().unwrap_or_default())
-            .collect(),
-    };
+    let lifecycle_result = async {
+        let message = MsgPayForFibre {
+            signer: context.signer.to_string(),
+            payment_promise: Some((&signed.promise).into()),
+            validator_signatures: signed
+                .validator_signatures
+                .iter()
+                .map(|signature| signature.clone().unwrap_or_default())
+                .collect(),
+        };
 
-    let submitted = run_timed_stage(
-        "payment_broadcast",
-        context.operation_timeout,
-        event_tx,
-        context
-            .app_grpc
-            .broadcast_message(message, context.tx_config.clone()),
-    )
-    .await?;
-    run_timed_stage(
-        "payment_confirmation",
-        context.operation_timeout,
-        event_tx,
-        submitted.confirm(),
-    )
-    .await?;
+        let submitted = run_timed_stage(
+            "payment_broadcast",
+            context.operation_timeout,
+            event_tx,
+            context
+                .app_grpc
+                .broadcast_message(message, context.tx_config.clone()),
+        )
+        .await?;
+        run_timed_stage(
+            "payment_confirmation",
+            context.operation_timeout,
+            event_tx,
+            submitted.confirm(),
+        )
+        .await?;
 
-    if context.skip_download {
-        return Ok(());
-    }
+        if context.skip_download {
+            return Ok(());
+        }
 
-    let download_permit = Arc::clone(&context.download_semaphore)
-        .acquire_owned()
-        .await
-        .map_err(|error| StageFailure {
-            stage: "download",
+        let download_permit = Arc::clone(&context.download_semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|error| StageFailure {
+                stage: "download",
+                error: anyhow!(error),
+            })?;
+        let downloaded = run_timed_stage(
+            "download",
+            context.operation_timeout,
+            event_tx,
+            context.fibre.download(&id, DownloadOptions::default()),
+        )
+        .await;
+        drop(download_permit);
+        let blob = downloaded?;
+        let data = blob.data().ok_or_else(|| StageFailure {
+            stage: "download_verify",
+            error: anyhow!("downloaded blob has no reconstructed data"),
+        })?;
+        verify_payload(data, sequence, context.payload_size).map_err(|error| StageFailure {
+            stage: "download_verify",
             error: anyhow!(error),
         })?;
-    let downloaded = run_timed_stage(
-        "download",
-        context.operation_timeout,
-        event_tx,
-        context.fibre.download(&id, DownloadOptions::default()),
-    )
+        Ok(())
+    }
     .await;
-    drop(download_permit);
-    let blob = downloaded?;
-    let data = blob.data().ok_or_else(|| StageFailure {
-        stage: "download_verify",
-        error: anyhow!("downloaded blob has no reconstructed data"),
-    })?;
-    verify_payload(data, sequence, context.payload_size).map_err(|error| StageFailure {
-        stage: "download_verify",
-        error: anyhow!(error),
-    })?;
+
+    let fanout = completion.wait().await;
+    let _ = event_tx.send(Event::StageFinished {
+        stage: "full_fanout",
+        elapsed: full_fanout_started.elapsed(),
+    });
+
+    lifecycle_result?;
+    if fanout.failed > 0 {
+        return Err(StageFailure {
+            stage: "full_fanout",
+            error: anyhow!(
+                "{} of {} validator uploads failed",
+                fanout.failed,
+                fanout.successful + fanout.failed
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -875,6 +848,7 @@ fn print_final_report(
         payload_bytes = stats.payload_bytes,
         paid_bytes = stats.paid_bytes,
         elapsed_seconds = total_elapsed.as_secs(),
+        elapsed_seconds_precise = %format_args!("{:.6}", total_elapsed.as_secs_f64()),
         blobs_per_second = %format_args!("{:.1}", per_second(stats.successes, total_elapsed)),
         payload_mib_per_second = %format_args!("{:.4}", payload_bps / MIB),
         payload_gib_per_second = %format_args!("{:.6}", payload_bps / GIB),
@@ -888,8 +862,10 @@ fn print_final_report(
     }
     for stage in [
         "queue",
-        "encode",
+        "encode_wait",
+        "encode_compute",
         "fibre_upload",
+        "full_fanout",
         "payment_broadcast",
         "payment_confirmation",
         "download",
@@ -1129,6 +1105,8 @@ mod tests {
         assert_eq!(cli.max_in_flight, 16);
         assert_eq!(cli.queue_capacity, 16);
         assert_eq!(cli.encode_concurrency, 1);
+        assert_eq!(cli.tokio_worker_threads, 32);
+        assert_eq!(cli.rayon_threads_per_signer, 4);
         assert_eq!(cli.download_concurrency, 4);
         assert!(!cli.skip_download);
         assert_eq!(cli.operation_timeout_seconds, 120);
@@ -1182,6 +1160,8 @@ mod tests {
             ("--max-in-flight", "0"),
             ("--queue-capacity", "0"),
             ("--encode-concurrency", "0"),
+            ("--tokio-worker-threads", "0"),
+            ("--rayon-threads-per-signer", "0"),
             ("--download-concurrency", "0"),
             ("--operation-timeout-seconds", "0"),
             ("--gas-limit", "0"),

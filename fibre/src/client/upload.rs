@@ -25,6 +25,34 @@ use crate::payment_promise::{PaymentPromise, SignedPaymentPromise};
 use crate::validator::signature_set::SignatureSet;
 use crate::validator::{ShardMap, ValidatorSet};
 
+/// Outcome of all validator uploads started for a blob.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UploadCompletionStats {
+    /// Validator upload tasks that returned a successful result.
+    pub successful: usize,
+    /// Validator upload tasks that failed or ended without a result.
+    pub failed: usize,
+}
+
+/// Completion handle for all validator uploads started for a blob.
+pub struct UploadCompletion {
+    tasks: TaskSet<usize, Result<Vec<u8>, FibreError>>,
+    stats: UploadCompletionStats,
+}
+
+impl UploadCompletion {
+    /// Wait for every validator upload to finish.
+    pub async fn wait(mut self) -> UploadCompletionStats {
+        while let Some((_, result)) = self.tasks.next().await {
+            match result {
+                Some(Ok(_)) => self.stats.successful += 1,
+                Some(Err(_)) | None => self.stats.failed += 1,
+            }
+        }
+        self.stats
+    }
+}
+
 impl FibreClient {
     /// Upload a pre-encoded [`Blob`] and collect validator signatures.
     ///
@@ -36,6 +64,23 @@ impl FibreClient {
         namespace: Namespace,
         blob: Blob,
     ) -> Result<SignedPaymentPromise, FibreError> {
+        let (signed_promise, _completion) = self
+            .upload_with_completion(signing_key, namespace, blob)
+            .await?;
+        Ok(signed_promise)
+    }
+
+    /// Upload a pre-encoded [`Blob`] and return the threshold result and a completion handle.
+    ///
+    /// The signed payment promise is returned once enough validator signatures
+    /// have been collected to meet the safety threshold. The completion handle
+    /// can then be awaited to drain every validator upload started for the blob.
+    pub async fn upload_with_completion(
+        &self,
+        signing_key: &k256::ecdsa::SigningKey,
+        namespace: Namespace,
+        blob: Blob,
+    ) -> Result<(SignedPaymentPromise, UploadCompletion), FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
@@ -84,23 +129,27 @@ impl FibreClient {
         //    threshold is met, but spawned tasks continue uploading in the
         //    background so that every validator eventually receives its shard.
         let blob = Arc::new(blob);
-        self.upload_shards(
-            &val_set,
-            &shard_map,
-            &promise,
-            &blob,
-            &sig_set,
-            &self.cancel_token,
-        )
-        .await?;
+        let completion = self
+            .upload_shards(
+                &val_set,
+                &shard_map,
+                &promise,
+                &blob,
+                &sig_set,
+                &self.cancel_token,
+            )
+            .await?;
 
         // 6. Collect signatures
         let sigs = sig_set.signatures()?;
 
-        Ok(SignedPaymentPromise {
-            promise,
-            validator_signatures: sigs,
-        })
+        Ok((
+            SignedPaymentPromise {
+                promise,
+                validator_signatures: sigs,
+            },
+            completion,
+        ))
     }
 
     /// Encode data, upload to validators, and build a `MsgPayForFibre`.
@@ -156,7 +205,7 @@ impl FibreClient {
         blob: &Arc<Blob>,
         sig_set: &Arc<SignatureSet>,
         cancel_token: &CancellationToken,
-    ) -> Result<(), FibreError> {
+    ) -> Result<UploadCompletion, FibreError> {
         // Collect (validator_index, row_indices) pairs for iteration.
         let validator_tasks: Vec<(usize, Vec<usize>)> = shard_map
             .inner()
@@ -171,6 +220,7 @@ impl FibreClient {
         );
 
         let mut futures: TaskSet<usize, Result<Vec<u8>, FibreError>> = TaskSet::new();
+        let mut stats = UploadCompletionStats::default();
 
         // Phase 1: Spawn all upload tasks up-front so that every validator is
         // contacted regardless of how quickly the signature threshold is met.
@@ -215,11 +265,15 @@ impl FibreClient {
                 task_result = futures.next() => {
                     match task_result {
                         Some((val_idx, Some(Ok(signature)))) => {
+                            stats.successful += 1;
                             let validator = &val_set.validators[val_idx];
                             match sig_set.add(validator, &signature) {
                                 Ok(threshold_met) => {
                                     if threshold_met {
-                                        return Ok(());
+                                        return Ok(UploadCompletion {
+                                            tasks: futures,
+                                            stats,
+                                        });
                                     }
                                 }
                                 Err(e) => {
@@ -232,6 +286,7 @@ impl FibreClient {
                             }
                         }
                         Some((val_idx, Some(Err(e)))) => {
+                            stats.failed += 1;
                             let validator = &val_set.validators[val_idx];
                             tracing::warn!(
                                 validator = %validator.address_hex(),
@@ -240,6 +295,7 @@ impl FibreClient {
                             );
                         }
                         Some((val_idx, None)) => {
+                            stats.failed += 1;
                             let validator = &val_set.validators[val_idx];
                             tracing::warn!(
                                 validator = %validator.address_hex(),
@@ -255,7 +311,10 @@ impl FibreClient {
             }
         }
 
-        Ok(())
+        Ok(UploadCompletion {
+            tasks: futures,
+            stats,
+        })
     }
 }
 
@@ -396,6 +455,63 @@ mod tests {
                 .await
                 .unwrap_or_else(|_| panic!("validator {i} did not receive upload data in time"));
         }
+    }
+
+    #[tokio::test]
+    async fn upload_completion_reports_all_successes() {
+        let validators = vec![
+            make_validator(100, 1),
+            make_validator(100, 2),
+            make_validator(100, 3),
+        ];
+        let val_set = ValidatorSet {
+            validators: validators.iter().map(|(_, info)| info.clone()).collect(),
+            height: 1,
+        };
+        let client = build_test_client(val_set, make_connector(&validators), "test-chain");
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
+
+        let (_, completion) = client
+            .upload_with_completion(&test_signing_key(), namespace, make_test_blob())
+            .await
+            .unwrap();
+        let stats = completion.wait().await;
+
+        assert_eq!(stats.successful, 3);
+        assert_eq!(stats.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn upload_completion_reports_successes_and_failures() {
+        let v1 = make_validator(200, 1);
+        let v2 = make_validator(200, 2);
+        let v3 = make_validator(200, 3);
+        let v4 = make_validator(100, 4);
+        let v5 = make_validator(100, 5);
+        let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4, v5];
+        let val_infos: Vec<ValidatorInfo> = all_validators
+            .iter()
+            .map(|(_, info)| info.clone())
+            .collect();
+        let failing_connector = FailingConnector {
+            inner: make_connector(&[v1, v2, v3]),
+            fail_addresses: vec![val_infos[3].address, val_infos[4].address],
+        };
+        let val_set = ValidatorSet {
+            validators: val_infos,
+            height: 1,
+        };
+        let client = build_test_client(val_set, failing_connector, "test-chain");
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
+
+        let (_, completion) = client
+            .upload_with_completion(&test_signing_key(), namespace, make_test_blob())
+            .await
+            .unwrap();
+        let stats = completion.wait().await;
+
+        assert_eq!(stats.successful, 3);
+        assert_eq!(stats.failed, 2);
     }
 
     #[tokio::test]

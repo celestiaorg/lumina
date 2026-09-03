@@ -898,6 +898,7 @@ dependencies = [
  "hex",
  "k256",
  "rand",
+ "rayon",
  "tokio",
  "tracing",
  "tracing-subscriber",
