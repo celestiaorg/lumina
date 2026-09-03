@@ -313,7 +313,8 @@ fn run_client_thread(
     start_rx: oneshot::Receiver<Instant>,
     event_tx: mpsc::UnboundedSender<Event>,
 ) -> Result<Duration> {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
     {
