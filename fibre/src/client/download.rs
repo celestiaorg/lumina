@@ -446,7 +446,9 @@ mod tests {
             for row in 0..total_rows {
                 let mut proof = blob.row(row).unwrap();
                 if i == 0 {
-                    proof.row[0] ^= 1;
+                    let mut corrupted = proof.row.to_vec();
+                    corrupted[0] ^= 1;
+                    proof.row = corrupted.into();
                 }
                 proofs.push(proof);
             }
@@ -497,7 +499,7 @@ mod tests {
                     let proof = blob.row(index).unwrap();
                     rsema1d::RowProof {
                         index: proof.index,
-                        row: std::borrow::Cow::Owned(proof.row),
+                        row: std::borrow::Cow::Owned(proof.row.to_vec()),
                         row_proof: proof.row_proof,
                     }
                 })

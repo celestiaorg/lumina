@@ -112,10 +112,12 @@ impl ExtendedData {
 
     /// Generate commitment from contiguous already-extended rows (K+N rows).
     pub fn generate_from_extended_rows(
-        extended_rows: RowMatrix,
+        mut extended_rows: RowMatrix,
         params: &Parameters,
     ) -> Result<Self> {
         extended_rows.extended_view(params)?;
+        // Share encoded rows with inclusion proofs.
+        extended_rows.freeze();
 
         let row_tree = build_row_tree(&extended_rows, params);
         let row_root = row_tree.root();
@@ -234,11 +236,14 @@ impl ExtendedData {
 
     /// Generate row inclusion proof for any row.
     pub fn generate_row_inclusion_proof(&self, index: usize) -> Result<RowInclusionProof> {
-        let row_proof = self.generate_row_proof(index)?;
+        if index >= self.params.total_rows() {
+            return Err(Error::InvalidIndex(index, self.params.total_rows()));
+        }
+        let tree_pos = map_index_to_tree_position(index, self.params.k);
         Ok(RowInclusionProof {
-            index: row_proof.index,
-            row: row_proof.row.into_owned(),
-            row_proof: row_proof.row_proof,
+            index,
+            row: self.all_rows.row_bytes(index)?,
+            row_proof: self.row_tree.generate_proof(tree_pos),
             rlc_root: self.rlc_root,
         })
     }
@@ -266,5 +271,21 @@ mod tests {
         );
         assert_eq!(ext_data.rlc_orig.len(), params.k);
         assert_eq!(ext_data.rlc_extended.len(), params.k + params.n);
+    }
+
+    #[test]
+    fn row_inclusion_proof_shares_matrix_storage() {
+        let params = Parameters::new(4, 4, 64).unwrap();
+        let rows = RowMatrix::with_shape(
+            vec![0; params.total_rows() * params.row_size],
+            params.total_rows(),
+            params.row_size,
+        )
+        .unwrap();
+        let ext_data = ExtendedData::generate_from_extended_rows(rows, &params).unwrap();
+
+        let proof = ext_data.generate_row_inclusion_proof(3).unwrap();
+
+        assert_eq!(proof.row.as_ptr(), ext_data.row(3).unwrap().as_ptr());
     }
 }
