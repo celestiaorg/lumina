@@ -1,8 +1,8 @@
+use crate::codec::extend_rlcs;
 use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::rows::RowMatrix;
 use crate::codec::symbols::RlcCoefficientLogs;
-use crate::codec::{extend_data, extend_rlcs};
 use crate::crypto::{derive_coefficients, hash_leaf, sha256, MerkleTree};
 use crate::error::{Error, Result};
 use crate::field::GF128;
@@ -96,8 +96,17 @@ pub struct ExtendedData {
 impl ExtendedData {
     /// Generate commitment from contiguous original rows.
     pub fn generate(original_rows: &RowMatrix, params: &Parameters) -> Result<Self> {
+        Self::generate_with_work_budget(original_rows, params, super::default_work_budget())
+    }
+
+    /// Generate commitment using an explicit combined Leopard work-buffer budget.
+    pub fn generate_with_work_budget(
+        original_rows: &RowMatrix,
+        params: &Parameters,
+        work_budget: std::num::NonZeroUsize,
+    ) -> Result<Self> {
         let original_view = original_rows.original_view(params)?;
-        let all_rows = extend_data(original_view, params)?;
+        let all_rows = super::rs::extend_data_with_work_budget(original_view, params, work_budget)?;
         Self::generate_from_extended_rows(all_rows, params)
     }
 
