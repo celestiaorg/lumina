@@ -376,7 +376,7 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
         .context("app gRPC client has no signer")?;
     let namespace = Namespace::new_v0(cli.namespace.as_bytes()).context("parsing namespace")?;
     let encode_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
+        .num_threads(5)
         .build()
         .context("building signer encode pool")?;
     let host_registry = Arc::new(GrpcHostRegistry::new(app_grpc.clone()));
