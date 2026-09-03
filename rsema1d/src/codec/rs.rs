@@ -80,7 +80,7 @@ fn work_shards(k: usize, n: usize) -> usize {
 /// Returns the largest multiple of 64 such that all rayon workers' work
 /// buffers fit in [`STRIPE_WORK_BUDGET`], clamped to `[MIN_STRIPE, row_size]`.
 fn stripe_size(k: usize, n: usize, row_size: usize) -> usize {
-    let threads = rayon::current_num_threads().max(1);
+    let threads = 4;
     let per_encoder = STRIPE_WORK_BUDGET / (threads * work_shards(k, n));
     let stripe = (per_encoder / MIN_STRIPE) * MIN_STRIPE;
     stripe.clamp(MIN_STRIPE, row_size)
