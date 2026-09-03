@@ -244,6 +244,9 @@ impl BlobReconstruction {
     ///
     /// Rows whose index is already filled are skipped. Returns the number of
     /// genuinely new rows stored.
+    ///
+    /// Row indexes are not re-checked here: [`ShardVerifier::new`] copies this
+    /// reconstruction's config, so `verify` already bounds them by `total_rows`.
     pub(crate) fn store_rows(&mut self, rows: VerifiedRows) -> usize {
         let mut applied = 0;
         for proof in rows.0 {
@@ -571,10 +574,13 @@ mod tests {
         Ok(blob.store_rows(verified))
     }
 
+    fn test_data() -> Vec<u8> {
+        (0u8..=249).collect()
+    }
+
     fn test_blob_and_reconstruction() -> (EncodedBlob, BlobReconstruction) {
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
-        let data: Vec<u8> = (0u8..=249).collect();
-        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(&test_data(), cfg.clone()).unwrap();
         let reconstruction = BlobReconstruction::with_config(blob.id().clone(), cfg);
         (blob, reconstruction)
     }
@@ -591,7 +597,8 @@ mod tests {
                 .unwrap();
 
         assert_eq!(unique, 4);
-        reconstruction.reconstruct().unwrap();
+        let reconstructed = reconstruction.reconstruct().unwrap();
+        assert_eq!(reconstructed.data(), &test_data());
     }
 
     #[tokio::test]
