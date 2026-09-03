@@ -111,6 +111,7 @@ struct LifecycleContext {
     paid_size: usize,
     operation_timeout: Duration,
     tx_config: TxConfig,
+    encode_pool: Arc<rayon::ThreadPool>,
     encode_semaphore: Arc<Semaphore>,
     download_semaphore: Arc<Semaphore>,
     skip_download: bool,
@@ -374,6 +375,10 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
         .get_account_address()
         .context("app gRPC client has no signer")?;
     let namespace = Namespace::new_v0(cli.namespace.as_bytes()).context("parsing namespace")?;
+    let encode_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .context("building signer encode pool")?;
     let host_registry = Arc::new(GrpcHostRegistry::new(app_grpc.clone()));
     let fibre = Arc::new(
         FibreClient::builder()
@@ -409,6 +414,7 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
         paid_size: cli.blob_size,
         operation_timeout: Duration::from_secs(cli.operation_timeout_seconds),
         tx_config,
+        encode_pool: Arc::new(encode_pool),
         encode_semaphore: Arc::new(Semaphore::new(cli.encode_concurrency)),
         download_semaphore: Arc::new(Semaphore::new(cli.download_concurrency)),
         skip_download: cli.skip_download,
@@ -624,10 +630,13 @@ async fn run_lifecycle(
             error: anyhow!(error),
         })?;
     let payload_size = context.payload_size;
+    let encode_pool = Arc::clone(&context.encode_pool);
     let encoded = tokio::task::spawn_blocking(move || {
         let _permit = encode_permit;
-        let payload = make_payload(sequence, payload_size);
-        Blob::new_owned(payload, BlobConfig::v0())
+        encode_pool.install(|| {
+            let payload = make_payload(sequence, payload_size);
+            Blob::new_owned(payload, BlobConfig::v0())
+        })
     })
     .await;
     let _ = event_tx.send(Event::StageFinished {
