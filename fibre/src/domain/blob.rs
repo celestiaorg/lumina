@@ -3,7 +3,8 @@
 //! This module implements the core blob data structures for the Fibre protocol:
 //! - `Commitment`: a 32-byte SHA-256 commitment hash
 //! - `BlobID`: version byte + commitment that uniquely identifies a blob
-//! - `Blob`: encoded data with Reed-Solomon erasure coding
+//! - `EncodedBlob`: encoded data ready for upload
+//! - `Blob`: decoded data returned by download
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -102,26 +103,35 @@ impl fmt::Debug for BlobID {
     }
 }
 
-/// Encoded blob with Reed-Solomon erasure coding.
-///
-/// A `Blob` can be created in two ways:
-/// - `Blob::new()` encodes data into a new blob (for upload)
-/// - [`FibreClient::download`](crate::FibreClient::download) reconstructs blobs from downloaded shards
+/// Decoded blob returned by [`FibreClient::download`](crate::FibreClient::download).
+#[derive(Debug)]
 pub struct Blob {
-    cfg: BlobConfig,
-    extended_data: Option<rsema1d::ExtendedData>,
     id: BlobID,
-    rlc_coeffs: Option<Vec<rsema1d::GF128>>,
-    header: BlobHeaderV0,
-    /// The decoded original data (without header). `None` until encoded or reconstructed.
-    data: Option<Vec<u8>>,
-    /// Rows buffer for reconstruction (indexed by row number).
-    /// `None` entries indicate missing rows.
-    rows: Option<Vec<Option<Vec<u8>>>>,
+    data: Vec<u8>,
 }
 
 impl Blob {
-    /// Encode data into a new Blob.
+    /// Returns the BlobID of this blob.
+    pub fn id(&self) -> &BlobID {
+        &self.id
+    }
+
+    /// Returns the original data without the header.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+/// Encoded blob ready for upload.
+pub struct EncodedBlob {
+    cfg: BlobConfig,
+    extended_data: rsema1d::ExtendedData,
+    id: BlobID,
+    data_size: usize,
+}
+
+impl EncodedBlob {
+    /// Encode data into a new upload-ready blob.
     ///
     /// The data is prefixed with a header containing the blob version and data size,
     /// then split into rows and erasure-coded using rsema1d.
@@ -159,57 +169,17 @@ impl Blob {
         header.encode_into_buffer(data, &mut flat);
         let extended = rsema1d::RowMatrix::with_shape(flat, total_rows, row_size)?;
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
-        let (ext_data, commitment, rlc_orig) =
+        let (extended_data, commitment, _) =
             rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
 
         let id = BlobID::new(cfg.blob_version, commitment);
 
         Ok(Self {
             cfg,
-            extended_data: Some(ext_data),
+            extended_data,
             id,
-            rlc_coeffs: Some(rlc_orig),
-            header,
-            data: Some(data.to_vec()),
-            rows: None,
+            data_size: data.len(),
         })
-    }
-
-    /// Create an empty blob for internal reconstruction from downloaded shards.
-    ///
-    /// Returns an error if the BlobID is invalid or the blob version is not supported.
-    pub(crate) fn empty(id: BlobID) -> Result<Self, FibreError> {
-        id.validate()?;
-        let cfg = BlobConfig::for_version(id.version())?;
-        let total_rows = cfg.total_rows();
-
-        Ok(Self {
-            cfg,
-            extended_data: None,
-            id,
-            rlc_coeffs: None,
-            header: BlobHeaderV0::default(),
-            data: None,
-            rows: Some(vec![None; total_rows]),
-        })
-    }
-
-    /// Create an empty blob with a custom [`BlobConfig`] for reconstruction.
-    ///
-    /// This is like [`Blob::empty()`] but uses a caller-supplied config instead of
-    /// deriving it from the blob version. Useful for tests that use small K/N parameters.
-    #[cfg(test)]
-    pub(crate) fn empty_with_config(id: BlobID, cfg: BlobConfig) -> Self {
-        let total_rows = cfg.total_rows();
-        Self {
-            cfg,
-            extended_data: None,
-            id,
-            rlc_coeffs: None,
-            header: BlobHeaderV0::default(),
-            data: None,
-            rows: Some(vec![None; total_rows]),
-        }
     }
 
     /// Returns the BlobID of this blob.
@@ -222,115 +192,97 @@ impl Blob {
         &self.cfg
     }
 
-    /// Returns the RLC coefficients of the original data, if available.
-    pub fn rlc_coeffs(&self) -> Option<&[rsema1d::GF128]> {
-        self.rlc_coeffs.as_deref()
+    /// Returns the RLC coefficients of the original data.
+    pub fn rlc_coeffs(&self) -> &[rsema1d::GF128] {
+        self.extended_data.rlc_original()
     }
 
-    /// Returns the size of each row in bytes, or `None` if no data is available.
-    pub fn row_size(&self) -> Option<usize> {
-        self.data.as_ref().map(|d| self.cfg.row_size(d.len()))
+    /// Returns the size of each row in bytes.
+    pub fn row_size(&self) -> usize {
+        self.extended_data.rows().row_size()
     }
 
-    /// Returns the size of the original data (without header), or `None` if
-    /// no data is available.
-    pub fn data_size(&self) -> Option<usize> {
-        self.data.as_ref().map(|d| d.len())
+    /// Returns the size of the original data without the header.
+    pub fn data_size(&self) -> usize {
+        self.data_size
     }
 
-    /// Returns the upload size (data with padding, without parity), or `None`
-    /// if no data is available.
-    ///
-    /// This is the size included in the `PaymentPromise` and the one actually paid for.
-    pub fn upload_size(&self) -> Option<usize> {
-        self.data_size().map(|s| self.cfg.upload_size(s))
-    }
-
-    /// Returns the original data (without header), if available.
-    ///
-    /// Returns `None` if the data has not been decoded yet
-    /// (call `reconstruct()` first for received blobs).
-    pub fn data(&self) -> Option<&[u8]> {
-        self.data.as_deref()
+    /// Returns the upload size: data with padding and without parity.
+    pub fn upload_size(&self) -> usize {
+        self.row_size() * self.cfg.original_rows
     }
 
     /// Generate a `RowInclusionProof` for the given row index from the extended data.
     pub fn row(&self, index: usize) -> Result<rsema1d::RowInclusionProof, FibreError> {
-        let ext = self
-            .extended_data
-            .as_ref()
-            .ok_or_else(|| FibreError::Other("no extended data available".into()))?;
-        ext.generate_row_inclusion_proof(index)
+        self.extended_data
+            .generate_row_inclusion_proof(index)
             .map_err(|e| e.into())
+    }
+}
+
+/// Incomplete blob used while collecting rows for reconstruction.
+pub(crate) struct BlobReconstruction {
+    cfg: BlobConfig,
+    id: BlobID,
+    rows: Vec<Option<Vec<u8>>>,
+}
+
+impl BlobReconstruction {
+    /// Create a reconstruction buffer for the blob ID.
+    pub(crate) fn new(id: BlobID) -> Result<Self, FibreError> {
+        let cfg = BlobConfig::for_version(id.version())?;
+        let rows = vec![None; cfg.total_rows()];
+
+        Ok(Self { cfg, id, rows })
+    }
+
+    /// Create a reconstruction buffer with a custom configuration for tests.
+    #[cfg(test)]
+    pub(crate) fn with_config(id: BlobID, cfg: BlobConfig) -> Self {
+        let rows = vec![None; cfg.total_rows()];
+        Self { cfg, id, rows }
+    }
+
+    pub(crate) fn id(&self) -> &BlobID {
+        &self.id
+    }
+
+    pub(crate) fn config(&self) -> &BlobConfig {
+        &self.cfg
     }
 
     /// Store rows that passed [`ShardVerifier::verify`].
     ///
     /// Rows whose index is already filled are skipped. Returns the number of
     /// genuinely new rows stored.
-    pub(crate) fn store_rows(&mut self, rows: VerifiedRows) -> Result<usize, FibreError> {
+    ///
+    /// Row indexes are not re-checked here: [`ShardVerifier::new`] copies this
+    /// reconstruction's config, so `verify` already bounds them by `total_rows`.
+    pub(crate) fn store_rows(&mut self, rows: VerifiedRows) -> usize {
         let mut applied = 0;
         for proof in rows.0 {
-            if self.store_row(proof.index, proof.row.into_owned())? {
+            let row = &mut self.rows[proof.index];
+            if row.is_none() {
+                *row = Some(proof.row.into_owned());
                 applied += 1;
             }
         }
-        Ok(applied)
+        applied
     }
 
     /// Returns which row indices are already stored, for pre-filtering
     /// downloaded shards before verification.
     pub(crate) fn stored_rows_bitmap(&self) -> Vec<bool> {
-        match &self.rows {
-            Some(rows) => rows.iter().map(Option::is_some).collect(),
-            None => Vec::new(),
-        }
-    }
-
-    fn store_row(&mut self, index: usize, row: Vec<u8>) -> Result<bool, FibreError> {
-        if let Some(ref mut rows) = self.rows {
-            if index < rows.len() {
-                if rows[index].is_some() {
-                    return Ok(false);
-                }
-                rows[index] = Some(row);
-            } else {
-                return Err(FibreError::Other(format!(
-                    "row index {} out of bounds (total rows: {})",
-                    index,
-                    rows.len()
-                )));
-            }
-        } else {
-            return Err(FibreError::Other(
-                "blob not initialized for reconstruction".into(),
-            ));
-        }
-
-        Ok(true)
+        self.rows.iter().map(Option::is_some).collect()
     }
 
     /// Reconstruct the original data from accumulated rows.
     ///
     /// Requires at least `original_rows` (K) rows to have been set via `store_rows()`.
-    /// After reconstruction, `data()` will return the original data.
-    ///
-    /// This method is NOT safe for concurrent calls.
-    pub fn reconstruct(&mut self) -> Result<(), FibreError> {
-        let rows_buffer = self
-            .rows
-            .as_ref()
-            .ok_or_else(|| FibreError::Other("no rows available for reconstruction".into()))?;
-
-        // Collect available row indices and data
+    pub(crate) fn reconstruct(self) -> Result<Blob, FibreError> {
         let mut indices = Vec::new();
-        let mut row_size = 0usize;
-
-        for (i, row_opt) in rows_buffer.iter().enumerate() {
-            if let Some(row) = row_opt {
-                if row_size == 0 {
-                    row_size = row.len();
-                }
+        for (i, row_opt) in self.rows.iter().enumerate() {
+            if row_opt.is_some() {
                 indices.push(i);
             }
         }
@@ -342,36 +294,28 @@ impl Blob {
             });
         }
 
-        if row_size == 0 {
-            return Err(FibreError::Other("no rows with data available".into()));
-        }
-
-        let params =
-            rsema1d::Parameters::new(self.cfg.original_rows, self.cfg.parity_rows, row_size)?;
-
-        // Take exactly K rows for reconstruction
         let k = self.cfg.original_rows;
         let selected_indices: Vec<usize> = indices[..k].to_vec();
         let selected_rows: Vec<&[u8]> = selected_indices
             .iter()
-            .map(|&i| rows_buffer[i].as_ref().unwrap().as_slice())
+            .map(|&i| self.rows[i].as_ref().unwrap().as_slice())
             .collect();
+        let params = rsema1d::Parameters::new(
+            self.cfg.original_rows,
+            self.cfg.parity_rows,
+            selected_rows[0].len(),
+        )?;
 
-        // Reconstruct original rows
         let reconstructed = rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
 
-        // Decode header and extract original data from the first K rows
         let original_rows: Vec<&[u8]> = (0..k).map(|i| reconstructed.row(i).unwrap()).collect();
-        let (header, original_data) = BlobHeaderV0::decode_from_rows(&original_rows, &self.cfg)?;
+        let (_, data) = BlobHeaderV0::decode_from_rows(&original_rows, &self.cfg)?;
 
-        self.header = header;
-        self.data = Some(original_data);
-
-        Ok(())
+        Ok(Blob { id: self.id, data })
     }
 }
 
-/// Rows that passed shard verification, accepted by [`Blob::store_rows`].
+/// Rows that passed shard verification, accepted by [`BlobReconstruction::store_rows`].
 ///
 /// Only [`ShardVerifier::verify`] can construct this, so unverified rows
 /// cannot reach the blob's row buffer.
@@ -397,7 +341,7 @@ pub(crate) struct ShardVerifier {
 }
 
 impl ShardVerifier {
-    pub(crate) fn new(blob: &Blob) -> Self {
+    pub(crate) fn new(blob: &BlobReconstruction) -> Self {
         Self {
             commitment: blob.id.commitment(),
             cfg: blob.cfg.clone(),
@@ -546,25 +490,23 @@ mod tests {
     }
 
     #[test]
-    fn blob_new_and_accessors() {
+    fn encoded_blob_new_and_accessors() {
         // Use test parameters with small K/N and row_size=64 for fast tests
         let cfg = BlobConfig::new_test(0, 4, 4, 1024, 4, 64);
         let data = vec![1u8; 200];
-        let blob = Blob::new(&data, cfg).unwrap();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
 
-        assert_eq!(blob.data_size(), Some(200));
-        assert!(blob.data().is_some());
-        assert_eq!(blob.data().unwrap(), &data);
-        assert!(blob.row_size().unwrap() > 0);
-        assert!(blob.upload_size().unwrap() > 0);
-        assert!(blob.rlc_coeffs().is_some());
+        assert_eq!(blob.data_size(), 200);
+        assert!(blob.row_size() > 0);
+        assert!(blob.upload_size() > 0);
+        assert_eq!(blob.rlc_coeffs().len(), cfg.original_rows);
         assert!(blob.id().validate().is_ok());
     }
 
     #[test]
-    fn blob_new_empty_data() {
+    fn encoded_blob_new_empty_data() {
         let cfg = BlobConfig::new_test(0, 4, 4, 1024, 4, 64);
-        assert!(Blob::new(&[], cfg).is_err());
+        assert!(EncodedBlob::new(&[], cfg).is_err());
     }
 
     #[tokio::test]
@@ -572,25 +514,36 @@ mod tests {
         // Encode a blob with small test parameters
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
         let data: Vec<u8> = (0u8..=249).collect();
-        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
 
-        let mut empty = Blob::empty_with_config(blob.id().clone(), cfg);
+        let mut reconstruction = BlobReconstruction::with_config(blob.id().clone(), cfg);
 
         // Set enough rows (need at least K=4)
-        set_shard(&mut empty, shard_of(&blob, &[0, 1, 2, 3]))
+        set_shard(&mut reconstruction, shard_of(&blob, &[0, 1, 2, 3]))
             .await
             .unwrap();
 
-        // Reconstruct
-        empty.reconstruct().unwrap();
-        assert_eq!(empty.data().unwrap(), &data);
+        let reconstructed = reconstruction.reconstruct().unwrap();
+        assert_eq!(reconstructed.data(), &data);
+    }
+
+    #[test]
+    fn reconstruction_rejects_insufficient_rows() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let reconstruction = BlobReconstruction::with_config(BlobID::new(0, [0; 32]), cfg);
+
+        let err = reconstruction.reconstruct().unwrap_err();
+        assert!(matches!(
+            err,
+            FibreError::NotEnoughShards { got: 0, need: 4 }
+        ));
     }
 
     #[test]
     fn blob_too_large() {
         let cfg = BlobConfig::new_test(0, 4, 4, 100, 4, 64);
         let data = vec![0u8; 101];
-        match Blob::new(&data, cfg) {
+        match EncodedBlob::new(&data, cfg) {
             Err(FibreError::BlobTooLarge { size, max }) => {
                 assert_eq!(size, 101);
                 assert_eq!(max, 100);
@@ -604,7 +557,7 @@ mod tests {
         rlcs: Vec<rsema1d::GF128>,
     }
 
-    fn shard_of(blob: &Blob, indices: &[usize]) -> TestShard {
+    fn shard_of(blob: &EncodedBlob, indices: &[usize]) -> TestShard {
         TestShard {
             rows: indices
                 .iter()
@@ -617,86 +570,98 @@ mod tests {
                     }
                 })
                 .collect(),
-            rlcs: blob.rlc_coeffs().unwrap().to_vec(),
+            rlcs: blob.rlc_coeffs().to_vec(),
         }
     }
 
-    async fn set_shard(blob: &mut Blob, shard: TestShard) -> Result<usize, FibreError> {
+    async fn set_shard(
+        blob: &mut BlobReconstruction,
+        shard: TestShard,
+    ) -> Result<usize, FibreError> {
         let verifier = ShardVerifier::new(blob);
         let verified = verifier
             .verify(shard.rows, &shard.rlcs, &blob.stored_rows_bitmap())
             .await?;
-        blob.store_rows(verified)
+        Ok(blob.store_rows(verified))
     }
 
-    fn test_blob_pair() -> (Blob, Blob) {
+    fn test_data() -> Vec<u8> {
+        (0u8..=249).collect()
+    }
+
+    fn test_blob_and_reconstruction() -> (EncodedBlob, BlobReconstruction) {
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
-        let data: Vec<u8> = (0u8..=249).collect();
-        let blob = Blob::new(&data, cfg.clone()).unwrap();
-        let empty = Blob::empty_with_config(blob.id().clone(), cfg);
-        (blob, empty)
+        let blob = EncodedBlob::new(&test_data(), cfg.clone()).unwrap();
+        let reconstruction = BlobReconstruction::with_config(blob.id().clone(), cfg);
+        (blob, reconstruction)
     }
 
     #[tokio::test]
     async fn set_shard_counts_only_new_rows() {
-        let (blob, mut empty) = test_blob_pair();
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
 
-        let unique = set_shard(&mut empty, shard_of(&blob, &[0, 1, 2]))
+        let unique = set_shard(&mut reconstruction, shard_of(&blob, &[0, 1, 2]))
             .await
             .unwrap()
-            + set_shard(&mut empty, shard_of(&blob, &[2, 3]))
+            + set_shard(&mut reconstruction, shard_of(&blob, &[2, 3]))
                 .await
                 .unwrap();
 
         assert_eq!(unique, 4);
-        empty.reconstruct().unwrap();
-        assert_eq!(empty.data().unwrap(), blob.data().unwrap());
+        let reconstructed = reconstruction.reconstruct().unwrap();
+        assert_eq!(reconstructed.data(), &test_data());
     }
 
     #[tokio::test]
     async fn set_shard_failing_shard_stores_nothing() {
-        let (blob, mut empty) = test_blob_pair();
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
 
         // Tamper with the second row; the whole shard must be rejected.
         let mut shard = shard_of(&blob, &[0, 1]);
         shard.rows[1].row.to_mut()[0] ^= 1;
-        assert!(set_shard(&mut empty, shard).await.is_err());
+        assert!(set_shard(&mut reconstruction, shard).await.is_err());
 
         // Row 0 was valid in the failing shard but must not have been stored.
         assert_eq!(
-            set_shard(&mut empty, shard_of(&blob, &[0])).await.unwrap(),
+            set_shard(&mut reconstruction, shard_of(&blob, &[0]))
+                .await
+                .unwrap(),
             1
         );
     }
 
     #[tokio::test]
     async fn set_shard_rejects_wrong_rlc_count() {
-        let (blob, mut empty) = test_blob_pair();
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
         let mut shard = shard_of(&blob, &[0]);
         shard.rlcs.pop();
 
-        assert!(set_shard(&mut empty, shard).await.is_err());
+        assert!(set_shard(&mut reconstruction, shard).await.is_err());
     }
 
     #[tokio::test]
     async fn set_shard_rejects_wrong_rlc_value() {
-        let (blob, mut empty) = test_blob_pair();
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
         let mut shard = shard_of(&blob, &[0]);
         shard.rlcs[0].limbs[0] ^= 1;
 
-        assert!(set_shard(&mut empty, shard).await.is_err());
+        assert!(set_shard(&mut reconstruction, shard).await.is_err());
     }
 
     #[tokio::test]
     async fn verify_rejects_oversized_row() {
-        let (blob, empty) = test_blob_pair();
+        let (blob, reconstruction) = test_blob_and_reconstruction();
         let mut shard = shard_of(&blob, &[0]);
         // Larger than row_size(max_data_size) for the test config.
         shard.rows[0].row = std::borrow::Cow::Owned(vec![0u8; 2048]);
 
-        let verifier = ShardVerifier::new(&empty);
+        let verifier = ShardVerifier::new(&reconstruction);
         let err = verifier
-            .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, FibreError::InvalidData(_)), "got {err}");
@@ -704,13 +669,17 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_out_of_range_index() {
-        let (blob, empty) = test_blob_pair();
+        let (blob, reconstruction) = test_blob_and_reconstruction();
         let mut shard = shard_of(&blob, &[0]);
-        shard.rows[0].index = empty.config().total_rows();
+        shard.rows[0].index = reconstruction.config().total_rows();
 
-        let verifier = ShardVerifier::new(&empty);
+        let verifier = ShardVerifier::new(&reconstruction);
         let err = verifier
-            .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, FibreError::InvalidData(_)), "got {err}");
@@ -718,9 +687,9 @@ mod tests {
 
     #[tokio::test]
     async fn verify_skips_duplicate_indices_within_response() {
-        let (blob, mut empty) = test_blob_pair();
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
 
-        let applied = set_shard(&mut empty, shard_of(&blob, &[0, 0, 1]))
+        let applied = set_shard(&mut reconstruction, shard_of(&blob, &[0, 0, 1]))
             .await
             .unwrap();
         assert_eq!(applied, 2);
@@ -728,8 +697,8 @@ mod tests {
 
     #[tokio::test]
     async fn verify_skips_already_stored_rows_before_crypto() {
-        let (blob, mut empty) = test_blob_pair();
-        set_shard(&mut empty, shard_of(&blob, &[0, 1]))
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
+        set_shard(&mut reconstruction, shard_of(&blob, &[0, 1]))
             .await
             .unwrap();
 
@@ -738,41 +707,55 @@ mod tests {
         let mut shard = shard_of(&blob, &[0]);
         shard.rows[0].row.to_mut()[0] ^= 1;
 
-        let verifier = ShardVerifier::new(&empty);
+        let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
-            .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap();
-        assert_eq!(empty.store_rows(verified).unwrap(), 0);
+        assert_eq!(reconstruction.store_rows(verified), 0);
     }
 
     #[tokio::test]
     async fn verify_uses_first_needed_row_size() {
-        let (blob, mut empty) = test_blob_pair();
-        set_shard(&mut empty, shard_of(&blob, &[0])).await.unwrap();
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
+        set_shard(&mut reconstruction, shard_of(&blob, &[0]))
+            .await
+            .unwrap();
 
         let mut shard = shard_of(&blob, &[0, 1]);
         shard.rows[0].row = std::borrow::Cow::Owned(vec![0; 128]);
 
-        let verifier = ShardVerifier::new(&empty);
+        let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
-            .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap();
 
-        assert_eq!(empty.store_rows(verified).unwrap(), 1);
+        assert_eq!(reconstruction.store_rows(verified), 1);
     }
 
     #[tokio::test]
     async fn verify_caches_context_and_rejects_mismatched_rlcs() {
-        let (blob, mut empty) = test_blob_pair();
-        let verifier = ShardVerifier::new(&empty);
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
+        let verifier = ShardVerifier::new(&reconstruction);
 
         let mut shard = shard_of(&blob, &[0]);
         shard.rows[0].row.to_mut()[0] ^= 1;
         assert!(
             verifier
-                .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+                .verify(
+                    shard.rows,
+                    &shard.rlcs,
+                    &reconstruction.stored_rows_bitmap(),
+                )
                 .await
                 .is_err()
         );
@@ -780,31 +763,50 @@ mod tests {
         // First shard authenticates the RLC vector and fills the cache.
         let shard = shard_of(&blob, &[0, 1]);
         let verified = verifier
-            .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap();
-        empty.store_rows(verified).unwrap();
+        reconstruction.store_rows(verified);
 
         // Same vector: verifies against the cached context.
         let shard = shard_of(&blob, &[2, 3]);
         let verified = verifier
-            .verify(shard.rows, &shard.rlcs, &empty.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap();
-        assert_eq!(empty.store_rows(verified).unwrap(), 2);
+        assert_eq!(reconstruction.store_rows(verified), 2);
 
         // Different vector: rejected by the cheap cache comparison.
         let mut shard = shard_of(&blob, &[2, 3]);
         shard.rlcs[0].limbs[0] ^= 1;
-        let fresh = Blob::empty_with_config(
+        let fresh_reconstruction = BlobReconstruction::with_config(
             blob.id().clone(),
             BlobConfig::new_test(0, 4, 4, 4096, 4, 64),
         );
         let err = verifier
-            .verify(shard.rows, &shard.rlcs, &fresh.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &fresh_reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, FibreError::InvalidData(_)), "got {err}");
-        assert_eq!(fresh.stored_rows_bitmap().iter().filter(|s| **s).count(), 0);
+        assert_eq!(
+            fresh_reconstruction
+                .stored_rows_bitmap()
+                .iter()
+                .filter(|s| **s)
+                .count(),
+            0
+        );
     }
 }

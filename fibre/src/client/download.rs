@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::client::task::{TaskSet, spawn_task};
 
 use crate::ValidatorInfo;
-use crate::blob::{Blob, BlobID, ShardVerifier, VerifiedRows};
+use crate::blob::{Blob, BlobID, BlobReconstruction, ShardVerifier, VerifiedRows};
 use crate::client::FibreClient;
 #[cfg(test)]
 use crate::config::BlobConfig;
@@ -34,7 +34,7 @@ impl FibreClient {
     /// 3. Downloads row inclusion proofs from validators using adaptive fan-out.
     /// 4. Reconstructs the original data from collected proofs.
     ///
-    /// Returns the reconstructed [`Blob`] whose `data()` contains the original payload.
+    /// Returns a [`Blob`] containing the original payload.
     ///
     /// # Errors
     ///
@@ -51,16 +51,16 @@ impl FibreClient {
             Some(h) => self.set_getter.get_by_height(h).await?,
             None => self.set_getter.head().await?,
         };
-        let mut blob = Blob::empty(id.clone())?;
-        self.select_and_download(&val_set, &mut blob).await?;
-        blob.reconstruct()?;
-        Ok(blob)
+        let mut reconstruction = BlobReconstruction::new(id.clone())?;
+        self.select_and_download(&val_set, &mut reconstruction)
+            .await?;
+        reconstruction.reconstruct()
     }
 
     /// Internal download with a custom [`BlobConfig`].
     ///
     /// This allows tests to use small K/N parameters without going through
-    /// the production `Blob::empty()` path which hardcodes production params.
+    /// the production `BlobReconstruction::new()` path which uses production params.
     #[cfg(test)]
     pub(crate) async fn download_with_config(
         &self,
@@ -72,16 +72,16 @@ impl FibreClient {
         }
 
         let val_set = self.set_getter.head().await?;
-        let mut blob = Blob::empty_with_config(id.clone(), blob_cfg);
-        self.select_and_download(&val_set, &mut blob).await?;
-        blob.reconstruct()?;
-        Ok(blob)
+        let mut reconstruction = BlobReconstruction::with_config(id.clone(), blob_cfg);
+        self.select_and_download(&val_set, &mut reconstruction)
+            .await?;
+        reconstruction.reconstruct()
     }
 
     async fn select_and_download(
         &self,
         val_set: &ValidatorSet,
-        blob: &mut Blob,
+        blob: &mut BlobReconstruction,
     ) -> Result<(), FibreError> {
         let selected = val_set.select(
             blob.config().original_rows,
@@ -108,7 +108,7 @@ impl FibreClient {
         &self,
         selected: &[(usize, &ValidatorInfo)],
         original_rows: usize,
-        blob: &mut Blob,
+        blob: &mut BlobReconstruction,
         cancel_token: &CancellationToken,
     ) -> Result<(), FibreError> {
         if selected.is_empty() {
@@ -175,7 +175,7 @@ impl FibreClient {
                         Some((val_idx, Some(Ok(verified)))) => {
                             let (rows, info) = selected[val_idx];
                             inflight_rows = inflight_rows.saturating_sub(rows);
-                            let applied = blob.store_rows(verified)?;
+                            let applied = blob.store_rows(verified);
                             // Shards are never empty here, so zero
                             // applied means all rows were duplicates.
                             if applied == 0 {
@@ -242,7 +242,7 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
-    use crate::blob::{Blob, BlobID};
+    use crate::blob::{BlobID, BlobReconstruction, EncodedBlob};
     use crate::config::BlobConfig;
     use crate::error::FibreError;
     use crate::payment_promise::PaymentPromise;
@@ -316,7 +316,7 @@ mod tests {
         connections: &[Arc<MockValidatorConnection>],
         cfg: &BlobConfig,
     ) -> BlobID {
-        let blob = Blob::new(data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
         let total_rows = cfg.total_rows();
 
@@ -325,11 +325,7 @@ mod tests {
             for i in 0..total_rows {
                 proofs.push(blob.row(i).unwrap());
             }
-            conn.store_proofs(
-                blob_id.commitment(),
-                proofs,
-                blob.rlc_coeffs().unwrap().to_vec(),
-            );
+            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
         }
 
         blob_id
@@ -366,7 +362,7 @@ mod tests {
         let client = build_test_client(val_set, connector, "test-chain");
         let blob = client.download_with_config(&blob_id, cfg).await.unwrap();
 
-        assert_eq!(blob.data().unwrap(), &data);
+        assert_eq!(blob.data(), &data);
     }
 
     #[tokio::test]
@@ -399,7 +395,7 @@ mod tests {
             .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
             .collect();
 
-        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
         let total_rows = cfg.total_rows();
 
@@ -408,11 +404,7 @@ mod tests {
             for i in 0..total_rows {
                 proofs.push(blob.row(i).unwrap());
             }
-            conn.store_proofs(
-                blob_id.commitment(),
-                proofs,
-                blob.rlc_coeffs().unwrap().to_vec(),
-            );
+            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
         }
 
         let mut connector = MockConnector::new();
@@ -425,7 +417,7 @@ mod tests {
         let client = build_test_client(val_set, connector, "test-chain");
         let result = client.download_with_config(&blob_id, cfg).await.unwrap();
 
-        assert_eq!(result.data().unwrap(), &data);
+        assert_eq!(result.data(), &data);
     }
 
     #[tokio::test]
@@ -445,7 +437,7 @@ mod tests {
             .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
             .collect();
 
-        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
         let total_rows = cfg.total_rows();
 
@@ -458,11 +450,7 @@ mod tests {
                 }
                 proofs.push(proof);
             }
-            conn.store_proofs(
-                blob_id.commitment(),
-                proofs,
-                blob.rlc_coeffs().unwrap().to_vec(),
-            );
+            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
         }
 
         let mut connector = MockConnector::new();
@@ -471,7 +459,7 @@ mod tests {
         }
 
         let client = build_test_client(val_set, connector, "test-chain");
-        let mut result = Blob::empty_with_config(blob_id, cfg.clone());
+        let mut reconstruction = BlobReconstruction::with_config(blob_id, cfg.clone());
         let selected = [
             (cfg.original_rows, &val_infos[0]),
             (cfg.original_rows, &val_infos[1]),
@@ -481,21 +469,21 @@ mod tests {
             .download_blob(
                 &selected,
                 cfg.original_rows,
-                &mut result,
+                &mut reconstruction,
                 &CancellationToken::new(),
             )
             .await
             .unwrap();
-        result.reconstruct().unwrap();
+        let result = reconstruction.reconstruct().unwrap();
 
-        assert_eq!(result.data().unwrap(), &data);
+        assert_eq!(result.data(), &data);
     }
 
     #[tokio::test]
     async fn download_cancels_inflight_tasks_after_reaching_threshold() {
         let cfg = test_blob_config();
         let data: Vec<u8> = (0u8..=199).collect();
-        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
         let validators = [make_validator(100, 1), make_validator(100, 2)];
         let val_infos: Vec<_> = validators.iter().map(|(_, info)| info.clone()).collect();
@@ -514,7 +502,7 @@ mod tests {
                     }
                 })
                 .collect(),
-            rlcs: blob.rlc_coeffs().unwrap().to_vec(),
+            rlcs: blob.rlc_coeffs().to_vec(),
         };
         let connector = CoordinatedConnector {
             fast_address: val_infos[0].address,
@@ -523,14 +511,14 @@ mod tests {
             barrier: Arc::new(Barrier::new(2)),
         };
         let client = build_test_client(val_set, connector, "test-chain");
-        let mut result = Blob::empty_with_config(blob_id, cfg.clone());
+        let mut reconstruction = BlobReconstruction::with_config(blob_id, cfg.clone());
         let selected = [(2, &val_infos[0]), (2, &val_infos[1])];
 
         client
             .download_blob(
                 &selected,
                 cfg.original_rows,
-                &mut result,
+                &mut reconstruction,
                 &CancellationToken::new(),
             )
             .await
@@ -561,7 +549,7 @@ mod tests {
         let mut connector = MockConnector::new();
         connector.add(val_infos[0].address, failing_conn);
 
-        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
 
         let client = build_test_client(val_set, connector, "test-chain");
@@ -614,7 +602,7 @@ mod tests {
             height: 42,
         };
 
-        let blob = Blob::new(&original_data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(&original_data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
         let total_rows = cfg.total_rows();
 
@@ -628,11 +616,7 @@ mod tests {
             for i in 0..total_rows {
                 proofs.push(blob.row(i).unwrap());
             }
-            conn.store_proofs(
-                blob_id.commitment(),
-                proofs,
-                blob.rlc_coeffs().unwrap().to_vec(),
-            );
+            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
         }
 
         let mut connector = MockConnector::new();
@@ -643,7 +627,7 @@ mod tests {
         let client = build_test_client(val_set, connector, "test-chain");
         let downloaded = client.download_with_config(&blob_id, cfg).await.unwrap();
 
-        assert_eq!(downloaded.data().unwrap(), &original_data);
+        assert_eq!(downloaded.data(), &original_data);
         assert_eq!(downloaded.id(), &blob_id);
     }
 
@@ -664,7 +648,7 @@ mod tests {
             height: 1,
         };
 
-        let blob = Blob::new(&data, cfg.clone()).unwrap();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
         let total_rows = cfg.total_rows();
 
@@ -680,11 +664,7 @@ mod tests {
                 for i in 0..total_rows {
                     proofs.push(blob.row(i).unwrap());
                 }
-                conn.store_proofs(
-                    blob_id.commitment(),
-                    proofs,
-                    blob.rlc_coeffs().unwrap().to_vec(),
-                );
+                conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
                 conn
             })
             .collect();
@@ -697,6 +677,6 @@ mod tests {
         let client = build_test_client(val_set, connector, "test-chain");
         let downloaded = client.download_with_config(&blob_id, cfg).await.unwrap();
 
-        assert_eq!(downloaded.data().unwrap(), &data);
+        assert_eq!(downloaded.data(), &data);
     }
 }

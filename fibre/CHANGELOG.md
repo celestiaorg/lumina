@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] split the Fibre blob lifecycle into upload-ready `EncodedBlob`, private reconstruction state, and decoded `Blob`
 - remove the public manual-reconstruction API (`Blob::empty` and `Blob::set_row`); use `FibreClient::download` instead
 
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-fibre-v1.0.0...celestia-fibre-v1.1.0-rc.1) - 2026-06-24
