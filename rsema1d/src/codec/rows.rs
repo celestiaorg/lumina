@@ -2,12 +2,6 @@ use crate::error::{Error, Result};
 use crate::params::Parameters;
 use bytes::Bytes;
 
-/// Backing store of a [`RowMatrix`].
-///
-/// A matrix starts out owned so it can be encoded in place. Once it is
-/// frozen, rows can be handed out as reference-counted [`Bytes`] slices
-/// without copying; mutating a frozen matrix converts it back to an owned
-/// buffer (a copy only if other `Bytes` still refer to it).
 #[derive(Debug, Clone)]
 enum Storage {
     Owned(Vec<u8>),
@@ -104,17 +98,10 @@ impl RowMatrix {
         }
     }
 
-    /// Freeze the buffer so that [`row_bytes`](Self::row_bytes) can return
-    /// rows without copying. No-op if already frozen; never copies.
-    pub fn freeze(&mut self) {
+    pub(crate) fn freeze(&mut self) {
         if let Storage::Owned(v) = &mut self.data {
             self.data = Storage::Shared(Bytes::from(std::mem::take(v)));
         }
-    }
-
-    /// Returns `true` if the matrix has been frozen.
-    pub fn is_frozen(&self) -> bool {
-        matches!(self.data, Storage::Shared(_))
     }
 
     /// Returns the row at `index`, or an error if out of bounds.
@@ -125,12 +112,7 @@ impl RowMatrix {
         Ok(self.row_unchecked(index))
     }
 
-    /// Returns the row at `index` as a reference-counted slice of the
-    /// matrix buffer.
-    ///
-    /// Zero-copy once the matrix is [frozen](Self::freeze); copies the row
-    /// otherwise.
-    pub fn row_bytes(&self, index: usize) -> Result<Bytes> {
+    pub(crate) fn row_bytes(&self, index: usize) -> Result<Bytes> {
         if index >= self.rows {
             return Err(Error::InvalidIndex(index, self.rows));
         }

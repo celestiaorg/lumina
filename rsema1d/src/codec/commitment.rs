@@ -107,8 +107,7 @@ impl ExtendedData {
         params: &Parameters,
     ) -> Result<Self> {
         extended_rows.extended_view(params)?;
-        // Nothing below mutates the rows; freezing lets row proofs share the
-        // buffer instead of copying every row that goes on the wire.
+        // Share encoded rows with inclusion proofs.
         extended_rows.freeze();
 
         let row_tree = build_row_tree(&extended_rows, params);
@@ -263,5 +262,21 @@ mod tests {
         );
         assert_eq!(ext_data.rlc_orig.len(), params.k);
         assert_eq!(ext_data.rlc_extended.len(), params.k + params.n);
+    }
+
+    #[test]
+    fn row_inclusion_proof_shares_matrix_storage() {
+        let params = Parameters::new(4, 4, 64).unwrap();
+        let rows = RowMatrix::with_shape(
+            vec![0; params.total_rows() * params.row_size],
+            params.total_rows(),
+            params.row_size,
+        )
+        .unwrap();
+        let ext_data = ExtendedData::generate_from_extended_rows(rows, &params).unwrap();
+
+        let proof = ext_data.generate_row_inclusion_proof(3).unwrap();
+
+        assert_eq!(proof.row.as_ptr(), ext_data.row(3).unwrap().as_ptr());
     }
 }

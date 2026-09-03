@@ -79,8 +79,7 @@ pub(crate) fn blob_row_to_row_proof(
 ///
 /// Shards carry the RLC vector of the K original rows (16 bytes per row) so
 /// the validator can verify each row without having enough rows to reconstruct.
-#[doc(hidden)]
-pub fn build_upload_shard(
+pub(crate) fn build_upload_shard(
     proofs: &[rsema1d::RowInclusionProof],
     rlc_vector: &[rsema1d::GF128],
 ) -> proto::BlobShard {
@@ -92,10 +91,7 @@ pub fn build_upload_shard(
         rlcs.extend_from_slice(&rlc.to_bytes());
     }
 
-    proto::BlobShard {
-        rows,
-        rlcs: rlcs.into(),
-    }
+    proto::BlobShard { rows, rlcs }
 }
 
 /// Parse a proto [`proto::DownloadShardResponse`] into a [`DownloadResponse`].
@@ -270,7 +266,7 @@ mod tests {
                     data: vec![1u8; 64].into(),
                     proof: vec![vec![2u8; 32]],
                 }],
-                rlcs: vec![9u8; 32].into(), // 2 RLC values
+                rlcs: vec![9u8; 32], // 2 RLC values
             }),
         };
 
@@ -291,10 +287,7 @@ mod tests {
     fn parse_download_response_invalid_rlc_length() {
         for rlcs in [vec![], vec![1u8; 15]] {
             let resp = proto::DownloadShardResponse {
-                shard: Some(proto::BlobShard {
-                    rows: vec![],
-                    rlcs: rlcs.into(),
-                }),
+                shard: Some(proto::BlobShard { rows: vec![], rlcs }),
             };
             assert!(parse_download_response(resp).is_err());
         }
