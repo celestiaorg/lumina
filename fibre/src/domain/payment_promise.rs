@@ -45,7 +45,7 @@ pub struct PaymentPromise {
     pub height: u64,
     /// The namespace the blob is associated with.
     pub namespace: Namespace,
-    /// Upload size of the blob (with padding, without parity), matching `Blob::upload_size()`.
+    /// Upload size of the blob (with padding, without parity), matching `EncodedBlob::upload_size()`.
     pub upload_size: u32,
     /// Version of the blob format.
     pub blob_version: u32,
