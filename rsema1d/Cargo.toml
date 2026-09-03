@@ -20,6 +20,9 @@ serde_json.workspace = true
 hex.workspace = true
 num_cpus = "1.17"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+memmap2 = "0.9"
+
 [dev-dependencies]
 rand.workspace = true
 rand_chacha = "0.3.1"

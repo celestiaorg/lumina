@@ -165,9 +165,8 @@ impl EncodedBlob {
         // Write header + data directly into the first K rows; parity rows stay
         // zeroed and will be filled by encode_in_place.
         let total_rows = cfg.original_rows + cfg.parity_rows;
-        let mut flat = vec![0u8; total_rows * row_size];
-        header.encode_into_buffer(data, &mut flat);
-        let extended = rsema1d::RowMatrix::with_shape(flat, total_rows, row_size)?;
+        let mut extended = rsema1d::RowMatrix::zeroed(total_rows, row_size)?;
+        header.encode_into_buffer(data, extended.as_row_major_mut());
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
         let (extended_data, commitment, _) =
             rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
