@@ -4896,6 +4896,7 @@ dependencies = [
  "criterion",
  "getrandom 0.2.17",
  "hex",
+ "num_cpus",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rayon",
