@@ -21,6 +21,10 @@
 //! ```
 //!
 //! A fast sanity pass (each case runs once) is `-- --test`.
+//!
+//! The bench frees one large block before measuring so that glibc's dynamic
+//! `mmap` threshold is the same in every run (see `pin_allocator_state`);
+//! without it the 7 MiB cases flip between two modes about 20% apart.
 
 use std::hint::black_box;
 use std::time::Duration;
@@ -159,7 +163,23 @@ criterion_group!(
     bench_commitment_from_shares
 );
 
+/// Put glibc's allocator in a steady state before measuring.
+///
+/// glibc raises its `mmap` threshold dynamically the first time it frees a
+/// large `mmap`-backed block. Whether the multi-megabyte buffers in these
+/// benches then come from the heap or from fresh `mmap` calls (page faults on
+/// every iteration) depends on allocation history, which made `blob_new/7MiB`
+/// flip between two modes ~20% apart from run to run. Freeing one large block
+/// up front raises the threshold once, so every run sees the same state, the
+/// one a long-running process is in anyway.
+pub(super) fn pin_allocator_state() {
+    let mut block = vec![0u8; 24 * MIB];
+    black_box(&mut block);
+    drop(block);
+}
+
 pub(super) fn main() {
+    pin_allocator_state();
     benches();
     Criterion::default().configure_from_args().final_summary();
 }
