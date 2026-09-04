@@ -97,22 +97,12 @@ impl PartialEq for Storage {
 impl Eq for Storage {}
 
 /// Contiguous row-major byte matrix (rows × row_size).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowMatrix {
     data: Storage,
     row_size: usize,
     rows: usize,
 }
-
-impl PartialEq for RowMatrix {
-    fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows
-            && self.row_size == other.row_size
-            && self.as_row_major() == other.as_row_major()
-    }
-}
-
-impl Eq for RowMatrix {}
 
 impl RowMatrix {
     fn checked_len(rows: usize, row_size: usize) -> Result<usize> {
@@ -335,6 +325,18 @@ mod tests {
             };
             assert!(message.contains("overflow"));
         }
+    }
+
+    #[test]
+    fn mutating_frozen_matrix_does_not_modify_shared_rows() {
+        let mut matrix = RowMatrix::with_shape(vec![0; 128], 2, 64).unwrap();
+        matrix.freeze();
+        let row = matrix.row_bytes(0).unwrap();
+
+        matrix.row_mut(0).unwrap()[0] = 1;
+
+        assert_eq!(row[0], 0);
+        assert_eq!(matrix.row(0).unwrap()[0], 1);
     }
 
     #[cfg(target_os = "linux")]
