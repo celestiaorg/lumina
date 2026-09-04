@@ -83,7 +83,7 @@ impl Clone for Storage {
                 clone.as_mut_slice().copy_from_slice(data);
                 clone
             }
-            Self::Shared(data) => Self::Shared(data.clone())
+            Self::Shared(data) => Self::Shared(data.clone()),
         }
     }
 }
@@ -361,10 +361,10 @@ mod tests {
     fn large_heap_clone_stays_heap() {
         let rows = HUGE_PAGE_THRESHOLD / 64;
         let matrix = RowMatrix::with_shape(vec![1u8; HUGE_PAGE_THRESHOLD], rows, 64).unwrap();
-        assert!(matches!(&matrix.data, RowStorage::Heap(_)));
+        assert!(matches!(&matrix.data, Storage::Heap(_)));
 
         let clone = matrix.clone();
-        assert!(matches!(&clone.data, RowStorage::Heap(_)));
+        assert!(matches!(&clone.data, Storage::Heap(_)));
         assert_eq!(clone, matrix);
     }
 }
