@@ -57,9 +57,15 @@ impl fmt::Debug for RowStorage {
 
 impl Clone for RowStorage {
     fn clone(&self) -> Self {
-        let mut clone = Self::zeroed(self.as_slice().len());
-        clone.as_mut_slice().copy_from_slice(self.as_slice());
-        clone
+        match self {
+            Self::Heap(data) => Self::Heap(data.clone()),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(data) => {
+                let mut clone = Self::zeroed(data.len());
+                clone.as_mut_slice().copy_from_slice(data);
+                clone
+            }
+        }
     }
 }
 
@@ -80,15 +86,24 @@ pub struct RowMatrix {
 }
 
 impl RowMatrix {
+    fn checked_len(rows: usize, row_size: usize) -> Result<usize> {
+        rows.checked_mul(row_size).ok_or_else(|| {
+            Error::InvalidParameters(format!(
+                "row buffer size overflow: rows={rows} row_size={row_size}"
+            ))
+        })
+    }
+
     /// Create a matrix from a flat byte buffer with the given shape.
     pub fn with_shape(data: Vec<u8>, rows: usize, row_size: usize) -> Result<Self> {
         if row_size == 0 {
             return Err(Error::InvalidParameters("row_size must be > 0".to_string()));
         }
-        if rows * row_size != data.len() {
+        let expected_len = Self::checked_len(rows, row_size)?;
+        if expected_len != data.len() {
             return Err(Error::InvalidParameters(format!(
                 "row buffer size mismatch: expected {} bytes (rows={} row_size={}), got {}",
-                rows * row_size,
+                expected_len,
                 rows,
                 row_size,
                 data.len()
@@ -106,8 +121,9 @@ impl RowMatrix {
         if row_size == 0 {
             return Err(Error::InvalidParameters("row_size must be > 0".to_string()));
         }
+        let len = Self::checked_len(rows, row_size)?;
         Ok(Self {
-            data: RowStorage::zeroed(rows * row_size),
+            data: RowStorage::zeroed(len),
             row_size,
             rows,
         })
@@ -134,6 +150,8 @@ impl RowMatrix {
     }
 
     /// Consumes the matrix and returns a flat byte buffer.
+    ///
+    /// Heap storage is returned directly. Memory-mapped storage is copied into a new allocation.
     pub fn into_row_major(self) -> Vec<u8> {
         self.data.into_vec()
     }
@@ -237,6 +255,7 @@ impl AsRef<[u8]> for RowMatrix {
 }
 
 impl From<RowMatrix> for Vec<u8> {
+    /// Uses the same allocation behavior as [`RowMatrix::into_row_major`].
     fn from(value: RowMatrix) -> Self {
         value.into_row_major()
     }
@@ -257,17 +276,41 @@ mod tests {
         assert_eq!(clone.into_row_major(), matrix.as_row_major());
     }
 
+    #[test]
+    fn shape_size_overflow_is_rejected() {
+        for result in [
+            RowMatrix::with_shape(Vec::new(), 2, usize::MAX),
+            RowMatrix::zeroed(2, usize::MAX),
+        ] {
+            let Error::InvalidParameters(message) = result.unwrap_err() else {
+                panic!("expected invalid parameters error");
+            };
+            assert!(message.contains("overflow"));
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
-    fn large_zeroed_matrix_uses_mapping() {
+    fn large_zeroed_matrix_round_trip() {
         let mut matrix = RowMatrix::zeroed(HUGE_PAGE_THRESHOLD / 64, 64).unwrap();
-        assert!(matches!(matrix.data, RowStorage::Mapped(_)));
         assert!(matrix.as_row_major().iter().all(|byte| *byte == 0));
 
         matrix.row_mut(1).unwrap()[1] = 7;
         let clone = matrix.clone();
         assert_eq!(clone, matrix);
         assert_eq!(clone.into_row_major(), matrix.as_row_major());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn large_heap_clone_stays_heap() {
+        let rows = HUGE_PAGE_THRESHOLD / 64;
+        let matrix = RowMatrix::with_shape(vec![1u8; HUGE_PAGE_THRESHOLD], rows, 64).unwrap();
+        assert!(matches!(&matrix.data, RowStorage::Heap(_)));
+
+        let clone = matrix.clone();
+        assert!(matches!(&clone.data, RowStorage::Heap(_)));
+        assert_eq!(clone, matrix);
     }
 }
 
