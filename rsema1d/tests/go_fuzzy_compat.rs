@@ -410,7 +410,7 @@ fn go_fuzzy_vectors_match_rust() {
 
             let inclusion = RowInclusionProof {
                 index: inclusion_test.index,
-                row: row.clone(),
+                row: row.clone().into(),
                 row_proof: row_proof.clone(),
                 rlc_root: inclusion_rlc_root,
             };
@@ -435,7 +435,7 @@ fn go_fuzzy_vectors_match_rust() {
                 case.name, inclusion_test.index
             );
             assert_eq!(
-                rust_inclusion.row.as_slice(),
+                rust_inclusion.row.as_ref(),
                 row.as_slice(),
                 "{}: row inclusion row mismatch for index {}",
                 case.name,

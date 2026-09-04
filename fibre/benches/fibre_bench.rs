@@ -308,6 +308,58 @@ fn bench_parse_download_response(c: &mut Criterion) {
     group.finish();
 }
 
+/// Upload path from row proof generation through protobuf encoding for one
+/// production-sized validator shard from a maximum-sized blob.
+fn bench_upload_shard_encode(c: &mut Criterion) {
+    use prost::Message;
+
+    let mut group = c.benchmark_group("upload_shard_encode");
+    group.measurement_time(CHEAP_MEASUREMENT);
+    group.noise_threshold(0.03);
+
+    let blob = EncodedBlob::new(
+        &generate_data(BlobConfig::v0().max_data_size),
+        BlobConfig::v0(),
+    )
+    .unwrap();
+    let rlcs = blob.rlc_coeffs().to_vec();
+    let shard = rows_per_shard();
+
+    let request = |proofs: &[rsema1d::RowInclusionProof]| {
+        let rows = proofs
+            .iter()
+            .map(|proof| proto::BlobRow {
+                index: proof.index as u32,
+                data: proof.row.clone(),
+                proof: proof.row_proof.iter().map(|hash| hash.to_vec()).collect(),
+            })
+            .collect();
+        let rlcs = rlcs.iter().flat_map(|rlc| rlc.to_bytes()).collect();
+
+        proto::UploadShardRequest {
+            promise: None,
+            shard: Some(proto::BlobShard { rows, rlcs }),
+        }
+    };
+    let wire_len = {
+        let proofs: Vec<_> = (0..shard).map(|i| blob.row(i).unwrap()).collect();
+        request(&proofs).encoded_len()
+    };
+    group.throughput(Throughput::Bytes(wire_len as u64));
+
+    group.bench_function(
+        BenchmarkId::new("proofs_build_encode", format!("shard_{shard}_rows_128MB")),
+        |b| {
+            b.iter(|| {
+                let proofs: Vec<_> = (0..shard).map(|i| blob.row(i).unwrap()).collect();
+                request(black_box(&proofs)).encode_to_vec()
+            });
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_blob_new,
@@ -315,6 +367,7 @@ criterion_group!(
     bench_payment_promise,
     bench_signature_set,
     bench_validator_assign,
-    bench_parse_download_response
+    bench_parse_download_response,
+    bench_upload_shard_encode
 );
 criterion_main!(benches);
