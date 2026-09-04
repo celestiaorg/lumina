@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use celestia_fibre::{
-    Blob, BlobConfig, DEFAULT_PROTOCOL_PARAMS, DownloadOptions, FibreClient, FibreClientConfig,
-    GrpcHostRegistry, GrpcSetGetter, GrpcValidatorConnector,
+    BlobConfig, DEFAULT_PROTOCOL_PARAMS, DownloadOptions, EncodedBlob, FibreClient,
+    FibreClientConfig, GrpcHostRegistry, GrpcSetGetter, GrpcValidatorConnector,
 };
 use celestia_grpc::{GrpcClient, TxConfig};
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
@@ -577,7 +577,7 @@ async fn run_lifecycle(
     let encoded = tokio::task::spawn_blocking(move || {
         let _permit = encode_permit;
         let payload = make_payload(sequence, payload_size);
-        encode_pool.install(|| Blob::new_owned(payload, BlobConfig::v0()))
+        encode_pool.install(|| EncodedBlob::new_owned(payload, BlobConfig::v0()))
     })
     .await;
     let _ = event_tx.send(Event::StageFinished {
@@ -653,10 +653,7 @@ async fn run_lifecycle(
         .await;
         drop(download_permit);
         let blob = downloaded?;
-        let data = blob.data().ok_or_else(|| StageFailure {
-            stage: "download_verify",
-            error: anyhow!("downloaded blob has no reconstructed data"),
-        })?;
+        let data = blob.data();
         verify_payload(data, sequence, context.payload_size).map_err(|error| StageFailure {
             stage: "download_verify",
             error: anyhow!(error),

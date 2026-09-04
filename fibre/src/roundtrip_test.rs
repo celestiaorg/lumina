@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::blob::Blob;
+use crate::blob::EncodedBlob;
 use crate::test_utils::{
     MockConnector, MockValidatorConnection, build_test_client, make_connector, make_validator,
     test_blob_config,
@@ -17,7 +17,7 @@ async fn upload_then_download_roundtrip() {
     let cfg = test_blob_config();
     let original_data: Vec<u8> = (0u8..200).collect();
 
-    let blob = Blob::new(&original_data, cfg.clone()).unwrap();
+    let blob = EncodedBlob::new(&original_data, cfg.clone()).unwrap();
     let blob_id = blob.id().clone();
 
     let validators = vec![
@@ -66,7 +66,7 @@ async fn upload_then_download_roundtrip() {
 
     let downloaded = downloaded.unwrap();
     assert_eq!(
-        downloaded.data().unwrap(),
+        downloaded.data(),
         &original_data,
         "downloaded data should match original"
     );
@@ -78,7 +78,7 @@ async fn roundtrip_with_partial_validator_failure() {
     let cfg = test_blob_config();
     let original_data: Vec<u8> = (0u8..200).collect();
 
-    let blob = Blob::new(&original_data, cfg.clone()).unwrap();
+    let blob = EncodedBlob::new(&original_data, cfg.clone()).unwrap();
     let blob_id = blob.id().clone();
 
     // 5 validators: first 3 succeed, last 2 fail.
@@ -134,5 +134,5 @@ async fn roundtrip_with_partial_validator_failure() {
         "download should succeed: {:?}",
         downloaded.err()
     );
-    assert_eq!(downloaded.unwrap().data().unwrap(), &original_data);
+    assert_eq!(downloaded.unwrap().data(), &original_data);
 }

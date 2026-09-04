@@ -1,7 +1,7 @@
 //! End-to-end smoke test: a real FibreClient against the mock network.
 #![cfg(not(target_arch = "wasm32"))]
 
-use celestia_fibre::{Blob, BlobConfig, DownloadOptions, FibreClient, FibreClientConfig};
+use celestia_fibre::{BlobConfig, DownloadOptions, EncodedBlob, FibreClient, FibreClientConfig};
 use celestia_types::nmt::Namespace;
 use fibre_mock_server::{MockNetworkConfig, spawn_mock_network};
 
@@ -33,7 +33,7 @@ async fn upload_download_roundtrip() {
     let signing_key = k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
     let namespace = Namespace::new_v0(b"mock").unwrap();
     let data = b"hello from the fibre mock server ".repeat(64);
-    let blob = Blob::new(&data, BlobConfig::for_version(0).unwrap()).unwrap();
+    let blob = EncodedBlob::new(&data, BlobConfig::for_version(0).unwrap()).unwrap();
     let blob_id = blob.id().clone();
 
     let signed = fibre.upload(&signing_key, namespace, blob).await.unwrap();
@@ -49,7 +49,7 @@ async fn upload_download_roundtrip() {
         .download(&blob_id, DownloadOptions::default())
         .await
         .unwrap();
-    assert_eq!(downloaded.data(), Some(data.as_slice()));
+    assert_eq!(downloaded.data(), data.as_slice());
 
     handle.shutdown();
 }
@@ -67,7 +67,7 @@ async fn no_store_uploads_succeed_but_downloads_fail() {
     let signing_key = k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
     let namespace = Namespace::new_v0(b"mock").unwrap();
     let data = b"discarded after signing ".repeat(64);
-    let blob = Blob::new(&data, BlobConfig::for_version(0).unwrap()).unwrap();
+    let blob = EncodedBlob::new(&data, BlobConfig::for_version(0).unwrap()).unwrap();
     let blob_id = blob.id().clone();
 
     // Upload still collects signatures (2/3 of 4 validators).
@@ -91,7 +91,7 @@ async fn download_unknown_blob_fails() {
 
     // A valid blob id that was never uploaded; goes through the real client,
     // so this also exercises the TLS handshake with every validator.
-    let blob = Blob::new(b"never uploaded", BlobConfig::for_version(0).unwrap()).unwrap();
+    let blob = EncodedBlob::new(b"never uploaded", BlobConfig::for_version(0).unwrap()).unwrap();
     let result = fibre.download(blob.id(), DownloadOptions::default()).await;
     assert!(result.is_err(), "download of unknown blob must fail");
 
@@ -131,7 +131,7 @@ async fn payment_roundtrip() {
 
     let namespace = Namespace::new_v0(b"mock").unwrap();
     let data = b"paid blob through the mock app node ".repeat(64);
-    let blob = Blob::new(&data, BlobConfig::for_version(0).unwrap()).unwrap();
+    let blob = EncodedBlob::new(&data, BlobConfig::for_version(0).unwrap()).unwrap();
     let blob_id = blob.id().clone();
 
     let signed = fibre.upload(&signing_key, namespace, blob).await.unwrap();
@@ -159,7 +159,7 @@ async fn payment_roundtrip() {
         .download(&blob_id, DownloadOptions::default())
         .await
         .unwrap();
-    assert_eq!(downloaded.data(), Some(data.as_slice()));
+    assert_eq!(downloaded.data(), data.as_slice());
 
     handle.shutdown();
 }
