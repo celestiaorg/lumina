@@ -102,7 +102,11 @@ impl ValidatorSet {
         min_rows: usize,
         liveness_threshold: Fraction,
     ) -> ShardMap {
-        if self.validators.is_empty() || total_rows == 0 || min_rows == 0 {
+        if self.validators.is_empty()
+            || total_rows == 0
+            || min_rows == 0
+            || self.total_voting_power() <= 0
+        {
             return ShardMap::new(HashMap::new());
         }
 
@@ -128,7 +132,7 @@ impl ValidatorSet {
 
     /// Selects validators for shard download, ordered by priority.
     ///
-    /// Returns ordered `(validator_index, expected_rows)` pairs. Higher-stake
+    /// Returns ordered `(expected_rows, validator)` pairs. Higher-stake
     /// validators come first (priority group), followed by the tail group.
     /// Both groups are shuffled weighted by stake.
     pub fn select(
@@ -137,7 +141,7 @@ impl ValidatorSet {
         min_rows: usize,
         liveness_threshold: Fraction,
     ) -> Vec<(usize, &ValidatorInfo)> {
-        if self.validators.is_empty() {
+        if self.validators.is_empty() || self.total_voting_power() <= 0 {
             return Vec::new();
         }
 
@@ -274,6 +278,13 @@ impl TryFrom<&tendermint_proto::v0_38::types::Validator> for ValidatorInfo {
                 .expect("sha256 output is always 32 bytes")
         };
 
+        if proto_val.voting_power < 0 {
+            return Err(FibreError::InvalidData(format!(
+                "validator has negative voting power: {}",
+                proto_val.voting_power
+            )));
+        }
+
         Ok(ValidatorInfo {
             address,
             pubkey,
@@ -376,6 +387,13 @@ mod assignment_tests {
     fn zero_min_rows_returns_empty_map() {
         let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
         let map = set.assign([0u8; 32], 100, 50, 0, default_liveness());
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn zero_voting_power_returns_empty_map() {
+        let set = ValidatorSet::new(vec![make_validator(0, 1), make_validator(0, 2)], 0);
+        let map = set.assign([0u8; 32], 100, 50, 10, default_liveness());
         assert!(map.is_empty());
     }
 
@@ -609,6 +627,13 @@ mod selection_tests {
     #[test]
     fn empty_validators_returns_empty() {
         let set = ValidatorSet::new(vec![], 0);
+        let selected = set.select(100, 10, default_liveness());
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn zero_voting_power_returns_empty() {
+        let set = ValidatorSet::new(vec![make_validator(0, 1), make_validator(0, 2)], 0);
         let selected = set.select(100, 10, default_liveness());
         assert!(selected.is_empty());
     }

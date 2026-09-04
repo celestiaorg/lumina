@@ -294,6 +294,17 @@ mod tests {
     }
 
     #[test]
+    fn threshold_uses_floor_and_inclusive_comparison() {
+        let (sk1, v1) = make_validator(33);
+        let (_sk2, v2) = make_validator(17);
+        let data = b"floor test";
+        let ss = SignatureSet::new(vec![v1.clone(), v2], fraction(2, 3), data.to_vec());
+
+        let met = ss.add(&v1, &sign(&sk1, data)).unwrap();
+        assert!(met, "33 >= floor(50 * 2/3) = 33");
+    }
+
+    #[test]
     fn duplicate_add_is_idempotent() {
         // Adding the same validator twice does NOT double-count voting power.
         // The signature map entry is overwritten but voting_power stays the same.
