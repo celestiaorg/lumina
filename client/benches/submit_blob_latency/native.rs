@@ -152,7 +152,16 @@ fn bench_broadcast_blobs(c: &mut Criterion, runtime: &Runtime, client: &GrpcClie
     group.finish();
 }
 
+/// Put glibc's allocator in a steady state before measuring; see the same
+/// helper in `types/benches/blob/native.rs` for the reasoning.
+fn pin_allocator_state() {
+    let mut block = vec![0u8; 24 * MIB];
+    black_box(&mut block);
+    drop(block);
+}
+
 pub(super) fn main() {
+    pin_allocator_state();
     let runtime = Runtime::new().expect("tokio runtime");
     // The transport is created eagerly and needs a runtime context.
     let _runtime_context = runtime.enter();
