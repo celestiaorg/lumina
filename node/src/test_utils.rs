@@ -2,23 +2,25 @@
 
 use std::time::Duration;
 
+use blockstore::Blockstore;
 use celestia_proto::p2p::pb::{HeaderRequest, header_request::Data};
 use celestia_types::ExtendedHeader;
 use celestia_types::hash::Hash;
 use celestia_types::sample::Sample;
 use celestia_types::test_utils::ExtendedHeaderGenerator;
-use lumina_utils::time::timeout;
+use libp2p::Multiaddr;
+use lumina_utils::time::{sleep, timeout};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
-    NodeBuilder,
+    Node, NodeBuilder,
     block_ranges::{BlockRange, BlockRanges},
     blockstore::InMemoryBlockstore,
     daser::DaserCmd,
     network::Network,
     p2p::{P2pCmd, P2pError},
     peer_tracker::PeerTrackerInfo,
-    store::{InMemoryStore, VerifiedExtendedHeaders},
+    store::{InMemoryStore, Store, VerifiedExtendedHeaders},
     utils::OneshotResultSender,
 };
 
@@ -61,6 +63,30 @@ pub fn test_node_builder() -> NodeBuilder<InMemoryBlockstore, InMemoryStore> {
 /// [`NodeBuilder`] with listen address and default values for the usage in tests.
 pub fn listening_test_node_builder() -> NodeBuilder<InMemoryBlockstore, InMemoryStore> {
     test_node_builder().listen(["/ip4/0.0.0.0/tcp/0".parse().unwrap()])
+}
+
+/// Wait until `node` reports at least one listening address and return them.
+///
+/// Listening on an unspecified address (e.g. `/ip4/0.0.0.0/tcp/0`) resolves the concrete
+/// per-interface addresses asynchronously, so [`Node::listeners`] can return an empty list
+/// right after the node started, even after it connected to a peer. Tests that pass the
+/// addresses as bootnodes to another node must use this instead of `listeners()` directly.
+pub async fn wait_listening<B, S>(node: &Node<B, S>) -> Vec<Multiaddr>
+where
+    B: Blockstore + 'static,
+    S: Store + 'static,
+{
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let addrs = node.listeners().await.expect("node stopped");
+            if !addrs.is_empty() {
+                return addrs;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("node did not report any listening address in time")
 }
 
 /// Extends test header generator for easier insertion into the store

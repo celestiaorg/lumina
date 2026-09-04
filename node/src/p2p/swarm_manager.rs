@@ -543,6 +543,15 @@ where
             } => {
                 self.on_peer_disconnected(&peer_id, connection_id);
             }
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                debug!("Outgoing connection to {peer_id:?} failed: {error}");
+            }
+            SwarmEvent::NewListenAddr { address, .. } => {
+                debug!("Listening on {address}");
+            }
+            SwarmEvent::ExpiredListenAddr { address, .. } => {
+                debug!("Stopped listening on {address}");
+            }
             _ => {}
         }
 
