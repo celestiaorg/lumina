@@ -23,7 +23,7 @@ Environment variables:
                    needs wasm-bindgen-test-runner (wasm-bindgen-cli at the
                    wasm-bindgen version in Cargo.lock) and node on PATH
   WASM_BENCH_ARGS  extra runner arguments for the wasm bench, e.g. a name
-                   filter or "--ignored" for the 128 MiB cases (default: none)
+                   filter or "--include-ignored 128mb" (default: none)
   CARGO_TARGET_DIR Cargo target directory (default: monorepo ../target)
   GO_CACHE_DIR     Go build cache directory (default: /tmp/rsema1d-go-build-cache)
 EOF

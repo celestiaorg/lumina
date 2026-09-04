@@ -66,7 +66,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test.workspace = true
-web-time = "1.1"
 
 [[bench]]
 name = "fibre_bench"

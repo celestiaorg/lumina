@@ -18,6 +18,11 @@ cargo test
 
 # wasm32 benchmarks, run in Node (needs wasm-bindgen-cli matching Cargo.lock)
 cargo bench --target wasm32-unknown-unknown --bench codec_bench
+# list cases or filter by name
+cargo bench --target wasm32-unknown-unknown --bench codec_bench -- --list
+cargo bench --target wasm32-unknown-unknown --bench codec_bench -- encode_8mb
+# opt into the ignored 128 MiB cases
+cargo bench --target wasm32-unknown-unknown --bench codec_bench -- --include-ignored 128mb
 RUN_RUST_BENCH=0 RUN_GO_BENCH=0 RUN_WASM_BENCH=1 ./scripts/run_benchmarks.sh
 
 # regenerate Go fuzzy vectors and run Rust Go-compat test
