@@ -26,6 +26,7 @@
 //! `LUMINA_ALLOC_PRIVATE_KEY` environment variables.
 
 use std::error::Error;
+use std::fmt;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
@@ -83,6 +84,10 @@ impl Phase {
             Self::ClientSubmit => "client-submit",
             Self::Full => "full",
         }
+    }
+
+    fn is_networked(self) -> bool {
+        !matches!(self, Self::Construct)
     }
 }
 
@@ -203,6 +208,17 @@ impl Config {
     }
 }
 
+/// Allocation counters collected while the profiler was active.
+#[derive(Debug)]
+struct ProfileSummary {
+    total_blocks: u64,
+    total_bytes: u64,
+    max_blocks: usize,
+    max_bytes: usize,
+    curr_blocks: usize,
+    curr_bytes: usize,
+}
+
 #[tokio::main(flavor = "current_thread")]
 pub(super) async fn run() -> Result<()> {
     let Some(config) = Config::parse()? else {
@@ -210,44 +226,91 @@ pub(super) async fn run() -> Result<()> {
     };
     fs::create_dir_all(&config.profile_dir)?;
 
+    if config.phase.is_networked() {
+        println!(
+            "profiling {} ({}, {}) against {}",
+            config.phase.as_str(),
+            config.scenario.as_str(),
+            HumanBytes(config.size as u64),
+            config.grpc_url
+        );
+    } else {
+        println!(
+            "profiling {} ({}, {})",
+            config.phase.as_str(),
+            config.scenario.as_str(),
+            HumanBytes(config.size as u64)
+        );
+    }
+
     let profile_path = config.profile_path();
-    match config.phase {
+    let summary = match config.phase {
         Phase::Construct => profile_construct(&config, &profile_path).await?,
         Phase::Broadcast => profile_broadcast(&config, &profile_path).await?,
         Phase::GrpcSubmit => profile_grpc_submit(&config, &profile_path).await?,
         Phase::ClientSubmit => profile_client_submit(&config, &profile_path).await?,
         Phase::Full => profile_full(&config, &profile_path).await?,
-    }
+    };
+
+    println!("profile: {}", profile_path.display());
+    println!(
+        "total: {} ({} bytes) in {} allocations",
+        HumanBytes(summary.total_bytes),
+        summary.total_bytes,
+        summary.total_blocks
+    );
+    println!(
+        "peak:  {} ({} bytes) in {} live allocations",
+        HumanBytes(summary.max_bytes as u64),
+        summary.max_bytes,
+        summary.max_blocks
+    );
+    println!(
+        "end:   {} ({} bytes) in {} live allocations",
+        HumanBytes(summary.curr_bytes as u64),
+        summary.curr_bytes,
+        summary.curr_blocks
+    );
 
     Ok(())
 }
 
-async fn profile_construct(config: &Config, profile_path: &Path) -> Result<()> {
+async fn profile_construct(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
     let payload = vec![0xA5; config.size];
     let address = build_grpc(config, Scenario::Happy)?
         .get_account_address()
         .ok_or_else(|| argument_error("benchmark client has no signer"))?;
     let namespace = benchmark_namespace();
 
-    let _profiler = start_profiler(profile_path);
+    let profiler = start_profiler(profile_path);
     let blob = Blob::new(namespace, payload, Some(address))?;
     black_box(&blob);
-    Ok(())
+    drop(blob);
+    Ok(finish_profiler(profiler))
 }
 
-async fn profile_broadcast(config: &Config, profile_path: &Path) -> Result<()> {
+async fn profile_broadcast(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
     let client = build_grpc(config, config.scenario)?;
     // The bytes deliberately aren't a valid Cosmos transaction. This phase
     // isolates request cloning and gRPC framing, so rejection after the server
     // has received the complete request is the expected outcome.
     let tx_bytes = vec![0xA5; config.size];
 
-    let _profiler = start_profiler(profile_path);
-    client.broadcast_tx(tx_bytes, BroadcastMode::Sync).await?;
-    Ok(())
+    let profiler = start_profiler(profile_path);
+    let result = client.broadcast_tx(tx_bytes, BroadcastMode::Sync).await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    match result {
+        Ok(response) => {
+            black_box(response);
+        }
+        Err(error) => println!("server response after receiving transport payload: {error}"),
+    }
+    Ok(summary)
 }
 
-async fn profile_grpc_submit(config: &Config, profile_path: &Path) -> Result<()> {
+async fn profile_grpc_submit(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
     let client = build_grpc(config, Scenario::Happy)?;
     warm_grpc(&client).await?;
     if config.scenario == Scenario::StaleSequence {
@@ -260,12 +323,16 @@ async fn profile_grpc_submit(config: &Config, profile_path: &Path) -> Result<()>
     let blob = make_blob(config.size, address)?;
     let tx_config = submission_config(config.scenario);
 
-    let _profiler = start_profiler(profile_path);
-    client.submit_blobs(&[blob], tx_config).await?;
-    Ok(())
+    let profiler = start_profiler(profile_path);
+    let result = client.submit_blobs(&[blob], tx_config).await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    black_box(result?);
+    Ok(summary)
 }
 
-async fn profile_client_submit(config: &Config, profile_path: &Path) -> Result<()> {
+async fn profile_client_submit(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
     let client = build_client(config).await?;
     warm_client(&client).await?;
     if config.scenario == Scenario::StaleSequence {
@@ -275,15 +342,16 @@ async fn profile_client_submit(config: &Config, profile_path: &Path) -> Result<(
     let blob = make_blob(config.size, client.address()?)?;
     let tx_config = submission_config(config.scenario);
 
-    let _profiler = start_profiler(profile_path);
-    client
-        .state()
-        .submit_pay_for_blob(&[blob], tx_config)
-        .await?;
-    Ok(())
+    let profiler = start_profiler(profile_path);
+    let result = client.state().submit_pay_for_blob(&[blob], tx_config).await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    black_box(result?);
+    Ok(summary)
 }
 
-async fn profile_full(config: &Config, profile_path: &Path) -> Result<()> {
+async fn profile_full(config: &Config, profile_path: &Path) -> Result<ProfileSummary> {
     let client = build_client(config).await?;
     warm_client(&client).await?;
     if config.scenario == Scenario::StaleSequence {
@@ -295,13 +363,21 @@ async fn profile_full(config: &Config, profile_path: &Path) -> Result<()> {
     let namespace = benchmark_namespace();
     let tx_config = submission_config(config.scenario);
 
-    let _profiler = start_profiler(profile_path);
-    let blob = Blob::new(namespace, payload, Some(address))?;
-    client
-        .state()
-        .submit_pay_for_blob(&[blob], tx_config)
-        .await?;
-    Ok(())
+    let profiler = start_profiler(profile_path);
+    let result = async {
+        let blob = Blob::new(namespace, payload, Some(address))?;
+        client
+            .state()
+            .submit_pay_for_blob(&[blob], tx_config)
+            .await
+            .map_err(DynError::from)
+    }
+    .await;
+    black_box(&result);
+    let summary = finish_profiler(profiler);
+
+    black_box(result?);
+    Ok(summary)
 }
 
 fn start_profiler(profile_path: &Path) -> dhat::Profiler {
@@ -309,6 +385,20 @@ fn start_profiler(profile_path: &Path) -> dhat::Profiler {
         .file_name(profile_path)
         .trim_backtraces(Some(20))
         .build()
+}
+
+fn finish_profiler(profiler: dhat::Profiler) -> ProfileSummary {
+    let stats = dhat::HeapStats::get();
+    let summary = ProfileSummary {
+        total_blocks: stats.total_blocks,
+        total_bytes: stats.total_bytes,
+        max_blocks: stats.max_blocks,
+        max_bytes: stats.max_bytes,
+        curr_blocks: stats.curr_blocks,
+        curr_bytes: stats.curr_bytes,
+    };
+    drop(profiler);
+    summary
 }
 
 fn build_grpc(config: &Config, scenario: Scenario) -> Result<GrpcClient> {
@@ -424,4 +514,21 @@ OPTIONS:
 The failover scenario is restricted to the broadcast phase so the payload-sized
 request, rather than an account or chain-state query, triggers failover."
     );
+}
+
+struct HumanBytes(u64);
+
+impl fmt::Display for HumanBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const KIB: f64 = 1024.0;
+        const MIB: f64 = KIB * 1024.0;
+        let bytes = self.0 as f64;
+        if bytes >= MIB {
+            write!(formatter, "{:.2} MiB", bytes / MIB)
+        } else if bytes >= KIB {
+            write!(formatter, "{:.2} KiB", bytes / KIB)
+        } else {
+            write!(formatter, "{} B", self.0)
+        }
+    }
 }
