@@ -59,6 +59,7 @@ serde.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion.workspace = true
 jsonrpsee = { workspace = true, features = ["server"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
@@ -69,6 +70,10 @@ wasm-bindgen-test.workspace = true
 name = "submit_blob_allocations"
 harness = false
 required-features = ["allocation-profiling"]
+
+[[bench]]
+name = "submit_blob_latency"
+harness = false
 
 [features]
 default = ['tls-native-roots']
