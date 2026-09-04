@@ -9,7 +9,9 @@ use lumina_node::{
     blockstore::InMemoryBlockstore,
     node::{HeaderExError, Node, NodeError, P2pError},
     store::{InMemoryStore, Store, VerifiedExtendedHeaders},
-    test_utils::{gen_filled_store, listening_test_node_builder, test_node_builder},
+    test_utils::{
+        gen_filled_store, listening_test_node_builder, test_node_builder, wait_listening,
+    },
 };
 use tokio::time::{sleep, timeout};
 
@@ -68,9 +70,7 @@ async fn client_server() {
         .await
         .unwrap();
 
-    // give server a sec to breathe, otherwise occiasionally client has problems with connecting
-    sleep(Duration::from_millis(100)).await;
-    let server_addrs = server.listeners().await.unwrap();
+    let server_addrs = wait_listening(&server).await;
 
     // Client node
     let client = test_node_builder()
@@ -183,12 +183,9 @@ async fn head_selection_with_multiple_peers() {
             .unwrap(),
     );
 
-    // give server a sec to breathe, otherwise occiasionally client has problems with connecting
-    sleep(Duration::from_millis(100)).await;
-
     let mut server_addrs = vec![];
     for s in &servers {
-        server_addrs.extend_from_slice(&s.listeners().await.unwrap()[..]);
+        server_addrs.extend_from_slice(&wait_listening(s).await[..]);
     }
 
     // Client Node
@@ -208,9 +205,7 @@ async fn head_selection_with_multiple_peers() {
         .collect::<Vec<_>>();
     wait_peers_connected(&client, &server_ids).await;
 
-    // give client node a sec to breathe, otherwise occiasionally rogue node has problems with connecting
-    sleep(Duration::from_millis(100)).await;
-    let client_addr = client.listeners().await.unwrap();
+    let client_addr = wait_listening(&client).await;
 
     // Rogue node, connects to client so isn't trusted
     let rogue_node = listening_test_node_builder()
@@ -315,9 +310,7 @@ async fn replaced_header_server_store() {
         .await
         .unwrap();
 
-    // give server a sec to breathe, otherwise occiasionally client has problems with connecting
-    sleep(Duration::from_millis(100)).await;
-    let server_addrs = server.listeners().await.unwrap();
+    let server_addrs = wait_listening(&server).await;
 
     let client = listening_test_node_builder()
         .bootnodes(server_addrs)
@@ -370,9 +363,7 @@ async fn invalidated_header_server_store() {
         .await
         .unwrap();
 
-    // give server a sec to breathe, otherwise occiasionally client has problems with connecting
-    sleep(Duration::from_millis(100)).await;
-    let server_addrs = server.listeners().await.unwrap();
+    let server_addrs = wait_listening(&server).await;
 
     let client = listening_test_node_builder()
         .bootnodes(server_addrs)
@@ -435,9 +426,7 @@ async fn unverified_header_server_store() {
         .await
         .unwrap();
 
-    // give server a sec to breathe, otherwise occiasionally client has problems with connecting
-    sleep(Duration::from_millis(100)).await;
-    let server_addrs = server.listeners().await.unwrap();
+    let server_addrs = wait_listening(&server).await;
 
     let client = listening_test_node_builder()
         .bootnodes(server_addrs)
