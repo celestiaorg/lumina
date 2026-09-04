@@ -18,6 +18,7 @@ rayon = "1.10"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 hex.workspace = true
+num_cpus = "1.17"
 
 [dev-dependencies]
 rand.workspace = true
