@@ -665,6 +665,7 @@ mod tests {
                 - signer.is_some() as usize * appconsts::SIGNER_SIZE;
             let continuation = appconsts::CONTINUATION_SPARSE_SHARE_CONTENT_SIZE;
             let sizes = [
+                0,
                 1,
                 first_share_content - 1,
                 first_share_content,
@@ -676,7 +677,11 @@ mod tests {
             for size in sizes {
                 let shares =
                     split_blob_to_shares(namespace, share_version, &vec![0; size], signer).unwrap();
-                let expected = super::super::shares_needed_for_blob(size, signer.is_some());
+                let expected = if size == 0 {
+                    0
+                } else {
+                    super::super::shares_needed_for_blob(size, signer.is_some())
+                };
 
                 assert_eq!(shares.len(), expected, "blob size {size}");
                 assert_eq!(shares.capacity(), expected, "blob size {size}");
