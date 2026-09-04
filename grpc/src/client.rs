@@ -1069,7 +1069,7 @@ fn extract_sequence(msg: &str) -> Result<u64> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use std::future::IntoFuture;
+    use std::future::{Future, IntoFuture};
     use std::ops::RangeInclusive;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1081,6 +1081,7 @@ mod tests {
     use celestia_types::state::{Coin, ErrorCode};
     use futures::FutureExt;
     use lumina_utils::test_utils::async_test;
+    use lumina_utils::time::{sleep, timeout};
     use rand::{Rng, RngCore};
     use tonic::Code;
 
@@ -1088,9 +1089,27 @@ mod tests {
     use crate::grpc::Context;
     use crate::test_utils::{
         CELESTIA_GRPC_URL, TestAccount, load_account, new_grpc_client, new_rpc_client,
-        new_tx_client, spawn, wait_balance, wait_balances, wait_tx_indexed,
+        new_tx_client, spawn,
     };
     use crate::{Error, TxConfig};
+
+    // Confirmation can precede the transaction index and latest app state.
+    async fn wait_until<T, F, Fut>(what: &str, mut f: F) -> T
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Option<T>>,
+    {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(value) = f().await {
+                    return value;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+    }
 
     #[async_test]
     async fn per_call_context_works() {
@@ -1245,9 +1264,9 @@ mod tests {
             .block_height(tx.height - 1)
             .await
             .unwrap();
-        // the latest state may lag behind the confirmation for a moment
-        let new_balance = wait_balance(&tx_client, &addr, "utia", |coin| {
-            coin.amount() < old_balance.amount()
+        let new_balance = wait_until("latest balance to update", || async {
+            let coin = tx_client.get_balance(&addr, "utia").await.unwrap();
+            (coin.amount() < old_balance.amount()).then_some(coin)
         })
         .await;
 
@@ -1265,7 +1284,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let tx2 = wait_tx_indexed(&tx_client, tx.hash).await;
+        let tx2 = wait_until("transaction to be indexed", || async {
+            match tx_client.get_tx(tx.hash).await {
+                Ok(tx) => Some(tx),
+                Err(Error::TonicError(status)) if status.code() == Code::NotFound => None,
+                Err(e) => panic!("get_tx({}) failed: {e}", tx.hash),
+            }
+        })
+        .await;
 
         assert_eq!(tx.hash, tx2.tx_response.txhash);
         assert_eq!(tx2.tx.body.memo, "foo");
@@ -1462,8 +1488,12 @@ mod tests {
             .await
             .unwrap();
 
-        let coins = wait_balances(&tx_client, &other_account.address, |coins| {
-            !coins.is_empty()
+        let coins = wait_until("recipient balance to update", || async {
+            let coins = tx_client
+                .get_all_balances(&other_account.address)
+                .await
+                .unwrap();
+            (!coins.is_empty()).then_some(coins)
         })
         .await;
 
@@ -1491,8 +1521,12 @@ mod tests {
 
         submitted_tx.confirm().await.unwrap();
 
-        let coins = wait_balances(&tx_client, &other_account.address, |coins| {
-            !coins.is_empty()
+        let coins = wait_until("recipient balance to update", || async {
+            let coins = tx_client
+                .get_all_balances(&other_account.address)
+                .await
+                .unwrap();
+            (!coins.is_empty()).then_some(coins)
         })
         .await;
 
@@ -1513,7 +1547,14 @@ mod tests {
             .unwrap();
 
         let tx_info = submitted_tx.confirm().await.unwrap();
-        let tx = wait_tx_indexed(&tx_client, tx_info.hash).await;
+        let tx = wait_until("transaction to be indexed", || async {
+            match tx_client.get_tx(tx_info.hash).await {
+                Ok(tx) => Some(tx),
+                Err(Error::TonicError(status)) if status.code() == Code::NotFound => None,
+                Err(e) => panic!("get_tx({}) failed: {e}", tx_info.hash),
+            }
+        })
+        .await;
 
         assert_eq!(tx_info.hash, tx.tx_response.txhash);
         assert_eq!(tx.tx.body.memo, "broadcast test");
