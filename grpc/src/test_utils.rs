@@ -1,6 +1,15 @@
-use celestia_types::state::{AccAddress, Address};
+use std::future::Future;
+use std::time::Duration;
+
+use celestia_types::hash::Hash;
+use celestia_types::state::{AccAddress, Address, Coin};
+use lumina_utils::time::{sleep, timeout};
 use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
 use tendermint::public_key::Secp256k1 as VerifyingKey;
+use tonic::Code;
+
+use crate::grpc::GetTxResponse;
+use crate::{Error, GrpcClient};
 
 #[allow(unused_imports)]
 pub use imp::*;
@@ -49,6 +58,83 @@ pub fn load_account() -> TestAccount {
     let hex_key = include_str!("../../ci/credentials/node-0.plaintext-key").trim();
 
     TestAccount::from_pk(&hex::decode(hex_key).expect("valid hex representation"))
+}
+
+/// How long the `wait_*` helpers below keep polling before giving up.
+const QUERY_DEADLINE: Duration = Duration::from_secs(10);
+/// Interval between polls of the `wait_*` helpers below.
+const QUERY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Poll `f` until it returns `Some`, or panic after [`QUERY_DEADLINE`].
+#[allow(dead_code)]
+pub async fn wait_until<T, F, Fut>(what: &str, mut f: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    timeout(QUERY_DEADLINE, async {
+        loop {
+            if let Some(value) = f().await {
+                return value;
+            }
+            sleep(QUERY_INTERVAL).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+}
+
+/// Fetch a committed transaction with `get_tx`, retrying while the node answers `NotFound`.
+///
+/// A transaction is reported as committed by `tx_status` as soon as its block is stored,
+/// but `get_tx` is served from the node's tx index, which is populated shortly *after*
+/// that. Querying right after a confirmation therefore occasionally hits `NotFound`.
+#[allow(dead_code)]
+pub async fn wait_tx_indexed(client: &GrpcClient, hash: Hash) -> GetTxResponse {
+    wait_until(&format!("tx {hash} to be indexed"), || async move {
+        match client.get_tx(hash).await {
+            Ok(tx) => Some(tx),
+            Err(Error::TonicError(status)) if status.code() == Code::NotFound => None,
+            Err(e) => panic!("get_tx({hash}) failed: {e}"),
+        }
+    })
+    .await
+}
+
+/// Fetch all balances of `address`, retrying until `accept` returns true for them.
+///
+/// State queries are answered from the latest state the query server has caught up with,
+/// which can still be the previous block right after a transaction was confirmed.
+#[allow(dead_code)]
+pub async fn wait_balances<F>(client: &GrpcClient, address: &Address, accept: F) -> Vec<Coin>
+where
+    F: Fn(&[Coin]) -> bool,
+{
+    let accept = &accept;
+    wait_until(&format!("balances of {address} to update"), || async move {
+        let coins = client.get_all_balances(address).await.unwrap();
+        accept(&coins).then_some(coins)
+    })
+    .await
+}
+
+/// Fetch the `denom` balance of `address`, retrying until `accept` returns true for it.
+///
+/// See [`wait_balances`].
+#[allow(dead_code)]
+pub async fn wait_balance<F>(client: &GrpcClient, address: &Address, denom: &str, accept: F) -> Coin
+where
+    F: Fn(&Coin) -> bool,
+{
+    let accept = &accept;
+    wait_until(
+        &format!("{denom} balance of {address} to update"),
+        || async move {
+            let coin = client.get_balance(address, denom).await.unwrap();
+            accept(&coin).then_some(coin)
+        },
+    )
+    .await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
