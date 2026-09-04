@@ -230,7 +230,12 @@ pub(crate) fn split_blob_to_shares(
     blob_data: &[u8],
     signer: Option<&AccAddress>,
 ) -> Result<Vec<Share>> {
-    let mut shares = Vec::new();
+    let share_count = if blob_data.is_empty() {
+        0
+    } else {
+        super::shares_needed_for_blob(blob_data.len(), signer.is_some())
+    };
+    let mut shares = Vec::with_capacity(share_count);
     let mut cursor = Cursor::new(blob_data);
 
     while cursor.has_remaining() {
@@ -648,6 +653,35 @@ mod tests {
             Commitment::from_shares(namespace, &[]).unwrap(),
             commitment_from_shares_reference(namespace, &[]).unwrap()
         );
+    }
+
+    #[test]
+    fn sparse_share_capacity_matches_encoded_share_count() {
+        let namespace = Namespace::new_v0(&[1]).unwrap();
+        let signer = AccAddress::from([9; appconsts::SIGNER_SIZE]);
+
+        for (share_version, signer) in [(0, None), (1, Some(&signer))] {
+            let first_share_content = appconsts::FIRST_SPARSE_SHARE_CONTENT_SIZE
+                - signer.is_some() as usize * appconsts::SIGNER_SIZE;
+            let continuation = appconsts::CONTINUATION_SPARSE_SHARE_CONTENT_SIZE;
+            let sizes = [
+                1,
+                first_share_content - 1,
+                first_share_content,
+                first_share_content + 1,
+                first_share_content + continuation,
+                first_share_content + continuation + 1,
+            ];
+
+            for size in sizes {
+                let shares =
+                    split_blob_to_shares(namespace, share_version, &vec![0; size], signer).unwrap();
+                let expected = super::super::shares_needed_for_blob(size, signer.is_some());
+
+                assert_eq!(shares.len(), expected, "blob size {size}");
+                assert_eq!(shares.capacity(), expected, "blob size {size}");
+            }
+        }
     }
 
     #[test]
