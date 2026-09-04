@@ -1,31 +1,129 @@
 use crate::error::{Error, Result};
 use crate::params::Parameters;
+use std::fmt;
+
+#[cfg(target_os = "linux")]
+const HUGE_PAGE_THRESHOLD: usize = 4 * 1024 * 1024;
+
+enum RowStorage {
+    Heap(Vec<u8>),
+    #[cfg(target_os = "linux")]
+    Mapped(memmap2::MmapMut),
+}
+
+impl RowStorage {
+    fn zeroed(len: usize) -> Self {
+        #[cfg(target_os = "linux")]
+        if len >= HUGE_PAGE_THRESHOLD {
+            if let Ok(data) = memmap2::MmapMut::map_anon(len) {
+                let _ = data.advise(memmap2::Advice::HugePage);
+                return Self::Mapped(data);
+            }
+        }
+
+        Self::Heap(vec![0u8; len])
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Heap(data) => data,
+            #[cfg(target_os = "linux")]
+            Self::Mapped(data) => data,
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Heap(data) => data,
+            #[cfg(target_os = "linux")]
+            Self::Mapped(data) => data,
+        }
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Heap(data) => data,
+            #[cfg(target_os = "linux")]
+            Self::Mapped(data) => data.to_vec(),
+        }
+    }
+}
+
+impl fmt::Debug for RowStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+impl Clone for RowStorage {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Heap(data) => Self::Heap(data.clone()),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(data) => {
+                let mut clone = Self::zeroed(data.len());
+                clone.as_mut_slice().copy_from_slice(data);
+                clone
+            }
+        }
+    }
+}
+
+impl PartialEq for RowStorage {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for RowStorage {}
 
 /// Contiguous row-major byte matrix (rows × row_size).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowMatrix {
-    data: Vec<u8>,
+    data: RowStorage,
     row_size: usize,
     rows: usize,
 }
 
 impl RowMatrix {
+    fn checked_len(rows: usize, row_size: usize) -> Result<usize> {
+        rows.checked_mul(row_size).ok_or_else(|| {
+            Error::InvalidParameters(format!(
+                "row buffer size overflow: rows={rows} row_size={row_size}"
+            ))
+        })
+    }
+
     /// Create a matrix from a flat byte buffer with the given shape.
     pub fn with_shape(data: Vec<u8>, rows: usize, row_size: usize) -> Result<Self> {
         if row_size == 0 {
             return Err(Error::InvalidParameters("row_size must be > 0".to_string()));
         }
-        if rows * row_size != data.len() {
+        let expected_len = Self::checked_len(rows, row_size)?;
+        if expected_len != data.len() {
             return Err(Error::InvalidParameters(format!(
                 "row buffer size mismatch: expected {} bytes (rows={} row_size={}), got {}",
-                rows * row_size,
+                expected_len,
                 rows,
                 row_size,
                 data.len()
             )));
         }
         Ok(Self {
-            data,
+            data: RowStorage::Heap(data),
+            row_size,
+            rows,
+        })
+    }
+
+    /// Creates a zero-initialized matrix with the given shape.
+    pub fn zeroed(rows: usize, row_size: usize) -> Result<Self> {
+        if row_size == 0 {
+            return Err(Error::InvalidParameters("row_size must be > 0".to_string()));
+        }
+        let len = Self::checked_len(rows, row_size)?;
+        Ok(Self {
+            data: RowStorage::zeroed(len),
             row_size,
             rows,
         })
@@ -43,17 +141,19 @@ impl RowMatrix {
 
     /// Returns the underlying flat buffer as a byte slice.
     pub fn as_row_major(&self) -> &[u8] {
-        &self.data
+        self.data.as_slice()
     }
 
     /// Returns the underlying flat buffer as a mutable byte slice.
     pub fn as_row_major_mut(&mut self) -> &mut [u8] {
-        &mut self.data
+        self.data.as_mut_slice()
     }
 
-    /// Consumes the matrix and returns the underlying byte buffer.
+    /// Consumes the matrix and returns a flat byte buffer.
+    ///
+    /// Heap storage is returned directly. Memory-mapped storage is copied into a new allocation.
     pub fn into_row_major(self) -> Vec<u8> {
-        self.data
+        self.data.into_vec()
     }
 
     /// Returns the row at `index`, or an error if out of bounds.
@@ -75,13 +175,13 @@ impl RowMatrix {
     pub(crate) fn row_unchecked(&self, index: usize) -> &[u8] {
         let start = index * self.row_size;
         let end = start + self.row_size;
-        &self.data[start..end]
+        &self.data.as_slice()[start..end]
     }
 
     pub(crate) fn row_mut_unchecked(&mut self, index: usize) -> &mut [u8] {
         let start = index * self.row_size;
         let end = start + self.row_size;
-        &mut self.data[start..end]
+        &mut self.data.as_mut_slice()[start..end]
     }
 
     /// Creates a new matrix containing only the rows at the given indices.
@@ -155,8 +255,62 @@ impl AsRef<[u8]> for RowMatrix {
 }
 
 impl From<RowMatrix> for Vec<u8> {
+    /// Uses the same allocation behavior as [`RowMatrix::into_row_major`].
     fn from(value: RowMatrix) -> Self {
         value.into_row_major()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zeroed_matrix_round_trip() {
+        let mut matrix = RowMatrix::zeroed(4, 64).unwrap();
+        assert_eq!(matrix.as_row_major(), &[0u8; 256]);
+
+        matrix.row_mut(2).unwrap()[7] = 42;
+        let clone = matrix.clone();
+        assert_eq!(clone, matrix);
+        assert_eq!(clone.into_row_major(), matrix.as_row_major());
+    }
+
+    #[test]
+    fn shape_size_overflow_is_rejected() {
+        for result in [
+            RowMatrix::with_shape(Vec::new(), 2, usize::MAX),
+            RowMatrix::zeroed(2, usize::MAX),
+        ] {
+            let Error::InvalidParameters(message) = result.unwrap_err() else {
+                panic!("expected invalid parameters error");
+            };
+            assert!(message.contains("overflow"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn large_zeroed_matrix_round_trip() {
+        let mut matrix = RowMatrix::zeroed(HUGE_PAGE_THRESHOLD / 64, 64).unwrap();
+        assert!(matrix.as_row_major().iter().all(|byte| *byte == 0));
+
+        matrix.row_mut(1).unwrap()[1] = 7;
+        let clone = matrix.clone();
+        assert_eq!(clone, matrix);
+        assert_eq!(clone.into_row_major(), matrix.as_row_major());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn large_heap_clone_stays_heap() {
+        let rows = HUGE_PAGE_THRESHOLD / 64;
+        let matrix = RowMatrix::with_shape(vec![1u8; HUGE_PAGE_THRESHOLD], rows, 64).unwrap();
+        assert!(matches!(&matrix.data, RowStorage::Heap(_)));
+
+        let clone = matrix.clone();
+        assert!(matches!(&clone.data, RowStorage::Heap(_)));
+        assert_eq!(clone, matrix);
     }
 }
 
