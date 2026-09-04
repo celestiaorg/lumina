@@ -267,7 +267,6 @@ pub(crate) fn test_client_config(chain_id: &str) -> FibreClientConfig {
         safety_threshold: fraction(2, 3),
         liveness_threshold: fraction(1, 3),
         min_rows_per_validator: 1,
-        max_message_size: 1 << 20,
         upload_concurrency: 10,
         download_concurrency: 10,
     }
