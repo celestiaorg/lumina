@@ -42,6 +42,11 @@ impl FibreClient {
 
         // 1. Get validator set
         let val_set = self.set_getter.head().await?;
+        if val_set.total_voting_power() <= 0 {
+            return Err(FibreError::InvalidData(
+                "validator set has no voting power".into(),
+            ));
+        }
 
         // 2. Create and sign payment promise
         let upload_size = blob.upload_size();
@@ -488,6 +493,48 @@ mod tests {
             FibreError::NotEnoughSignatures { .. } => {}
             other => panic!("expected NotEnoughSignatures, got: {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn upload_fails_on_empty_validator_set() {
+        let client = build_test_client(
+            ValidatorSet {
+                validators: vec![],
+                height: 1,
+            },
+            MockConnector::new(),
+            "test-chain",
+        );
+
+        let result = client
+            .upload(
+                &test_signing_key(),
+                Namespace::from_raw(&[0u8; 29]).unwrap(),
+                make_test_blob(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(FibreError::InvalidData(_))));
+    }
+
+    #[tokio::test]
+    async fn upload_fails_on_zero_voting_power_set() {
+        let validators = vec![make_validator(0, 1)];
+        let val_set = ValidatorSet {
+            validators: validators.iter().map(|(_, info)| info.clone()).collect(),
+            height: 1,
+        };
+        let client = build_test_client(val_set, make_connector(&validators), "test-chain");
+
+        let result = client
+            .upload(
+                &test_signing_key(),
+                Namespace::from_raw(&[0u8; 29]).unwrap(),
+                make_test_blob(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(FibreError::InvalidData(_))));
     }
 
     #[tokio::test]

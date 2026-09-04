@@ -368,6 +368,24 @@ mod tests {
     }
 
     #[test]
+    fn validator_from_proto_negative_power() {
+        let mut secret = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut OsRng, &mut secret);
+        let pk = ed25519_dalek::SigningKey::from_bytes(&secret).verifying_key();
+
+        let proto_val = tendermint_proto::v0_38::types::Validator {
+            address: vec![0u8; 20],
+            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
+                sum: Some(CryptoKeySum::Ed25519(pk.as_bytes().to_vec())),
+            }),
+            voting_power: -1,
+            proposer_priority: 0,
+        };
+
+        assert!(ValidatorInfo::try_from(&proto_val).is_err());
+    }
+
+    #[test]
     fn validator_from_proto_missing_key() {
         let proto_val = tendermint_proto::v0_38::types::Validator {
             address: vec![],
