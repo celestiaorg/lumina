@@ -108,7 +108,13 @@ fn bench_broadcast_tx(c: &mut Criterion, runtime: &Runtime, client: &GrpcClient)
                         let start = Instant::now();
                         let result = client.broadcast_tx(tx_bytes, BroadcastMode::Sync).await;
                         elapsed += start.elapsed();
-                        black_box(result).ok();
+                        if let Err(error) = &result {
+                            assert!(
+                                !error.is_network_error(),
+                                "broadcast_tx benchmark transport failed: {error}"
+                            );
+                        }
+                        let _ = black_box(result);
                     }
                     elapsed
                 })

@@ -305,6 +305,9 @@ async fn profile_broadcast(config: &Config, profile_path: &Path) -> Result<Profi
         Ok(response) => {
             black_box(response);
         }
+        Err(error) if error.is_network_error() => {
+            return Err(format!("broadcast benchmark transport failed: {error}").into());
+        }
         Err(error) => println!("server response after receiving transport payload: {error}"),
     }
     Ok(summary)
