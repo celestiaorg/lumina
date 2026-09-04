@@ -142,14 +142,6 @@ impl EncodedBlob {
         Self::new_with_work_budget(data, cfg, rsema1d::default_work_budget())
     }
 
-    /// Encode owned data into a new upload-ready blob.
-    ///
-    /// Returns `FibreError::EmptyBlobData` if data is empty.
-    /// Returns `FibreError::BlobTooLarge` if the data exceeds `cfg.max_data_size`.
-    pub fn new_owned(data: Vec<u8>, cfg: BlobConfig) -> Result<Self, FibreError> {
-        Self::new_with_work_budget(&data, cfg, rsema1d::default_work_budget())
-    }
-
     /// Encode data with an explicit combined Reed-Solomon work-buffer budget.
     pub fn new_with_work_budget(
         data: &[u8],
@@ -508,27 +500,6 @@ mod tests {
         assert!(blob.upload_size() > 0);
         assert_eq!(blob.rlc_coeffs().len(), cfg.original_rows);
         assert!(blob.id().validate().is_ok());
-    }
-
-    #[test]
-    fn encoded_blob_new_owned_matches_borrowed_constructor() {
-        let cfg = BlobConfig::new_test(0, 4, 4, 1024, 4, 64);
-        let data = vec![1u8; 200];
-        let borrowed = EncodedBlob::new(&data, cfg.clone()).unwrap();
-        let owned = EncodedBlob::new_owned(data, cfg.clone()).unwrap();
-
-        assert_eq!(owned.id(), borrowed.id());
-        assert_eq!(owned.data_size(), borrowed.data_size());
-        assert_eq!(owned.row_size(), borrowed.row_size());
-        assert_eq!(owned.upload_size(), borrowed.upload_size());
-        assert_eq!(owned.rlc_coeffs(), borrowed.rlc_coeffs());
-
-        for index in 0..cfg.total_rows() {
-            assert_eq!(
-                owned.row(index).unwrap().row,
-                borrowed.row(index).unwrap().row
-            );
-        }
     }
 
     #[test]

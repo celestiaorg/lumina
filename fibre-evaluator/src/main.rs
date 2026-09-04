@@ -577,7 +577,7 @@ async fn run_lifecycle(
     let encoded = tokio::task::spawn_blocking(move || {
         let _permit = encode_permit;
         let payload = make_payload(sequence, payload_size);
-        encode_pool.install(|| EncodedBlob::new_owned(payload, BlobConfig::v0()))
+        encode_pool.install(|| EncodedBlob::new(&payload, BlobConfig::v0()))
     })
     .await;
     let _ = event_tx.send(Event::StageFinished {
