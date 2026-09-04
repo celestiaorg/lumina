@@ -1,0 +1,24 @@
+[package]
+name = "fibre-evaluator"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+celestia-fibre = { path = "../fibre" }
+celestia-grpc = { path = "../grpc", default-features = false, features = ["tls-ring", "tls-webpki-roots"] }
+celestia-proto = { path = "../proto", features = ["tonic"] }
+celestia-types = { path = "../types" }
+
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+crc32fast = "1"
+hex = "0.4"
+k256 = "0.13"
+rand = "0.8"
+rayon = "1"
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
