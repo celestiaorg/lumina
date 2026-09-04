@@ -1,5 +1,7 @@
 //! Reed-Solomon erasure coding with Merkle commitments and Random Linear Combinations.
 
+#![forbid(unsafe_code)]
+
 pub mod codec;
 /// Cryptographic primitives: hashing, Merkle trees, and RLC coefficient derivation.
 pub mod crypto;
@@ -21,7 +23,8 @@ pub use codec::{
 pub use codec::Commitment;
 
 pub use codec::{
-    create_verification_context, encode, encode_in_place, encode_parity, reconstruct,
+    create_verification_context, default_work_budget, encode, encode_in_place,
+    encode_in_place_with_work_budget, encode_parity, encode_with_work_budget, reconstruct,
     verify_row_inclusion, verify_row_inclusion_proof, verify_row_with_context, verify_standalone,
     verify_standalone_proof, verify_with_context,
 };

@@ -277,7 +277,10 @@ fn prost_build(fds: FileDescriptorSet) {
     config
         .include_file("mod.rs")
         .enable_type_names()
-        .bytes([".tendermint_celestia_mods.abci"])
+        .bytes([
+            ".tendermint_celestia_mods.abci",
+            ".celestia.fibre.v1.BlobRow.data",
+        ])
         .compile_fds(fds)
         .expect("prost failed");
 }
@@ -295,7 +298,10 @@ fn tonic_build(fds: FileDescriptorSet) {
         .use_arc_self(true)
         .compile_well_known_types(true)
         .skip_protoc_run()
-        .bytes([".tendermint_celestia_mods.abci"]);
+        .bytes([
+            ".tendermint_celestia_mods.abci",
+            ".celestia.fibre.v1.BlobRow.data",
+        ]);
 
     for (type_path, attr) in CUSTOM_TYPE_ATTRIBUTES {
         tonic_config = tonic_config.type_attribute(type_path, attr);
