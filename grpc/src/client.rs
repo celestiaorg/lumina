@@ -302,14 +302,15 @@ impl GrpcClient {
                             .max_decoding_message_size(MAX_MSG_SIZE)
                             .max_encoding_message_size(MAX_MSG_SIZE);
 
-                        client.ready().await.map_err(|error| {
-                            tonic::Status::unknown(format!(
-                                "Service was not ready: {}",
-                                Into::<tonic::codegen::StdError>::into(error)
-                            ))
-                        })?;
-
-                        let future = client.unary(request, path, codec);
+                        let future = async move {
+                            client.ready().await.map_err(|error| {
+                                tonic::Status::unknown(format!(
+                                    "Service was not ready: {}",
+                                    Into::<tonic::codegen::StdError>::into(error)
+                                ))
+                            })?;
+                            client.unary(request, path, codec).await
+                        };
 
                         #[cfg(target_arch = "wasm32")]
                         let future = send_wrapper::SendWrapper::new(future);
