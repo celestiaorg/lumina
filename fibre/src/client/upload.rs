@@ -62,6 +62,7 @@ impl FibreClient {
             signature: None,
         };
         promise.sign(signing_key)?;
+        promise.validate()?;
 
         // 3. Assign shards
         let shard_map = val_set.assign(
@@ -488,6 +489,31 @@ mod tests {
             FibreError::NotEnoughSignatures { .. } => {}
             other => panic!("expected NotEnoughSignatures, got: {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_invalid_promise_before_contacting_validators() {
+        let validators = vec![make_validator(100, 1)];
+        let val_infos: Vec<ValidatorInfo> =
+            validators.iter().map(|(_, info)| info.clone()).collect();
+        let connector = make_connector(&validators);
+        let connection = connector.get(&val_infos[0].address).unwrap().clone();
+        let val_set = ValidatorSet {
+            validators: val_infos,
+            height: 1,
+        };
+
+        let client = build_test_client(val_set, connector, "");
+        let result = client
+            .upload(
+                &test_signing_key(),
+                Namespace::from_raw(&[0u8; 29]).unwrap(),
+                make_test_blob(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(FibreError::InvalidPaymentPromise(_))));
+        assert!(connection.uploaded().is_empty());
     }
 
     #[tokio::test]
