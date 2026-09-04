@@ -1,17 +1,19 @@
 use crate::error::{Error, Result};
 use crate::params::Parameters;
+use bytes::Bytes;
 use std::fmt;
 
 #[cfg(target_os = "linux")]
 const HUGE_PAGE_THRESHOLD: usize = 4 * 1024 * 1024;
 
-enum RowStorage {
+enum Storage {
     Heap(Vec<u8>),
     #[cfg(target_os = "linux")]
     Mapped(memmap2::MmapMut),
+    Shared(Bytes),
 }
 
-impl RowStorage {
+impl Storage {
     fn zeroed(len: usize) -> Self {
         #[cfg(target_os = "linux")]
         if len >= HUGE_PAGE_THRESHOLD {
@@ -29,14 +31,19 @@ impl RowStorage {
             Self::Heap(data) => data,
             #[cfg(target_os = "linux")]
             Self::Mapped(data) => data,
+            Self::Shared(data) => data,
         }
     }
 
     fn as_mut_slice(&mut self) -> &mut [u8] {
+        if let Self::Shared(data) = self {
+            *self = Self::Heap(Vec::from(std::mem::take(data)));
+        }
         match self {
             Self::Heap(data) => data,
             #[cfg(target_os = "linux")]
             Self::Mapped(data) => data,
+            Self::Shared(_) => unreachable!("converted to heap above"),
         }
     }
 
@@ -45,39 +52,63 @@ impl RowStorage {
             Self::Heap(data) => data,
             #[cfg(target_os = "linux")]
             Self::Mapped(data) => data.to_vec(),
+            Self::Shared(data) => Vec::from(data),
         }
+    }
+
+    fn freeze(&mut self) {
+        let data = std::mem::replace(self, Self::Heap(Vec::new()));
+        *self = match data {
+            Self::Heap(data) => Self::Shared(Bytes::from(data)),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(data) => Self::Shared(Bytes::from_owner(data)),
+            Self::Shared(data) => Self::Shared(data),
+        };
     }
 }
 
-impl fmt::Debug for RowStorage {
+impl fmt::Debug for Storage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.as_slice().fmt(f)
     }
 }
 
-impl Clone for RowStorage {
+impl Clone for Storage {
     fn clone(&self) -> Self {
+        if let Self::Shared(data) = self {
+            return Self::Shared(data.clone());
+        }
         let mut clone = Self::zeroed(self.as_slice().len());
         clone.as_mut_slice().copy_from_slice(self.as_slice());
         clone
     }
 }
 
-impl PartialEq for RowStorage {
+impl PartialEq for Storage {
     fn eq(&self, other: &Self) -> bool {
         self.as_slice() == other.as_slice()
     }
 }
 
-impl Eq for RowStorage {}
+impl Eq for Storage {}
 
 /// Contiguous row-major byte matrix (rows × row_size).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RowMatrix {
-    data: RowStorage,
+    data: Storage,
     row_size: usize,
     rows: usize,
 }
+
+impl PartialEq for RowMatrix {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.row_size == other.row_size
+            && self.as_row_major() == other.as_row_major()
+    }
+}
+
+impl Eq for RowMatrix {}
 
 impl RowMatrix {
     /// Create a matrix from a flat byte buffer with the given shape.
@@ -95,7 +126,7 @@ impl RowMatrix {
             )));
         }
         Ok(Self {
-            data: RowStorage::Heap(data),
+            data: Storage::Heap(data),
             row_size,
             rows,
         })
@@ -107,7 +138,7 @@ impl RowMatrix {
             return Err(Error::InvalidParameters("row_size must be > 0".to_string()));
         }
         Ok(Self {
-            data: RowStorage::zeroed(rows * row_size),
+            data: Storage::zeroed(rows * row_size),
             row_size,
             rows,
         })
@@ -129,13 +160,20 @@ impl RowMatrix {
     }
 
     /// Returns the underlying flat buffer as a mutable byte slice.
+    ///
+    /// If the matrix was frozen and rows are still shared, this copies the
+    /// buffer first.
     pub fn as_row_major_mut(&mut self) -> &mut [u8] {
         self.data.as_mut_slice()
     }
 
-    /// Consumes the matrix and returns a flat byte buffer.
+    /// Consumes the matrix and returns the underlying byte buffer.
     pub fn into_row_major(self) -> Vec<u8> {
         self.data.into_vec()
+    }
+
+    pub(crate) fn freeze(&mut self) {
+        self.data.freeze();
     }
 
     /// Returns the row at `index`, or an error if out of bounds.
@@ -144,6 +182,18 @@ impl RowMatrix {
             return Err(Error::InvalidIndex(index, self.rows));
         }
         Ok(self.row_unchecked(index))
+    }
+
+    pub(crate) fn row_bytes(&self, index: usize) -> Result<Bytes> {
+        if index >= self.rows {
+            return Err(Error::InvalidIndex(index, self.rows));
+        }
+        let start = index * self.row_size;
+        let end = start + self.row_size;
+        Ok(match &self.data {
+            Storage::Shared(b) => b.slice(start..end),
+            data => Bytes::copy_from_slice(&data.as_slice()[start..end]),
+        })
     }
 
     /// Returns a mutable reference to the row at `index`.
@@ -261,13 +311,18 @@ mod tests {
     #[test]
     fn large_zeroed_matrix_uses_mapping() {
         let mut matrix = RowMatrix::zeroed(HUGE_PAGE_THRESHOLD / 64, 64).unwrap();
-        assert!(matches!(matrix.data, RowStorage::Mapped(_)));
+        assert!(matches!(matrix.data, Storage::Mapped(_)));
         assert!(matrix.as_row_major().iter().all(|byte| *byte == 0));
 
         matrix.row_mut(1).unwrap()[1] = 7;
         let clone = matrix.clone();
         assert_eq!(clone, matrix);
         assert_eq!(clone.into_row_major(), matrix.as_row_major());
+
+        let ptr = matrix.as_row_major().as_ptr();
+        matrix.freeze();
+        assert!(matches!(matrix.data, Storage::Shared(_)));
+        assert_eq!(matrix.as_row_major().as_ptr(), ptr);
     }
 }
 
