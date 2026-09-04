@@ -781,6 +781,7 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "wasm-bindgen-test",
  "x509-parser",
 ]
 
