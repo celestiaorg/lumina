@@ -34,8 +34,7 @@ use celestia_types::nmt::Namespace;
 use celestia_types::state::{AccAddress, Id};
 use celestia_types::{Blob, Commitment};
 use criterion::{
-    BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group,
-    measurement::WallTime,
+    BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput, measurement::WallTime,
 };
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
@@ -155,13 +154,12 @@ fn bench_commitment_from_shares(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_blob_new,
-    bench_blob_validate,
-    bench_blob_to_shares,
-    bench_commitment_from_shares
-);
+fn run_benches(c: &mut Criterion) {
+    bench_blob_new(c);
+    bench_blob_validate(c);
+    bench_blob_to_shares(c);
+    bench_commitment_from_shares(c);
+}
 
 /// Put glibc's allocator in a steady state before measuring.
 ///
@@ -180,6 +178,7 @@ pub(super) fn pin_allocator_state() {
 
 pub(super) fn main() {
     pin_allocator_state();
-    benches();
-    Criterion::default().configure_from_args().final_summary();
+    let mut criterion = Criterion::default().configure_from_args();
+    run_benches(&mut criterion);
+    criterion.final_summary();
 }
