@@ -270,9 +270,9 @@ pub fn extend_data_with_work_budget(
     params: &Parameters,
     work_budget: NonZeroUsize,
 ) -> Result<RowMatrix> {
-    let mut all_rows = vec![0u8; (params.k + params.n) * params.row_size];
+    let mut all_rows = RowMatrix::zeroed(params.total_rows(), params.row_size)?;
     let split_at = params.k * params.row_size;
-    let (orig, parity) = all_rows.split_at_mut(split_at);
+    let (orig, parity) = all_rows.as_row_major_mut().split_at_mut(split_at);
     orig.copy_from_slice(original_rows.as_row_major());
     fill_parity_with_work_budget(
         orig,
@@ -282,7 +282,7 @@ pub fn extend_data_with_work_budget(
         params.row_size,
         work_budget,
     )?;
-    RowMatrix::with_shape(all_rows, params.total_rows(), params.row_size)
+    Ok(all_rows)
 }
 
 /// Encode parity rows in place into an already allocated extended matrix.

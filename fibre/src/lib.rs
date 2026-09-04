@@ -4,6 +4,8 @@
 //! blob data on-chain, Fibre distributes it directly to validators via gRPC. Only a
 //! small payment receipt (`MsgPayForFibre`) goes on-chain.
 
+#![forbid(unsafe_code)]
+
 pub mod client;
 pub mod domain;
 pub mod transport;
