@@ -1081,7 +1081,6 @@ mod tests {
     use celestia_types::state::{Coin, ErrorCode};
     use futures::FutureExt;
     use lumina_utils::test_utils::async_test;
-    use lumina_utils::time::sleep;
     use rand::{Rng, RngCore};
     use tonic::Code;
 
@@ -1089,7 +1088,7 @@ mod tests {
     use crate::grpc::Context;
     use crate::test_utils::{
         CELESTIA_GRPC_URL, TestAccount, load_account, new_grpc_client, new_rpc_client,
-        new_tx_client, spawn,
+        new_tx_client, spawn, wait_balance, wait_balances, wait_tx_indexed,
     };
     use crate::{Error, TxConfig};
 
@@ -1241,12 +1240,16 @@ mod tests {
             .unwrap();
 
         let addr = tx_client.get_account_address().unwrap().into();
-        let new_balance = tx_client.get_balance(&addr, "utia").await.unwrap();
         let old_balance = tx_client
             .get_balance(&addr, "utia")
             .block_height(tx.height - 1)
             .await
             .unwrap();
+        // the latest state may lag behind the confirmation for a moment
+        let new_balance = wait_balance(&tx_client, &addr, "utia", |coin| {
+            coin.amount() < old_balance.amount()
+        })
+        .await;
 
         assert!(new_balance.amount() < old_balance.amount());
     }
@@ -1262,9 +1265,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let tx2 = tx_client.get_tx(tx.hash).await.unwrap();
-
-        sleep(Duration::from_millis(100)).await;
+        let tx2 = wait_tx_indexed(&tx_client, tx.hash).await;
 
         assert_eq!(tx.hash, tx2.tx_response.txhash);
         assert_eq!(tx2.tx.body.memo, "foo");
@@ -1461,10 +1462,10 @@ mod tests {
             .await
             .unwrap();
 
-        let coins = tx_client
-            .get_all_balances(&other_account.address)
-            .await
-            .unwrap();
+        let coins = wait_balances(&tx_client, &other_account.address, |coins| {
+            !coins.is_empty()
+        })
+        .await;
 
         assert_eq!(coins.len(), 1);
         assert_eq!(amount, coins[0]);
@@ -1490,10 +1491,10 @@ mod tests {
 
         submitted_tx.confirm().await.unwrap();
 
-        let coins = tx_client
-            .get_all_balances(&other_account.address)
-            .await
-            .unwrap();
+        let coins = wait_balances(&tx_client, &other_account.address, |coins| {
+            !coins.is_empty()
+        })
+        .await;
 
         assert_eq!(coins.len(), 1);
         assert_eq!(amount, coins[0]);
@@ -1512,7 +1513,7 @@ mod tests {
             .unwrap();
 
         let tx_info = submitted_tx.confirm().await.unwrap();
-        let tx = tx_client.get_tx(tx_info.hash).await.unwrap();
+        let tx = wait_tx_indexed(&tx_client, tx_info.hash).await;
 
         assert_eq!(tx_info.hash, tx.tx_response.txhash);
         assert_eq!(tx.tx.body.memo, "broadcast test");
