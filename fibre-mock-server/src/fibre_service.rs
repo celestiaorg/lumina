@@ -30,6 +30,21 @@ impl MockFibreService {
     pub fn new(signing_key: ed25519_dalek::SigningKey, store: Option<ShardStore>) -> Self {
         Self { signing_key, store }
     }
+
+    pub(crate) fn sign_promise(
+        &self,
+        promise: celestia_proto::celestia::fibre::v1::PaymentPromise,
+    ) -> Result<UploadShardResponse, Status> {
+        let promise = promise_from_proto(promise)?;
+        let sign_bytes = promise
+            .sign_bytes()
+            .map_err(|e| Status::invalid_argument(format!("promise sign bytes: {e}")))?;
+        let signature = self.signing_key.sign(&sign_bytes);
+
+        Ok(UploadShardResponse {
+            validator_signature: signature.to_bytes().to_vec(),
+        })
+    }
 }
 
 #[tonic::async_trait]
@@ -52,20 +67,14 @@ impl Fibre for MockFibreService {
             .try_into()
             .map_err(|_| Status::invalid_argument("commitment must be 32 bytes"))?;
 
-        let promise = promise_from_proto(promise_proto)?;
-        let sign_bytes = promise
-            .sign_bytes()
-            .map_err(|e| Status::invalid_argument(format!("promise sign bytes: {e}")))?;
-        let signature = self.signing_key.sign(&sign_bytes);
+        let response = self.sign_promise(promise_proto)?;
 
         if let Some(store) = &self.store {
             store.insert(commitment, shard);
             tracing::trace!(commitment = %hex::encode(commitment), "stored shard");
         }
 
-        Ok(Response::new(UploadShardResponse {
-            validator_signature: signature.to_bytes().to_vec(),
-        }))
+        Ok(Response::new(response))
     }
 
     async fn download_shard(

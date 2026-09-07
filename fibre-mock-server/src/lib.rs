@@ -13,6 +13,7 @@ pub mod chain;
 pub mod cli;
 pub mod control_plane;
 pub mod fibre_service;
+mod no_store_service;
 pub mod promise;
 pub mod store;
 pub mod tls;
@@ -39,6 +40,7 @@ use crate::app_node::{
 use crate::chain::MockChain;
 use crate::control_plane::{MockBlockApi, MockValaddrQuery};
 use crate::fibre_service::MockFibreService;
+use crate::no_store_service::NoStoreFibreServer;
 use crate::store::ShardStore;
 use crate::validator::MockValidator;
 
@@ -46,6 +48,9 @@ use crate::validator::MockValidator;
 /// (`grpc/grpc-macros/src/lib.rs`); tonic's server default of 4 MiB is too
 /// small for v0 shards.
 const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
+
+#[doc(hidden)]
+pub use no_store_service::NoStoreFibreServer as BenchmarkNoStoreFibreServer;
 
 /// HTTP/2 flow-control windows. The spec default of 64 KiB caps each
 /// connection at window/RTT (~150 MB/s at 0.4 ms), starving shard uploads on a
@@ -165,28 +170,38 @@ pub async fn spawn_mock_network(cfg: MockNetworkConfig) -> anyhow::Result<MockNe
     }
 
     for (incoming, validator) in incomings.into_iter().zip(&validators) {
-        let store = cfg
-            .store_shards
+        let store_shards = cfg.store_shards;
+        let store = store_shards
             .then(|| ShardStore::new(cfg.store_budget_bytes / cfg.num_validators as u64));
-        let svc = FibreServer::new(MockFibreService::new(validator.signing_key.clone(), store))
-            .max_decoding_message_size(MAX_MESSAGE_SIZE)
-            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+        let svc = MockFibreService::new(validator.signing_key.clone(), store);
         let identity = tls::endorsed_identity(&validator.signing_key, &cfg.chain_id)
             .with_context(|| format!("failed to build TLS identity for {}", validator.host))?;
         let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
         let mut rx = shutdown_rx.clone();
         let host = validator.host.clone();
         tokio::spawn(async move {
-            let server = tonic::transport::Server::builder()
+            let mut server = tonic::transport::Server::builder()
                 .tls_config(tls_config)
                 .expect("static TLS config is valid")
                 .initial_stream_window_size(STREAM_WINDOW)
                 .initial_connection_window_size(CONN_WINDOW)
-                .http2_adaptive_window(Some(true))
-                .add_service(svc)
-                .serve_with_incoming_shutdown(incoming, async move {
-                    let _ = rx.changed().await;
-                });
+                .http2_adaptive_window(Some(true));
+            let server = if store_shards {
+                server.add_service(
+                    FibreServer::new(svc)
+                        .max_decoding_message_size(MAX_MESSAGE_SIZE)
+                        .max_encoding_message_size(MAX_MESSAGE_SIZE),
+                )
+            } else {
+                server.add_service(
+                    NoStoreFibreServer::new(svc)
+                        .max_decoding_message_size(MAX_MESSAGE_SIZE)
+                        .max_encoding_message_size(MAX_MESSAGE_SIZE),
+                )
+            }
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = rx.changed().await;
+            });
             if let Err(e) = server.await {
                 tracing::error!("validator server {host} exited: {e}");
             }

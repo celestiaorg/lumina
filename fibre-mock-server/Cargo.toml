@@ -18,6 +18,9 @@ tonic = { version = "0.13", default-features = false, features = ["codegen", "pr
 prost = "0.13.3"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "signal", "sync", "net"] }
 futures = "0.3.30"
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
 
 ed25519-dalek = "2.1"
 k256 = { version = "0.13", features = ["ecdsa"] }
@@ -38,3 +41,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["loggin
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 celestia-grpc = { path = "../grpc", features = ["tls-ring"] }
 x509-parser = "0.17"
+criterion = "0.5"
+
+[[bench]]
+name = "no_store_upload"
+harness = false
