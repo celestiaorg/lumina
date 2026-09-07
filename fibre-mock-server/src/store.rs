@@ -79,7 +79,7 @@ mod tests {
     fn shard(marker: u8, size: usize) -> BlobShard {
         BlobShard {
             rows: vec![],
-            rlcs: vec![marker; size],
+            rlcs: vec![marker; size].into(),
         }
     }
 

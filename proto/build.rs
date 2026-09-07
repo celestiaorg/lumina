@@ -280,6 +280,8 @@ fn prost_build(fds: FileDescriptorSet) {
         .bytes([
             ".tendermint_celestia_mods.abci",
             ".celestia.fibre.v1.BlobRow.data",
+            ".celestia.fibre.v1.BlobRow.proof",
+            ".celestia.fibre.v1.BlobShard.rlcs",
         ])
         .compile_fds(fds)
         .expect("prost failed");
@@ -301,6 +303,8 @@ fn tonic_build(fds: FileDescriptorSet) {
         .bytes([
             ".tendermint_celestia_mods.abci",
             ".celestia.fibre.v1.BlobRow.data",
+            ".celestia.fibre.v1.BlobRow.proof",
+            ".celestia.fibre.v1.BlobShard.rlcs",
         ]);
 
     for (type_path, attr) in CUSTOM_TYPE_ATTRIBUTES {

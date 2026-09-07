@@ -43,6 +43,7 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group,
     criterion_main,
 };
+use prost::bytes::Bytes;
 use rand::Rng;
 use rand::rngs::OsRng;
 
@@ -284,7 +285,11 @@ fn bench_parse_download_response(c: &mut Criterion) {
             proto::BlobRow {
                 index: proof.index as u32,
                 data: proof.row,
-                proof: proof.row_proof.iter().map(|h| h.to_vec()).collect(),
+                proof: proof
+                    .row_proof
+                    .iter()
+                    .map(|hash| Bytes::copy_from_slice(hash))
+                    .collect(),
             }
         })
         .collect();
@@ -294,7 +299,10 @@ fn bench_parse_download_response(c: &mut Criterion) {
         .flat_map(|rlc| rlc.to_bytes())
         .collect();
     let response = proto::DownloadShardResponse {
-        shard: Some(proto::BlobShard { rows, rlcs }),
+        shard: Some(proto::BlobShard {
+            rows,
+            rlcs: rlcs.into(),
+        }),
     };
 
     group.bench_function(format!("shard_{shard}_rows_1MB"), |b| {
@@ -331,14 +339,21 @@ fn bench_upload_shard_encode(c: &mut Criterion) {
             .map(|proof| proto::BlobRow {
                 index: proof.index as u32,
                 data: proof.row.clone(),
-                proof: proof.row_proof.iter().map(|hash| hash.to_vec()).collect(),
+                proof: proof
+                    .row_proof
+                    .iter()
+                    .map(|hash| Bytes::copy_from_slice(hash))
+                    .collect(),
             })
             .collect();
-        let rlcs = rlcs.iter().flat_map(|rlc| rlc.to_bytes()).collect();
+        let rlcs: Vec<u8> = rlcs.iter().flat_map(|rlc| rlc.to_bytes()).collect();
 
         proto::UploadShardRequest {
             promise: None,
-            shard: Some(proto::BlobShard { rows, rlcs }),
+            shard: Some(proto::BlobShard {
+                rows,
+                rlcs: rlcs.into(),
+            }),
         }
     };
     let wire_len = {

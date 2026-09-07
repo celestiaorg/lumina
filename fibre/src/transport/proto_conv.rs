@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use celestia_proto::celestia::fibre::v1 as proto;
 use celestia_proto::cosmos::crypto::secp256k1::PubKey as ProtoPubKey;
+use prost::bytes::Bytes;
 use tendermint_proto::google::protobuf::Timestamp;
 #[cfg(test)]
 use tendermint_proto::v0_38::crypto::public_key::Sum as CryptoKeySum;
@@ -47,7 +48,11 @@ pub(crate) fn row_proof_to_blob_row(proof: &rsema1d::RowInclusionProof) -> proto
     proto::BlobRow {
         index: proof.index as u32,
         data: proof.row.clone(),
-        proof: proof.row_proof.iter().map(|h| h.to_vec()).collect(),
+        proof: proof
+            .row_proof
+            .iter()
+            .map(|hash| Bytes::copy_from_slice(hash))
+            .collect(),
     }
 }
 
@@ -60,7 +65,7 @@ pub(crate) fn blob_row_to_row_proof(
         .into_iter()
         .map(|h| {
             let len = h.len();
-            h.try_into().map_err(|_| {
+            h.as_ref().try_into().map_err(|_| {
                 FibreError::InvalidData(
                     format!("proof hash has invalid length {len}, expected 32",),
                 )
@@ -91,7 +96,10 @@ pub(crate) fn build_upload_shard(
         rlcs.extend_from_slice(&rlc.to_bytes());
     }
 
-    proto::BlobShard { rows, rlcs }
+    proto::BlobShard {
+        rows,
+        rlcs: rlcs.into(),
+    }
 }
 
 /// Parse a proto [`proto::DownloadShardResponse`] into a [`DownloadResponse`].
@@ -236,7 +244,7 @@ mod tests {
         let row = proto::BlobRow {
             index: 0,
             data: vec![0u8; 64].into(),
-            proof: vec![vec![0u8; 31]], // wrong length
+            proof: vec![vec![0u8; 31].into()], // wrong length
         };
         let result = blob_row_to_row_proof(row);
         assert!(result.is_err());
@@ -264,9 +272,9 @@ mod tests {
                 rows: vec![proto::BlobRow {
                     index: 3,
                     data: vec![1u8; 64].into(),
-                    proof: vec![vec![2u8; 32]],
+                    proof: vec![vec![2u8; 32].into()],
                 }],
-                rlcs: vec![9u8; 32], // 2 RLC values
+                rlcs: vec![9u8; 32].into(), // 2 RLC values
             }),
         };
 
@@ -287,7 +295,10 @@ mod tests {
     fn parse_download_response_invalid_rlc_length() {
         for rlcs in [vec![], vec![1u8; 15]] {
             let resp = proto::DownloadShardResponse {
-                shard: Some(proto::BlobShard { rows: vec![], rlcs }),
+                shard: Some(proto::BlobShard {
+                    rows: vec![],
+                    rlcs: rlcs.into(),
+                }),
             };
             assert!(parse_download_response(resp).is_err());
         }

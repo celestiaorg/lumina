@@ -51,7 +51,7 @@ fn encoded_request() -> Bytes {
         promise: Some((&promise).into()),
         shard: Some(BlobShard {
             rows,
-            rlcs: Vec::new(),
+            rlcs: Bytes::new(),
         }),
     };
 

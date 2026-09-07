@@ -397,7 +397,7 @@ mod tests {
                 data: vec![5; 256].into(),
                 proof: vec![],
             }],
-            rlcs: vec![],
+            rlcs: Bytes::new(),
         };
         let mut message = Vec::new();
         if shard_first {
@@ -470,7 +470,7 @@ mod tests {
     async fn rejects_missing_promise() {
         let shard = BlobShard {
             rows: vec![],
-            rlcs: vec![],
+            rlcs: Bytes::new(),
         };
         let mut message = Vec::new();
         message_field(2, &shard, &mut message);
@@ -525,7 +525,7 @@ mod tests {
             2,
             &BlobShard {
                 rows: vec![],
-                rlcs: vec![],
+                rlcs: Bytes::new(),
             },
             &mut message,
         );
@@ -565,7 +565,7 @@ mod tests {
                     2,
                     &BlobShard {
                         rows: vec![],
-                        rlcs: vec![],
+                        rlcs: Bytes::new(),
                     },
                     &mut message,
                 );
