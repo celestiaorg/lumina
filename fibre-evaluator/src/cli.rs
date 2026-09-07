@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use celestia_types::nmt::Namespace;
 use clap::Parser;
 use k256::ecdsa::SigningKey;
@@ -83,6 +85,10 @@ pub(crate) struct Cli {
     /// Interval between periodic statistics reports.
     #[arg(long, default_value_t = 10, value_parser = parse_positive_u64)]
     pub(crate) stats_interval_seconds: u64,
+
+    /// Address serving Prometheus metrics at /metrics.
+    #[arg(long, default_value = "0.0.0.0:9464")]
+    pub(crate) metrics_listen_addr: SocketAddr,
 }
 
 fn parse_non_empty(value: &str) -> Result<String, String> {
@@ -214,6 +220,7 @@ mod tests {
         assert_eq!(cli.gas_limit, None);
         assert_eq!(cli.gas_price, None);
         assert_eq!(cli.stats_interval_seconds, 10);
+        assert_eq!(cli.metrics_listen_addr, "0.0.0.0:9464".parse().unwrap());
     }
 
     #[test]

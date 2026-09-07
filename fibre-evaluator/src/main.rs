@@ -1,5 +1,6 @@
 mod cli;
 mod evaluator;
+mod metrics;
 mod payload;
 mod stats;
 

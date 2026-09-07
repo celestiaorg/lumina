@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fmt::Write;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -52,14 +54,16 @@ pub(crate) struct Stats {
     latencies: BTreeMap<&'static str, Vec<Duration>>,
 }
 
+pub(crate) type SharedStats = Arc<RwLock<Stats>>;
+
 pub(crate) async fn run_stats_collector(
     mut events: mpsc::UnboundedReceiver<Event>,
     stats_interval: Duration,
     started_at: Instant,
     client_count: usize,
     blobs_per_second: f64,
+    stats: SharedStats,
 ) -> Stats {
-    let mut stats = Stats::default();
     let mut ticker = time::interval(stats_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     ticker.tick().await;
@@ -67,10 +71,10 @@ pub(crate) async fn run_stats_collector(
     loop {
         tokio::select! {
             event = events.recv() => match event {
-                Some(event) => stats.apply(event),
+                Some(event) => stats.write().unwrap().apply(event),
                 None => break,
             },
-            _ = ticker.tick() => stats.log_periodic(
+            _ = ticker.tick() => stats.read().unwrap().log_periodic(
                 started_at.elapsed(),
                 client_count,
                 blobs_per_second,
@@ -78,7 +82,7 @@ pub(crate) async fn run_stats_collector(
         }
     }
 
-    stats
+    stats.read().unwrap().clone()
 }
 
 impl Stats {
@@ -145,6 +149,228 @@ impl Stats {
             "periodic stats"
         );
     }
+
+    pub(crate) fn encode_prometheus(
+        &self,
+        elapsed: Duration,
+        client_count: usize,
+        blobs_per_second: f64,
+    ) -> String {
+        let completed = self.successes + self.failures;
+        let payload_bps = per_second(self.payload_bytes, elapsed);
+        let paid_bps = per_second(self.paid_bytes, elapsed);
+        let mut output = String::new();
+
+        metric(
+            &mut output,
+            "fibre_evaluator_clients",
+            "gauge",
+            "Number of Fibre evaluator clients.",
+            client_count,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_per_client_target_blobs_per_second",
+            "gauge",
+            "Target blob lifecycle launch rate for each client.",
+            blobs_per_second,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_aggregate_target_blobs_per_second",
+            "gauge",
+            "Aggregate target blob lifecycle launch rate.",
+            blobs_per_second * client_count as f64,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_elapsed_seconds",
+            "gauge",
+            "Time elapsed since the workload started.",
+            elapsed.as_secs_f64(),
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_scheduled_total",
+            "counter",
+            "Blob lifecycles scheduled.",
+            self.scheduled,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_admitted_total",
+            "counter",
+            "Blob lifecycles admitted to the queue.",
+            self.admitted,
+        );
+        writeln!(
+            output,
+            "# HELP fibre_evaluator_dropped_total Blob lifecycles dropped before admission.\n# TYPE fibre_evaluator_dropped_total counter\nfibre_evaluator_dropped_total{{reason=\"queue_full\"}} {}\nfibre_evaluator_dropped_total{{reason=\"scheduler_late\"}} {}",
+            self.dropped_queue_full, self.dropped_scheduler_late,
+        )
+        .unwrap();
+        metric(
+            &mut output,
+            "fibre_evaluator_queued",
+            "gauge",
+            "Admitted blob lifecycles waiting to start.",
+            self.admitted.saturating_sub(self.started),
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_in_flight",
+            "gauge",
+            "Blob lifecycles currently in flight.",
+            self.started.saturating_sub(completed),
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_started_total",
+            "counter",
+            "Blob lifecycles started.",
+            self.started,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_verified_total",
+            "counter",
+            "Blob lifecycles successfully verified.",
+            self.successes,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_failed_total",
+            "counter",
+            "Blob lifecycles that failed.",
+            self.failures,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_payload_bytes_total",
+            "counter",
+            "Payload bytes in successfully verified blobs.",
+            self.payload_bytes,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_paid_bytes_total",
+            "counter",
+            "Paid bytes in successfully verified blobs.",
+            self.paid_bytes,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_scheduled_per_second",
+            "gauge",
+            "Average blob lifecycle schedule rate.",
+            per_second(self.scheduled, elapsed),
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_admitted_per_second",
+            "gauge",
+            "Average blob lifecycle admission rate.",
+            per_second(self.admitted, elapsed),
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_blobs_per_second",
+            "gauge",
+            "Average successful blob lifecycle rate.",
+            per_second(self.successes, elapsed),
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_success_percent",
+            "gauge",
+            "Percentage of completed blob lifecycles that succeeded.",
+            success_percent(self.successes, completed),
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_payload_mib_per_second",
+            "gauge",
+            "Average successful payload throughput in MiB per second.",
+            payload_bps / MIB,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_payload_gib_per_second",
+            "gauge",
+            "Average successful payload throughput in GiB per second.",
+            payload_bps / GIB,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_paid_mib_per_second",
+            "gauge",
+            "Average paid throughput in MiB per second.",
+            paid_bps / MIB,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_paid_gib_per_second",
+            "gauge",
+            "Average paid throughput in GiB per second.",
+            paid_bps / GIB,
+        );
+
+        writeln!(
+            output,
+            "# HELP fibre_evaluator_stage_failures_total Failed blob lifecycles by stage.\n# TYPE fibre_evaluator_stage_failures_total counter"
+        )
+        .unwrap();
+        for (stage, failures) in &self.failures_by_stage {
+            writeln!(
+                output,
+                "fibre_evaluator_stage_failures_total{{stage=\"{stage}\"}} {failures}"
+            )
+            .unwrap();
+        }
+
+        writeln!(
+            output,
+            "# HELP fibre_evaluator_stage_latency_samples Latency samples recorded by stage.\n# TYPE fibre_evaluator_stage_latency_samples gauge"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "# HELP fibre_evaluator_stage_latency_milliseconds Latency percentile by stage.\n# TYPE fibre_evaluator_stage_latency_milliseconds gauge"
+        )
+        .unwrap();
+        for (stage, samples) in &self.latencies {
+            writeln!(
+                output,
+                "fibre_evaluator_stage_latency_samples{{stage=\"{stage}\"}} {}",
+                samples.len()
+            )
+            .unwrap();
+            for (quantile, percentile) in [("0.5", 0.50), ("0.95", 0.95), ("0.99", 0.99)] {
+                writeln!(
+                    output,
+                    "fibre_evaluator_stage_latency_milliseconds{{stage=\"{stage}\",quantile=\"{quantile}\"}} {}",
+                    percentile_ms(samples, percentile).unwrap()
+                )
+                .unwrap();
+            }
+        }
+
+        output
+    }
+}
+
+fn metric(
+    output: &mut String,
+    name: &str,
+    metric_type: &str,
+    help: &str,
+    value: impl std::fmt::Display,
+) {
+    writeln!(
+        output,
+        "# HELP {name} {help}\n# TYPE {name} {metric_type}\n{name} {value}"
+    )
+    .unwrap();
 }
 
 pub(crate) fn print_final_report(
@@ -297,6 +523,14 @@ mod tests {
             stats.latencies["total"],
             [Duration::from_millis(10), Duration::from_millis(20)]
         );
+
+        let metrics = stats.encode_prometheus(Duration::from_secs(2), 2, 1.5);
+        assert!(metrics.contains("fibre_evaluator_scheduled_total 7\n"));
+        assert!(metrics.contains("fibre_evaluator_started_total 1\n"));
+        assert!(metrics.contains("fibre_evaluator_stage_failures_total{stage=\"download\"} 1\n"));
+        assert!(metrics.contains(
+            "fibre_evaluator_stage_latency_milliseconds{stage=\"total\",quantile=\"0.5\"} 10\n"
+        ));
     }
 
     #[test]

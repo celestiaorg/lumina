@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::IntoFuture;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -13,14 +13,16 @@ use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
 use celestia_types::nmt::Namespace;
 use celestia_types::state::AccAddress;
 use k256::ecdsa::SigningKey;
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{self, Instant, MissedTickBehavior};
 
 use crate::cli::Cli;
+use crate::metrics;
 use crate::payload::{make_payload, payload_size_for_paid_size, verify_payload};
-use crate::stats::{Event, print_final_report, run_stats_collector};
+use crate::stats::{Event, SharedStats, Stats, print_final_report, run_stats_collector};
 
 struct LifecycleContext {
     client: usize,
@@ -108,13 +110,27 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         });
     }
 
+    let metrics_listener = TcpListener::bind(cli.metrics_listen_addr)
+        .await
+        .with_context(|| format!("binding metrics endpoint to {}", cli.metrics_listen_addr))?;
+    tracing::info!(address = %cli.metrics_listen_addr, path = "/metrics", "Prometheus metrics ready");
+
     let started_at = Instant::now();
+    let shared_stats: SharedStats = Arc::new(RwLock::new(Stats::default()));
+    let metrics_handle = tokio::spawn(metrics::serve(
+        metrics_listener,
+        Arc::clone(&shared_stats),
+        started_at,
+        client_count,
+        cli.blobs_per_second,
+    ));
     let stats_handle = tokio::spawn(run_stats_collector(
         event_rx,
         Duration::from_secs(cli.stats_interval_seconds),
         started_at,
         client_count,
         cli.blobs_per_second,
+        shared_stats,
     ));
 
     let mut client_error = None;
@@ -156,6 +172,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         client_count,
         cli.blobs_per_second,
     );
+    metrics_handle.abort();
     if let Some(error) = client_error {
         return Err(error);
     }
