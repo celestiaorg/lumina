@@ -223,6 +223,12 @@ impl FibreH2TransportInner {
             .await
             .map_err(BoxError::from)?;
         let (sender, connection) = hyper::client::conn::http2::Builder::new(h2_executor())
+            // On a fast, low-latency link the default 64 KiB windows and 1 MiB
+            // send buffer throttle shard uploads while CPU and NIC sit idle.
+            // Adaptive windowing tunes the receive side to the BDP; the larger
+            // send buffer keeps the upload pipe full between WINDOW_UPDATEs.
+            .adaptive_window(true)
+            .max_send_buf_size(32 * 1024 * 1024)
             .handshake(TokioIo::new(tls))
             .await?;
         spawn_connection(connection);
