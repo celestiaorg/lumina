@@ -105,13 +105,7 @@ fn make_validators(count: usize) -> (Vec<ed25519_dalek::SigningKey>, Vec<Validat
             let mut seed = [0u8; 32];
             seed[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
             let key = ed25519_dalek::SigningKey::from_bytes(&seed);
-            let mut address = [0u8; 20];
-            address[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
-            let info = ValidatorInfo {
-                address,
-                pubkey: key.verifying_key(),
-                voting_power: (i as i64 % 10) + 1,
-            };
+            let info = ValidatorInfo::try_new(key.verifying_key(), (i as u64 % 10) + 1).unwrap();
             (key, info)
         })
         .unzip()
@@ -216,7 +210,7 @@ fn bench_signature_set(c: &mut Criterion) {
         })
         .collect();
 
-    let set = ValidatorSet::new(validators.clone(), 1);
+    let set = ValidatorSet::try_new(validators.clone(), 1).unwrap();
     let threshold = Fraction::new(NonZeroU64::new(2).unwrap(), NonZeroU64::new(3).unwrap());
 
     let signature_set = set.new_signature_set(threshold, payload.clone());
@@ -257,7 +251,7 @@ fn bench_validator_assign(c: &mut Criterion) {
 
     for count in [10, 50, 100] {
         let (_, validators) = make_validators(count);
-        let set = ValidatorSet::new(validators, 1);
+        let set = ValidatorSet::try_new(validators, 1).unwrap();
 
         group.bench_with_input(BenchmarkId::new("assign", count), &set, |b, set| {
             b.iter(|| {

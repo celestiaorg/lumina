@@ -18,7 +18,7 @@ use tendermint_proto::v0_38::crypto::public_key::Sum as CryptoKeySum;
 use crate::error::FibreError;
 use crate::payment_promise::PaymentPromise;
 #[cfg(test)]
-use crate::validator::ValidatorInfo;
+use crate::validator::{ValidatorInfo, ValidatorSet};
 use crate::validator_client::DownloadResponse;
 
 fn proof_hashes_as_bytes(hashes: &[[u8; 32]]) -> Vec<Bytes> {
@@ -191,6 +191,7 @@ pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> Result<SystemTime, Fibr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::make_validator;
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
@@ -358,30 +359,111 @@ mod tests {
         assert_eq!(diff.as_nanos(), 0);
     }
 
-    #[test]
-    fn validator_from_proto_valid() {
-        // Generate a random ed25519 key using raw bytes
-        let mut secret = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut OsRng, &mut secret);
-        let sk = ed25519_dalek::SigningKey::from_bytes(&secret);
-        let pk = sk.verifying_key();
-
-        let proto_val = tendermint_proto::v0_38::types::Validator {
-            address: vec![0u8; 20], // not used in conversion (derived from pubkey)
+    fn proto_validator(
+        voting_power: i64,
+    ) -> (
+        ed25519_dalek::VerifyingKey,
+        tendermint_proto::v0_38::types::Validator,
+    ) {
+        let info = make_validator(1, 7).1;
+        let validator = tendermint_proto::v0_38::types::Validator {
+            address: info.address().to_vec(),
             pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
-                sum: Some(CryptoKeySum::Ed25519(pk.as_bytes().to_vec())),
+                sum: Some(CryptoKeySum::Ed25519(info.public_key().as_bytes().to_vec())),
             }),
-            voting_power: 100,
+            voting_power,
             proposer_priority: 0,
         };
+        (*info.public_key(), validator)
+    }
+
+    #[test]
+    fn validator_from_proto_valid() {
+        let (pubkey, proto_val) = proto_validator(100);
 
         let info = ValidatorInfo::try_from(&proto_val).unwrap();
-        assert_eq!(info.pubkey, pk);
-        assert_eq!(info.voting_power, 100);
-        // Verify address is derived from pubkey
-        use sha2::{Digest, Sha256};
-        let expected_addr: [u8; 20] = Sha256::digest(pk.as_bytes())[..20].try_into().unwrap();
-        assert_eq!(info.address, expected_addr);
+        assert_eq!(info.public_key(), &pubkey);
+        assert_eq!(info.voting_power(), 100);
+        assert_eq!(info.address().as_slice(), proto_val.address);
+    }
+
+    #[test]
+    fn validator_from_proto_negative_power() {
+        let (_, proto_val) = proto_validator(-1);
+        assert!(ValidatorInfo::try_from(&proto_val).is_err());
+    }
+
+    #[test]
+    fn validator_from_proto_zero_power() {
+        let (_, proto_val) = proto_validator(0);
+        assert!(ValidatorInfo::try_from(&proto_val).is_err());
+    }
+
+    #[test]
+    fn validator_from_proto_mismatched_address() {
+        let (_, mut proto_val) = proto_validator(1);
+        proto_val.address = vec![0; 20];
+        assert!(ValidatorInfo::try_from(&proto_val).is_err());
+    }
+
+    #[test]
+    fn validator_set_from_proto_valid() {
+        let (_, validator) = proto_validator(100);
+        let proto_set = tendermint_proto::v0_38::types::ValidatorSet {
+            validators: vec![validator.clone()],
+            proposer: Some(validator),
+            total_voting_power: 100,
+        };
+
+        let set = ValidatorSet::try_from((&proto_set, 7)).unwrap();
+        assert_eq!(set.height().get(), 7);
+        assert_eq!(set.total_voting_power(), 100);
+        assert_eq!(set.validators().len(), 1);
+    }
+
+    #[test]
+    fn validator_set_from_proto_ignores_total_power() {
+        let (_, validator) = proto_validator(100);
+        let proto_set = tendermint_proto::v0_38::types::ValidatorSet {
+            validators: vec![validator.clone()],
+            proposer: Some(validator),
+            total_voting_power: 101,
+        };
+
+        let set = ValidatorSet::try_from((&proto_set, 7)).unwrap();
+        assert_eq!(set.total_voting_power(), 100);
+    }
+
+    #[test]
+    fn validator_set_from_proto_matches_proposer_by_address() {
+        let (_, validator) = proto_validator(100);
+        let mut proposer = validator.clone();
+        proposer.voting_power = 99;
+        let proto_set = tendermint_proto::v0_38::types::ValidatorSet {
+            validators: vec![validator],
+            proposer: Some(proposer),
+            total_voting_power: 0,
+        };
+
+        assert!(ValidatorSet::try_from((&proto_set, 7)).is_ok());
+    }
+
+    #[test]
+    fn validator_set_from_proto_missing_proposer() {
+        let (_, validator) = proto_validator(100);
+        let proto_set = tendermint_proto::v0_38::types::ValidatorSet {
+            validators: vec![validator],
+            proposer: None,
+            total_voting_power: 100,
+        };
+
+        assert!(ValidatorSet::try_from((&proto_set, 7)).is_err());
+    }
+
+    #[test]
+    fn validator_set_from_proto_empty() {
+        let proto_set = tendermint_proto::v0_38::types::ValidatorSet::default();
+        assert!(ValidatorSet::try_from((&proto_set, 1)).is_err());
     }
 
     #[test]
