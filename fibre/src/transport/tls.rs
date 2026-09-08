@@ -72,6 +72,75 @@ struct BindingPayload<'a> {
     tls_pub_key: OctetStringRef<'a>,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum FibreCertificateError {
+    #[error("peer cert is missing the fibre identity extension")]
+    MissingIdentityExtension,
+    #[error("peer cert has duplicate fibre identity extensions")]
+    DuplicateIdentityExtensions,
+    #[error("trailing bytes in identity extension: {0}")]
+    IdentityTrailingData(#[source] der::Error),
+    #[error("unmarshal identity extension: {0}")]
+    IdentityDer(#[source] der::Error),
+    #[error("trailing bytes in binding payload: {0}")]
+    BindingTrailingData(#[source] der::Error),
+    #[error("unmarshal binding payload: {0}")]
+    BindingDer(#[source] der::Error),
+    #[error("parse peer cert: {0}")]
+    CertificateParse(#[source] x509_parser::nom::Err<x509_parser::error::X509Error>),
+    #[error("peer cert has {0} trailing bytes")]
+    CertificateTrailingData(usize),
+    #[error("identity extension size {0} exceeds maximum {MAX_IDENTITY_EXTENSION_SIZE}")]
+    IdentityExtensionTooLarge(usize),
+    #[error("empty identity payload")]
+    EmptyIdentityPayload,
+    #[error("identity payload size {0} exceeds maximum {MAX_PAYLOAD_DER_SIZE}")]
+    IdentityPayloadTooLarge(usize),
+    #[error("empty identity signature")]
+    EmptyIdentitySignature,
+    #[error("unsupported fibre identity version {0}")]
+    UnsupportedIdentityVersion(i64),
+    #[error("peer cert signature is invalid: {0}")]
+    InvalidIdentitySignature(#[source] ed25519_dalek::SignatureError),
+    #[error("peer cert public key does not match signed identity")]
+    TlsPublicKeyMismatch,
+    #[error("fibre identity validity window is empty: {not_before}..{not_after}")]
+    EmptyValidityWindow { not_before: i128, not_after: i128 },
+    #[error("fibre identity validity window is {0} seconds, exceeding the maximum")]
+    ValidityWindowTooLong(i128),
+    #[error(
+        "peer fibre identity is not currently valid: now {now}, window {not_before}..{not_after}"
+    )]
+    OutsideValidityWindow {
+        now: i128,
+        not_before: i128,
+        not_after: i128,
+    },
+    #[error(
+        "certificate validity {certificate_not_before}..{certificate_not_after} does not match signed identity {signed_not_before}..{signed_not_after}"
+    )]
+    CertificateValidityMismatch {
+        signed_not_before: i64,
+        signed_not_after: i64,
+        certificate_not_before: i64,
+        certificate_not_after: i64,
+    },
+    #[error("parse peer cert extended key usage: {0}")]
+    ExtendedKeyUsage(#[source] x509_parser::error::X509Error),
+    #[error("peer cert missing serverAuth extended key usage")]
+    MissingServerAuth,
+}
+
+impl From<FibreCertificateError> for tokio_rustls::rustls::Error {
+    fn from(error: FibreCertificateError) -> Self {
+        tokio_rustls::rustls::Error::InvalidCertificate(
+            tokio_rustls::rustls::CertificateError::Other(tokio_rustls::rustls::OtherError(
+                Arc::new(error),
+            )),
+        )
+    }
+}
+
 #[derive(Debug)]
 struct FibreServerCertVerifier {
     validator_key: VerifyingKey,
@@ -93,8 +162,7 @@ impl ServerCertVerifier for FibreServerCertVerifier {
             &self.validator_key,
             &self.chain_id,
             now,
-        )
-        .map_err(tokio_rustls::rustls::Error::General)?;
+        )?;
 
         Ok(ServerCertVerified::assertion())
     }
@@ -135,21 +203,24 @@ impl ServerCertVerifier for FibreServerCertVerifier {
 }
 
 pub(crate) fn grpc_client(
-    url: &str,
+    url: String,
     validator_key: VerifyingKey,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
 ) -> Result<celestia_grpc::GrpcClient, FibreError> {
     let uri = url
         .parse::<http::Uri>()
-        .map_err(|error| FibreError::Other(format!("invalid Fibre endpoint '{url}': {error}")))?;
+        .map_err(|source| FibreError::InvalidEndpoint {
+            endpoint: url,
+            source,
+        })?;
     let host = uri
         .host()
-        .ok_or_else(|| FibreError::Other(format!("Fibre endpoint '{url}' has no host")))?
+        .ok_or_else(|| FibreError::EndpointMissingHost(uri.clone()))?
         .to_string();
     let port = uri.port_u16().unwrap_or(443);
     let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-    let mut tls_config = fibre_tls_config(validator_key, chain_id, provider, None)?;
+    let mut tls_config = fibre_tls_config(validator_key, chain_id, provider, None);
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
     let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
     let transport = FibreH2Transport {
@@ -166,7 +237,7 @@ pub(crate) fn grpc_client(
     celestia_grpc::GrpcClient::builder()
         .transport(transport)
         .build()
-        .map_err(|error| FibreError::Other(format!("failed to build Fibre gRPC client: {error}")))
+        .map_err(FibreError::from)
 }
 
 fn fibre_tls_config(
@@ -174,7 +245,7 @@ fn fibre_tls_config(
     chain_id: String,
     provider: Arc<CryptoProvider>,
     time_provider: Option<Arc<dyn tokio_rustls::rustls::time_provider::TimeProvider>>,
-) -> Result<ClientConfig, FibreError> {
+) -> ClientConfig {
     let verifier = FibreServerCertVerifier {
         validator_key,
         chain_id,
@@ -186,12 +257,12 @@ fn fibre_tls_config(
     };
     let mut tls_config = builder
         .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
-        .map_err(|error| FibreError::Other(format!("failed to configure Fibre TLS: {error}")))?
+        .expect("ring crypto provider supports TLS 1.3")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
     tls_config.resumption = Resumption::disabled();
-    Ok(tls_config)
+    tls_config
 }
 
 struct FibreH2TransportInner {
@@ -315,37 +386,41 @@ where
 
 fn identity_extension<'a>(
     extensions: &'a [x509_parser::extensions::X509Extension<'a>],
-) -> Result<&'a [u8], String> {
+) -> Result<&'a [u8], FibreCertificateError> {
     let mut matching = extensions
         .iter()
         .filter(|extension| extension.oid.to_id_string() == IDENTITY_EXTENSION_OID);
     let extension = matching
         .next()
-        .ok_or_else(|| "peer cert is missing the fibre identity extension".to_string())?;
+        .ok_or(FibreCertificateError::MissingIdentityExtension)?;
     if matching.next().is_some() {
-        return Err("peer cert has duplicate fibre identity extensions".to_string());
+        return Err(FibreCertificateError::DuplicateIdentityExtensions);
     }
     Ok(extension.value)
 }
 
-fn decode_identity(extension: &[u8]) -> Result<SignedIdentity<'_>, String> {
+fn decode_identity(extension: &[u8]) -> Result<SignedIdentity<'_>, FibreCertificateError> {
     SignedIdentity::from_der(extension).map_err(|error| {
         if matches!(error.kind(), der::ErrorKind::TrailingData { .. }) {
-            "trailing bytes in identity extension".to_string()
+            FibreCertificateError::IdentityTrailingData(error)
         } else {
-            format!("unmarshal identity extension: {error}")
+            FibreCertificateError::IdentityDer(error)
         }
     })
 }
 
-fn decode_binding(payload: &[u8]) -> Result<BindingPayload<'_>, String> {
+fn decode_binding(payload: &[u8]) -> Result<BindingPayload<'_>, FibreCertificateError> {
     BindingPayload::from_der(payload).map_err(|error| {
         if matches!(error.kind(), der::ErrorKind::TrailingData { .. }) {
-            "trailing bytes in binding payload".to_string()
+            FibreCertificateError::BindingTrailingData(error)
         } else {
-            format!("unmarshal binding payload: {error}")
+            FibreCertificateError::BindingDer(error)
         }
     })
+}
+
+fn decode_identity_signature(bytes: &[u8]) -> Result<Signature, FibreCertificateError> {
+    Signature::from_slice(bytes).map_err(FibreCertificateError::InvalidIdentitySignature)
 }
 
 fn verify_certificate(
@@ -353,41 +428,40 @@ fn verify_certificate(
     validator_key: &VerifyingKey,
     chain_id: &str,
     now: UnixTime,
-) -> Result<(), String> {
+) -> Result<(), FibreCertificateError> {
     let (remaining, cert) =
-        parse_x509_certificate(cert_der).map_err(|error| format!("parse peer cert: {error}"))?;
+        parse_x509_certificate(cert_der).map_err(FibreCertificateError::CertificateParse)?;
     if !remaining.is_empty() {
-        return Err("trailing bytes in peer cert".to_string());
+        return Err(FibreCertificateError::CertificateTrailingData(
+            remaining.len(),
+        ));
     }
 
     let extension = identity_extension(cert.extensions())?;
     if extension.len() > MAX_IDENTITY_EXTENSION_SIZE {
-        return Err(format!(
-            "identity extension size {} exceeds maximum {MAX_IDENTITY_EXTENSION_SIZE}",
-            extension.len()
+        return Err(FibreCertificateError::IdentityExtensionTooLarge(
+            extension.len(),
         ));
     }
 
     let identity = decode_identity(extension)?;
     let payload = identity.payload.as_bytes();
     if payload.is_empty() {
-        return Err("empty identity payload".to_string());
+        return Err(FibreCertificateError::EmptyIdentityPayload);
     }
     if payload.len() > MAX_PAYLOAD_DER_SIZE {
-        return Err(format!(
-            "identity payload size {} exceeds maximum {MAX_PAYLOAD_DER_SIZE}",
-            payload.len()
+        return Err(FibreCertificateError::IdentityPayloadTooLarge(
+            payload.len(),
         ));
     }
     if identity.signature.as_bytes().is_empty() {
-        return Err("empty identity signature".to_string());
+        return Err(FibreCertificateError::EmptyIdentitySignature);
     }
 
     let binding = decode_binding(payload)?;
     if binding.version != BINDING_VERSION {
-        return Err(format!(
-            "unsupported fibre identity version {}",
-            binding.version
+        return Err(FibreCertificateError::UnsupportedIdentityVersion(
+            binding.version,
         ));
     }
 
@@ -395,41 +469,54 @@ fn verify_certificate(
     sign_input.extend_from_slice(SIGN_PREFIX);
     sign_input.extend_from_slice(payload);
     let signed_bytes = raw_bytes_message_sign_bytes(chain_id, SIGN_UNIQUE_ID, &sign_input);
-    let signature = Signature::from_slice(identity.signature.as_bytes())
-        .map_err(|_| "peer cert signature is invalid".to_string())?;
+    let signature = decode_identity_signature(identity.signature.as_bytes())?;
     validator_key
         .verify_strict(&signed_bytes, &signature)
-        .map_err(|_| "peer cert signature is invalid".to_string())?;
+        .map_err(FibreCertificateError::InvalidIdentitySignature)?;
 
     if cert.tbs_certificate.subject_pki.raw != binding.tls_pub_key.as_bytes() {
-        return Err("peer cert public key does not match signed identity".to_string());
+        return Err(FibreCertificateError::TlsPublicKeyMismatch);
     }
 
     let not_before = i128::from(binding.not_before);
     let not_after = i128::from(binding.not_after);
     if not_after <= not_before {
-        return Err("fibre identity validity window is empty".to_string());
+        return Err(FibreCertificateError::EmptyValidityWindow {
+            not_before,
+            not_after,
+        });
     }
     if not_after - not_before > MAX_CERT_VALIDITY_SECONDS {
-        return Err("fibre identity validity window exceeds maximum".to_string());
+        return Err(FibreCertificateError::ValidityWindowTooLong(
+            not_after - not_before,
+        ));
     }
     let now = i128::from(now.as_secs());
     if now < not_before - CLOCK_SKEW_SECONDS || now > not_after + CLOCK_SKEW_SECONDS {
-        return Err("peer fibre identity is not currently valid".to_string());
+        return Err(FibreCertificateError::OutsideValidityWindow {
+            now,
+            not_before,
+            not_after,
+        });
     }
 
     if cert.validity().not_before.timestamp() != binding.not_before
         || cert.validity().not_after.timestamp() != binding.not_after
     {
-        return Err("certificate validity does not match signed identity".to_string());
+        return Err(FibreCertificateError::CertificateValidityMismatch {
+            signed_not_before: binding.not_before,
+            signed_not_after: binding.not_after,
+            certificate_not_before: cert.validity().not_before.timestamp(),
+            certificate_not_after: cert.validity().not_after.timestamp(),
+        });
     }
 
     let has_server_auth = cert
         .extended_key_usage()
-        .map_err(|error| format!("parse peer cert extended key usage: {error}"))?
+        .map_err(FibreCertificateError::ExtendedKeyUsage)?
         .is_some_and(|usage| usage.value.server_auth);
     if !has_server_auth {
-        return Err("peer cert missing serverAuth extended key usage".to_string());
+        return Err(FibreCertificateError::MissingServerAuth);
     }
 
     Ok(())
@@ -468,25 +555,44 @@ mod tests {
         error: Option<String>,
     }
 
-    fn expected_error_fragment(error: &str) -> &str {
-        match error {
-            "extension_missing" => "missing the fibre identity extension",
-            "extension_too_large" => "identity extension size",
-            "extension_malformed" => "unmarshal identity extension",
-            "extension_trailing_data" => "trailing bytes in identity extension",
-            "payload_empty" => "empty identity payload",
-            "payload_too_large" => "identity payload size",
-            "signature_empty" => "empty identity signature",
-            "payload_malformed" => "unmarshal binding payload",
-            "binding_trailing_data" => "trailing bytes in binding payload",
-            "unsupported_version" => "unsupported fibre identity version",
-            "signature_invalid" => "signature is invalid",
-            "tls_key_mismatch" => "public key does not match signed identity",
-            "window_empty" => "validity window is empty",
-            "window_too_long" => "validity window exceeds maximum",
-            "outside_validity_window" => "not currently valid",
-            "cert_window_mismatch" => "certificate validity does not match signed identity",
-            "eku_missing" => "serverAuth",
+    fn matches_error_code(error: &FibreCertificateError, code: &str) -> bool {
+        match code {
+            "extension_missing" => matches!(error, FibreCertificateError::MissingIdentityExtension),
+            "extension_too_large" => {
+                matches!(error, FibreCertificateError::IdentityExtensionTooLarge(_))
+            }
+            "extension_malformed" => {
+                matches!(error, FibreCertificateError::IdentityDer(_))
+            }
+            "extension_trailing_data" => {
+                matches!(error, FibreCertificateError::IdentityTrailingData(_))
+            }
+            "payload_empty" => matches!(error, FibreCertificateError::EmptyIdentityPayload),
+            "payload_too_large" => {
+                matches!(error, FibreCertificateError::IdentityPayloadTooLarge(_))
+            }
+            "signature_empty" => matches!(error, FibreCertificateError::EmptyIdentitySignature),
+            "payload_malformed" => matches!(error, FibreCertificateError::BindingDer(_)),
+            "binding_trailing_data" => {
+                matches!(error, FibreCertificateError::BindingTrailingData(_))
+            }
+            "unsupported_version" => {
+                matches!(error, FibreCertificateError::UnsupportedIdentityVersion(_))
+            }
+            "signature_invalid" => {
+                matches!(error, FibreCertificateError::InvalidIdentitySignature(_))
+            }
+            "tls_key_mismatch" => matches!(error, FibreCertificateError::TlsPublicKeyMismatch),
+            "window_empty" => matches!(error, FibreCertificateError::EmptyValidityWindow { .. }),
+            "window_too_long" => matches!(error, FibreCertificateError::ValidityWindowTooLong(_)),
+            "outside_validity_window" => {
+                matches!(error, FibreCertificateError::OutsideValidityWindow { .. })
+            }
+            "cert_window_mismatch" => matches!(
+                error,
+                FibreCertificateError::CertificateValidityMismatch { .. }
+            ),
+            "eku_missing" => matches!(error, FibreCertificateError::MissingServerAuth),
             unknown => panic!("unknown upstream error code {unknown}"),
         }
     }
@@ -519,7 +625,7 @@ mod tests {
                     .as_deref()
                     .expect("invalid vector should name its expected error");
                 assert!(
-                    error.contains(expected_error_fragment(expected)),
+                    matches_error_code(&error, expected),
                     "vector {} returned {error:?}, expected {expected}",
                     vector.name
                 );
@@ -545,7 +651,138 @@ mod tests {
 
         let error = identity_extension(&[extension.clone(), extension])
             .expect_err("duplicate identity extensions should fail");
-        assert!(error.contains("duplicate fibre identity extensions"));
+        assert!(matches!(
+            error,
+            FibreCertificateError::DuplicateIdentityExtensions
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_certificate() {
+        let key = VerifyingKey::from_bytes(&[1u8; 32]).expect("key should be valid");
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(0));
+        assert!(matches!(
+            verify_certificate(&[0], &key, "chain", now),
+            Err(FibreCertificateError::CertificateParse(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_identity_signature_length() {
+        assert!(matches!(
+            decode_identity_signature(&[0; 63]),
+            Err(FibreCertificateError::InvalidIdentitySignature(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_trailing_certificate_data() {
+        let vector = vectors()
+            .cases
+            .into_iter()
+            .find(|vector| vector.name == "valid")
+            .expect("valid vector should exist");
+        let mut cert_der = hex::decode(&vector.cert_der).expect("certificate should be hex");
+        cert_der.push(0);
+        let key_bytes: [u8; 32] = hex::decode(&vector.verifier_consensus_pub)
+            .expect("validator key should be hex")
+            .try_into()
+            .expect("validator key should have 32 bytes");
+        let key = VerifyingKey::from_bytes(&key_bytes).expect("validator key should be valid");
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(vector.verify_at));
+        assert!(matches!(
+            verify_certificate(&cert_der, &key, &vector.verifier_chain_id, now),
+            Err(FibreCertificateError::CertificateTrailingData(1))
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_extended_key_usage() {
+        let vector = vectors()
+            .cases
+            .into_iter()
+            .find(|vector| vector.name == "valid")
+            .expect("valid vector should exist");
+        let mut cert_der = hex::decode(&vector.cert_der).expect("certificate should be hex");
+        let (_, cert) = parse_x509_certificate(&cert_der).expect("certificate should parse");
+        let eku = cert
+            .extensions()
+            .iter()
+            .find(|extension| extension.oid.to_id_string() == "2.5.29.37")
+            .expect("certificate should contain extended key usage");
+        let offset = cert_der
+            .windows(eku.value.len())
+            .position(|window| window == eku.value)
+            .expect("extension value should occur in certificate");
+        cert_der[offset] = 0xff;
+
+        let key_bytes: [u8; 32] = hex::decode(&vector.verifier_consensus_pub)
+            .expect("validator key should be hex")
+            .try_into()
+            .expect("validator key should have 32 bytes");
+        let key = VerifyingKey::from_bytes(&key_bytes).expect("validator key should be valid");
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(vector.verify_at));
+        assert!(matches!(
+            verify_certificate(&cert_der, &key, &vector.verifier_chain_id, now),
+            Err(FibreCertificateError::ExtendedKeyUsage(_))
+        ));
+    }
+
+    #[test]
+    fn certificate_error_maps_to_rustls_other() {
+        let error: tokio_rustls::rustls::Error =
+            FibreCertificateError::MissingIdentityExtension.into();
+        let tokio_rustls::rustls::Error::InvalidCertificate(
+            tokio_rustls::rustls::CertificateError::Other(other),
+        ) = error
+        else {
+            panic!("expected InvalidCertificate(Other)")
+        };
+        assert!(
+            other
+                .0
+                .downcast_ref::<FibreCertificateError>()
+                .is_some_and(|error| matches!(
+                    error,
+                    FibreCertificateError::MissingIdentityExtension
+                ))
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn grpc_client_rejects_invalid_uri() {
+        let url = "not a valid url \0".to_string();
+        let key = VerifyingKey::from_bytes(&[1u8; 32]).expect("key should be valid");
+        let error = grpc_client(
+            url.clone(),
+            key,
+            "chain".to_string(),
+            Arc::new(crate::transport::io_connector::NativeTcpConnector),
+        )
+        .expect_err("invalid URI should fail");
+        assert!(matches!(
+            error,
+            FibreError::InvalidEndpoint { endpoint, .. } if endpoint == url
+        ));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn grpc_client_rejects_uri_without_host() {
+        let uri: http::Uri = "/relative".parse().expect("relative URI should parse");
+        let key = VerifyingKey::from_bytes(&[1u8; 32]).expect("key should be valid");
+        let error = grpc_client(
+            uri.to_string(),
+            key,
+            "chain".to_string(),
+            Arc::new(crate::transport::io_connector::NativeTcpConnector),
+        )
+        .expect_err("URI without host should fail");
+        assert!(matches!(
+            error,
+            FibreError::EndpointMissingHost(value) if value == uri
+        ));
     }
 
     #[test]
@@ -644,8 +881,7 @@ mod tests {
             vector.verifier_chain_id,
             provider,
             Some(Arc::new(FixedTime(fixed_time))),
-        )
-        .expect("TLS configuration should succeed");
+        );
         client_config.alpn_protocols = vec![b"h2".to_vec()];
         let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
         let server_name =

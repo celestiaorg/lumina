@@ -13,7 +13,7 @@ use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::blob::Commitment;
-use crate::error::FibreError;
+use crate::error::{ChainIdError, FibreError, PaymentPromiseError};
 
 /// Domain separation prefix prepended to sign bytes.
 /// Ensures payment promise signatures cannot be confused with consensus messages.
@@ -23,10 +23,20 @@ pub const SIGN_BYTES_PREFIX: &[u8] = b"fibre/pp:v0";
 const PUBKEY_SIZE: usize = 33;
 
 /// Size of a secp256k1 signature in compact format (32 bytes r + 32 bytes s).
-const SIGNATURE_SIZE: usize = 64;
+pub(crate) const SIGNATURE_SIZE: usize = 64;
 
 /// Maximum allowed chain ID length.
 pub(crate) const MAX_CHAIN_ID_SIZE: usize = 20;
+
+pub(crate) fn validate_chain_id(chain_id: &str) -> Result<(), ChainIdError> {
+    if chain_id.is_empty() {
+        return Err(ChainIdError::Empty);
+    }
+    if chain_id.len() > MAX_CHAIN_ID_SIZE {
+        return Err(ChainIdError::TooLong(chain_id.len()));
+    }
+    Ok(())
+}
 
 /// Size of the Go time.Time MarshalBinary output for UTC times.
 const TIMESTAMP_BINARY_SIZE: usize = 15;
@@ -149,63 +159,38 @@ impl PaymentPromise {
     /// Performs stateless validation of all field constraints and verifies
     /// the signature using the signer's public key.
     pub fn validate(&self) -> Result<(), FibreError> {
-        // Chain ID must not be empty
-        if self.chain_id.is_empty() {
-            return Err(FibreError::InvalidPaymentPromise(
-                "chain id must not be empty".into(),
-            ));
-        }
-
-        // Chain ID length limit
-        if self.chain_id.len() > MAX_CHAIN_ID_SIZE {
-            return Err(FibreError::InvalidPaymentPromise(format!(
-                "chain id length {} exceeds maximum {}",
-                self.chain_id.len(),
-                MAX_CHAIN_ID_SIZE
-            )));
-        }
+        validate_chain_id(&self.chain_id).map_err(PaymentPromiseError::ChainId)?;
 
         // Upload size must be positive
         if self.upload_size == 0 {
-            return Err(FibreError::InvalidPaymentPromise(
-                "upload size must be positive".into(),
-            ));
+            return Err(PaymentPromiseError::ZeroUploadSize.into());
         }
 
         // Creation timestamp must not be Unix epoch (Go's zero value check)
         if self.creation_timestamp == SystemTime::UNIX_EPOCH {
-            return Err(FibreError::InvalidPaymentPromise(
-                "creation timestamp must not be zero".into(),
-            ));
+            return Err(PaymentPromiseError::ZeroTimestamp.into());
         }
 
         // Signature must be present and correct size
         let signature_bytes = self
             .signature
             .as_ref()
-            .ok_or_else(|| FibreError::InvalidPaymentPromise("signature must be present".into()))?;
+            .ok_or(PaymentPromiseError::MissingSignature)?;
 
         if signature_bytes.len() != SIGNATURE_SIZE {
-            return Err(FibreError::InvalidPaymentPromise(format!(
-                "signature must be {} bytes, got {}",
-                SIGNATURE_SIZE,
-                signature_bytes.len()
-            )));
+            return Err(PaymentPromiseError::SignatureLength(signature_bytes.len()).into());
         }
 
         // Verify signature
         let sign_bytes = self.sign_bytes()?;
 
-        let signature = Signature::from_slice(signature_bytes).map_err(|e| {
-            FibreError::InvalidPaymentPromise(format!("invalid signature format: {}", e))
-        })?;
+        let signature =
+            Signature::from_slice(signature_bytes).map_err(PaymentPromiseError::SignatureFormat)?;
 
         use k256::ecdsa::signature::Verifier;
         self.signer_pubkey
             .verify(&sign_bytes, &signature)
-            .map_err(|_| {
-                FibreError::InvalidPaymentPromise("signature verification failed".into())
-            })?;
+            .map_err(PaymentPromiseError::SignatureVerification)?;
 
         Ok(())
     }
@@ -214,9 +199,10 @@ impl PaymentPromise {
     ///
     /// The signature must be set before calling this method.
     pub fn hash(&self) -> Result<[u8; 32], FibreError> {
-        let signature = self.signature.as_ref().ok_or_else(|| {
-            FibreError::InvalidPaymentPromise("signature must be set before computing hash".into())
-        })?;
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or(PaymentPromiseError::MissingSignature)?;
 
         let sign_bytes = self.sign_bytes()?;
 
@@ -272,7 +258,7 @@ const UNIX_TO_INTERNAL: i64 = (1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400) 
 fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
     let duration = t
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|_| FibreError::InvalidPaymentPromise("timestamp before Unix epoch".into()))?;
+        .map_err(PaymentPromiseError::TimestampBeforeEpoch)?;
 
     // Convert from Unix epoch to Go's internal epoch (year 1)
     let secs = duration.as_secs() as i64 + UNIX_TO_INTERNAL;
@@ -299,21 +285,9 @@ fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
 
 /// Unmarshal a timestamp from Go's `time.Time.MarshalBinary()` format back to `SystemTime`.
 #[cfg(test)]
-fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
-    if data.len() != TIMESTAMP_BINARY_SIZE {
-        return Err(FibreError::Other(format!(
-            "timestamp binary must be {} bytes, got {}",
-            TIMESTAMP_BINARY_SIZE,
-            data.len()
-        )));
-    }
-
-    if data[0] != 1 {
-        return Err(FibreError::Other(format!(
-            "unsupported timestamp version: {}",
-            data[0]
-        )));
-    }
+fn unmarshal_binary_time(data: &[u8]) -> SystemTime {
+    assert_eq!(data.len(), TIMESTAMP_BINARY_SIZE);
+    assert_eq!(data[0], 1);
 
     // Seconds since year 1 (Go's internal epoch)
     let internal_secs = i64::from_be_bytes(data[1..9].try_into().unwrap());
@@ -322,19 +296,11 @@ fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
     // Convert from Go's internal epoch to Unix epoch
     let unix_secs = internal_secs - UNIX_TO_INTERNAL;
 
-    if unix_secs < 0 {
-        return Err(FibreError::Other(
-            "timestamp before Unix epoch not supported".into(),
-        ));
-    }
-    if nsecs < 0 {
-        return Err(FibreError::Other(
-            "negative timestamp nanoseconds not supported".into(),
-        ));
-    }
+    assert!(unix_secs >= 0);
+    assert!(nsecs >= 0);
 
     let duration = std::time::Duration::new(unix_secs as u64, nsecs as u32);
-    Ok(SystemTime::UNIX_EPOCH + duration)
+    SystemTime::UNIX_EPOCH + duration
 }
 
 #[cfg(test)]
@@ -450,7 +416,12 @@ mod tests {
     #[test]
     fn validate_fails_without_signature() {
         let (_, promise) = make_test_promise();
-        assert!(promise.validate().is_err());
+        assert!(matches!(
+            promise.validate(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::MissingSignature
+            ))
+        ));
     }
 
     #[test]
@@ -462,7 +433,12 @@ mod tests {
         let wrong_key = SigningKey::random(&mut OsRng);
         promise.signer_pubkey = *wrong_key.verifying_key();
 
-        assert!(promise.validate().is_err());
+        assert!(matches!(
+            promise.validate(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::SignatureVerification(_)
+            ))
+        ));
     }
 
     #[test]
@@ -470,7 +446,25 @@ mod tests {
         let (signing_key, mut promise) = make_test_promise();
         promise.chain_id = String::new();
         promise.sign(&signing_key).unwrap();
-        assert!(promise.validate().is_err());
+        assert!(matches!(
+            promise.validate(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::ChainId(ChainIdError::Empty)
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_fails_with_long_chain_id() {
+        let (signing_key, mut promise) = make_test_promise();
+        promise.chain_id = "x".repeat(MAX_CHAIN_ID_SIZE + 1);
+        promise.sign(&signing_key).unwrap();
+        assert!(matches!(
+            promise.validate(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::ChainId(ChainIdError::TooLong(len))
+            )) if len == MAX_CHAIN_ID_SIZE + 1
+        ));
     }
 
     #[test]
@@ -478,13 +472,60 @@ mod tests {
         let (signing_key, mut promise) = make_test_promise();
         promise.upload_size = 0;
         promise.sign(&signing_key).unwrap();
-        assert!(promise.validate().is_err());
+        assert!(matches!(
+            promise.validate(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::ZeroUploadSize
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_fails_with_zero_timestamp() {
+        let (signing_key, mut promise) = make_test_promise();
+        promise.creation_timestamp = SystemTime::UNIX_EPOCH;
+        promise.sign(&signing_key).unwrap();
+        assert!(matches!(
+            promise.validate(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::ZeroTimestamp
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_fails_with_wrong_signature_length() {
+        let (_, mut promise) = make_test_promise();
+        promise.signature = Some(vec![0; SIGNATURE_SIZE - 1]);
+        assert!(matches!(
+            promise.validate(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::SignatureLength(len)
+            )) if len == SIGNATURE_SIZE - 1
+        ));
+    }
+
+    #[test]
+    fn validate_fails_with_invalid_signature_format() {
+        let (_, mut promise) = make_test_promise();
+        promise.signature = Some(vec![0; SIGNATURE_SIZE]);
+        assert!(matches!(
+            promise.validate(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::SignatureFormat(_)
+            ))
+        ));
     }
 
     #[test]
     fn hash_requires_signature() {
         let (_, promise) = make_test_promise();
-        assert!(promise.hash().is_err());
+        assert!(matches!(
+            promise.hash(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::MissingSignature
+            ))
+        ));
     }
 
     #[test]
@@ -517,7 +558,7 @@ mod tests {
         assert_eq!(bytes.len(), TIMESTAMP_BINARY_SIZE);
         assert_eq!(bytes[0], 1); // version
 
-        let recovered = unmarshal_binary_time(&bytes).unwrap();
+        let recovered = unmarshal_binary_time(&bytes);
 
         // Check precision is maintained (nanosecond-level)
         let diff = now
@@ -544,6 +585,17 @@ mod tests {
         // Check nanoseconds
         let nsecs = i32::from_be_bytes(bytes[9..13].try_into().unwrap());
         assert_eq!(nsecs, 500_000_000);
+    }
+
+    #[test]
+    fn timestamp_before_epoch_is_rejected() {
+        let timestamp = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert!(matches!(
+            marshal_binary_time(timestamp),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::TimestampBeforeEpoch(_)
+            ))
+        ));
     }
 
     #[test]

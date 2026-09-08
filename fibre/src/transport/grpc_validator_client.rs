@@ -79,7 +79,7 @@ impl ValidatorConnector for GrpcValidatorConnector {
         let url = normalize_host(&host.0);
 
         let client = crate::transport::tls::grpc_client(
-            &url,
+            url,
             validator.pubkey,
             self.chain_id.clone(),
             self.io_connector.clone(),
@@ -170,7 +170,7 @@ mod tests {
             self.hosts
                 .get(&validator.address)
                 .cloned()
-                .ok_or_else(|| FibreError::HostNotFound(validator.address_hex()))
+                .ok_or(FibreError::HostNotFound(validator.address))
         }
     }
 
@@ -265,12 +265,8 @@ mod tests {
 
         let result = connector.connect(&validator).await;
         match result {
-            Err(FibreError::HostNotFound(addr_hex)) => {
-                assert_eq!(
-                    addr_hex,
-                    validator.address_hex(),
-                    "error should contain the validator address"
-                );
+            Err(FibreError::HostNotFound(addr)) => {
+                assert_eq!(addr, validator.address);
             }
             Err(other) => panic!("expected HostNotFound error, got: {other}"),
             Ok(_) => panic!("expected connect to fail for unknown validator"),

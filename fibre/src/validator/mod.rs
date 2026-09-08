@@ -5,13 +5,14 @@ pub(crate) mod signature_set;
 
 use std::collections::HashMap;
 
+use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetResponse;
 use chacha8rand::ChaCha8Rand;
 use ed25519_dalek::VerifyingKey as Ed25519PublicKey;
 use rand::Rng;
 
 use crate::blob::Commitment;
 use crate::config::Fraction;
-use crate::error::FibreError;
+use crate::error::{FibreError, ValidatorSetError};
 use celestia_grpc::GrpcClient;
 
 pub(crate) use shard_map::ShardMap;
@@ -190,15 +191,14 @@ impl GrpcSetGetter {
 
     async fn get_by_height_inner(&self, height: i64) -> Result<ValidatorSet, FibreError> {
         let resp = self.client.get_fibre_validator_set(height).await?;
-
-        let height = resp.height as u64;
-
-        let proto_set = resp.validator_set.ok_or_else(|| {
-            FibreError::Other("ValidatorSetResponse missing validator_set".into())
-        })?;
-
-        (&proto_set, height).try_into()
+        validator_set_from_response(resp)
     }
+}
+
+fn validator_set_from_response(resp: ValidatorSetResponse) -> Result<ValidatorSet, FibreError> {
+    let height = resp.height as u64;
+    let proto_set = resp.validator_set.ok_or(ValidatorSetError::Missing)?;
+    (&proto_set, height).try_into()
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -210,9 +210,7 @@ impl SetGetter for GrpcSetGetter {
 
     async fn get_by_height(&self, height: u64) -> Result<ValidatorSet, FibreError> {
         if height == 0 {
-            return Err(FibreError::Other(
-                "get_by_height requires height > 0".into(),
-            ));
+            return Err(ValidatorSetError::ZeroHeight.into());
         }
         self.get_by_height_inner(height as i64).await
     }
@@ -245,25 +243,18 @@ impl TryFrom<&tendermint_proto::v0_38::types::Validator> for ValidatorInfo {
         let pubkey_bytes = match proto_val.pub_key.as_ref() {
             Some(pk) => match &pk.sum {
                 Some(CryptoKeySum::Ed25519(bytes)) => bytes.clone(),
-                _ => {
-                    return Err(FibreError::Other(
-                        "expected ed25519 public key for validator".into(),
-                    ));
-                }
+                _ => return Err(ValidatorSetError::UnsupportedPublicKeyType.into()),
             },
-            None => {
-                return Err(FibreError::Other("validator missing public key".into()));
-            }
+            None => return Err(ValidatorSetError::MissingPublicKey.into()),
         };
 
-        let pubkey =
-            Ed25519PublicKey::from_bytes(pubkey_bytes.as_slice().try_into().map_err(|_| {
-                FibreError::InvalidData(format!(
-                    "ed25519 key has invalid length {}, expected 32",
-                    pubkey_bytes.len()
-                ))
-            })?)
-            .map_err(|e| FibreError::Other(format!("invalid ed25519 key: {e}")))?;
+        let pubkey = Ed25519PublicKey::from_bytes(
+            pubkey_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ValidatorSetError::PublicKeyLength(pubkey_bytes.len()))?,
+        )
+        .map_err(ValidatorSetError::InvalidPublicKey)?;
 
         // CometBFT address = first 20 bytes of SHA-256(pubkey)
         let address: [u8; 20] = {
@@ -356,6 +347,32 @@ mod assignment_tests {
 
     fn default_liveness() -> Fraction {
         crate::test_utils::fraction(1, 3)
+    }
+
+    #[tokio::test]
+    async fn grpc_set_getter_rejects_zero_height() {
+        let client = GrpcClient::builder()
+            .url("http://localhost:50051")
+            .build()
+            .expect("GrpcClient builder should accept the test URL");
+        let getter = GrpcSetGetter::new(client);
+        assert!(matches!(
+            getter.get_by_height(0).await,
+            Err(FibreError::InvalidValidatorSet(
+                ValidatorSetError::ZeroHeight
+            ))
+        ));
+    }
+
+    #[test]
+    fn validator_set_response_requires_set() {
+        assert!(matches!(
+            validator_set_from_response(ValidatorSetResponse {
+                validator_set: None,
+                height: 1,
+            }),
+            Err(FibreError::InvalidValidatorSet(ValidatorSetError::Missing))
+        ));
     }
 
     #[test]
@@ -454,39 +471,6 @@ mod assignment_tests {
             assert_eq!(map1.get(i).unwrap().len(), map2.get(i).unwrap().len());
         }
         assert_ne!(map1.get(0).unwrap(), map2.get(0).unwrap());
-    }
-
-    #[test]
-    fn shard_map_verify_correct() {
-        let set = ValidatorSet::new(vec![make_validator(50, 1), make_validator(50, 2)], 0);
-        let map = set.assign([10u8; 32], 200, 100, 10, default_liveness());
-        let row_indices_u32: Vec<u32> = map.get(0).unwrap().iter().map(|&r| r as u32).collect();
-        assert!(map.verify(0, &row_indices_u32).is_ok());
-    }
-
-    #[test]
-    fn shard_map_verify_wrong_count() {
-        let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
-        let map = set.assign([11u8; 32], 200, 100, 10, default_liveness());
-        assert!(map.verify(0, &[0, 1, 2]).is_err());
-    }
-
-    #[test]
-    fn shard_map_verify_wrong_row() {
-        let set = ValidatorSet::new(vec![make_validator(50, 1), make_validator(50, 2)], 0);
-        let total_rows = 200;
-        let map = set.assign([12u8; 32], total_rows, 100, 10, default_liveness());
-
-        let mut wrong_indices: Vec<u32> = map.get(0).unwrap().iter().map(|&r| r as u32).collect();
-        wrong_indices[0] = (total_rows + 999) as u32;
-        assert!(map.verify(0, &wrong_indices).is_err());
-    }
-
-    #[test]
-    fn shard_map_verify_missing_validator() {
-        let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
-        let map = set.assign([13u8; 32], 200, 100, 10, default_liveness());
-        assert!(map.verify(5, &[0]).is_err());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! The blob header is prepended to the original data before splitting into rows.
 
 use crate::config::BlobConfig;
-use crate::error::FibreError;
+use crate::error::{BlobHeaderError, FibreError};
 
 /// Length of the version field in bytes.
 const BLOB_VERSION_LEN: usize = 1;
@@ -62,15 +62,11 @@ impl BlobHeaderV0 {
         cfg: &BlobConfig,
     ) -> Result<(Self, Vec<u8>), FibreError> {
         if rows.is_empty() {
-            return Err(FibreError::Other("no rows to decode".into()));
+            return Err(BlobHeaderError::NoRows.into());
         }
 
         if rows[0].len() < Self::HEADER_SIZE {
-            return Err(FibreError::Other(format!(
-                "first row too small: need at least {} bytes for header, got {}",
-                Self::HEADER_SIZE,
-                rows[0].len()
-            )));
+            return Err(BlobHeaderError::FirstRowTooSmall(rows[0].len()).into());
         }
 
         // Decode header from first row
@@ -78,15 +74,14 @@ impl BlobHeaderV0 {
 
         // Validate blob size is within reasonable bounds
         if header.data_size == 0 {
-            return Err(FibreError::Other(
-                "invalid blob size in header: must be greater than 0".into(),
-            ));
+            return Err(BlobHeaderError::ZeroDataSize.into());
         }
         if header.data_size as usize > cfg.max_data_size {
-            return Err(FibreError::Other(format!(
-                "blob size in header ({} bytes) exceeds maximum allowed size ({} bytes)",
-                header.data_size, cfg.max_data_size
-            )));
+            return Err(BlobHeaderError::DataSizeExceedsMax {
+                size: header.data_size,
+                max: cfg.max_data_size,
+            }
+            .into());
         }
 
         let data_size = header.data_size as usize;
@@ -112,10 +107,11 @@ impl BlobHeaderV0 {
         }
 
         if offset != data_size {
-            return Err(FibreError::Other(format!(
-                "data size mismatch: copied {} bytes, expected {}",
-                offset, data_size
-            )));
+            return Err(BlobHeaderError::DataSizeMismatch {
+                copied: offset,
+                expected: data_size,
+            }
+            .into());
         }
 
         Ok((header, data))
@@ -175,7 +171,22 @@ mod tests {
     fn decode_empty_rows() {
         let cfg = test_blob_config();
         let rows: &[&[u8]] = &[];
-        assert!(BlobHeaderV0::decode_from_rows(rows, &cfg).is_err());
+        assert!(matches!(
+            BlobHeaderV0::decode_from_rows(rows, &cfg),
+            Err(FibreError::InvalidBlobHeader(BlobHeaderError::NoRows))
+        ));
+    }
+
+    #[test]
+    fn decode_first_row_too_small() {
+        let cfg = test_blob_config();
+        let row = [0u8; BlobHeaderV0::HEADER_SIZE - 1];
+        assert!(matches!(
+            BlobHeaderV0::decode_from_rows(&[&row], &cfg),
+            Err(FibreError::InvalidBlobHeader(
+                BlobHeaderError::FirstRowTooSmall(4)
+            ))
+        ));
     }
 
     #[test]
@@ -183,6 +194,41 @@ mod tests {
         let cfg = test_blob_config();
         let mut row = vec![0u8; 64];
         row[1..5].copy_from_slice(&0u32.to_be_bytes());
-        assert!(BlobHeaderV0::decode_from_rows(&[row.as_slice()], &cfg).is_err());
+        assert!(matches!(
+            BlobHeaderV0::decode_from_rows(&[row.as_slice()], &cfg),
+            Err(FibreError::InvalidBlobHeader(BlobHeaderError::ZeroDataSize))
+        ));
+    }
+
+    #[test]
+    fn decode_data_size_exceeds_max() {
+        let cfg = test_blob_config();
+        let mut row = vec![0u8; 64];
+        row[1..5].copy_from_slice(&1025u32.to_be_bytes());
+        assert!(matches!(
+            BlobHeaderV0::decode_from_rows(&[row.as_slice()], &cfg),
+            Err(FibreError::InvalidBlobHeader(
+                BlobHeaderError::DataSizeExceedsMax {
+                    size: 1025,
+                    max: 1024
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn decode_data_size_mismatch() {
+        let cfg = test_blob_config();
+        let mut row = vec![0u8; BlobHeaderV0::HEADER_SIZE];
+        row[1..5].copy_from_slice(&1u32.to_be_bytes());
+        assert!(matches!(
+            BlobHeaderV0::decode_from_rows(&[row.as_slice()], &cfg),
+            Err(FibreError::InvalidBlobHeader(
+                BlobHeaderError::DataSizeMismatch {
+                    copied: 0,
+                    expected: 1
+                }
+            ))
+        ));
     }
 }

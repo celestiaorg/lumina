@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::FibreClientConfig;
-use crate::error::FibreError;
+use crate::error::{FibreClientBuilderError, FibreError};
 use crate::validator::SetGetter;
 use crate::validator_client::ValidatorConnector;
 
@@ -80,8 +80,7 @@ impl FibreClient {
         {
             let grpc_client = celestia_grpc::GrpcClient::builder()
                 .endpoint(endpoint)
-                .build()
-                .map_err(|e| FibreError::Other(format!("failed to build GrpcClient: {e}")))?;
+                .build()?;
             Self::from_grpc_client(grpc_client, config)
         }
     }
@@ -94,8 +93,7 @@ impl FibreClient {
     ) -> Result<Self, FibreError> {
         let grpc_client = celestia_grpc::GrpcClient::builder()
             .endpoint(endpoint)
-            .build()
-            .map_err(|e| FibreError::Other(format!("failed to build GrpcClient: {e}")))?;
+            .build()?;
 
         Self::from_grpc_client_with_io_connector(grpc_client, config, io_connector)
     }
@@ -181,15 +179,13 @@ impl FibreClientBuilder {
 
     /// Builds the [`FibreClient`].
     pub fn build(self) -> Result<FibreClient, FibreError> {
-        let cfg = self
-            .config
-            .ok_or_else(|| FibreError::Other("config is required".into()))?;
+        let cfg = self.config.ok_or(FibreClientBuilderError::MissingConfig)?;
         let set_getter = self
             .set_getter
-            .ok_or_else(|| FibreError::Other("set_getter is required".into()))?;
+            .ok_or(FibreClientBuilderError::MissingSetGetter)?;
         let connector = self
             .connector
-            .ok_or_else(|| FibreError::Other("connector is required".into()))?;
+            .ok_or(FibreClientBuilderError::MissingConnector)?;
 
         Ok(FibreClient {
             upload_semaphore: Arc::new(tokio::sync::Semaphore::new(cfg.upload_concurrency)),
@@ -262,10 +258,7 @@ mod tests {
             "not a valid url \x00",
             FibreClientConfig::new("test-chain").unwrap(),
         );
-        assert!(
-            result.is_err(),
-            "from_endpoint with invalid URL should fail"
-        );
+        assert!(matches!(result, Err(FibreError::GrpcClientBuilder(_))));
     }
 
     #[tokio::test]
@@ -285,16 +278,10 @@ mod tests {
             .connector(DummyConnector)
             .build();
 
-        match result {
-            Err(FibreError::Other(msg)) => {
-                assert!(
-                    msg.contains("config"),
-                    "error should mention config, got: {msg}"
-                );
-            }
-            Err(other) => panic!("expected FibreError::Other mentioning config, got: {other}"),
-            Ok(_) => panic!("expected an error but build() succeeded"),
-        }
+        assert!(matches!(
+            result,
+            Err(FibreError::Builder(FibreClientBuilderError::MissingConfig))
+        ));
     }
 
     #[test]
@@ -304,16 +291,12 @@ mod tests {
             .connector(DummyConnector)
             .build();
 
-        match result {
-            Err(FibreError::Other(msg)) => {
-                assert!(
-                    msg.contains("set_getter"),
-                    "error should mention set_getter, got: {msg}"
-                );
-            }
-            Err(other) => panic!("expected FibreError::Other mentioning set_getter, got: {other}"),
-            Ok(_) => panic!("expected an error but build() succeeded"),
-        }
+        assert!(matches!(
+            result,
+            Err(FibreError::Builder(
+                FibreClientBuilderError::MissingSetGetter
+            ))
+        ));
     }
 
     #[test]
@@ -323,16 +306,12 @@ mod tests {
             .set_getter(DummySetGetter)
             .build();
 
-        match result {
-            Err(FibreError::Other(msg)) => {
-                assert!(
-                    msg.contains("connector"),
-                    "error should mention connector, got: {msg}"
-                );
-            }
-            Err(other) => panic!("expected FibreError::Other mentioning connector, got: {other}"),
-            Ok(_) => panic!("expected an error but build() succeeded"),
-        }
+        assert!(matches!(
+            result,
+            Err(FibreError::Builder(
+                FibreClientBuilderError::MissingConnector
+            ))
+        ));
     }
 
     #[test]

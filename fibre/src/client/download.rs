@@ -15,7 +15,7 @@ use crate::blob::{Blob, BlobID, BlobReconstruction, ShardVerifier, VerifiedRows}
 use crate::client::FibreClient;
 #[cfg(test)]
 use crate::config::BlobConfig;
-use crate::error::FibreError;
+use crate::error::{FibreError, ShardError};
 use crate::validator::ValidatorSet;
 
 /// Options for configuring blob download behavior.
@@ -39,9 +39,12 @@ impl FibreClient {
     /// # Errors
     ///
     /// - [`FibreError::ClientClosed`] if the client has been closed.
+    /// - [`FibreError::Cancelled`] if the operation is cancelled while in progress.
     /// - [`FibreError::NotFound`] if no validator returned any rows.
     /// - [`FibreError::NotEnoughShards`] if too few unique rows were collected.
-    /// - Any error from reconstruction (commitment mismatch, encoding, etc.).
+    /// - [`FibreError::UnsupportedBlobVersion`] if the blob ID version is unsupported.
+    /// - [`FibreError::Encoding`] or [`FibreError::InvalidBlobHeader`] if reconstruction fails.
+    /// - Any error returned while retrieving the validator set.
     pub async fn download(&self, id: &BlobID, opts: DownloadOptions) -> Result<Blob, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
@@ -136,8 +139,7 @@ impl FibreClient {
 
             tokio::select! {
                 result = self.download_semaphore.clone().acquire_owned(), if need_more => {
-                    let global_permit = result
-                        .map_err(|_| FibreError::Other("global semaphore closed".into()))?;
+                    let global_permit = result.expect("client semaphores are never closed");
                     let val_idx = cur_idx;
                     cur_idx += 1;
                     let (rows, info) = selected[val_idx];
@@ -157,10 +159,7 @@ impl FibreClient {
                             _ = task_cancel.cancelled() => Err(FibreError::Cancelled),
                             result = async {
                                 let conn = connector.connect(&validator).await?;
-                                let shard = conn.download_shard(&blob_id).await?;
-                                if shard.rows.is_empty() {
-                                    return Err(FibreError::EmptyShardResponse);
-                                }
+                                let shard = non_empty_shard(conn.download_shard(&blob_id).await?)?;
                                 // Verify here so the heavy crypto runs off the
                                 // select! loop and per-task instead of serially.
                                 verifier
@@ -234,17 +233,27 @@ impl FibreClient {
     }
 }
 
+fn non_empty_shard(
+    shard: crate::validator_client::DownloadResponse,
+) -> Result<crate::validator_client::DownloadResponse, FibreError> {
+    if shard.rows.is_empty() {
+        return Err(ShardError::Empty.into());
+    }
+    Ok(shard)
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::pending;
     use std::sync::Arc;
 
+    use super::non_empty_shard;
     use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
     use crate::blob::{BlobID, BlobReconstruction, EncodedBlob};
     use crate::config::BlobConfig;
-    use crate::error::FibreError;
+    use crate::error::{FibreError, ShardError};
     use crate::payment_promise::PaymentPromise;
     use crate::test_utils::{
         MockConnector, MockValidatorConnection, build_test_client, make_validator, test_blob_config,
@@ -253,6 +262,17 @@ mod tests {
     use crate::validator_client::{
         DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
     };
+
+    #[test]
+    fn empty_shard_response_is_typed() {
+        assert!(matches!(
+            non_empty_shard(DownloadResponse {
+                rows: Vec::new(),
+                rlcs: Vec::new(),
+            }),
+            Err(FibreError::InvalidShard(ShardError::Empty))
+        ));
+    }
 
     struct CoordinatedConnector {
         fast_address: [u8; 20],
@@ -278,7 +298,7 @@ mod tests {
             } else if validator.address == self.blocked_address {
                 None
             } else {
-                return Err(FibreError::HostNotFound(validator.address_hex()));
+                return Err(FibreError::HostNotFound(validator.address));
             };
 
             Ok(Arc::new(CoordinatedConnection {
@@ -297,7 +317,9 @@ mod tests {
             _rows: &[rsema1d::RowInclusionProof],
             _rlc_coeffs: &[rsema1d::GF128],
         ) -> Result<UploadResponse, FibreError> {
-            Err(FibreError::Other("upload not supported".into()))
+            Err(FibreError::GrpcClient(
+                tonic::Status::unimplemented("upload not supported").into(),
+            ))
         }
 
         async fn download_shard(&self, _blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {

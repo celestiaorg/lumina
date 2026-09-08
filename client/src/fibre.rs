@@ -97,10 +97,7 @@ impl FibreApi {
 /// Convert a [`FibreError`] into the client [`Error`] type.
 fn fibre_err(e: FibreError) -> Error {
     match e {
-        FibreError::Grpc(status) => Error::Grpc(celestia_grpc::Error::from(*status)),
         FibreError::GrpcClient(grpc_err) => Error::Grpc(grpc_err),
-        #[cfg(not(target_arch = "wasm32"))]
-        FibreError::Transport(t) => Error::Grpc(celestia_grpc::Error::from(t)),
         other => Error::Fibre(other),
     }
 }

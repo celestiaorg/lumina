@@ -74,8 +74,8 @@ impl SignatureSet {
         // Parse the raw signature bytes into an ed25519 Signature.
         let ed_sig = Ed25519Signature::from_slice(signature).map_err(|e| {
             FibreError::InvalidValidatorSignature {
-                validator: validator.address_hex(),
-                reason: e.to_string(),
+                validator: validator.address,
+                source: e,
             }
         })?;
 
@@ -83,8 +83,8 @@ impl SignatureSet {
             .pubkey
             .verify(&self.required_bytes_signed, &ed_sig)
             .map_err(|e| FibreError::InvalidValidatorSignature {
-                validator: validator.address_hex(),
-                reason: e.to_string(),
+                validator: validator.address,
+                source: e,
             })?;
 
         // Lock, record, and check threshold.
@@ -201,10 +201,22 @@ mod tests {
         assert!(result.is_err(), "invalid signature should be rejected");
         match result.unwrap_err() {
             FibreError::InvalidValidatorSignature { validator, .. } => {
-                assert_eq!(validator, val.address_hex());
+                assert_eq!(validator, val.address);
             }
             other => panic!("expected InvalidValidatorSignature, got: {other}"),
         }
+    }
+
+    #[test]
+    fn add_malformed_signature() {
+        let (_, val) = make_validator(10);
+        let ss = SignatureSet::new(vec![val.clone()], fraction(1, 2), b"data".to_vec());
+
+        assert!(matches!(
+            ss.add(&val, &[0u8; 63]),
+            Err(FibreError::InvalidValidatorSignature { validator, .. })
+                if validator == val.address
+        ));
     }
 
     #[test]
