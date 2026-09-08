@@ -150,14 +150,8 @@ fn encode_bech32_address(hrp: &str, addr: &[u8; 20]) -> Result<String, FibreErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::make_validator;
     use std::collections::HashMap;
-
-    fn make_validator(seed: u8) -> ValidatorInfo {
-        let mut key_bytes = [0u8; 32];
-        key_bytes[0] = seed;
-        let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-        ValidatorInfo::try_new(sk.verifying_key(), 1).unwrap()
-    }
 
     #[test]
     fn bech32_encode_decode_roundtrip() {
@@ -252,10 +246,10 @@ mod tests {
     #[tokio::test]
     async fn map_registry_returns_host_when_present() {
         let expected_host = Host("dns:///example.com:9090".to_string());
-        let validator = make_validator(1);
+        let validator = make_validator(1, 1).1;
 
         let mut hosts = HashMap::new();
-        hosts.insert(*validator.address(), expected_host.clone());
+        hosts.insert(validator.address, expected_host.clone());
 
         let registry = MapRegistry { hosts };
 
@@ -271,7 +265,7 @@ mod tests {
         let registry = MapRegistry {
             hosts: HashMap::new(),
         };
-        let validator = make_validator(1);
+        let validator = make_validator(1, 1).1;
 
         let result = registry.get_host(&validator).await;
         assert!(result.is_err(), "should return an error for missing host");
@@ -298,14 +292,14 @@ mod tests {
         let registry = GrpcHostRegistry::new(client);
 
         let expected_host = Host("dns:///cached-validator.example.com:9090".to_string());
-        let validator = make_validator(2);
+        let validator = make_validator(1, 2).1;
 
         // Manually populate the cache.
         registry
             .cache
             .write()
             .await
-            .insert(*validator.address(), expected_host.clone());
+            .insert(validator.address, expected_host.clone());
 
         // get_host should return the cached value without hitting the (unreachable) server.
         let host = registry

@@ -96,13 +96,15 @@ pub struct ValidatorSet {
     /// The validators in this set.
     validators: Vec<ValidatorInfo>,
     /// The block height at which this validator set is valid.
-    height: u64,
+    height: NonZeroU64,
     total_voting_power: u64,
 }
 
 impl ValidatorSet {
     /// Creates a validated validator set at the given height.
     pub fn try_new(validators: Vec<ValidatorInfo>, height: u64) -> Result<Self, FibreError> {
+        let height = NonZeroU64::new(height)
+            .ok_or_else(|| FibreError::InvalidData("validator set has zero height".into()))?;
         if validators.is_empty() {
             return Err(FibreError::InvalidData("validator set is empty".into()));
         }
@@ -116,9 +118,9 @@ impl ValidatorSet {
                     validator.address_hex()
                 )));
             }
-            total_voting_power = total_voting_power
-                .checked_add(validator.voting_power())
-                .ok_or_else(|| FibreError::InvalidData("validator voting power overflow".into()))?;
+            // Cannot overflow: each addend and the running total are capped at
+            // `MAX_TOTAL_VOTING_POWER`.
+            total_voting_power += validator.voting_power();
             if total_voting_power > MAX_TOTAL_VOTING_POWER {
                 return Err(FibreError::InvalidData(format!(
                     "total voting power {total_voting_power} exceeds maximum {MAX_TOTAL_VOTING_POWER}"
@@ -139,7 +141,7 @@ impl ValidatorSet {
     }
 
     /// Returns the height at which this validator set is valid.
-    pub fn height(&self) -> u64 {
+    pub fn height(&self) -> NonZeroU64 {
         self.height
     }
 
@@ -164,7 +166,7 @@ impl ValidatorSet {
                     * (liveness_threshold.denominator.get() as u128);
                 let den =
                     (total_voting_power as u128) * (liveness_threshold.numerator.get() as u128);
-                let rows = num.div_ceil(den).min(original_rows as u128) as usize;
+                let rows = usize::try_from(num.div_ceil(den)).unwrap_or(original_rows);
                 (rows.max(min_rows).min(original_rows), v)
             })
             .collect()
@@ -214,12 +216,16 @@ impl ValidatorSet {
         min_rows: usize,
         liveness_threshold: Fraction,
     ) -> Vec<(usize, &ValidatorInfo)> {
-        let mut rpv = self.rows_per_validator(original_rows, min_rows, liveness_threshold);
-
-        let total_voting_power = self.total_voting_power();
         let total_distributed_rows = (original_rows as u128)
             * (liveness_threshold.denominator.get() as u128)
             / (liveness_threshold.numerator.get() as u128);
+        if total_distributed_rows == 0 {
+            return Vec::new();
+        }
+
+        let mut rpv = self.rows_per_validator(original_rows, min_rows, liveness_threshold);
+
+        let total_voting_power = self.total_voting_power();
         let min_stake = ((min_rows as u128) * (total_voting_power as u128))
             .div_ceil(total_distributed_rows) as u64;
 
@@ -241,26 +247,19 @@ impl ValidatorSet {
 }
 
 #[cfg(test)]
-impl ValidatorSet {
-    fn new(validators: Vec<ValidatorInfo>, height: u64) -> Self {
-        Self::try_new(validators, height).unwrap()
-    }
-}
-
-#[cfg(test)]
 mod validation_tests {
     use super::*;
+    use crate::test_utils::make_validator;
     use ed25519_dalek::SigningKey;
-
-    fn validator(power: u64, seed: u8) -> ValidatorInfo {
-        let mut key_bytes = [0u8; 32];
-        key_bytes[0] = seed;
-        ValidatorInfo::try_new(SigningKey::from_bytes(&key_bytes).verifying_key(), power).unwrap()
-    }
 
     #[test]
     fn rejects_empty_set() {
-        assert!(ValidatorSet::try_new(vec![], 0).is_err());
+        assert!(ValidatorSet::try_new(vec![], 1).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_height() {
+        assert!(ValidatorSet::try_new(vec![make_validator(1, 1).1], 0).is_err());
     }
 
     #[test]
@@ -277,14 +276,17 @@ mod validation_tests {
 
     #[test]
     fn rejects_total_power_above_cometbft_limit() {
-        let validators = vec![validator(MAX_TOTAL_VOTING_POWER, 1), validator(1, 2)];
-        assert!(ValidatorSet::try_new(validators, 0).is_err());
+        let validators = vec![
+            make_validator(MAX_TOTAL_VOTING_POWER, 1).1,
+            make_validator(1, 2).1,
+        ];
+        assert!(ValidatorSet::try_new(validators, 1).is_err());
     }
 
     #[test]
     fn rejects_duplicate_validator() {
-        let validator = validator(1, 1);
-        assert!(ValidatorSet::try_new(vec![validator.clone(), validator], 0).is_err());
+        let validator = make_validator(1, 1).1;
+        assert!(ValidatorSet::try_new(vec![validator.clone(), validator], 1).is_err());
     }
 }
 
@@ -315,11 +317,6 @@ impl GrpcSetGetter {
         let height = u64::try_from(resp.height).map_err(|_| {
             FibreError::InvalidData(format!("validator set has invalid height {}", resp.height))
         })?;
-        if height == 0 {
-            return Err(FibreError::InvalidData(
-                "validator set has zero height".into(),
-            ));
-        }
 
         let proto_set = resp.validator_set.ok_or_else(|| {
             FibreError::InvalidData("ValidatorSetResponse missing validator_set".into())
@@ -338,7 +335,7 @@ impl SetGetter for GrpcSetGetter {
 
     async fn get_by_height(&self, height: u64) -> Result<ValidatorSet, FibreError> {
         if height == 0 {
-            return Err(FibreError::Other(
+            return Err(FibreError::InvalidData(
                 "get_by_height requires height > 0".into(),
             ));
         }
@@ -414,20 +411,6 @@ impl TryFrom<&tendermint_proto::v0_38::types::Validator> for ValidatorInfo {
             })?)
             .map_err(|e| FibreError::InvalidData(format!("invalid ed25519 key: {e}")))?;
 
-        let address = validator_address(&pubkey);
-
-        let proto_address: [u8; 20] = proto_val.address.as_slice().try_into().map_err(|_| {
-            FibreError::InvalidData(format!(
-                "validator address has invalid length {}, expected 20",
-                proto_val.address.len()
-            ))
-        })?;
-        if proto_address != address {
-            return Err(FibreError::InvalidData(
-                "validator address does not match public key".into(),
-            ));
-        }
-
         let voting_power = u64::try_from(proto_val.voting_power).map_err(|_| {
             FibreError::InvalidData(format!(
                 "validator has negative voting power: {}",
@@ -435,7 +418,14 @@ impl TryFrom<&tendermint_proto::v0_38::types::Validator> for ValidatorInfo {
             ))
         })?;
 
-        ValidatorInfo::try_new(pubkey, voting_power)
+        let info = ValidatorInfo::try_new(pubkey, voting_power)?;
+        if proto_val.address != info.address {
+            return Err(FibreError::InvalidData(
+                "validator address does not match public key".into(),
+            ));
+        }
+
+        Ok(info)
     }
 }
 
@@ -505,36 +495,25 @@ fn shuffle_by_stake(selected: &mut [(usize, &ValidatorInfo)], rng: &mut impl Rng
 #[cfg(test)]
 mod assignment_tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
-
-    fn make_validator(power: u64, seed: u8) -> ValidatorInfo {
-        let mut key_bytes = [0u8; 32];
-        key_bytes[0] = seed;
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        ValidatorInfo::try_new(signing_key.verifying_key(), power).unwrap()
-    }
-
-    fn default_liveness() -> Fraction {
-        crate::test_utils::fraction(1, 3)
-    }
+    use crate::test_utils::{fraction, make_validator};
 
     #[test]
     fn zero_total_rows_returns_empty_map() {
-        let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
-        let map = set.assign([0u8; 32], 0, 50, 10, default_liveness());
+        let set = ValidatorSet::try_new(vec![make_validator(100, 1).1], 1).unwrap();
+        let map = set.assign([0u8; 32], 0, 50, 10, fraction(1, 3));
         assert!(map.is_empty());
     }
 
     #[test]
     fn zero_min_rows_returns_empty_map() {
-        let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
-        let map = set.assign([0u8; 32], 100, 50, 0, default_liveness());
+        let set = ValidatorSet::try_new(vec![make_validator(100, 1).1], 1).unwrap();
+        let map = set.assign([0u8; 32], 100, 50, 0, fraction(1, 3));
         assert!(map.is_empty());
     }
 
     #[test]
     fn single_validator_gets_original_rows() {
-        let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
+        let set = ValidatorSet::try_new(vec![make_validator(100, 1).1], 1).unwrap();
         let commitment = [0u8; 32];
         let total_rows = 200;
         let original_rows = 100;
@@ -545,7 +524,7 @@ mod assignment_tests {
             total_rows,
             original_rows,
             min_rows,
-            default_liveness(),
+            fraction(1, 3),
         );
 
         assert_eq!(map.len(), 1);
@@ -554,8 +533,9 @@ mod assignment_tests {
 
     #[test]
     fn two_equal_stake_validators_get_equal_rows() {
-        let set = ValidatorSet::new(vec![make_validator(50, 1), make_validator(50, 2)], 0);
-        let map = set.assign([1u8; 32], 200, 100, 10, default_liveness());
+        let set = ValidatorSet::try_new(vec![make_validator(50, 1).1, make_validator(50, 2).1], 1)
+            .unwrap();
+        let map = set.assign([1u8; 32], 200, 100, 10, fraction(1, 3));
 
         assert_eq!(map.len(), 2);
         assert_eq!(map.get(0).unwrap().len(), map.get(1).unwrap().len());
@@ -563,45 +543,48 @@ mod assignment_tests {
 
     #[test]
     fn rows_per_validator_respects_min_rows_floor() {
-        let set = ValidatorSet::new(vec![make_validator(1, 1), make_validator(999, 2)], 0);
-        let map = set.assign([2u8; 32], 200, 100, 50, default_liveness());
+        let set = ValidatorSet::try_new(vec![make_validator(1, 1).1, make_validator(999, 2).1], 1)
+            .unwrap();
+        let map = set.assign([2u8; 32], 200, 100, 50, fraction(1, 3));
         assert_eq!(map.get(0).unwrap().len(), 50);
     }
 
     #[test]
     fn rows_per_validator_respects_original_rows_ceiling() {
-        let set = ValidatorSet::new(vec![make_validator(1000, 1)], 0);
-        let map = set.assign([3u8; 32], 200, 100, 10, default_liveness());
+        let set = ValidatorSet::try_new(vec![make_validator(1000, 1).1], 1).unwrap();
+        let map = set.assign([3u8; 32], 200, 100, 10, fraction(1, 3));
         assert_eq!(map.get(0).unwrap().len(), 100);
     }
 
     #[test]
     fn assignment_is_deterministic() {
-        let set = ValidatorSet::new(
+        let set = ValidatorSet::try_new(
             vec![
-                make_validator(50, 1),
-                make_validator(30, 2),
-                make_validator(20, 3),
+                make_validator(50, 1).1,
+                make_validator(30, 2).1,
+                make_validator(20, 3).1,
             ],
-            0,
-        );
-        let map1 = set.assign([42u8; 32], 200, 100, 10, default_liveness());
-        let map2 = set.assign([42u8; 32], 200, 100, 10, default_liveness());
+            1,
+        )
+        .unwrap();
+        let map1 = set.assign([42u8; 32], 200, 100, 10, fraction(1, 3));
+        let map2 = set.assign([42u8; 32], 200, 100, 10, fraction(1, 3));
         assert_eq!(map1, map2);
     }
 
     #[test]
     fn different_commitments_produce_different_assignments() {
-        let set = ValidatorSet::new(
+        let set = ValidatorSet::try_new(
             vec![
-                make_validator(50, 1),
-                make_validator(30, 2),
-                make_validator(20, 3),
+                make_validator(50, 1).1,
+                make_validator(30, 2).1,
+                make_validator(20, 3).1,
             ],
-            0,
-        );
-        let map1 = set.assign([1u8; 32], 200, 100, 10, default_liveness());
-        let map2 = set.assign([2u8; 32], 200, 100, 10, default_liveness());
+            1,
+        )
+        .unwrap();
+        let map1 = set.assign([1u8; 32], 200, 100, 10, fraction(1, 3));
+        let map2 = set.assign([2u8; 32], 200, 100, 10, fraction(1, 3));
 
         for i in 0..set.validators.len() {
             assert_eq!(map1.get(i).unwrap().len(), map2.get(i).unwrap().len());
@@ -611,24 +594,26 @@ mod assignment_tests {
 
     #[test]
     fn shard_map_verify_correct() {
-        let set = ValidatorSet::new(vec![make_validator(50, 1), make_validator(50, 2)], 0);
-        let map = set.assign([10u8; 32], 200, 100, 10, default_liveness());
+        let set = ValidatorSet::try_new(vec![make_validator(50, 1).1, make_validator(50, 2).1], 1)
+            .unwrap();
+        let map = set.assign([10u8; 32], 200, 100, 10, fraction(1, 3));
         let row_indices_u32: Vec<u32> = map.get(0).unwrap().iter().map(|&r| r as u32).collect();
         assert!(map.verify(0, &row_indices_u32).is_ok());
     }
 
     #[test]
     fn shard_map_verify_wrong_count() {
-        let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
-        let map = set.assign([11u8; 32], 200, 100, 10, default_liveness());
+        let set = ValidatorSet::try_new(vec![make_validator(100, 1).1], 1).unwrap();
+        let map = set.assign([11u8; 32], 200, 100, 10, fraction(1, 3));
         assert!(map.verify(0, &[0, 1, 2]).is_err());
     }
 
     #[test]
     fn shard_map_verify_wrong_row() {
-        let set = ValidatorSet::new(vec![make_validator(50, 1), make_validator(50, 2)], 0);
+        let set = ValidatorSet::try_new(vec![make_validator(50, 1).1, make_validator(50, 2).1], 1)
+            .unwrap();
         let total_rows = 200;
-        let map = set.assign([12u8; 32], total_rows, 100, 10, default_liveness());
+        let map = set.assign([12u8; 32], total_rows, 100, 10, fraction(1, 3));
 
         let mut wrong_indices: Vec<u32> = map.get(0).unwrap().iter().map(|&r| r as u32).collect();
         wrong_indices[0] = (total_rows + 999) as u32;
@@ -637,22 +622,23 @@ mod assignment_tests {
 
     #[test]
     fn shard_map_verify_missing_validator() {
-        let set = ValidatorSet::new(vec![make_validator(100, 1)], 0);
-        let map = set.assign([13u8; 32], 200, 100, 10, default_liveness());
+        let set = ValidatorSet::try_new(vec![make_validator(100, 1).1], 1).unwrap();
+        let map = set.assign([13u8; 32], 200, 100, 10, fraction(1, 3));
         assert!(map.verify(5, &[0]).is_err());
     }
 
     #[test]
     fn total_assigned_rows_across_validators() {
-        let set = ValidatorSet::new(
+        let set = ValidatorSet::try_new(
             vec![
-                make_validator(40, 1),
-                make_validator(35, 2),
-                make_validator(25, 3),
+                make_validator(40, 1).1,
+                make_validator(35, 2).1,
+                make_validator(25, 3).1,
             ],
-            0,
-        );
-        let map = set.assign([20u8; 32], 200, 100, 10, default_liveness());
+            1,
+        )
+        .unwrap();
+        let map = set.assign([20u8; 32], 200, 100, 10, fraction(1, 3));
 
         let total_assigned: usize = (0..set.validators.len())
             .map(|i| map.get(i).unwrap().len())
@@ -698,14 +684,15 @@ mod assignment_tests {
 
     #[test]
     fn cross_language_assign_matches_go() {
-        let set = ValidatorSet::new(
+        let set = ValidatorSet::try_new(
             vec![
-                make_validator(300, 1),
-                make_validator(200, 2),
-                make_validator(100, 3),
+                make_validator(300, 1).1,
+                make_validator(200, 2).1,
+                make_validator(100, 3).1,
             ],
-            0,
-        );
+            1,
+        )
+        .unwrap();
         let mut commitment = [0u8; 32];
         for (i, byte) in commitment.iter_mut().enumerate() {
             *byte = (i + 1) as u8;
@@ -720,16 +707,17 @@ mod assignment_tests {
 
     #[test]
     fn all_row_indices_within_bounds() {
-        let set = ValidatorSet::new(
+        let set = ValidatorSet::try_new(
             vec![
-                make_validator(50, 1),
-                make_validator(30, 2),
-                make_validator(20, 3),
+                make_validator(50, 1).1,
+                make_validator(30, 2).1,
+                make_validator(20, 3).1,
             ],
-            0,
-        );
+            1,
+        )
+        .unwrap();
         let total_rows = 200;
-        let map = set.assign([30u8; 32], total_rows, 100, 10, default_liveness());
+        let map = set.assign([30u8; 32], total_rows, 100, 10, fraction(1, 3));
 
         for i in 0..set.validators.len() {
             for &row_idx in map.get(i).unwrap() {
@@ -742,25 +730,14 @@ mod assignment_tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
-
-    fn make_validator(power: u64, seed: u8) -> ValidatorInfo {
-        let mut key_bytes = [0u8; 32];
-        key_bytes[0] = seed;
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        ValidatorInfo::try_new(signing_key.verifying_key(), power).unwrap()
-    }
-
-    fn default_liveness() -> Fraction {
-        crate::test_utils::fraction(1, 3)
-    }
+    use crate::test_utils::{fraction, make_validator};
 
     #[test]
     fn single_validator_returns_one() {
-        let validator = make_validator(100, 1);
+        let validator = make_validator(100, 1).1;
         let expected_address = validator.address;
-        let set = ValidatorSet::new(vec![validator], 0);
-        let selected = set.select(100, 10, default_liveness());
+        let set = ValidatorSet::try_new(vec![validator], 1).unwrap();
+        let selected = set.select(100, 10, fraction(1, 3));
         assert_eq!(selected.len(), 1);
         assert!(selected[0].0 > 0);
         assert_eq!(selected[0].1.address, expected_address);
@@ -769,17 +746,17 @@ mod selection_tests {
     #[test]
     fn multiple_validators_returns_all() {
         let validators = vec![
-            make_validator(100, 1),
-            make_validator(100, 2),
-            make_validator(100, 3),
+            make_validator(100, 1).1,
+            make_validator(100, 2).1,
+            make_validator(100, 3).1,
         ];
         let mut expected: Vec<_> = validators
             .iter()
             .map(|validator| validator.address)
             .collect();
         expected.sort();
-        let set = ValidatorSet::new(validators, 0);
-        let selected = set.select(100, 10, default_liveness());
+        let set = ValidatorSet::try_new(validators, 1).unwrap();
+        let selected = set.select(100, 10, fraction(1, 3));
         assert_eq!(selected.len(), 3);
 
         let mut actual: Vec<_> = selected.iter().map(|(_, info)| info.address).collect();
@@ -789,39 +766,42 @@ mod selection_tests {
 
     #[test]
     fn split_idx_separates_groups_correctly() {
-        let set = ValidatorSet::new(
+        let set = ValidatorSet::try_new(
             vec![
-                make_validator(150, 1),
-                make_validator(100, 2),
-                make_validator(50, 3),
+                make_validator(150, 1).1,
+                make_validator(100, 2).1,
+                make_validator(50, 3).1,
             ],
-            0,
-        );
-        let selected = set.select(100, 10, default_liveness());
+            1,
+        )
+        .unwrap();
+        let selected = set.select(100, 10, fraction(1, 3));
         assert_eq!(selected.len(), 3);
     }
 
     #[test]
     fn split_idx_with_high_min_rows() {
-        let set = ValidatorSet::new((0..10).map(|i| make_validator(10, i as u8)).collect(), 0);
-        let selected = set.select(100, 50, default_liveness());
+        let set =
+            ValidatorSet::try_new((0..10).map(|i| make_validator(10, i as u8).1).collect(), 1)
+                .unwrap();
+        let selected = set.select(100, 50, fraction(1, 3));
         assert_eq!(selected.len(), 10);
     }
 
     #[test]
     fn all_validators_present_in_result() {
         let validators = vec![
-            make_validator(50, 1),
-            make_validator(30, 2),
-            make_validator(20, 3),
+            make_validator(50, 1).1,
+            make_validator(30, 2).1,
+            make_validator(20, 3).1,
         ];
         let mut expected: Vec<_> = validators
             .iter()
             .map(|validator| validator.address)
             .collect();
         expected.sort();
-        let set = ValidatorSet::new(validators, 0);
-        let selected = set.select(100, 10, default_liveness());
+        let set = ValidatorSet::try_new(validators, 1).unwrap();
+        let selected = set.select(100, 10, fraction(1, 3));
 
         assert_eq!(selected.len(), 3);
         let mut actual: Vec<_> = selected.iter().map(|(_, info)| info.address).collect();
@@ -836,16 +816,16 @@ mod selection_tests {
 
         for _ in 0..trials {
             let validators = vec![
-                make_validator(100, 1),
-                make_validator(10, 2),
-                make_validator(10, 3),
+                make_validator(100, 1).1,
+                make_validator(10, 2).1,
+                make_validator(10, 3).1,
             ];
             let addresses: Vec<_> = validators
                 .iter()
                 .map(|validator| validator.address)
                 .collect();
-            let set = ValidatorSet::new(validators, 0);
-            let selected = set.select(100, 10, default_liveness());
+            let set = ValidatorSet::try_new(validators, 1).unwrap();
+            let selected = set.select(100, 10, fraction(1, 3));
             let first = addresses
                 .iter()
                 .position(|address| address == &selected[0].1.address)
@@ -859,15 +839,16 @@ mod selection_tests {
 
     #[test]
     fn select_expected_rows_match_assign() {
-        let set = ValidatorSet::new(
+        let set = ValidatorSet::try_new(
             vec![
-                make_validator(300, 1),
-                make_validator(200, 2),
-                make_validator(100, 3),
+                make_validator(300, 1).1,
+                make_validator(200, 2).1,
+                make_validator(100, 3).1,
             ],
-            0,
-        );
-        let liveness = default_liveness();
+            1,
+        )
+        .unwrap();
+        let liveness = fraction(1, 3);
         let original_rows = 100;
         let min_rows = 10;
 

@@ -156,6 +156,7 @@ mod tests {
 
     use crate::host_registry::Host;
     use crate::host_registry::HostRegistry;
+    use crate::test_utils::make_validator;
 
     struct MockHostRegistry {
         hosts: std::collections::HashMap<[u8; 20], Host>,
@@ -174,16 +175,9 @@ mod tests {
         }
     }
 
-    fn make_test_validator(seed: u8) -> ValidatorInfo {
-        let mut key_bytes = [0u8; 32];
-        key_bytes[0] = seed;
-        let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-        ValidatorInfo::try_new(sk.verifying_key(), 100).unwrap()
-    }
-
     #[tokio::test]
     async fn connector_caches_connections() {
-        let validator = make_test_validator(1);
+        let validator = make_validator(100, 1).1;
 
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(validator.address, Host("http://127.0.0.1:9090".to_string()));
@@ -213,8 +207,8 @@ mod tests {
 
     #[tokio::test]
     async fn connector_creates_separate_connections_for_different_validators() {
-        let validator_a = make_test_validator(1);
-        let validator_b = make_test_validator(2);
+        let validator_a = make_validator(100, 1).1;
+        let validator_b = make_validator(100, 2).1;
 
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(
@@ -249,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn connector_propagates_host_not_found_error() {
-        let validator = make_test_validator(42);
+        let validator = make_validator(100, 42).1;
 
         // Empty hosts map: every lookup will fail with HostNotFound.
         let registry = Arc::new(MockHostRegistry {

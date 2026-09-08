@@ -177,6 +177,7 @@ pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> Result<SystemTime, Fibr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::make_validator;
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
@@ -347,21 +348,16 @@ mod tests {
         ed25519_dalek::VerifyingKey,
         tendermint_proto::v0_38::types::Validator,
     ) {
-        use sha2::{Digest, Sha256};
-
-        let mut secret = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut OsRng, &mut secret);
-        let pubkey = ed25519_dalek::SigningKey::from_bytes(&secret).verifying_key();
-        let address = Sha256::digest(pubkey.as_bytes())[..20].to_vec();
+        let info = make_validator(1, 7).1;
         let validator = tendermint_proto::v0_38::types::Validator {
-            address,
+            address: info.address().to_vec(),
             pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
-                sum: Some(CryptoKeySum::Ed25519(pubkey.as_bytes().to_vec())),
+                sum: Some(CryptoKeySum::Ed25519(info.public_key().as_bytes().to_vec())),
             }),
             voting_power,
             proposer_priority: 0,
         };
-        (pubkey, validator)
+        (*info.public_key(), validator)
     }
 
     #[test]
@@ -403,9 +399,36 @@ mod tests {
         };
 
         let set = ValidatorSet::try_from((&proto_set, 7)).unwrap();
-        assert_eq!(set.height(), 7);
+        assert_eq!(set.height().get(), 7);
         assert_eq!(set.total_voting_power(), 100);
         assert_eq!(set.validators().len(), 1);
+    }
+
+    #[test]
+    fn validator_set_from_proto_ignores_total_power() {
+        let (_, validator) = proto_validator(100);
+        let proto_set = tendermint_proto::v0_38::types::ValidatorSet {
+            validators: vec![validator.clone()],
+            proposer: Some(validator),
+            total_voting_power: 101,
+        };
+
+        let set = ValidatorSet::try_from((&proto_set, 7)).unwrap();
+        assert_eq!(set.total_voting_power(), 100);
+    }
+
+    #[test]
+    fn validator_set_from_proto_matches_proposer_by_address() {
+        let (_, validator) = proto_validator(100);
+        let mut proposer = validator.clone();
+        proposer.voting_power = 99;
+        let proto_set = tendermint_proto::v0_38::types::ValidatorSet {
+            validators: vec![validator],
+            proposer: Some(proposer),
+            total_voting_power: 0,
+        };
+
+        assert!(ValidatorSet::try_from((&proto_set, 7)).is_ok());
     }
 
     #[test]
