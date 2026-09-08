@@ -510,7 +510,7 @@ mod tests {
     use celestia_grpc::Error as GrpcError;
     use celestia_rpc::Error as RpcError;
     use jsonrpsee::core::ClientError as JrpcError;
-    use lumina_utils::test_utils::async_test;
+    use lumina_utils::test_utils::{async_test, wait_until};
     use tonic::Code;
 
     use celestia_grpc::TxConfig;
@@ -521,6 +521,63 @@ mod tests {
         new_read_only_client, new_rpc_only_client, node0_address, validator_address,
     };
     use crate::{Client, Error};
+
+    fn is_not_found(err: &Error) -> bool {
+        err.as_grpc_status()
+            .is_some_and(|status| status.code() == Code::NotFound)
+    }
+
+    // A transaction is reported as committed before the latest application
+    // state reflects it, so staking and balance queries issued right after
+    // a submission are polled until they show the expected value.
+    async fn delegation_with_balance(
+        client: &Client,
+        validator: &ValAddress,
+        balance: u64,
+    ) -> QueryDelegationResponse {
+        wait_until(
+            &format!("delegation balance to become {balance}"),
+            || async {
+                match client.state().query_delegation(validator).await {
+                    Ok(del) if del.response.balance == balance => Some(del),
+                    Ok(_) => None,
+                    Err(e) if is_not_found(&e) => None,
+                    Err(e) => panic!("query_delegation failed: {e}"),
+                }
+            },
+        )
+        .await
+    }
+
+    async fn unbonding_with_balance(
+        client: &Client,
+        validator: &ValAddress,
+        balance: u64,
+    ) -> QueryUnbondingDelegationResponse {
+        wait_until(
+            &format!("unbonding balance to become {balance}"),
+            || async {
+                match client.state().query_unbonding(validator).await {
+                    Ok(unbond)
+                        if unbond.unbond.entries.first().map(|e| e.balance) == Some(balance) =>
+                    {
+                        Some(unbond)
+                    }
+                    Ok(_) => None,
+                    Err(e) if is_not_found(&e) => None,
+                    Err(e) => panic!("query_unbonding failed: {e}"),
+                }
+            },
+        )
+        .await
+    }
+
+    async fn unbonding_error(client: &Client, validator: &ValAddress) -> Error {
+        wait_until("unbonding delegation to disappear", || async {
+            client.state().query_unbonding(validator).await.err()
+        })
+        .await
+    }
 
     #[async_test]
     async fn transfer() {
@@ -535,14 +592,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            client
+        let balance = wait_until("recipient balance to update", || async {
+            let balance = client
                 .state()
                 .balance_for_address_unverified(&random_acc)
                 .await
-                .unwrap(),
-            123
-        );
+                .unwrap();
+            (balance > 0).then_some(balance)
+        })
+        .await;
+        assert_eq!(balance, 123);
 
         let client_ro = new_read_only_client().await;
         let e = client_ro
@@ -567,11 +626,7 @@ mod tests {
             .await
             .unwrap();
 
-        let del = client
-            .state()
-            .query_delegation(&validator_addr)
-            .await
-            .unwrap();
+        let del = delegation_with_balance(&client, &validator_addr, 100).await;
 
         assert_eq!(del.response.balance, 100);
         assert_eq!(del.response.delegation.delegator_address, client_addr);
@@ -586,11 +641,7 @@ mod tests {
             .unwrap()
             .height;
 
-        let unbond = client
-            .state()
-            .query_unbonding(&validator_addr)
-            .await
-            .unwrap();
+        let unbond = unbonding_with_balance(&client, &validator_addr, 10).await;
 
         assert_eq!(unbond.unbond.delegator_address, client_addr);
         assert_eq!(unbond.unbond.validator_address, validator_addr);
@@ -602,11 +653,7 @@ mod tests {
         assert_eq!(unbond.unbond.entries[0].initial_balance, 10);
         assert_eq!(unbond.unbond.entries[0].balance, 10);
 
-        let del = client
-            .state()
-            .query_delegation(&validator_addr)
-            .await
-            .unwrap();
+        let del = delegation_with_balance(&client, &validator_addr, 90).await;
 
         assert_eq!(del.response.balance, 90);
         assert_eq!(del.response.delegation.delegator_address, client_addr);
@@ -620,11 +667,7 @@ mod tests {
             .await
             .unwrap();
 
-        let unbond = client
-            .state()
-            .query_unbonding(&validator_addr)
-            .await
-            .unwrap();
+        let unbond = unbonding_with_balance(&client, &validator_addr, 7).await;
 
         assert_eq!(unbond.unbond.delegator_address, client_addr);
         assert_eq!(unbond.unbond.validator_address, validator_addr);
@@ -636,11 +679,7 @@ mod tests {
         assert_eq!(unbond.unbond.entries[0].initial_balance, 7);
         assert_eq!(unbond.unbond.entries[0].balance, 7);
 
-        let del = client
-            .state()
-            .query_delegation(&validator_addr)
-            .await
-            .unwrap();
+        let del = delegation_with_balance(&client, &validator_addr, 93).await;
 
         assert_eq!(del.response.balance, 93);
         assert_eq!(del.response.delegation.delegator_address, client_addr);
@@ -654,19 +693,11 @@ mod tests {
             .await
             .unwrap();
 
-        let err = client
-            .state()
-            .query_unbonding(&validator_addr)
-            .await
-            .unwrap_err();
+        let err = unbonding_error(&client, &validator_addr).await;
 
-        assert_eq!(err.as_grpc_status().unwrap().code(), tonic::Code::NotFound);
+        assert_eq!(err.as_grpc_status().unwrap().code(), Code::NotFound);
 
-        let del = client
-            .state()
-            .query_delegation(&validator_addr)
-            .await
-            .unwrap();
+        let del = delegation_with_balance(&client, &validator_addr, 100).await;
 
         assert_eq!(del.response.balance, 100);
         assert_eq!(del.response.delegation.delegator_address, client_addr);
@@ -786,10 +817,13 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(
-            client_build_error,
-            Error::Rpc(RpcError::JsonRpc(JrpcError::RequestTimeout))
-        ));
+        assert!(
+            matches!(
+                client_build_error,
+                Error::Rpc(RpcError::JsonRpc(JrpcError::RequestTimeout))
+            ),
+            "unexpected error: {client_build_error:?}"
+        );
     }
 
     #[async_test]

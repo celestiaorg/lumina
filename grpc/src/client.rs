@@ -1069,7 +1069,7 @@ fn extract_sequence(msg: &str) -> Result<u64> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use std::future::{Future, IntoFuture};
+    use std::future::IntoFuture;
     use std::ops::RangeInclusive;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1080,8 +1080,7 @@ mod tests {
     use celestia_types::nmt::Namespace;
     use celestia_types::state::{Coin, ErrorCode};
     use futures::FutureExt;
-    use lumina_utils::test_utils::async_test;
-    use lumina_utils::time::{sleep, timeout};
+    use lumina_utils::test_utils::{async_test, wait_until};
     use rand::{Rng, RngCore};
     use tonic::Code;
 
@@ -1092,24 +1091,6 @@ mod tests {
         new_tx_client, spawn,
     };
     use crate::{Error, TxConfig};
-
-    // Confirmation can precede the transaction index and latest app state.
-    async fn wait_until<T, F, Fut>(what: &str, mut f: F) -> T
-    where
-        F: FnMut() -> Fut,
-        Fut: Future<Output = Option<T>>,
-    {
-        timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(value) = f().await {
-                    return value;
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
-    }
 
     #[async_test]
     async fn per_call_context_works() {
