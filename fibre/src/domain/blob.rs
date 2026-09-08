@@ -7,6 +7,7 @@
 //! - `Blob`: decoded data returned by download
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::blob_header::BlobHeaderV0;
@@ -138,6 +139,15 @@ impl EncodedBlob {
     /// Returns `FibreError::EmptyBlobData` if data is empty.
     /// Returns `FibreError::BlobTooLarge` if the data exceeds `cfg.max_data_size`.
     pub fn new(data: &[u8], cfg: BlobConfig) -> Result<Self, FibreError> {
+        Self::new_with_work_budget(data, cfg, rsema1d::default_work_budget())
+    }
+
+    /// Encode data with an explicit combined Reed-Solomon work-buffer budget.
+    pub fn new_with_work_budget(
+        data: &[u8],
+        cfg: BlobConfig,
+        work_budget: NonZeroUsize,
+    ) -> Result<Self, FibreError> {
         if data.is_empty() {
             return Err(FibreError::EmptyBlobData);
         }
@@ -155,11 +165,11 @@ impl EncodedBlob {
         // Write header + data directly into the first K rows; parity rows stay
         // zeroed and will be filled by encode_in_place.
         let total_rows = cfg.original_rows + cfg.parity_rows;
-        let mut flat = vec![0u8; total_rows * row_size];
-        header.encode_into_buffer(data, &mut flat);
-        let extended = rsema1d::RowMatrix::with_shape(flat, total_rows, row_size)?;
+        let mut extended = rsema1d::RowMatrix::zeroed(total_rows, row_size)?;
+        header.encode_into_buffer(data, extended.as_row_major_mut());
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
-        let (extended_data, commitment, _) = rsema1d::encode_in_place(extended, &params)?;
+        let (extended_data, commitment, _) =
+            rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
 
         let id = BlobID::new(cfg.blob_version, commitment);
 
@@ -554,7 +564,7 @@ mod tests {
                     let proof = blob.row(i).unwrap();
                     rsema1d::RowProof {
                         index: proof.index,
-                        row: std::borrow::Cow::Owned(proof.row),
+                        row: std::borrow::Cow::Owned(proof.row.to_vec()),
                         row_proof: proof.row_proof,
                     }
                 })

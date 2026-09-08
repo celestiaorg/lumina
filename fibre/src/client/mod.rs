@@ -132,7 +132,7 @@ impl FibreClient {
         ));
         let connector = crate::grpc_validator_client::GrpcValidatorConnector::new_with_io_connector(
             host_registry,
-            config.chain_id.clone(),
+            config.chain_id().to_owned(),
             io_connector,
         );
 
@@ -181,7 +181,9 @@ impl FibreClientBuilder {
 
     /// Builds the [`FibreClient`].
     pub fn build(self) -> Result<FibreClient, FibreError> {
-        let cfg = self.config.unwrap_or_default();
+        let cfg = self
+            .config
+            .ok_or_else(|| FibreError::Other("config is required".into()))?;
         let set_getter = self
             .set_getter
             .ok_or_else(|| FibreError::Other("set_getter is required".into()))?;
@@ -243,8 +245,10 @@ mod tests {
 
     #[tokio::test]
     async fn from_endpoint_with_valid_url() {
-        let result =
-            FibreClient::from_endpoint("http://localhost:9090", FibreClientConfig::default());
+        let result = FibreClient::from_endpoint(
+            "http://localhost:9090",
+            FibreClientConfig::new("test-chain").unwrap(),
+        );
         assert!(
             result.is_ok(),
             "from_endpoint with valid URL should succeed but got err: {}",
@@ -254,8 +258,10 @@ mod tests {
 
     #[tokio::test]
     async fn from_endpoint_with_invalid_url() {
-        let result =
-            FibreClient::from_endpoint("not a valid url \x00", FibreClientConfig::default());
+        let result = FibreClient::from_endpoint(
+            "not a valid url \x00",
+            FibreClientConfig::new("test-chain").unwrap(),
+        );
         assert!(
             result.is_err(),
             "from_endpoint with invalid URL should fail"
@@ -264,20 +270,39 @@ mod tests {
 
     #[tokio::test]
     async fn from_endpoint_sets_config_correctly() {
-        let config = FibreClientConfig {
-            chain_id: "test-123".to_string(),
-            ..Default::default()
-        };
+        let config = FibreClientConfig::new("test-123").unwrap();
 
         let client = FibreClient::from_endpoint("http://localhost:9090", config)
             .expect("from_endpoint should succeed");
 
-        assert_eq!(client.config().chain_id, "test-123");
+        assert_eq!(client.config().chain_id(), "test-123");
+    }
+
+    #[test]
+    fn builder_missing_config_returns_error() {
+        let result = FibreClient::builder()
+            .set_getter(DummySetGetter)
+            .connector(DummyConnector)
+            .build();
+
+        match result {
+            Err(FibreError::Other(msg)) => {
+                assert!(
+                    msg.contains("config"),
+                    "error should mention config, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected FibreError::Other mentioning config, got: {other}"),
+            Ok(_) => panic!("expected an error but build() succeeded"),
+        }
     }
 
     #[test]
     fn builder_missing_set_getter_returns_error() {
-        let result = FibreClient::builder().connector(DummyConnector).build();
+        let result = FibreClient::builder()
+            .config(FibreClientConfig::new("test-chain").unwrap())
+            .connector(DummyConnector)
+            .build();
 
         match result {
             Err(FibreError::Other(msg)) => {
@@ -293,7 +318,10 @@ mod tests {
 
     #[test]
     fn builder_missing_connector_returns_error() {
-        let result = FibreClient::builder().set_getter(DummySetGetter).build();
+        let result = FibreClient::builder()
+            .config(FibreClientConfig::new("test-chain").unwrap())
+            .set_getter(DummySetGetter)
+            .build();
 
         match result {
             Err(FibreError::Other(msg)) => {
@@ -310,6 +338,7 @@ mod tests {
     #[test]
     fn close_and_is_closed() {
         let client = FibreClient::builder()
+            .config(FibreClientConfig::new("test-chain").unwrap())
             .set_getter(DummySetGetter)
             .connector(DummyConnector)
             .build()

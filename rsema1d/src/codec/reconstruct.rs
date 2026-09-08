@@ -78,8 +78,7 @@ pub fn reconstruct_data(
         .decode()
         .map_err(|e| Error::ReedSolomon(format!("Failed to decode: {:?}", e)))?;
 
-    let mut all_original =
-        RowMatrix::with_shape(vec![0u8; params.k * row_size], params.k, params.row_size)?;
+    let mut all_original = RowMatrix::zeroed(params.k, row_size)?;
 
     for (i, &index) in indices.iter().enumerate() {
         if index < params.k {

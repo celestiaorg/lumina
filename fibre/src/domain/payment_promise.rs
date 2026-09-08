@@ -4,6 +4,7 @@
 //! The signer creates the promise, signs it with their secp256k1 key, and
 //! validators counter-sign to confirm they received and stored the data.
 
+use std::num::NonZeroU64;
 use std::time::SystemTime;
 
 use celestia_types::nmt::{NS_SIZE, Namespace};
@@ -25,7 +26,7 @@ const PUBKEY_SIZE: usize = 33;
 const SIGNATURE_SIZE: usize = 64;
 
 /// Maximum allowed chain ID length.
-const MAX_CHAIN_ID_SIZE: usize = 20;
+pub(crate) const MAX_CHAIN_ID_SIZE: usize = 20;
 
 /// Size of the Go time.Time MarshalBinary output for UTC times.
 const TIMESTAMP_BINARY_SIZE: usize = 15;
@@ -42,7 +43,7 @@ pub struct PaymentPromise {
     /// Chain identifier for domain separation.
     pub chain_id: String,
     /// Height used to determine the validator set.
-    pub height: u64,
+    pub height: NonZeroU64,
     /// The namespace the blob is associated with.
     pub namespace: Namespace,
     /// Upload size of the blob (with padding, without parity), matching `EncodedBlob::upload_size()`.
@@ -89,7 +90,7 @@ impl PaymentPromise {
         buf.extend_from_slice(&self.blob_version.to_be_bytes());
 
         // Append height (8 bytes, big-endian)
-        buf.extend_from_slice(&self.height.to_be_bytes());
+        buf.extend_from_slice(&self.height.get().to_be_bytes());
 
         // Append timestamp bytes (15 bytes)
         buf.extend_from_slice(&timestamp_bytes);
@@ -176,14 +177,6 @@ impl PaymentPromise {
             return Err(FibreError::InvalidPaymentPromise(
                 "creation timestamp must not be zero".into(),
             ));
-        }
-
-        // Height must be positive
-        if self.height == 0 {
-            return Err(FibreError::InvalidPaymentPromise(format!(
-                "height must be positive, got {}",
-                self.height
-            )));
         }
 
         // Signature must be present and correct size
@@ -356,7 +349,7 @@ mod tests {
 
         let promise = PaymentPromise {
             chain_id: "test-chain-1".to_string(),
-            height: 12345,
+            height: NonZeroU64::new(12345).unwrap(),
             namespace: Namespace::from_raw(&[0u8; NS_SIZE]).unwrap(),
             upload_size: 1024,
             blob_version: 0,
@@ -431,7 +424,10 @@ mod tests {
         offset += 4;
 
         // Height (8 bytes BE)
-        assert_eq!(&stripped[offset..offset + 8], &promise.height.to_be_bytes());
+        assert_eq!(
+            &stripped[offset..offset + 8],
+            &promise.height.get().to_be_bytes()
+        );
         offset += 8;
 
         // Timestamp (15 bytes)
@@ -481,14 +477,6 @@ mod tests {
     fn validate_fails_with_zero_upload_size() {
         let (signing_key, mut promise) = make_test_promise();
         promise.upload_size = 0;
-        promise.sign(&signing_key).unwrap();
-        assert!(promise.validate().is_err());
-    }
-
-    #[test]
-    fn validate_fails_with_zero_height() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.height = 0;
         promise.sign(&signing_key).unwrap();
         assert!(promise.validate().is_err());
     }
@@ -600,7 +588,7 @@ mod tests {
 
         let mut promise = PaymentPromise {
             chain_id: "mocha-4".to_string(),
-            height: 100,
+            height: NonZeroU64::new(100).unwrap(),
             namespace: Namespace::from_raw(&[0u8; NS_SIZE]).unwrap(),
             upload_size: 1024,
             blob_version: 0,
@@ -709,7 +697,7 @@ mod tests {
 
         let mut promise = PaymentPromise {
             chain_id: "mocha-4".to_string(),
-            height: 100,
+            height: NonZeroU64::new(100).unwrap(),
             namespace: Namespace::from_raw(&[0u8; NS_SIZE]).unwrap(),
             upload_size: 1024,
             blob_version: 0,
@@ -752,7 +740,7 @@ mod tests {
 
         let reconstructed = PaymentPromise {
             chain_id: decoded_proto.chain_id,
-            height: decoded_proto.height as u64,
+            height: NonZeroU64::new(decoded_proto.height as u64).unwrap(),
             namespace: Namespace::from_raw(&decoded_proto.namespace).unwrap(),
             upload_size: decoded_proto.blob_size,
             blob_version: decoded_proto.blob_version,
