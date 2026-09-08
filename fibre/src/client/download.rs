@@ -159,7 +159,10 @@ impl FibreClient {
                             _ = task_cancel.cancelled() => Err(FibreError::Cancelled),
                             result = async {
                                 let conn = connector.connect(&validator).await?;
-                                let shard = non_empty_shard(conn.download_shard(&blob_id).await?)?;
+                                let shard = conn.download_shard(&blob_id).await?;
+                                if shard.rows.is_empty() {
+                                    return Err(ShardError::Empty.into());
+                                }
                                 // Verify here so the heavy crypto runs off the
                                 // select! loop and per-task instead of serially.
                                 verifier
@@ -233,27 +236,17 @@ impl FibreClient {
     }
 }
 
-fn non_empty_shard(
-    shard: crate::validator_client::DownloadResponse,
-) -> Result<crate::validator_client::DownloadResponse, FibreError> {
-    if shard.rows.is_empty() {
-        return Err(ShardError::Empty.into());
-    }
-    Ok(shard)
-}
-
 #[cfg(test)]
 mod tests {
     use std::future::pending;
     use std::sync::Arc;
 
-    use super::non_empty_shard;
     use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
     use crate::blob::{BlobID, BlobReconstruction, EncodedBlob};
     use crate::config::BlobConfig;
-    use crate::error::{FibreError, ShardError};
+    use crate::error::FibreError;
     use crate::payment_promise::PaymentPromise;
     use crate::test_utils::{
         MockConnector, MockValidatorConnection, build_test_client, make_validator, test_blob_config,
@@ -262,17 +255,6 @@ mod tests {
     use crate::validator_client::{
         DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
     };
-
-    #[test]
-    fn empty_shard_response_is_typed() {
-        assert!(matches!(
-            non_empty_shard(DownloadResponse {
-                rows: Vec::new(),
-                rlcs: Vec::new(),
-            }),
-            Err(FibreError::InvalidShard(ShardError::Empty))
-        ));
-    }
 
     struct CoordinatedConnector {
         fast_address: [u8; 20],
@@ -639,7 +621,7 @@ mod tests {
         let cfg = test_blob_config();
         let data: Vec<u8> = (0u8..=149).collect();
 
-        // 3 validators; validator 0 returns NotFound (no proofs stored)
+        // 3 validators; validator 0 returns an empty shard
         let validators = [
             make_validator(100, 1),
             make_validator(100, 2),
@@ -652,8 +634,9 @@ mod tests {
         let blob_id = blob.id().clone();
         let total_rows = cfg.total_rows();
 
-        // Validator 0 has an empty store (returns NotFound)
+        // Validator 0 has an empty shard response
         let empty_conn = Arc::new(MockValidatorConnection::new(validators[0].0.clone()));
+        empty_conn.store_proofs(blob_id.commitment(), Vec::new(), Vec::new());
 
         // Validators 1 and 2 have proofs
         let good_conns: Vec<Arc<MockValidatorConnection>> = validators[1..]
