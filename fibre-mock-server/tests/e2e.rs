@@ -101,6 +101,8 @@ async fn payment_roundtrip() {
     use celestia_fibre::{GrpcHostRegistry, GrpcSetGetter, GrpcValidatorConnector};
     use celestia_grpc::{GrpcClient, TxConfig};
     use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
+    use celestia_proto::cosmos::tx::v1beta1::GetTxsEventRequest;
+    use prost::Name;
 
     let handle = spawn_mock_network(test_config()).await.unwrap();
     let control_url = format!("http://{}", handle.control_addr);
@@ -147,6 +149,18 @@ async fn payment_roundtrip() {
         .await
         .unwrap();
     assert!(tx.height >= 1, "tx confirmed at height {}", tx.height);
+
+    let payments = app_grpc
+        .get_txs_event(GetTxsEventRequest {
+            query: format!("message.action='{}'", MsgPayForFibre::type_url()),
+            page: 1,
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(payments.total, 1);
+    assert_eq!(payments.txs.len(), 1);
 
     let downloaded = fibre
         .download(&blob_id, DownloadOptions::default())

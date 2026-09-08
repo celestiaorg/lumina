@@ -4,6 +4,13 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use celestia_proto::cosmos::tx::v1beta1::Tx;
+
+struct CommittedTxs {
+    heights: HashMap<String, i64>,
+    txs: Vec<Tx>,
+}
+
 /// Minimal chain state backing the app-node gRPC services.
 pub struct MockChain {
     /// Chain id served in the latest-block header and used for tx signing.
@@ -14,7 +21,7 @@ pub struct MockChain {
     pub proposer: [u8; 20],
     /// Uppercase-hex tx hash → committed height. Held only for synchronous
     /// lookups; never across an await.
-    txs: Mutex<HashMap<String, i64>>,
+    txs: Mutex<CommittedTxs>,
 }
 
 impl MockChain {
@@ -23,16 +30,18 @@ impl MockChain {
             chain_id,
             height,
             proposer,
-            txs: Mutex::new(HashMap::new()),
+            txs: Mutex::new(CommittedTxs {
+                heights: HashMap::new(),
+                txs: Vec::new(),
+            }),
         }
     }
 
     /// Record a broadcast tx as instantly committed; returns its height.
-    pub fn commit_tx(&self, hash_hex_upper: String) -> i64 {
-        self.txs
-            .lock()
-            .expect("mock chain lock poisoned")
-            .insert(hash_hex_upper, self.height);
+    pub fn commit_tx(&self, hash_hex_upper: String, tx: Tx) -> i64 {
+        let mut txs = self.txs.lock().expect("mock chain lock poisoned");
+        txs.heights.insert(hash_hex_upper, self.height);
+        txs.txs.push(tx);
         self.height
     }
 
@@ -41,7 +50,16 @@ impl MockChain {
         self.txs
             .lock()
             .expect("mock chain lock poisoned")
+            .heights
             .get(hash_hex_upper)
             .copied()
+    }
+
+    pub fn committed_txs(&self) -> Vec<Tx> {
+        self.txs
+            .lock()
+            .expect("mock chain lock poisoned")
+            .txs
+            .clone()
     }
 }

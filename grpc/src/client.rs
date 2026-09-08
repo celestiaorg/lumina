@@ -29,6 +29,7 @@ use celestia_proto::cosmos::base::node::v1beta1::service_client::ServiceClient a
 use celestia_proto::cosmos::base::tendermint::v1beta1::service_client::ServiceClient as TendermintServiceClient;
 use celestia_proto::cosmos::staking::v1beta1::query_client::QueryClient as StakingQueryClient;
 use celestia_proto::cosmos::tx::v1beta1::service_client::ServiceClient as TxServiceClient;
+use celestia_proto::cosmos::tx::v1beta1::{GetTxsEventRequest, GetTxsEventResponse};
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetResponse;
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::block_api_client::BlockApiClient as FibreBlockApiClient;
 use celestia_types::blob::{BlobParams, MsgPayForBlobs, RawBlobTx, RawMsgPayForBlobs};
@@ -214,6 +215,13 @@ impl GrpcClient {
     /// Get Tx
     #[grpc_method(TxServiceClient::get_tx)]
     fn get_tx(&self, hash: Hash) -> AsyncGrpcCall<GetTxResponse>;
+
+    /// Get transactions matching a Tendermint event query.
+    #[grpc_method(TxServiceClient::get_txs_event)]
+    fn get_txs_event(
+        &self,
+        request: GetTxsEventRequest,
+    ) -> AsyncGrpcCall<GetTxsEventResponse>;
 
     /// Broadcast prepared and serialised transaction
     #[grpc_method(TxServiceClient::simulate)]

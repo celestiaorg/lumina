@@ -1,7 +1,8 @@
 use celestia_proto::cosmos::base::abci::v1beta1::GasInfo;
 use celestia_proto::cosmos::tx::v1beta1::{
     BroadcastTxRequest, BroadcastTxResponse, GetTxRequest as RawGetTxRequest,
-    GetTxResponse as RawGetTxResponse, SimulateRequest, SimulateResponse,
+    GetTxResponse as RawGetTxResponse, GetTxsEventRequest, GetTxsEventResponse, SimulateRequest,
+    SimulateResponse,
 };
 use celestia_types::hash::Hash;
 use celestia_types::state::{Tx, TxResponse};
@@ -78,6 +79,18 @@ impl FromGrpcResponse<GetTxResponse> for RawGetTxResponse {
             tx: cosmos_tx,
             tx_response,
         })
+    }
+}
+
+impl IntoGrpcParam<GetTxsEventRequest> for GetTxsEventRequest {
+    fn into_parameter(self) -> GetTxsEventRequest {
+        self
+    }
+}
+
+impl FromGrpcResponse<GetTxsEventResponse> for GetTxsEventResponse {
+    fn try_from_response(self) -> Result<GetTxsEventResponse> {
+        Ok(self)
     }
 }
 

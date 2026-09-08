@@ -11,7 +11,7 @@ use celestia_proto::celestia::core::v1::gas_estimation::{
     EstimateGasPriceAndUsageRequest, EstimateGasPriceAndUsageResponse, EstimateGasPriceRequest,
     EstimateGasPriceResponse,
 };
-use celestia_proto::celestia::core::v1::tx::tx_server::Tx;
+use celestia_proto::celestia::core::v1::tx::tx_server::Tx as CelestiaTx;
 use celestia_proto::celestia::core::v1::tx::{
     TxStatusBatchRequest, TxStatusBatchResponse, TxStatusRequest, TxStatusResponse, TxStatusResult,
 };
@@ -35,11 +35,11 @@ use celestia_proto::cosmos::base::tendermint::v1beta1::{
 };
 use celestia_proto::cosmos::tx::v1beta1::service_server::Service as CosmosTxService;
 use celestia_proto::cosmos::tx::v1beta1::{
-    BroadcastTxRequest, BroadcastTxResponse, GetBlockWithTxsRequest, GetBlockWithTxsResponse,
-    GetTxRequest, GetTxResponse, GetTxsEventRequest, GetTxsEventResponse, SimulateRequest,
-    SimulateResponse, TxDecodeAminoRequest, TxDecodeAminoResponse, TxDecodeRequest,
-    TxDecodeResponse, TxEncodeAminoRequest, TxEncodeAminoResponse, TxEncodeRequest,
-    TxEncodeResponse,
+    AuthInfo, BroadcastTxRequest, BroadcastTxResponse, GetBlockWithTxsRequest,
+    GetBlockWithTxsResponse, GetTxRequest, GetTxResponse, GetTxsEventRequest, GetTxsEventResponse,
+    SimulateRequest, SimulateResponse, Tx as CosmosTx, TxBody, TxDecodeAminoRequest,
+    TxDecodeAminoResponse, TxDecodeRequest, TxDecodeResponse, TxEncodeAminoRequest,
+    TxEncodeAminoResponse, TxEncodeRequest, TxEncodeResponse, TxRaw,
 };
 use celestia_proto::tendermint_celestia_mods::types::{Block, Data};
 use prost::{Message, Name};
@@ -261,9 +261,23 @@ impl CosmosTxService for MockCosmosTxService {
         self: Arc<Self>,
         request: Request<BroadcastTxRequest>,
     ) -> Result<Response<BroadcastTxResponse>, Status> {
+        let tx_bytes = request.into_inner().tx_bytes;
         // The client takes this hash verbatim and parses it as uppercase hex.
-        let txhash = hex::encode_upper(Sha256::digest(&request.into_inner().tx_bytes));
-        let height = self.0.commit_tx(txhash.clone());
+        let txhash = hex::encode_upper(Sha256::digest(&tx_bytes));
+        let raw = TxRaw::decode(tx_bytes.as_slice())
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let tx = CosmosTx {
+            body: Some(
+                TxBody::decode(raw.body_bytes.as_slice())
+                    .map_err(|error| Status::invalid_argument(error.to_string()))?,
+            ),
+            auth_info: Some(
+                AuthInfo::decode(raw.auth_info_bytes.as_slice())
+                    .map_err(|error| Status::invalid_argument(error.to_string()))?,
+            ),
+            signatures: raw.signatures,
+        };
+        let height = self.0.commit_tx(txhash.clone(), tx);
         Ok(Response::new(BroadcastTxResponse {
             tx_response: Some(TxResponse {
                 height,
@@ -290,9 +304,23 @@ impl CosmosTxService for MockCosmosTxService {
 
     async fn get_txs_event(
         self: Arc<Self>,
-        _request: Request<GetTxsEventRequest>,
+        request: Request<GetTxsEventRequest>,
     ) -> Result<Response<GetTxsEventResponse>, Status> {
-        unimplemented()
+        let request = request.into_inner();
+        let txs = self.0.committed_txs();
+        let total = txs.len() as u64;
+        let limit = if request.limit == 0 {
+            100
+        } else {
+            request.limit
+        };
+        let start = request.page.saturating_sub(1).saturating_mul(limit) as usize;
+        let txs = txs.into_iter().skip(start).take(limit as usize).collect();
+        Ok(Response::new(GetTxsEventResponse {
+            txs,
+            total,
+            ..Default::default()
+        }))
     }
 
     async fn get_block_with_txs(
@@ -349,7 +377,7 @@ fn status_of(chain: &MockChain, tx_id: &str) -> TxStatusResponse {
 }
 
 #[tonic::async_trait]
-impl Tx for MockCelestiaTxStatus {
+impl CelestiaTx for MockCelestiaTxStatus {
     async fn tx_status(
         self: Arc<Self>,
         request: Request<TxStatusRequest>,

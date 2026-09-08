@@ -25,6 +25,17 @@ pub(crate) fn verify_payload(
             data.len()
         ));
     }
+    let sequence = verify_payload_integrity(data)?;
+    if sequence != expected_sequence {
+        return Err(format!(
+            "payload sequence mismatch: expected {expected_sequence}, got {sequence}"
+        ));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn verify_payload_integrity(data: &[u8]) -> Result<u64, String> {
     if data.len() < PAYLOAD_HEADER_LEN {
         return Err(format!(
             "payload is shorter than {PAYLOAD_HEADER_LEN}-byte header"
@@ -35,12 +46,6 @@ pub(crate) fn verify_payload(
     }
 
     let sequence = u64::from_le_bytes(data[4..12].try_into().expect("fixed-size slice"));
-    if sequence != expected_sequence {
-        return Err(format!(
-            "payload sequence mismatch: expected {expected_sequence}, got {sequence}"
-        ));
-    }
-
     let expected_checksum = u32::from_le_bytes(data[12..16].try_into().expect("fixed-size slice"));
     let actual_checksum = crc32fast::hash(&data[PAYLOAD_HEADER_LEN..]);
     if actual_checksum != expected_checksum {
@@ -49,7 +54,7 @@ pub(crate) fn verify_payload(
         ));
     }
 
-    Ok(())
+    Ok(sequence)
 }
 
 pub(crate) fn payload_size_for_paid_size(paid_size: usize) -> Result<usize, String> {
@@ -92,6 +97,7 @@ mod tests {
     #[test]
     fn payload_roundtrip_verifies() {
         let payload = make_payload(42, 1024);
+        assert_eq!(verify_payload_integrity(&payload).unwrap(), 42);
         verify_payload(&payload, 42, 1024).unwrap();
     }
 

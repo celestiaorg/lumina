@@ -897,6 +897,7 @@ dependencies = [
  "crc32fast",
  "hex",
  "k256",
+ "prost",
  "rand",
  "rayon",
  "tokio",

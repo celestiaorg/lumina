@@ -1,18 +1,20 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::IntoFuture;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use celestia_fibre::{
-    BlobConfig, DownloadOptions, EncodedBlob, FibreClient, FibreClientConfig, GrpcHostRegistry,
-    GrpcSetGetter, GrpcValidatorConnector,
+    BlobConfig, BlobID, DownloadOptions, EncodedBlob, FibreClient, FibreClientConfig,
+    GrpcHostRegistry, GrpcSetGetter, GrpcValidatorConnector,
 };
 use celestia_grpc::{GrpcClient, TxConfig};
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
+use celestia_proto::cosmos::tx::v1beta1::{GetTxsEventRequest, OrderBy, Tx as CosmosTx};
 use celestia_types::nmt::Namespace;
 use celestia_types::state::AccAddress;
 use k256::ecdsa::SigningKey;
+use prost::{Message, Name};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -21,29 +23,56 @@ use tokio::time::{self, Instant, MissedTickBehavior};
 
 use crate::cli::Cli;
 use crate::metrics;
-use crate::payload::{make_payload, payload_size_for_paid_size, verify_payload};
+use crate::payload::{
+    make_payload, payload_size_for_paid_size, verify_payload, verify_payload_integrity,
+};
 use crate::stats::{Event, SharedStats, Stats, print_final_report, run_stats_collector};
 
 struct LifecycleContext {
     client: usize,
     fibre: Arc<FibreClient>,
+    workload: Workload,
+    operation_timeout: Duration,
+    download_semaphore: Arc<Semaphore>,
+}
+
+enum Workload {
+    Writer(Box<WriterContext>),
+    Reader(ReaderContext),
+}
+
+struct WriterContext {
     app_grpc: GrpcClient,
     signing_key: SigningKey,
     signer: AccAddress,
     namespace: Namespace,
     payload_size: usize,
     paid_size: usize,
-    operation_timeout: Duration,
     tx_config: TxConfig,
     encode_pool: Arc<rayon::ThreadPool>,
     encode_semaphore: Arc<Semaphore>,
-    download_semaphore: Arc<Semaphore>,
     skip_download: bool,
 }
 
+struct ReaderContext {
+    app_grpc: GrpcClient,
+    namespace: Namespace,
+    verify_crc: bool,
+}
+
+struct CompletedBlob {
+    payload_bytes: u64,
+    paid_bytes: u64,
+}
+
 struct WorkItem {
-    sequence: u64,
+    work: Work,
     scheduled_at: Instant,
+}
+
+enum Work {
+    Write(u64),
+    Read(BlobID),
 }
 
 struct StageFailure {
@@ -53,7 +82,11 @@ struct StageFailure {
 
 pub(crate) async fn run(cli: Cli) -> Result<()> {
     let cli = Arc::new(cli);
-    let client_count = cli.private_keys.len();
+    let client_count = if cli.reader_only {
+        1
+    } else {
+        cli.private_keys.len()
+    };
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let mut contexts = Vec::with_capacity(client_count);
     let mut signers = BTreeMap::new();
@@ -63,20 +96,29 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
             build_lifecycle_context(client, &cli)
                 .with_context(|| format!("client {client} setup failed"))?,
         );
-        tracing::info!(client, signer = %context.signer, "Fibre client ready");
-        signers.insert(client, context.signer.to_string());
+        let identity = match &context.workload {
+            Workload::Writer(writer) => writer.signer.to_string(),
+            Workload::Reader(_) => "reader".to_string(),
+        };
+        tracing::info!(client, %identity, "Fibre client ready");
+        signers.insert(client, identity);
         contexts.push(context);
     }
 
-    let payload_size = payload_size_for_paid_size(cli.blob_size).expect("validated by clap");
+    let payload_size = cli
+        .blob_size
+        .map(|size| payload_size_for_paid_size(size).expect("validated by clap"));
+    let blobs_per_second = cli.blobs_per_second.unwrap_or(0.0);
     tracing::info!(
         clients = client_count,
+        reader_only = cli.reader_only,
+        verify_crc = cli.verify_crc,
         chain_id = %cli.chain_id,
         namespace = %cli.namespace,
-        payload_size,
-        paid_size = cli.blob_size,
-        per_client_target_blobs_per_second = cli.blobs_per_second,
-        aggregate_target_blobs_per_second = cli.blobs_per_second * client_count as f64,
+        ?payload_size,
+        paid_size = ?cli.blob_size,
+        per_client_target_blobs_per_second = blobs_per_second,
+        aggregate_target_blobs_per_second = blobs_per_second * client_count as f64,
         run_for_seconds = cli.run_for_seconds,
         max_in_flight = cli.max_in_flight,
         queue_capacity = cli.queue_capacity,
@@ -84,7 +126,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         tokio_worker_threads = cli.tokio_worker_threads,
         rayon_threads_per_signer = cli.rayon_threads_per_signer,
         download_concurrency = cli.download_concurrency,
-        download_enabled = !cli.skip_download,
+        download_enabled = cli.reader_only || !cli.skip_download,
         gas_limit = ?cli.gas_limit,
         gas_price = ?cli.gas_price,
         "starting Fibre evaluation"
@@ -122,14 +164,14 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Arc::clone(&shared_stats),
         started_at,
         client_count,
-        cli.blobs_per_second,
+        blobs_per_second,
     ));
     let stats_handle = tokio::spawn(run_stats_collector(
         event_rx,
         Duration::from_secs(cli.stats_interval_seconds),
         started_at,
         client_count,
-        cli.blobs_per_second,
+        blobs_per_second,
         shared_stats,
     ));
 
@@ -170,7 +212,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         launch_elapsed,
         total_elapsed,
         client_count,
-        cli.blobs_per_second,
+        blobs_per_second,
     );
     metrics_handle.abort();
     if let Some(error) = client_error {
@@ -180,14 +222,16 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
 }
 
 fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext> {
-    let private_key =
-        hex::decode(&cli.private_keys[client - 1]).context("decoding --private-key")?;
-    let signing_key = SigningKey::from_slice(&private_key).context("parsing --private-key")?;
-    let payload_size = payload_size_for_paid_size(cli.blob_size).expect("validated by clap");
-
-    let app_grpc = GrpcClient::builder()
-        .url(&cli.app_grpc_url)
-        .private_key(&private_key)
+    let private_key = cli
+        .private_keys
+        .get(client - 1)
+        .map(|private_key| hex::decode(private_key).context("decoding --private-key"))
+        .transpose()?;
+    let mut app_grpc_builder = GrpcClient::builder().url(&cli.app_grpc_url);
+    if let Some(private_key) = &private_key {
+        app_grpc_builder = app_grpc_builder.private_key(private_key);
+    }
+    let app_grpc = app_grpc_builder
         .build()
         .context("building app gRPC client")?;
     let core_grpc = GrpcClient::builder()
@@ -195,13 +239,9 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
         .build()
         .context("building core gRPC client")?;
 
-    let signer = app_grpc
-        .get_account_address()
-        .context("app gRPC client has no signer")?;
-    let namespace = Namespace::new_v0(cli.namespace.as_bytes()).context("parsing namespace")?;
     let host_registry = Arc::new(GrpcHostRegistry::new(app_grpc.clone()));
-    let fibre_config = FibreClientConfig::new(cli.chain_id.clone())
-        .context("building Fibre client config")?;
+    let fibre_config =
+        FibreClientConfig::new(cli.chain_id.clone()).context("building Fibre client config")?;
     let fibre = Arc::new(
         FibreClient::builder()
             .config(fibre_config)
@@ -214,35 +254,56 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
             .context("building Fibre client")?,
     );
 
-    let mut tx_config = TxConfig::default();
-    if let Some(gas_limit) = cli.gas_limit {
-        tx_config = tx_config.with_gas_limit(gas_limit);
-    }
-    if let Some(gas_price) = cli.gas_price {
-        tx_config = tx_config.with_gas_price(gas_price);
-    }
+    let namespace = Namespace::new_v0(cli.namespace.as_bytes()).context("parsing namespace")?;
+    let workload = if cli.reader_only {
+        Workload::Reader(ReaderContext {
+            app_grpc,
+            namespace,
+            verify_crc: cli.verify_crc,
+        })
+    } else {
+        let private_key = private_key.expect("required by clap in writer mode");
+        let signing_key = SigningKey::from_slice(&private_key).context("parsing --private-key")?;
+        let signer = app_grpc
+            .get_account_address()
+            .context("app gRPC client has no signer")?;
+        let paid_size = cli.blob_size.expect("required by clap in writer mode");
+        let payload_size = payload_size_for_paid_size(paid_size).expect("validated by clap");
 
-    let encode_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(cli.rayon_threads_per_signer)
-        .thread_name(move |worker| format!("fibre-encode-{client}-{worker}"))
-        .build()
-        .context("building signer Rayon pool")?;
+        let mut tx_config = TxConfig::default();
+        if let Some(gas_limit) = cli.gas_limit {
+            tx_config = tx_config.with_gas_limit(gas_limit);
+        }
+        if let Some(gas_price) = cli.gas_price {
+            tx_config = tx_config.with_gas_price(gas_price);
+        }
+
+        let encode_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(cli.rayon_threads_per_signer)
+            .thread_name(move |worker| format!("fibre-encode-{client}-{worker}"))
+            .build()
+            .context("building signer Rayon pool")?;
+
+        Workload::Writer(Box::new(WriterContext {
+            app_grpc,
+            signing_key,
+            signer,
+            namespace,
+            payload_size,
+            paid_size,
+            tx_config,
+            encode_pool: Arc::new(encode_pool),
+            encode_semaphore: Arc::new(Semaphore::new(cli.encode_concurrency)),
+            skip_download: cli.skip_download,
+        }))
+    };
 
     Ok(LifecycleContext {
         client,
         fibre,
-        app_grpc,
-        signing_key,
-        signer,
-        namespace,
-        payload_size,
-        paid_size: cli.blob_size,
+        workload,
         operation_timeout: Duration::from_secs(cli.operation_timeout_seconds),
-        tx_config,
-        encode_pool: Arc::new(encode_pool),
-        encode_semaphore: Arc::new(Semaphore::new(cli.encode_concurrency)),
         download_semaphore: Arc::new(Semaphore::new(cli.download_concurrency)),
-        skip_download: cli.skip_download,
     })
 }
 
@@ -254,19 +315,28 @@ async fn run_client(
 ) -> Result<Duration> {
     let (work_tx, work_rx) = mpsc::channel(cli.queue_capacity);
     let dispatcher_handle = tokio::spawn(run_dispatcher(
-        context,
+        Arc::clone(&context),
         work_rx,
         event_tx.clone(),
         cli.max_in_flight,
     ));
-    let launch_elapsed = run_scheduler(
-        work_tx,
-        event_tx,
-        cli.blobs_per_second,
-        Duration::from_secs(cli.run_for_seconds),
-        started_at,
-    )
-    .await?;
+    let run_for = Duration::from_secs(cli.run_for_seconds);
+    let launch_elapsed = match &context.workload {
+        Workload::Writer(_) => {
+            run_scheduler(
+                work_tx,
+                event_tx,
+                cli.blobs_per_second
+                    .expect("required by clap in writer mode"),
+                run_for,
+                started_at,
+            )
+            .await?
+        }
+        Workload::Reader(reader) => {
+            run_reader_source(work_tx, event_tx, reader, run_for, started_at).await?
+        }
+    };
     dispatcher_handle
         .await
         .context("dispatcher task panicked")??;
@@ -311,7 +381,14 @@ async fn run_scheduler(
                     continue;
                 }
 
-                admit_work(&work_tx, &event_tx, WorkItem { sequence, scheduled_at })?;
+                admit_work(
+                    &work_tx,
+                    &event_tx,
+                    WorkItem {
+                        work: Work::Write(sequence),
+                        scheduled_at,
+                    },
+                )?;
             }
         }
     };
@@ -330,6 +407,129 @@ async fn run_scheduler(
     } else {
         Ok(started_at.elapsed())
     }
+}
+
+async fn run_reader_source(
+    work_tx: mpsc::Sender<WorkItem>,
+    event_tx: mpsc::UnboundedSender<Event>,
+    reader: &ReaderContext,
+    run_for: Duration,
+    started_at: Instant,
+) -> Result<Duration> {
+    let deadline = started_at + run_for;
+    let deadline_sleep = time::sleep_until(deadline);
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut poll = time::interval_at(started_at, Duration::from_secs(1));
+    poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    tokio::pin!(deadline_sleep);
+    tokio::pin!(ctrl_c);
+
+    let mut page = 1;
+    let mut seen = HashSet::new();
+    let stopped_at_deadline = loop {
+        tokio::select! {
+            biased;
+            _ = &mut deadline_sleep => break true,
+            result = &mut ctrl_c => {
+                result.context("listening for Ctrl+C")?;
+                tracing::info!("received Ctrl+C; stopping namespace reads");
+                break false;
+            }
+            _ = poll.tick() => {
+                read_available_blobs(
+                    &work_tx,
+                    &event_tx,
+                    reader,
+                    &mut page,
+                    &mut seen,
+                ).await?;
+            }
+        }
+    };
+
+    Ok(if stopped_at_deadline {
+        run_for
+    } else {
+        started_at.elapsed()
+    })
+}
+
+async fn read_available_blobs(
+    work_tx: &mpsc::Sender<WorkItem>,
+    event_tx: &mpsc::UnboundedSender<Event>,
+    reader: &ReaderContext,
+    page: &mut u64,
+    seen: &mut HashSet<BlobID>,
+) -> Result<()> {
+    const PAGE_LIMIT: u64 = 100;
+
+    loop {
+        let response = reader
+            .app_grpc
+            .get_txs_event(GetTxsEventRequest {
+                order_by: OrderBy::Asc.into(),
+                page: *page,
+                limit: PAGE_LIMIT,
+                query: format!("message.action='{}'", MsgPayForFibre::type_url()),
+                ..Default::default()
+            })
+            .await
+            .context("querying Fibre payments")?;
+
+        for blob_id in blob_ids_in_namespace(response.txs, reader.namespace)? {
+            if seen.contains(&blob_id) {
+                continue;
+            }
+            let _ = event_tx.send(Event::Scheduled { count: 1 });
+            work_tx
+                .send(WorkItem {
+                    work: Work::Read(blob_id.clone()),
+                    scheduled_at: Instant::now(),
+                })
+                .await
+                .context("lifecycle dispatcher stopped")?;
+            let _ = event_tx.send(Event::Admitted);
+            seen.insert(blob_id);
+        }
+
+        if page.saturating_mul(PAGE_LIMIT) >= response.total {
+            return Ok(());
+        }
+        *page += 1;
+    }
+}
+
+fn blob_ids_in_namespace(txs: Vec<CosmosTx>, namespace: Namespace) -> Result<Vec<BlobID>> {
+    let mut blob_ids = Vec::new();
+    for tx in txs {
+        let Some(body) = tx.body else {
+            continue;
+        };
+        for message in body.messages {
+            if message.type_url != MsgPayForFibre::type_url() {
+                continue;
+            }
+            let message = MsgPayForFibre::decode(message.value.as_slice())
+                .context("decoding MsgPayForFibre")?;
+            let promise = message
+                .payment_promise
+                .context("MsgPayForFibre has no payment promise")?;
+            if promise.namespace != namespace.as_bytes() {
+                continue;
+            }
+            let version = u8::try_from(promise.blob_version).context("invalid blob version")?;
+            let commitment = promise
+                .commitment
+                .try_into()
+                .map_err(|commitment: Vec<u8>| {
+                    anyhow!("commitment must be 32 bytes, got {}", commitment.len())
+                })?;
+            let blob_id = BlobID::new(version, commitment);
+            blob_id.validate().context("invalid blob ID")?;
+            blob_ids.push(blob_id);
+        }
+    }
+    Ok(blob_ids)
 }
 
 fn admit_work(
@@ -403,18 +603,22 @@ async fn run_lifecycle_job(
         queue_latency: started_at.saturating_duration_since(item.scheduled_at),
     });
 
-    match run_lifecycle(&context, item.sequence, &event_tx).await {
-        Ok(()) => {
+    match run_lifecycle(&context, item.work, &event_tx).await {
+        Ok(completed) => {
             let _ = event_tx.send(Event::LifecycleSuccess {
-                payload_bytes: context.payload_size as u64,
-                paid_bytes: context.paid_size as u64,
+                payload_bytes: completed.payload_bytes,
+                paid_bytes: completed.paid_bytes,
                 elapsed: started_at.elapsed(),
             });
         }
         Err(StageFailure { stage, error }) => {
+            let identity = match &context.workload {
+                Workload::Writer(writer) => writer.signer.to_string(),
+                Workload::Reader(_) => "reader".to_string(),
+            };
             let _ = event_tx.send(Event::LifecycleFailure {
                 client: context.client,
-                signer: context.signer.to_string(),
+                signer: identity,
                 stage,
                 error: format!("{error:#}"),
                 elapsed: started_at.elapsed(),
@@ -425,11 +629,28 @@ async fn run_lifecycle_job(
 
 async fn run_lifecycle(
     context: &LifecycleContext,
+    work: Work,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> std::result::Result<CompletedBlob, StageFailure> {
+    match (&context.workload, work) {
+        (Workload::Writer(writer), Work::Write(sequence)) => {
+            run_writer_lifecycle(context, writer, sequence, event_tx).await
+        }
+        (Workload::Reader(reader), Work::Read(blob_id)) => {
+            run_reader_lifecycle(context, reader, &blob_id, event_tx).await
+        }
+        _ => unreachable!("work item must match evaluator mode"),
+    }
+}
+
+async fn run_writer_lifecycle(
+    context: &LifecycleContext,
+    writer: &WriterContext,
     sequence: u64,
     event_tx: &mpsc::UnboundedSender<Event>,
-) -> std::result::Result<(), StageFailure> {
+) -> std::result::Result<CompletedBlob, StageFailure> {
     let encode_wait_started = Instant::now();
-    let encode_permit = Arc::clone(&context.encode_semaphore)
+    let encode_permit = Arc::clone(&writer.encode_semaphore)
         .acquire_owned()
         .await
         .map_err(|error| StageFailure {
@@ -442,8 +663,8 @@ async fn run_lifecycle(
     });
 
     let encode_compute_started = Instant::now();
-    let payload_size = context.payload_size;
-    let encode_pool = Arc::clone(&context.encode_pool);
+    let payload_size = writer.payload_size;
+    let encode_pool = Arc::clone(&writer.encode_pool);
     let encoded = tokio::task::spawn_blocking(move || {
         let _permit = encode_permit;
         let payload = make_payload(sequence, payload_size);
@@ -472,12 +693,12 @@ async fn run_lifecycle(
         event_tx,
         context
             .fibre
-            .upload_with_completion(&context.signing_key, context.namespace, blob),
+            .upload_with_completion(&writer.signing_key, writer.namespace, blob),
     )
     .await?;
     let lifecycle_result = async {
         let message = MsgPayForFibre {
-            signer: context.signer.to_string(),
+            signer: writer.signer.to_string(),
             payment_promise: Some((&signed.promise).into()),
             validator_signatures: signed
                 .validator_signatures
@@ -490,9 +711,9 @@ async fn run_lifecycle(
             "payment_broadcast",
             context.operation_timeout,
             event_tx,
-            context
+            writer
                 .app_grpc
-                .broadcast_message(message, context.tx_config.clone()),
+                .broadcast_message(message, writer.tx_config.clone()),
         )
         .await?;
         run_timed_stage(
@@ -503,7 +724,7 @@ async fn run_lifecycle(
         )
         .await?;
 
-        if context.skip_download {
+        if writer.skip_download {
             return Ok(());
         }
 
@@ -523,7 +744,7 @@ async fn run_lifecycle(
         .await;
         drop(download_permit);
         let blob = downloaded?;
-        verify_payload(blob.data(), sequence, context.payload_size).map_err(|error| {
+        verify_payload(blob.data(), sequence, writer.payload_size).map_err(|error| {
             StageFailure {
                 stage: "download_verify",
                 error: anyhow!(error),
@@ -550,7 +771,47 @@ async fn run_lifecycle(
             ),
         });
     }
-    Ok(())
+    Ok(CompletedBlob {
+        payload_bytes: writer.payload_size as u64,
+        paid_bytes: writer.paid_size as u64,
+    })
+}
+
+async fn run_reader_lifecycle(
+    context: &LifecycleContext,
+    reader: &ReaderContext,
+    blob_id: &BlobID,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> std::result::Result<CompletedBlob, StageFailure> {
+    let download_permit = Arc::clone(&context.download_semaphore)
+        .acquire_owned()
+        .await
+        .map_err(|error| StageFailure {
+            stage: "download",
+            error: anyhow!(error),
+        })?;
+    let downloaded = run_timed_stage(
+        "download",
+        context.operation_timeout,
+        event_tx,
+        context.fibre.download(blob_id, DownloadOptions::default()),
+    )
+    .await;
+    drop(download_permit);
+    let blob = downloaded?;
+    if reader.verify_crc {
+        verify_payload_integrity(blob.data()).map_err(|error| StageFailure {
+            stage: "download_verify",
+            error: anyhow!(error),
+        })?;
+    }
+
+    Ok(CompletedBlob {
+        payload_bytes: blob.data().len() as u64,
+        paid_bytes: BlobConfig::for_version(blob_id.version())
+            .expect("validated during discovery")
+            .upload_size(blob.data().len()) as u64,
+    })
 }
 
 async fn run_timed_stage<T, E, F>(
@@ -594,6 +855,9 @@ fn expected_launches(blobs_per_second: f64, run_for: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use celestia_grpc::IntoProtobufAny;
+    use celestia_proto::celestia::fibre::v1::PaymentPromise;
+    use celestia_proto::cosmos::tx::v1beta1::TxBody;
 
     #[test]
     fn expected_launch_count_rounds_up() {
@@ -610,7 +874,7 @@ mod tests {
             &work_tx,
             &event_tx,
             WorkItem {
-                sequence: 1,
+                work: Work::Write(1),
                 scheduled_at,
             },
         )
@@ -619,13 +883,13 @@ mod tests {
             &work_tx,
             &event_tx,
             WorkItem {
-                sequence: 2,
+                work: Work::Write(2),
                 scheduled_at,
             },
         )
         .unwrap();
 
-        assert_eq!(work_rx.try_recv().unwrap().sequence, 1);
+        assert!(matches!(work_rx.try_recv().unwrap().work, Work::Write(1)));
         assert!(matches!(event_rx.try_recv(), Ok(Event::Admitted)));
         assert!(matches!(
             event_rx.try_recv(),
@@ -634,5 +898,34 @@ mod tests {
                 count: 1
             })
         ));
+    }
+
+    #[test]
+    fn extracts_only_fibre_blobs_in_namespace() {
+        let namespace = Namespace::new_v0(b"fibre-eval").unwrap();
+        let other_namespace = Namespace::new_v0(b"other-data").unwrap();
+        let tx = |namespace: Namespace, commitment: u8| CosmosTx {
+            body: Some(TxBody {
+                messages: vec![
+                    MsgPayForFibre {
+                        payment_promise: Some(PaymentPromise {
+                            namespace: namespace.as_bytes().to_vec(),
+                            blob_version: 0,
+                            commitment: vec![commitment; 32],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }
+                    .into_any(),
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let ids = blob_ids_in_namespace(vec![tx(namespace, 1), tx(other_namespace, 2)], namespace)
+            .unwrap();
+
+        assert_eq!(ids, [BlobID::new(0, [1; 32])]);
     }
 }

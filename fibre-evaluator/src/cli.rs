@@ -23,20 +23,48 @@ pub(crate) struct Cli {
     pub(crate) core_grpc_url: String,
 
     /// Hex-encoded secp256k1 private keys for Fibre promises and payment transactions.
-    #[arg(long = "private-key", required = true, value_parser = parse_private_key)]
+    #[arg(
+        long = "private-key",
+        required_unless_present = "reader_only",
+        value_parser = parse_private_key
+    )]
     pub(crate) private_keys: Vec<String>,
 
     /// Ten-byte ASCII suffix for a version-zero namespace.
     #[arg(long, value_parser = parse_namespace)]
     pub(crate) namespace: String,
 
+    /// Discover and download all paid Fibre blobs in the namespace without uploading.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "private_keys",
+            "blobs_per_second",
+            "blob_size",
+            "skip_download"
+        ]
+    )]
+    pub(crate) reader_only: bool,
+
+    /// Verify that downloaded blobs contain valid evaluator payloads and CRCs.
+    #[arg(long, requires = "reader_only")]
+    pub(crate) verify_crc: bool,
+
     /// Target number of blob lifecycle launches per second.
-    #[arg(long, value_parser = parse_blob_rate)]
-    pub(crate) blobs_per_second: f64,
+    #[arg(
+        long,
+        required_unless_present = "reader_only",
+        value_parser = parse_blob_rate
+    )]
+    pub(crate) blobs_per_second: Option<f64>,
 
     /// Exact paid Fibre upload size of each blob in bytes.
-    #[arg(long, value_parser = parse_blob_size)]
-    pub(crate) blob_size: usize,
+    #[arg(
+        long,
+        required_unless_present = "reader_only",
+        value_parser = parse_blob_size
+    )]
+    pub(crate) blob_size: Option<usize>,
 
     /// Duration during which new jobs are scheduled.
     #[arg(long, value_parser = parse_positive_u64)]
@@ -207,8 +235,10 @@ mod tests {
         assert_eq!(cli.chain_id, "test-chain");
         assert_eq!(cli.private_keys, [VALID_KEY]);
         assert_eq!(cli.namespace, "fibre-eval");
-        assert_eq!(cli.blobs_per_second, 2.5);
-        assert_eq!(cli.blob_size, 134_217_728);
+        assert!(!cli.reader_only);
+        assert!(!cli.verify_crc);
+        assert_eq!(cli.blobs_per_second, Some(2.5));
+        assert_eq!(cli.blob_size, Some(134_217_728));
         assert_eq!(cli.max_in_flight, 16);
         assert_eq!(cli.queue_capacity, 16);
         assert_eq!(cli.encode_concurrency, 1);
@@ -237,6 +267,42 @@ mod tests {
         let key_flag = args.iter().position(|arg| *arg == "--private-key").unwrap();
         args.drain(key_flag..=key_flag + 1);
         assert!(Cli::try_parse_from(args).is_err());
+    }
+
+    #[test]
+    fn parses_reader_only_without_writer_arguments() {
+        let mut args = vec![
+            "fibre-evaluator",
+            "--chain-id",
+            "test-chain",
+            "--app-grpc-url",
+            "http://127.0.0.1:9091",
+            "--core-grpc-url",
+            "http://127.0.0.1:9090",
+            "--namespace",
+            "fibre-eval",
+            "--reader-only",
+            "--run-for-seconds",
+            "60",
+        ];
+        let cli = Cli::try_parse_from(&args).unwrap();
+
+        assert!(cli.private_keys.is_empty());
+        assert_eq!(cli.namespace, "fibre-eval");
+        assert!(cli.reader_only);
+        assert!(!cli.verify_crc);
+        assert!(cli.blobs_per_second.is_none());
+        assert!(cli.blob_size.is_none());
+
+        args.push("--verify-crc");
+        assert!(Cli::try_parse_from(args).unwrap().verify_crc);
+    }
+
+    #[test]
+    fn reader_only_rejects_writer_arguments() {
+        let mut writer_args = valid_args();
+        writer_args.push("--reader-only");
+        assert!(Cli::try_parse_from(writer_args).is_err());
     }
 
     #[test]
