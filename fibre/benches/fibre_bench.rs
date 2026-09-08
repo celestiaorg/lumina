@@ -43,6 +43,7 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group,
     criterion_main,
 };
+use prost::bytes::Bytes;
 use rand::Rng;
 use rand::rngs::OsRng;
 
@@ -86,6 +87,16 @@ fn generate_data(len: usize) -> Vec<u8> {
     let mut data = vec![0u8; len];
     rng.fill(&mut data[..]);
     data
+}
+
+fn proof_hashes_as_bytes(hashes: &[[u8; 32]]) -> Vec<Bytes> {
+    let mut storage = Vec::with_capacity(hashes.len() * 32);
+    for hash in hashes {
+        storage.extend_from_slice(hash);
+    }
+
+    let mut storage = Bytes::from(storage);
+    (0..hashes.len()).map(|_| storage.split_to(32)).collect()
 }
 
 fn make_validators(count: usize) -> (Vec<ed25519_dalek::SigningKey>, Vec<ValidatorInfo>) {
@@ -278,7 +289,7 @@ fn bench_parse_download_response(c: &mut Criterion) {
             proto::BlobRow {
                 index: proof.index as u32,
                 data: proof.row,
-                proof: proof.row_proof.iter().map(|h| h.to_vec()).collect(),
+                proof: proof_hashes_as_bytes(&proof.row_proof),
             }
         })
         .collect();
@@ -288,7 +299,10 @@ fn bench_parse_download_response(c: &mut Criterion) {
         .flat_map(|rlc| rlc.to_bytes())
         .collect();
     let response = proto::DownloadShardResponse {
-        shard: Some(proto::BlobShard { rows, rlcs }),
+        shard: Some(proto::BlobShard {
+            rows,
+            rlcs: rlcs.into(),
+        }),
     };
 
     group.bench_function(format!("shard_{shard}_rows_1MB"), |b| {
@@ -325,14 +339,17 @@ fn bench_upload_shard_encode(c: &mut Criterion) {
             .map(|proof| proto::BlobRow {
                 index: proof.index as u32,
                 data: proof.row.clone(),
-                proof: proof.row_proof.iter().map(|hash| hash.to_vec()).collect(),
+                proof: proof_hashes_as_bytes(&proof.row_proof),
             })
             .collect();
-        let rlcs = rlcs.iter().flat_map(|rlc| rlc.to_bytes()).collect();
+        let rlcs: Vec<u8> = rlcs.iter().flat_map(|rlc| rlc.to_bytes()).collect();
 
         proto::UploadShardRequest {
             promise: None,
-            shard: Some(proto::BlobShard { rows, rlcs }),
+            shard: Some(proto::BlobShard {
+                rows,
+                rlcs: rlcs.into(),
+            }),
         }
     };
     let wire_len = {
