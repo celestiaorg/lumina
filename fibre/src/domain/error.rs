@@ -96,8 +96,28 @@ pub enum PaymentPromiseError {
 pub enum ValidatorSetError {
     #[error("validator set response is missing validator_set")]
     Missing,
+    #[error("validator set has invalid height {0}")]
+    InvalidHeight(i64),
     #[error("validator set height must be greater than 0")]
     ZeroHeight,
+    #[error("validator set height {0} exceeds i64::MAX")]
+    HeightTooLarge(u64),
+    #[error("validator set is empty")]
+    Empty,
+    #[error("validator has zero voting power")]
+    ZeroVotingPower,
+    #[error("validator has negative voting power: {0}")]
+    NegativeVotingPower(i64),
+    #[error("validator voting power {0} exceeds maximum {max}", max = i64::MAX / 8)]
+    VotingPowerTooLarge(u64),
+    #[error("total voting power {0} exceeds maximum {max}", max = i64::MAX / 8)]
+    TotalVotingPowerTooLarge(u64),
+    #[error("validator set contains duplicate address {}", hex::encode_upper(.0))]
+    DuplicateValidator([u8; 20]),
+    #[error("validator set is missing proposer")]
+    MissingProposer,
+    #[error("validator set proposer is not in validator set")]
+    ProposerNotInSet,
     #[error("validator is missing a public key")]
     MissingPublicKey,
     #[error("expected ed25519 public key for validator")]
@@ -106,6 +126,8 @@ pub enum ValidatorSetError {
     PublicKeyLength(usize),
     #[error("invalid ed25519 key: {0}")]
     InvalidPublicKey(#[source] ed25519_dalek::SignatureError),
+    #[error("validator address does not match public key")]
+    AddressMismatch,
 }
 
 #[allow(missing_docs)]
@@ -168,9 +190,9 @@ pub enum FibreError {
     #[error("not enough voting power: collected {collected}, required {required}")]
     NotEnoughSignatures {
         /// Total voting power of collected signatures.
-        collected: i64,
+        collected: u64,
         /// Required voting power threshold.
-        required: i64,
+        required: u64,
     },
 
     /// A validator returned an invalid signature.

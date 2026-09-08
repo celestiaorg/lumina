@@ -7,7 +7,6 @@
 //! The [`FibreClient::upload_and_prepare()`] method encodes a blob, uploads it to validators,
 //! and returns a `MsgPayForFibre` ready for broadcast by the caller.
 
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
@@ -21,7 +20,7 @@ use crate::client::task::{TaskSet, spawn_task};
 use crate::blob::EncodedBlob;
 use crate::client::FibreClient;
 use crate::config::BlobConfig;
-use crate::error::{FibreError, ValidatorSetError};
+use crate::error::FibreError;
 use crate::payment_promise::{PaymentPromise, SignedPaymentPromise};
 use crate::validator::signature_set::SignatureSet;
 use crate::validator::{ShardMap, ValidatorSet};
@@ -111,7 +110,7 @@ impl FibreClient {
 
         let mut promise = PaymentPromise {
             chain_id: self.cfg.chain_id().to_owned(),
-            height: NonZeroU64::new(val_set.height).ok_or(ValidatorSetError::ZeroHeight)?,
+            height: val_set.height(),
             namespace,
             upload_size: upload_size_u32,
             blob_version: blob.config().blob_version as u32,
@@ -239,7 +238,7 @@ impl FibreClient {
                 .expect("client semaphores are never closed");
 
             let connector = Arc::clone(&self.connector);
-            let validator = val_set.validators[val_idx].clone();
+            let validator = val_set.validators()[val_idx].clone();
             let promise = promise.clone();
             let blob = Arc::clone(blob);
 
@@ -273,7 +272,7 @@ impl FibreClient {
                     match task_result {
                         Some((val_idx, Some(Ok(signature)))) => {
                             stats.successful += 1;
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             match sig_set.add(validator, &signature) {
                                 Ok(threshold_met) => {
                                     if threshold_met {
@@ -294,7 +293,7 @@ impl FibreClient {
                         }
                         Some((val_idx, Some(Err(e)))) => {
                             stats.failed += 1;
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             tracing::warn!(
                                 validator = %validator.address_hex(),
                                 error = %e,
@@ -303,7 +302,7 @@ impl FibreClient {
                         }
                         Some((val_idx, None)) => {
                             stats.failed += 1;
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             tracing::warn!(
                                 validator = %validator.address_hex(),
                                 "upload task dropped unexpectedly"
@@ -358,10 +357,7 @@ mod tests {
         let validators = vec![make_validator(100, 1)];
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: vec![val],
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(vec![val], 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();
@@ -390,10 +386,7 @@ mod tests {
 
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 42,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 42).unwrap();
 
         let sk = test_signing_key();
         let client = build_test_client(val_set, connector, "test-chain");
@@ -440,10 +433,7 @@ mod tests {
             connector.add(info.address, conn);
         }
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         let blob = make_test_blob();
@@ -471,10 +461,9 @@ mod tests {
             make_validator(100, 2),
             make_validator(100, 3),
         ];
-        let val_set = ValidatorSet {
-            validators: validators.iter().map(|(_, info)| info.clone()).collect(),
-            height: 1,
-        };
+        let val_set =
+            ValidatorSet::try_new(validators.iter().map(|(_, info)| info.clone()).collect(), 1)
+                .unwrap();
         let client = build_test_client(val_set, make_connector(&validators), "test-chain");
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
@@ -504,10 +493,7 @@ mod tests {
             inner: make_connector(&[v1, v2, v3]),
             fail_addresses: vec![val_infos[3].address, val_infos[4].address],
         };
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 1).unwrap();
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
@@ -544,10 +530,7 @@ mod tests {
             fail_addresses,
         };
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 10,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 10).unwrap();
 
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let blob = make_test_blob();
@@ -600,10 +583,7 @@ mod tests {
             fail_addresses,
         };
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 10,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 10).unwrap();
 
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let blob = make_test_blob();
@@ -621,15 +601,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_requires_signature_when_fraction_rounds_to_zero() {
+        let validator = make_validator(1, 1);
+        let val_set = ValidatorSet::try_new(vec![validator.1.clone()], 1).unwrap();
+        let connector = FailingConnector {
+            inner: MockConnector::new(),
+            fail_addresses: vec![validator.1.address],
+        };
+        let client = build_test_client(val_set, connector, "test-chain");
+
+        let result = client
+            .upload(
+                &test_signing_key(),
+                Namespace::from_raw(&[0u8; 29]).unwrap(),
+                make_test_blob(),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(FibreError::NotEnoughSignatures {
+                collected: 0,
+                required: 1
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn put_fails_when_client_closed() {
         let (_, val) = make_validator(100, 1);
         let validators = vec![make_validator(100, 1)];
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: vec![val],
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(vec![val], 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();

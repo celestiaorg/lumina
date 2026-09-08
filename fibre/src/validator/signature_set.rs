@@ -21,7 +21,7 @@ pub struct SignatureSet {
     /// The bytes that each validator must have signed.
     required_bytes_signed: Vec<u8>,
     /// Minimum accumulated voting power to consider the threshold met.
-    min_required_voting_power: i64,
+    min_required_voting_power: u64,
     /// Ordered validator list (determines output ordering).
     validators: Vec<ValidatorInfo>,
     /// Mutable state protected by a mutex.
@@ -31,7 +31,7 @@ pub struct SignatureSet {
 /// Mutable interior of [`SignatureSet`], protected by a [`Mutex`].
 struct SignatureSetInner {
     /// Accumulated voting power from accepted signatures.
-    voting_power: i64,
+    voting_power: u64,
     /// Map from validator address to their signature bytes.
     signatures: HashMap<[u8; 20], Vec<u8>>,
 }
@@ -44,15 +44,17 @@ impl SignatureSet {
     /// * `validators` - The full ordered validator list.
     /// * `target_voting_power` - Fraction of total voting power required (e.g. 2/3).
     /// * `required_bytes_signed` - The exact bytes each signature must cover.
-    pub fn new(
+    fn new(
         validators: Vec<ValidatorInfo>,
         target_voting_power: Fraction,
         required_bytes_signed: Vec<u8>,
     ) -> Self {
-        let total_voting_power: i64 = validators.iter().map(|v| v.voting_power).sum();
-        let min_required_voting_power = total_voting_power
-            * target_voting_power.numerator.get() as i64
-            / target_voting_power.denominator.get() as i64;
+        let total_voting_power: u64 = validators.iter().map(ValidatorInfo::voting_power).sum();
+        let min_required_voting_power = (total_voting_power as u128)
+            * (target_voting_power.numerator.get() as u128)
+            / (target_voting_power.denominator.get() as u128);
+        let min_required_voting_power =
+            u64::try_from(min_required_voting_power.max(1)).unwrap_or(u64::MAX);
 
         let capacity = validators.len();
         Self {
@@ -91,7 +93,7 @@ impl SignatureSet {
         let mut inner = self.inner.lock().expect("SignatureSet mutex poisoned");
         // Only count voting power once per validator (idempotent on duplicates).
         if !inner.signatures.contains_key(&validator.address) {
-            inner.voting_power += validator.voting_power;
+            inner.voting_power += validator.voting_power();
         }
         inner
             .signatures
@@ -149,22 +151,14 @@ mod tests {
     use rand::RngCore;
 
     /// Helper: generate a ValidatorInfo with a fresh ed25519 keypair.
-    fn make_validator(voting_power: i64) -> (SigningKey, ValidatorInfo) {
+    fn make_validator(voting_power: u64) -> (SigningKey, ValidatorInfo) {
         let mut secret = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut secret);
         let signing_key = SigningKey::from_bytes(&secret);
         let pubkey = signing_key.verifying_key();
-        // Derive a deterministic 20-byte address from the public key bytes.
-        let pk_bytes = pubkey.to_bytes();
-        let mut address = [0u8; 20];
-        address.copy_from_slice(&pk_bytes[..20]);
         (
             signing_key,
-            ValidatorInfo {
-                address,
-                pubkey,
-                voting_power,
-            },
+            ValidatorInfo::try_new(pubkey, voting_power).unwrap(),
         )
     }
 
@@ -303,6 +297,33 @@ mod tests {
             }
             other => panic!("expected NotEnoughSignatures, got: {other}"),
         }
+    }
+
+    #[test]
+    fn threshold_uses_floor_and_inclusive_comparison() {
+        let (sk1, v1) = make_validator(33);
+        let (_sk2, v2) = make_validator(17);
+        let data = b"floor test";
+        let ss = SignatureSet::new(vec![v1.clone(), v2], fraction(2, 3), data.to_vec());
+
+        let met = ss.add(&v1, &sign(&sk1, data)).unwrap();
+        assert!(met, "33 >= floor(50 * 2/3) = 33");
+    }
+
+    #[test]
+    fn threshold_always_requires_voting_power() {
+        let (sk, validator) = make_validator(1);
+        let data = b"minimum threshold";
+        let ss = SignatureSet::new(vec![validator.clone()], fraction(2, 3), data.to_vec());
+
+        assert!(matches!(
+            ss.signatures(),
+            Err(FibreError::NotEnoughSignatures {
+                collected: 0,
+                required: 1
+            })
+        ));
+        assert!(ss.add(&validator, &sign(&sk, data)).unwrap());
     }
 
     #[test]

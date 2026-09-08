@@ -12,6 +12,7 @@ use libp2p::{Multiaddr, SwarmBuilder, gossipsub, noise, ping, tcp, yamux};
 use lumina_node::store::{InMemoryStore, Store};
 use lumina_node::test_utils::{
     ExtendedHeaderGeneratorExt, gen_filled_store, listening_test_node_builder, test_node_builder,
+    wait_for_listeners,
 };
 use rand::Rng;
 use tendermint_proto::Protobuf;
@@ -103,7 +104,7 @@ async fn peer_discovery() {
         .expect("node1 did not connect within 30s — is the devnet reachable? (docker compose -f ci/docker-compose.yml up)")
         .unwrap();
 
-    let node1_addrs = node1.listeners().await.unwrap();
+    let node1_addrs = wait_for_listeners(&node1).await;
 
     // Node2
     //
@@ -226,8 +227,7 @@ async fn stops_services_when_network_is_compromised() {
         .unwrap();
 
     // get the address to dial
-    sleep(Duration::from_millis(300)).await;
-    let listener_addr = node.listeners().await.unwrap()[0].clone();
+    let listener_addr = wait_for_listeners(&node).await[0].clone();
 
     // spawn a proof broadcaster
     let befp_announce_tx = spawn_befp_announcer(listener_addr);

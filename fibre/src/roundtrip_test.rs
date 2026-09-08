@@ -28,10 +28,7 @@ async fn upload_then_download_roundtrip() {
 
     let connector = make_connector(&validators);
     let val_infos = validators.iter().map(|(_, v)| v.clone()).collect();
-    let val_set = crate::validator::ValidatorSet {
-        validators: val_infos,
-        height: 42,
-    };
+    let val_set = crate::validator::ValidatorSet::try_new(val_infos, 42).unwrap();
 
     let client = build_test_client(val_set, connector, "roundtrip-test");
 
@@ -105,10 +102,7 @@ async fn roundtrip_with_partial_validator_failure() {
     }
 
     let val_infos = all_validators.iter().map(|(_, v)| v.clone()).collect();
-    let val_set = crate::validator::ValidatorSet {
-        validators: val_infos,
-        height: 42,
-    };
+    let val_set = crate::validator::ValidatorSet::try_new(val_infos, 42).unwrap();
 
     let client = build_test_client(val_set, connector, "roundtrip-test");
 
