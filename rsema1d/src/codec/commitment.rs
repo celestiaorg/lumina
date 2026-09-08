@@ -1,8 +1,8 @@
+use crate::codec::extend_rlcs;
 use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::rows::RowMatrix;
 use crate::codec::symbols::RlcCoefficientLogs;
-use crate::codec::{extend_data, extend_rlcs};
 use crate::crypto::{derive_coefficients, hash_leaf, sha256, MerkleTree};
 use crate::error::{Error, Result};
 use crate::field::GF128;
@@ -96,17 +96,28 @@ pub struct ExtendedData {
 impl ExtendedData {
     /// Generate commitment from contiguous original rows.
     pub fn generate(original_rows: &RowMatrix, params: &Parameters) -> Result<Self> {
+        Self::generate_with_work_budget(original_rows, params, super::default_work_budget())
+    }
+
+    /// Generate commitment using an explicit combined Leopard work-buffer budget.
+    pub fn generate_with_work_budget(
+        original_rows: &RowMatrix,
+        params: &Parameters,
+        work_budget: std::num::NonZeroUsize,
+    ) -> Result<Self> {
         let original_view = original_rows.original_view(params)?;
-        let all_rows = extend_data(original_view, params)?;
+        let all_rows = super::rs::extend_data_with_work_budget(original_view, params, work_budget)?;
         Self::generate_from_extended_rows(all_rows, params)
     }
 
     /// Generate commitment from contiguous already-extended rows (K+N rows).
     pub fn generate_from_extended_rows(
-        extended_rows: RowMatrix,
+        mut extended_rows: RowMatrix,
         params: &Parameters,
     ) -> Result<Self> {
         extended_rows.extended_view(params)?;
+        // Share encoded rows with inclusion proofs.
+        extended_rows.freeze();
 
         let row_tree = build_row_tree(&extended_rows, params);
         let row_root = row_tree.root();
@@ -225,11 +236,14 @@ impl ExtendedData {
 
     /// Generate row inclusion proof for any row.
     pub fn generate_row_inclusion_proof(&self, index: usize) -> Result<RowInclusionProof> {
-        let row_proof = self.generate_row_proof(index)?;
+        if index >= self.params.total_rows() {
+            return Err(Error::InvalidIndex(index, self.params.total_rows()));
+        }
+        let tree_pos = map_index_to_tree_position(index, self.params.k);
         Ok(RowInclusionProof {
-            index: row_proof.index,
-            row: row_proof.row.into_owned(),
-            row_proof: row_proof.row_proof,
+            index,
+            row: self.all_rows.row_bytes(index)?,
+            row_proof: self.row_tree.generate_proof(tree_pos),
             rlc_root: self.rlc_root,
         })
     }
@@ -257,5 +271,21 @@ mod tests {
         );
         assert_eq!(ext_data.rlc_orig.len(), params.k);
         assert_eq!(ext_data.rlc_extended.len(), params.k + params.n);
+    }
+
+    #[test]
+    fn row_inclusion_proof_shares_matrix_storage() {
+        let params = Parameters::new(4, 4, 64).unwrap();
+        let rows = RowMatrix::with_shape(
+            vec![0; params.total_rows() * params.row_size],
+            params.total_rows(),
+            params.row_size,
+        )
+        .unwrap();
+        let ext_data = ExtendedData::generate_from_extended_rows(rows, &params).unwrap();
+
+        let proof = ext_data.generate_row_inclusion_proof(3).unwrap();
+
+        assert_eq!(proof.row.as_ptr(), ext_data.row(3).unwrap().as_ptr());
     }
 }

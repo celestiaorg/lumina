@@ -12,6 +12,8 @@ mod verification;
 use crate::error::Result;
 use crate::field::GF128;
 use crate::params::Parameters;
+use std::num::NonZeroUsize;
+use std::sync::OnceLock;
 
 pub use commitment::ExtendedData;
 pub use padding::map_index_to_tree_position;
@@ -19,7 +21,8 @@ pub use proof::{RowInclusionProof, RowProof, StandaloneProof};
 pub use reconstruct::reconstruct_data;
 pub use rows::{ExtendedRowsView, OriginalRowsView, RowMatrix};
 pub use rs::{
-    encode_parity_in_place, extend_data, extend_rlcs, pack_gf128_to_shard, unpack_shard_to_gf128,
+    encode_parity_in_place, encode_parity_in_place_with_work_budget, extend_data,
+    extend_data_with_work_budget, extend_rlcs, pack_gf128_to_shard, unpack_shard_to_gf128,
 };
 pub use symbols::{compute_rlc, extract_symbols};
 pub use verification::{
@@ -31,12 +34,49 @@ pub use verification::{
 /// A 32-byte SHA-256 commitment hash.
 pub type Commitment = [u8; 32];
 
+const DEFAULT_WORK_BUDGET_PER_PHYSICAL_CORE: NonZeroUsize = NonZeroUsize::new(2 << 20).unwrap();
+const MIN_DEFAULT_WORK_BUDGET: NonZeroUsize = NonZeroUsize::new(8 << 20).unwrap();
+
+fn work_budget_for_parallelism(
+    threads: NonZeroUsize,
+    physical_cores: NonZeroUsize,
+) -> NonZeroUsize {
+    DEFAULT_WORK_BUDGET_PER_PHYSICAL_CORE
+        .saturating_mul(threads.min(physical_cores))
+        .max(MIN_DEFAULT_WORK_BUDGET)
+}
+
+/// Return the default combined Leopard work-buffer budget for the current pool.
+///
+/// The default has an 8 MiB floor to avoid excessively narrow serial stripes,
+/// then scales at 2 MiB per active physical core. Rayon workers above the
+/// detected physical-core count are treated as SMT siblings, not extra cache.
+pub fn default_work_budget() -> NonZeroUsize {
+    // `num_cpus::get_physical` parses /proc/cpuinfo on Linux (~0.4 ms), and
+    // this runs on every encode and every verification-context build.
+    static PHYSICAL_CORES: OnceLock<NonZeroUsize> = OnceLock::new();
+
+    let threads = NonZeroUsize::new(rayon::current_num_threads()).unwrap_or(NonZeroUsize::MIN);
+    let physical_cores = *PHYSICAL_CORES
+        .get_or_init(|| NonZeroUsize::new(num_cpus::get_physical()).unwrap_or(NonZeroUsize::MIN));
+    work_budget_for_parallelism(threads, physical_cores)
+}
+
 /// Encode original rows and return extended data, commitment, and original RLCs.
 pub fn encode(
     data: &RowMatrix,
     params: &Parameters,
 ) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
-    let ext_data = ExtendedData::generate(data, params)?;
+    encode_with_work_budget(data, params, default_work_budget())
+}
+
+/// Encode original rows with an explicit combined Leopard work-buffer budget.
+pub fn encode_with_work_budget(
+    data: &RowMatrix,
+    params: &Parameters,
+    work_budget: NonZeroUsize,
+) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
+    let ext_data = ExtendedData::generate_with_work_budget(data, params, work_budget)?;
     let commitment = ext_data.commitment();
     let rlc_orig = ext_data.rlc_original().to_vec();
     Ok((ext_data, commitment, rlc_orig))
@@ -49,11 +89,20 @@ pub fn encode(
 /// 2. computes parity rows in place
 /// 3. builds commitment, trees, and RLCs from the extended rows
 pub fn encode_in_place(
-    mut extended_rows: RowMatrix,
+    extended_rows: RowMatrix,
     params: &Parameters,
 ) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
+    encode_in_place_with_work_budget(extended_rows, params, default_work_budget())
+}
+
+/// Encode from a caller-provided buffer with an explicit Leopard work-buffer budget.
+pub fn encode_in_place_with_work_budget(
+    mut extended_rows: RowMatrix,
+    params: &Parameters,
+    work_budget: NonZeroUsize,
+) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
     extended_rows.extended_view(params)?;
-    encode_parity_in_place(&mut extended_rows, params)?;
+    encode_parity_in_place_with_work_budget(&mut extended_rows, params, work_budget)?;
 
     let ext_data = ExtendedData::generate_from_extended_rows(extended_rows, params)?;
     let commitment = ext_data.commitment();
@@ -180,6 +229,49 @@ mod tests {
             seed: 14,
         },
     ];
+
+    #[test]
+    fn default_work_budget_scales_with_physical_parallelism() {
+        for (threads, physical_cores, expected_mib) in [
+            (1, 16, 8),
+            (2, 16, 8),
+            (4, 16, 8),
+            (8, 16, 16),
+            (16, 16, 32),
+            (32, 16, 32),
+            (192, 192, 384),
+        ] {
+            let threads = NonZeroUsize::new(threads).unwrap();
+            let physical_cores = NonZeroUsize::new(physical_cores).unwrap();
+
+            assert_eq!(
+                work_budget_for_parallelism(threads, physical_cores).get(),
+                expected_mib << 20
+            );
+        }
+    }
+
+    #[test]
+    fn work_budget_does_not_change_encoded_output() {
+        let case = Case {
+            k: 16,
+            n: 48,
+            row_size: 4096,
+            seed: 42,
+        };
+        let (params, rows) = make_original_rows(case);
+        let small_budget = NonZeroUsize::new(64 << 10).unwrap();
+        let large_budget = NonZeroUsize::new(8 << 20).unwrap();
+
+        let (small, small_commitment, small_rlcs) =
+            encode_with_work_budget(&rows, &params, small_budget).unwrap();
+        let (large, large_commitment, large_rlcs) =
+            encode_with_work_budget(&rows, &params, large_budget).unwrap();
+
+        assert_eq!(small.rows().as_row_major(), large.rows().as_row_major());
+        assert_eq!(small_commitment, large_commitment);
+        assert_eq!(small_rlcs, large_rlcs);
+    }
 
     fn make_original_rows(case: Case) -> (Parameters, RowMatrix) {
         let params = Parameters::new(case.k, case.n, case.row_size).unwrap();
@@ -446,7 +538,7 @@ mod tests {
             let row_proof = ext_data.generate_row_proof(i).unwrap();
             let manual = RowInclusionProof {
                 index: row_proof.index,
-                row: row_proof.row.into_owned(),
+                row: row_proof.row.into_owned().into(),
                 row_proof: row_proof.row_proof,
                 rlc_root: ext_data.rlc_root(),
             };
@@ -460,7 +552,9 @@ mod tests {
         assert!(verify_row_inclusion(&proof, &bad_commitment, &params).is_err());
 
         let mut bad_row = proof.clone();
-        bad_row.row[0] ^= 0x01;
+        let mut corrupted = bad_row.row.to_vec();
+        corrupted[0] ^= 0x01;
+        bad_row.row = corrupted.into();
         assert!(verify_row_inclusion(&bad_row, &commitment, &params).is_err());
 
         assert!(ext_data

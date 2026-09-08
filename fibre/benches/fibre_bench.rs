@@ -43,12 +43,13 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group,
     criterion_main,
 };
+use prost::bytes::Bytes;
 use rand::Rng;
 use rand::rngs::OsRng;
 
 use celestia_fibre::transport::proto_conv;
 use celestia_fibre::{
-    BlobConfig, EncodedBlob, FibreClientConfig, Fraction, PaymentPromise, ValidatorInfo,
+    BlobConfig, DEFAULT_PROTOCOL_PARAMS, EncodedBlob, Fraction, PaymentPromise, ValidatorInfo,
     ValidatorSet,
 };
 use celestia_proto::celestia::fibre::v1 as proto;
@@ -74,7 +75,7 @@ const HEAVY_WARM_UP: Duration = Duration::from_secs(5);
 
 /// Rows per shard, matching the protocol's min_rows_per_validator (148 for v0).
 fn rows_per_shard() -> usize {
-    FibreClientConfig::default().min_rows_per_validator
+    DEFAULT_PROTOCOL_PARAMS.min_rows_per_validator()
 }
 
 fn liveness() -> Fraction {
@@ -86,6 +87,16 @@ fn generate_data(len: usize) -> Vec<u8> {
     let mut data = vec![0u8; len];
     rng.fill(&mut data[..]);
     data
+}
+
+fn proof_hashes_as_bytes(hashes: &[[u8; 32]]) -> Vec<Bytes> {
+    let mut storage = Vec::with_capacity(hashes.len() * 32);
+    for hash in hashes {
+        storage.extend_from_slice(hash);
+    }
+
+    let mut storage = Bytes::from(storage);
+    (0..hashes.len()).map(|_| storage.split_to(32)).collect()
 }
 
 fn make_validators(count: usize) -> (Vec<ed25519_dalek::SigningKey>, Vec<ValidatorInfo>) {
@@ -168,7 +179,7 @@ fn bench_payment_promise(c: &mut Criterion) {
     let signing_key = k256::ecdsa::SigningKey::random(&mut OsRng);
     let mut promise = PaymentPromise {
         chain_id: "private".into(),
-        height: 42,
+        height: NonZeroU64::new(42).unwrap(),
         namespace: Namespace::from_raw(&[0u8; 29]).unwrap(),
         upload_size: BlobConfig::v0().upload_size(1 << 20) as u32,
         blob_version: 0,
@@ -284,7 +295,7 @@ fn bench_parse_download_response(c: &mut Criterion) {
             proto::BlobRow {
                 index: proof.index as u32,
                 data: proof.row,
-                proof: proof.row_proof.iter().map(|h| h.to_vec()).collect(),
+                proof: proof_hashes_as_bytes(&proof.row_proof),
             }
         })
         .collect();
@@ -294,7 +305,10 @@ fn bench_parse_download_response(c: &mut Criterion) {
         .flat_map(|rlc| rlc.to_bytes())
         .collect();
     let response = proto::DownloadShardResponse {
-        shard: Some(proto::BlobShard { rows, rlcs }),
+        shard: Some(proto::BlobShard {
+            rows,
+            rlcs: rlcs.into(),
+        }),
     };
 
     group.bench_function(format!("shard_{shard}_rows_1MB"), |b| {
@@ -308,6 +322,61 @@ fn bench_parse_download_response(c: &mut Criterion) {
     group.finish();
 }
 
+/// Upload path from row proof generation through protobuf encoding for one
+/// production-sized validator shard from a maximum-sized blob.
+fn bench_upload_shard_encode(c: &mut Criterion) {
+    use prost::Message;
+
+    let mut group = c.benchmark_group("upload_shard_encode");
+    group.measurement_time(CHEAP_MEASUREMENT);
+    group.noise_threshold(0.03);
+
+    let blob = EncodedBlob::new(
+        &generate_data(BlobConfig::v0().max_data_size),
+        BlobConfig::v0(),
+    )
+    .unwrap();
+    let rlcs = blob.rlc_coeffs().to_vec();
+    let shard = rows_per_shard();
+
+    let request = |proofs: &[rsema1d::RowInclusionProof]| {
+        let rows = proofs
+            .iter()
+            .map(|proof| proto::BlobRow {
+                index: proof.index as u32,
+                data: proof.row.clone(),
+                proof: proof_hashes_as_bytes(&proof.row_proof),
+            })
+            .collect();
+        let rlcs: Vec<u8> = rlcs.iter().flat_map(|rlc| rlc.to_bytes()).collect();
+
+        proto::UploadShardRequest {
+            promise: None,
+            shard: Some(proto::BlobShard {
+                rows,
+                rlcs: rlcs.into(),
+            }),
+        }
+    };
+    let wire_len = {
+        let proofs: Vec<_> = (0..shard).map(|i| blob.row(i).unwrap()).collect();
+        request(&proofs).encoded_len()
+    };
+    group.throughput(Throughput::Bytes(wire_len as u64));
+
+    group.bench_function(
+        BenchmarkId::new("proofs_build_encode", format!("shard_{shard}_rows_128MB")),
+        |b| {
+            b.iter(|| {
+                let proofs: Vec<_> = (0..shard).map(|i| blob.row(i).unwrap()).collect();
+                request(black_box(&proofs)).encode_to_vec()
+            });
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_blob_new,
@@ -315,6 +384,7 @@ criterion_group!(
     bench_payment_promise,
     bench_signature_set,
     bench_validator_assign,
-    bench_parse_download_response
+    bench_parse_download_response,
+    bench_upload_shard_encode
 );
 criterion_main!(benches);

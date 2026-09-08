@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::borrow::Cow;
 
 /// Lightweight row proof (works for both original and extended rows).
@@ -29,8 +30,9 @@ pub struct StandaloneProof {
 pub struct RowInclusionProof {
     /// Row index within the extended data (0..K+N).
     pub index: usize,
-    /// The row bytes.
-    pub row: Vec<u8>,
+    /// The row bytes; a reference-counted slice of the encoded matrix when
+    /// produced by [`ExtendedData`](crate::ExtendedData).
+    pub row: Bytes,
     /// Merkle proof siblings for the row tree.
     pub row_proof: Vec<[u8; 32]>,
     /// The RLC Merkle root used in the commitment.
