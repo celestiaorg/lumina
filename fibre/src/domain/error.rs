@@ -4,7 +4,8 @@ use thiserror::Error;
 
 use super::blob::BLOB_ID_SIZE;
 use super::blob_header::BlobHeaderV0;
-use super::payment_promise::{MAX_CHAIN_ID_SIZE, SIGNATURE_SIZE};
+use super::config::MAX_CHAIN_ID_SIZE;
+use super::payment_promise::SIGNATURE_SIZE;
 
 #[allow(missing_docs)]
 #[derive(Debug, Error)]
@@ -57,21 +58,7 @@ pub enum ShardError {
 
 #[allow(missing_docs)]
 #[derive(Debug, Error)]
-pub enum ChainIdError {
-    #[error("chain ID must not be empty")]
-    Empty,
-    #[error(
-        "chain ID length {0} exceeds maximum {max}",
-        max = MAX_CHAIN_ID_SIZE
-    )]
-    TooLong(usize),
-}
-
-#[allow(missing_docs)]
-#[derive(Debug, Error)]
 pub enum PaymentPromiseError {
-    #[error(transparent)]
-    ChainId(#[from] ChainIdError),
     #[error("upload size must be positive")]
     ZeroUploadSize,
     #[error("creation timestamp must not be zero")]
@@ -212,9 +199,15 @@ pub enum FibreError {
     #[error("payment promise validation failed: {0}")]
     InvalidPaymentPromise(#[from] PaymentPromiseError),
 
-    /// The configured chain ID is invalid.
-    #[error("invalid chain ID: {0}")]
-    InvalidChainId(#[from] ChainIdError),
+    /// The chain ID length is outside the supported range.
+    #[error(
+        "invalid chain ID length {len}; expected 1..={max}",
+        max = MAX_CHAIN_ID_SIZE
+    )]
+    InvalidChainId {
+        /// Actual chain ID length in bytes.
+        len: usize,
+    },
 
     /// The Fibre client builder is missing a required value.
     #[error("client builder error: {0}")]

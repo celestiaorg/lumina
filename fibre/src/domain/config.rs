@@ -5,12 +5,18 @@
 
 use std::num::NonZeroU64;
 
-#[cfg(test)]
-use super::payment_promise::MAX_CHAIN_ID_SIZE;
-use super::payment_promise::validate_chain_id;
-#[cfg(test)]
-use crate::error::ChainIdError;
 use crate::error::FibreError;
+
+/// Maximum allowed chain ID length.
+pub(crate) const MAX_CHAIN_ID_SIZE: usize = 20;
+
+pub(crate) fn validate_chain_id(chain_id: &str) -> Result<(), FibreError> {
+    let len = chain_id.len();
+    if len == 0 || len > MAX_CHAIN_ID_SIZE {
+        return Err(FibreError::InvalidChainId { len });
+    }
+    Ok(())
+}
 
 /// Fraction represented as numerator/denominator.
 ///
@@ -443,15 +449,13 @@ mod tests {
     fn fibre_client_config_rejects_invalid_chain_id() {
         assert!(matches!(
             FibreClientConfig::new(""),
-            Err(FibreError::InvalidChainId(ChainIdError::Empty))
+            Err(FibreError::InvalidChainId { len: 0 })
         ));
 
         let too_long = "x".repeat(MAX_CHAIN_ID_SIZE + 1);
         assert!(matches!(
             FibreClientConfig::new(too_long),
-            Err(FibreError::InvalidChainId(ChainIdError::TooLong(
-                len
-            ))) if len == MAX_CHAIN_ID_SIZE + 1
+            Err(FibreError::InvalidChainId { len }) if len == MAX_CHAIN_ID_SIZE + 1
         ));
     }
 

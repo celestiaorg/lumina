@@ -62,11 +62,12 @@ impl FibreClient {
     /// # Errors
     ///
     /// - [`FibreError::ClientClosed`] if the client has been closed.
+    /// - [`FibreError::Cancelled`] if the client is closed while the upload is in progress.
     /// - [`FibreError::BlobTooLarge`] if the upload size does not fit the wire format.
     /// - [`FibreError::InvalidValidatorSet`] if the validator set height is zero.
     /// - [`FibreError::InvalidPaymentPromise`] if the payment promise cannot be signed.
     /// - [`FibreError::NotEnoughSignatures`] if the voting-power threshold is not met.
-    /// - Any error returned while retrieving the validator set or contacting validators.
+    /// - Any error returned while retrieving the validator set.
     pub async fn upload(
         &self,
         signing_key: &k256::ecdsa::SigningKey,

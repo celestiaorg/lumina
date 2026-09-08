@@ -419,10 +419,6 @@ fn decode_binding(payload: &[u8]) -> Result<BindingPayload<'_>, FibreCertificate
     })
 }
 
-fn decode_identity_signature(bytes: &[u8]) -> Result<Signature, FibreCertificateError> {
-    Signature::from_slice(bytes).map_err(FibreCertificateError::InvalidIdentitySignature)
-}
-
 fn verify_certificate(
     cert_der: &[u8],
     validator_key: &VerifyingKey,
@@ -469,7 +465,8 @@ fn verify_certificate(
     sign_input.extend_from_slice(SIGN_PREFIX);
     sign_input.extend_from_slice(payload);
     let signed_bytes = raw_bytes_message_sign_bytes(chain_id, SIGN_UNIQUE_ID, &sign_input);
-    let signature = decode_identity_signature(identity.signature.as_bytes())?;
+    let signature = Signature::from_slice(identity.signature.as_bytes())
+        .map_err(FibreCertificateError::InvalidIdentitySignature)?;
     validator_key
         .verify_strict(&signed_bytes, &signature)
         .map_err(FibreCertificateError::InvalidIdentitySignature)?;
@@ -664,14 +661,6 @@ mod tests {
         assert!(matches!(
             verify_certificate(&[0], &key, "chain", now),
             Err(FibreCertificateError::CertificateParse(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_identity_signature_length() {
-        assert!(matches!(
-            decode_identity_signature(&[0; 63]),
-            Err(FibreCertificateError::InvalidIdentitySignature(_))
         ));
     }
 

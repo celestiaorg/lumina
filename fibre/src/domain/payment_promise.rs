@@ -13,7 +13,8 @@ use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::blob::Commitment;
-use crate::error::{ChainIdError, FibreError, PaymentPromiseError};
+use crate::config::validate_chain_id;
+use crate::error::{FibreError, PaymentPromiseError};
 
 /// Domain separation prefix prepended to sign bytes.
 /// Ensures payment promise signatures cannot be confused with consensus messages.
@@ -24,19 +25,6 @@ const PUBKEY_SIZE: usize = 33;
 
 /// Size of a secp256k1 signature in compact format (32 bytes r + 32 bytes s).
 pub(crate) const SIGNATURE_SIZE: usize = 64;
-
-/// Maximum allowed chain ID length.
-pub(crate) const MAX_CHAIN_ID_SIZE: usize = 20;
-
-pub(crate) fn validate_chain_id(chain_id: &str) -> Result<(), ChainIdError> {
-    if chain_id.is_empty() {
-        return Err(ChainIdError::Empty);
-    }
-    if chain_id.len() > MAX_CHAIN_ID_SIZE {
-        return Err(ChainIdError::TooLong(chain_id.len()));
-    }
-    Ok(())
-}
 
 /// Size of the Go time.Time MarshalBinary output for UTC times.
 const TIMESTAMP_BINARY_SIZE: usize = 15;
@@ -159,7 +147,7 @@ impl PaymentPromise {
     /// Performs stateless validation of all field constraints and verifies
     /// the signature using the signer's public key.
     pub fn validate(&self) -> Result<(), FibreError> {
-        validate_chain_id(&self.chain_id).map_err(PaymentPromiseError::ChainId)?;
+        validate_chain_id(&self.chain_id)?;
 
         // Upload size must be positive
         if self.upload_size == 0 {
@@ -306,6 +294,7 @@ fn unmarshal_binary_time(data: &[u8]) -> SystemTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MAX_CHAIN_ID_SIZE;
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
@@ -448,9 +437,7 @@ mod tests {
         promise.sign(&signing_key).unwrap();
         assert!(matches!(
             promise.validate(),
-            Err(FibreError::InvalidPaymentPromise(
-                PaymentPromiseError::ChainId(ChainIdError::Empty)
-            ))
+            Err(FibreError::InvalidChainId { len: 0 })
         ));
     }
 
@@ -461,9 +448,7 @@ mod tests {
         promise.sign(&signing_key).unwrap();
         assert!(matches!(
             promise.validate(),
-            Err(FibreError::InvalidPaymentPromise(
-                PaymentPromiseError::ChainId(ChainIdError::TooLong(len))
-            )) if len == MAX_CHAIN_ID_SIZE + 1
+            Err(FibreError::InvalidChainId { len }) if len == MAX_CHAIN_ID_SIZE + 1
         ));
     }
 
