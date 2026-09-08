@@ -16,11 +16,7 @@ fn test_config() -> MockNetworkConfig {
 fn client(control_addr: std::net::SocketAddr) -> FibreClient {
     FibreClient::from_endpoint(
         format!("http://{control_addr}"),
-        FibreClientConfig {
-            // chain_id feeds the promise sign bytes; the default is empty.
-            chain_id: "mock-1".to_string(),
-            ..Default::default()
-        },
+        FibreClientConfig::new("mock-1").unwrap(),
     )
     .expect("client builds")
 }
@@ -120,10 +116,7 @@ async fn payment_roundtrip() {
 
     let host_registry = std::sync::Arc::new(GrpcHostRegistry::new(app_grpc.clone()));
     let fibre = FibreClient::builder()
-        .config(FibreClientConfig {
-            chain_id: "mock-1".to_string(),
-            ..Default::default()
-        })
+        .config(FibreClientConfig::new("mock-1").unwrap())
         .set_getter(GrpcSetGetter::new(core_grpc))
         .connector(GrpcValidatorConnector::new(host_registry, "mock-1"))
         .build()

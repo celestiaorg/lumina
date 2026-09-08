@@ -49,7 +49,7 @@ use rand::rngs::OsRng;
 
 use celestia_fibre::transport::proto_conv;
 use celestia_fibre::{
-    BlobConfig, EncodedBlob, FibreClientConfig, Fraction, PaymentPromise, ValidatorInfo,
+    BlobConfig, DEFAULT_PROTOCOL_PARAMS, EncodedBlob, Fraction, PaymentPromise, ValidatorInfo,
     ValidatorSet,
 };
 use celestia_proto::celestia::fibre::v1 as proto;
@@ -75,7 +75,7 @@ const HEAVY_WARM_UP: Duration = Duration::from_secs(5);
 
 /// Rows per shard, matching the protocol's min_rows_per_validator (148 for v0).
 fn rows_per_shard() -> usize {
-    FibreClientConfig::default().min_rows_per_validator
+    DEFAULT_PROTOCOL_PARAMS.min_rows_per_validator()
 }
 
 fn liveness() -> Fraction {
@@ -169,7 +169,7 @@ fn bench_payment_promise(c: &mut Criterion) {
     let signing_key = k256::ecdsa::SigningKey::random(&mut OsRng);
     let mut promise = PaymentPromise {
         chain_id: "private".into(),
-        height: 42,
+        height: NonZeroU64::new(42).unwrap(),
         namespace: Namespace::from_raw(&[0u8; 29]).unwrap(),
         upload_size: BlobConfig::v0().upload_size(1 << 20) as u32,
         blob_version: 0,

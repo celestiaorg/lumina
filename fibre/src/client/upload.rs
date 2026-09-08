@@ -7,6 +7,7 @@
 //! The [`FibreClient::upload_and_prepare()`] method encodes a blob, uploads it to validators,
 //! and returns a `MsgPayForFibre` ready for broadcast by the caller.
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
@@ -96,8 +97,10 @@ impl FibreClient {
         })?;
 
         let mut promise = PaymentPromise {
-            chain_id: self.cfg.chain_id.clone(),
-            height: val_set.height,
+            chain_id: self.cfg.chain_id().to_owned(),
+            height: NonZeroU64::new(val_set.height).ok_or_else(|| {
+                FibreError::InvalidPaymentPromise("height must be positive, got 0".into())
+            })?,
             namespace,
             upload_size: upload_size_u32,
             blob_version: blob.config().blob_version as u32,
@@ -390,7 +393,7 @@ mod tests {
         assert!(result.is_ok(), "upload should succeed: {:?}", result.err());
 
         let signed = result.unwrap();
-        assert_eq!(signed.promise.height, 42);
+        assert_eq!(signed.promise.height.get(), 42);
         assert_eq!(signed.promise.chain_id, "test-chain");
 
         let sig_count = signed

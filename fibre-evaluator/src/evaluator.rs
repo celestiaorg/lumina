@@ -200,12 +200,11 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
         .context("app gRPC client has no signer")?;
     let namespace = Namespace::new_v0(cli.namespace.as_bytes()).context("parsing namespace")?;
     let host_registry = Arc::new(GrpcHostRegistry::new(app_grpc.clone()));
+    let fibre_config = FibreClientConfig::new(cli.chain_id.clone())
+        .context("building Fibre client config")?;
     let fibre = Arc::new(
         FibreClient::builder()
-            .config(FibreClientConfig {
-                chain_id: cli.chain_id.clone(),
-                ..FibreClientConfig::default()
-            })
+            .config(fibre_config)
             .set_getter(GrpcSetGetter::new(core_grpc))
             .connector(GrpcValidatorConnector::new(
                 host_registry,

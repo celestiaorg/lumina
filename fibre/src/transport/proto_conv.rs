@@ -31,7 +31,7 @@ impl From<&PaymentPromise> for proto::PaymentPromise {
 
         proto::PaymentPromise {
             chain_id: pp.chain_id.clone(),
-            height: pp.height as i64,
+            height: pp.height.get() as i64,
             namespace: pp.namespace.as_bytes().to_vec(),
             blob_size: pp.upload_size,
             blob_version: pp.blob_version,
@@ -193,7 +193,7 @@ mod tests {
         let sk = SigningKey::random(&mut OsRng);
         let pp = PaymentPromise {
             chain_id: "test-chain".into(),
-            height: 42,
+            height: std::num::NonZeroU64::new(42).unwrap(),
             namespace: celestia_types::nmt::Namespace::from_raw(&[0u8; 29]).unwrap(),
             upload_size: 1024,
             blob_version: 0,

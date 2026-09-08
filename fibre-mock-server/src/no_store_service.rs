@@ -362,7 +362,7 @@ mod tests {
         let signer = k256::ecdsa::SigningKey::from_slice(&[7; 32]).unwrap();
         let mut promise = DomainPaymentPromise {
             chain_id: "mock-1".into(),
-            height: 1,
+            height: std::num::NonZeroU64::new(1).unwrap(),
             namespace: Namespace::new_v0(b"test").unwrap(),
             upload_size: 1024,
             blob_version: 0,

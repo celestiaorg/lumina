@@ -1,6 +1,7 @@
 //! Rebuild a domain [`celestia_fibre::PaymentPromise`] from its proto form so
 //! the mock can compute the exact `sign_bytes()` the uploading client signed.
 
+use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use celestia_fibre::PaymentPromise;
@@ -13,6 +14,10 @@ use tonic::Status;
 pub fn promise_from_proto(pp: proto::PaymentPromise) -> Result<PaymentPromise, Status> {
     let namespace = celestia_types::nmt::Namespace::from_raw(&pp.namespace)
         .map_err(|e| Status::invalid_argument(format!("invalid namespace: {e}")))?;
+    let height = u64::try_from(pp.height)
+        .ok()
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| Status::invalid_argument("height must be positive"))?;
 
     let commitment: [u8; 32] = pp
         .commitment
@@ -33,7 +38,7 @@ pub fn promise_from_proto(pp: proto::PaymentPromise) -> Result<PaymentPromise, S
 
     Ok(PaymentPromise {
         chain_id: pp.chain_id,
-        height: pp.height as u64,
+        height,
         namespace,
         upload_size: pp.blob_size,
         blob_version: pp.blob_version,
@@ -77,7 +82,7 @@ mod tests {
         let sk = k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
         let pp = PaymentPromise {
             chain_id: "mock-1".into(),
-            height: 42,
+            height: NonZeroU64::new(42).unwrap(),
             namespace: celestia_types::nmt::Namespace::new_v0(b"mock-test").unwrap(),
             upload_size: 1024,
             blob_version: 0,
