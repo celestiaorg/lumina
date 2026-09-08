@@ -255,15 +255,13 @@ pub(crate) fn fraction(numerator: u64, denominator: u64) -> Fraction {
 
 /// Standard test client configuration.
 pub(crate) fn test_client_config(chain_id: &str) -> FibreClientConfig {
-    FibreClientConfig {
-        chain_id: chain_id.to_string(),
-        safety_threshold: fraction(2, 3),
-        liveness_threshold: fraction(1, 3),
-        min_rows_per_validator: 1,
-        max_message_size: 1 << 20,
-        upload_concurrency: 10,
-        download_concurrency: 10,
-    }
+    let mut config = FibreClientConfig::new(chain_id).unwrap();
+    config.safety_threshold = fraction(2, 3);
+    config.liveness_threshold = fraction(1, 3);
+    config.min_rows_per_validator = 1;
+    config.upload_concurrency = 10;
+    config.download_concurrency = 10;
+    config
 }
 
 /// Build a [`FibreClient`] from a validator set and connector with test config.

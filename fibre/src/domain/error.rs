@@ -82,6 +82,10 @@ pub enum FibreError {
     #[error("payment promise validation failed: {0}")]
     InvalidPaymentPromise(String),
 
+    /// The configured chain ID is invalid.
+    #[error("invalid chain ID: {0}")]
+    InvalidChainId(String),
+
     // -- Connection errors --
     /// No host address was found for a validator.
     #[error("host not found for validator {0}")]
