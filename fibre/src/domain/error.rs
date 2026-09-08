@@ -63,9 +63,9 @@ pub enum FibreError {
     #[error("not enough voting power: collected {collected}, required {required}")]
     NotEnoughSignatures {
         /// Total voting power of collected signatures.
-        collected: i64,
+        collected: u64,
         /// Required voting power threshold.
-        required: i64,
+        required: u64,
     },
 
     /// A validator returned an invalid signature.

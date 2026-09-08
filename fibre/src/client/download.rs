@@ -342,10 +342,7 @@ mod tests {
             make_validator(100, 3),
         ];
         let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet {
-            validators: val_infos.clone(),
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
 
         let conns: Vec<Arc<MockValidatorConnection>> = validators
             .iter()
@@ -379,10 +376,7 @@ mod tests {
             make_validator(100, 5),
         ];
         let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet {
-            validators: val_infos.clone(),
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
 
         let failing_conn_0 = Arc::new(MockValidatorConnection::new_failing(
             validators[0].0.clone(),
@@ -427,10 +421,7 @@ mod tests {
 
         let validators = [make_validator(100, 1), make_validator(100, 2)];
         let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet {
-            validators: val_infos.clone(),
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
 
         let conns: Vec<Arc<MockValidatorConnection>> = validators
             .iter()
@@ -489,10 +480,7 @@ mod tests {
         let blob_id = blob.id().clone();
         let validators = [make_validator(100, 1), make_validator(100, 2)];
         let val_infos: Vec<_> = validators.iter().map(|(_, info)| info.clone()).collect();
-        let val_set = ValidatorSet {
-            validators: val_infos.clone(),
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
         let response = DownloadResponse {
             rows: (0..cfg.total_rows())
                 .map(|index| {
@@ -540,10 +528,7 @@ mod tests {
         // Single validator that fails
         let validators = [make_validator(100, 1)];
         let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet {
-            validators: val_infos.clone(),
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
 
         let failing_conn = Arc::new(MockValidatorConnection::new_failing(
             validators[0].0.clone(),
@@ -567,10 +552,7 @@ mod tests {
     async fn download_fails_when_client_closed() {
         let cfg = test_blob_config();
         let (key, val) = make_validator(100, 1);
-        let val_set = ValidatorSet {
-            validators: vec![val.clone()],
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(vec![val.clone()], 1).unwrap();
 
         let conn = Arc::new(MockValidatorConnection::new(key));
         let mut connector = MockConnector::new();
@@ -599,10 +581,7 @@ mod tests {
             make_validator(100, 30),
         ];
         let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet {
-            validators: val_infos.clone(),
-            height: 42,
-        };
+        let val_set = ValidatorSet::try_new(val_infos.clone(), 42).unwrap();
 
         let blob = EncodedBlob::new(&original_data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
@@ -645,10 +624,7 @@ mod tests {
             make_validator(100, 3),
         ];
         let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet {
-            validators: val_infos.clone(),
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
 
         let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();

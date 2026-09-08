@@ -178,11 +178,7 @@ mod tests {
         let mut key_bytes = [0u8; 32];
         key_bytes[0] = seed;
         let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-        ValidatorInfo {
-            address: [seed; 20],
-            pubkey: sk.verifying_key(),
-            voting_power: 100,
-        }
+        ValidatorInfo::try_new(sk.verifying_key(), 100).unwrap()
     }
 
     #[tokio::test]

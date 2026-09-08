@@ -42,12 +42,6 @@ impl FibreClient {
 
         // 1. Get validator set
         let val_set = self.set_getter.head().await?;
-        if val_set.total_voting_power() <= 0 {
-            return Err(FibreError::InvalidData(
-                "validator set has no voting power".into(),
-            ));
-        }
-
         // 2. Create and sign payment promise
         let upload_size = blob.upload_size();
         let upload_size_u32 = u32::try_from(upload_size).map_err(|_| FibreError::BlobTooLarge {
@@ -57,7 +51,7 @@ impl FibreClient {
 
         let mut promise = PaymentPromise {
             chain_id: self.cfg.chain_id.clone(),
-            height: val_set.height,
+            height: val_set.height(),
             namespace,
             upload_size: upload_size_u32,
             blob_version: blob.config().blob_version as u32,
@@ -180,7 +174,7 @@ impl FibreClient {
                 .map_err(|_| FibreError::Other("upload semaphore closed".into()))?;
 
             let connector = Arc::clone(&self.connector);
-            let validator = val_set.validators[val_idx].clone();
+            let validator = val_set.validators()[val_idx].clone();
             let promise = promise.clone();
             let blob = Arc::clone(blob);
 
@@ -213,7 +207,7 @@ impl FibreClient {
                 task_result = futures.next() => {
                     match task_result {
                         Some((val_idx, Some(Ok(signature)))) => {
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             match sig_set.add(validator, &signature) {
                                 Ok(threshold_met) => {
                                     if threshold_met {
@@ -230,7 +224,7 @@ impl FibreClient {
                             }
                         }
                         Some((val_idx, Some(Err(e)))) => {
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             tracing::warn!(
                                 validator = %validator.address_hex(),
                                 error = %e,
@@ -238,7 +232,7 @@ impl FibreClient {
                             );
                         }
                         Some((val_idx, None)) => {
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             tracing::warn!(
                                 validator = %validator.address_hex(),
                                 "upload task dropped unexpectedly"
@@ -290,10 +284,7 @@ mod tests {
         let validators = vec![make_validator(100, 1)];
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: vec![val],
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(vec![val], 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();
@@ -322,10 +313,7 @@ mod tests {
 
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 42,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 42).unwrap();
 
         let sk = test_signing_key();
         let client = build_test_client(val_set, connector, "test-chain");
@@ -372,10 +360,7 @@ mod tests {
             connector.add(info.address, conn);
         }
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         let blob = make_test_blob();
@@ -419,10 +404,7 @@ mod tests {
             fail_addresses,
         };
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 10,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 10).unwrap();
 
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let blob = make_test_blob();
@@ -475,10 +457,7 @@ mod tests {
             fail_addresses,
         };
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 10,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 10).unwrap();
 
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let blob = make_test_blob();
@@ -496,35 +475,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_fails_on_empty_validator_set() {
-        let client = build_test_client(
-            ValidatorSet {
-                validators: vec![],
-                height: 1,
-            },
-            MockConnector::new(),
-            "test-chain",
-        );
-
-        let result = client
-            .upload(
-                &test_signing_key(),
-                Namespace::from_raw(&[0u8; 29]).unwrap(),
-                make_test_blob(),
-            )
-            .await;
-
-        assert!(matches!(result, Err(FibreError::InvalidData(_))));
-    }
-
-    #[tokio::test]
-    async fn upload_fails_on_zero_voting_power_set() {
-        let validators = vec![make_validator(0, 1)];
-        let val_set = ValidatorSet {
-            validators: validators.iter().map(|(_, info)| info.clone()).collect(),
-            height: 1,
+    async fn upload_requires_signature_when_fraction_rounds_to_zero() {
+        let validator = make_validator(1, 1);
+        let val_set = ValidatorSet::try_new(vec![validator.1.clone()], 1).unwrap();
+        let connector = FailingConnector {
+            inner: MockConnector::new(),
+            fail_addresses: vec![validator.1.address],
         };
-        let client = build_test_client(val_set, make_connector(&validators), "test-chain");
+        let client = build_test_client(val_set, connector, "test-chain");
 
         let result = client
             .upload(
@@ -534,7 +492,13 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(FibreError::InvalidData(_))));
+        assert!(matches!(
+            result,
+            Err(FibreError::NotEnoughSignatures {
+                collected: 0,
+                required: 1
+            })
+        ));
     }
 
     #[tokio::test]
@@ -543,10 +507,7 @@ mod tests {
         let validators = vec![make_validator(100, 1)];
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: vec![val],
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(vec![val], 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();

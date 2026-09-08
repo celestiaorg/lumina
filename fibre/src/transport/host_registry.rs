@@ -152,16 +152,11 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn make_validator(seed: u8, address: [u8; 20]) -> ValidatorInfo {
+    fn make_validator(seed: u8) -> ValidatorInfo {
         let mut key_bytes = [0u8; 32];
         key_bytes[0] = seed;
         let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-        let pubkey = sk.verifying_key();
-        ValidatorInfo {
-            address,
-            pubkey,
-            voting_power: 1,
-        }
+        ValidatorInfo::try_new(sk.verifying_key(), 1).unwrap()
     }
 
     #[test]
@@ -256,14 +251,13 @@ mod tests {
 
     #[tokio::test]
     async fn map_registry_returns_host_when_present() {
-        let addr = [42u8; 20];
         let expected_host = Host("dns:///example.com:9090".to_string());
+        let validator = make_validator(1);
 
         let mut hosts = HashMap::new();
-        hosts.insert(addr, expected_host.clone());
+        hosts.insert(*validator.address(), expected_host.clone());
 
         let registry = MapRegistry { hosts };
-        let validator = make_validator(1, addr);
 
         let host = registry
             .get_host(&validator)
@@ -277,7 +271,7 @@ mod tests {
         let registry = MapRegistry {
             hosts: HashMap::new(),
         };
-        let validator = make_validator(1, [99u8; 20]);
+        let validator = make_validator(1);
 
         let result = registry.get_host(&validator).await;
         assert!(result.is_err(), "should return an error for missing host");
@@ -286,7 +280,7 @@ mod tests {
             FibreError::HostNotFound(addr_hex) => {
                 assert_eq!(
                     addr_hex,
-                    hex::encode_upper([99u8; 20]),
+                    validator.address_hex(),
                     "error should contain the hex-encoded address"
                 );
             }
@@ -303,17 +297,15 @@ mod tests {
 
         let registry = GrpcHostRegistry::new(client);
 
-        let addr = [7u8; 20];
         let expected_host = Host("dns:///cached-validator.example.com:9090".to_string());
+        let validator = make_validator(2);
 
         // Manually populate the cache.
         registry
             .cache
             .write()
             .await
-            .insert(addr, expected_host.clone());
-
-        let validator = make_validator(2, addr);
+            .insert(*validator.address(), expected_host.clone());
 
         // get_host should return the cached value without hitting the (unreachable) server.
         let host = registry
