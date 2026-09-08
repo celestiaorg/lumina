@@ -5,6 +5,9 @@
 
 use std::num::NonZeroU64;
 
+use super::payment_promise::MAX_CHAIN_ID_SIZE;
+use crate::error::FibreError;
+
 /// Fraction represented as numerator/denominator.
 ///
 /// Both fields are non-zero: threshold math divides by each of them.
@@ -180,7 +183,7 @@ impl ProtocolParams {
 #[derive(Debug, Clone)]
 pub struct FibreClientConfig {
     /// Chain ID for domain separation in PaymentPromise signatures.
-    pub chain_id: String,
+    chain_id: String,
     /// Safety threshold (fraction of stake needed for safety, typically 2/3).
     pub safety_threshold: Fraction,
     /// Liveness threshold (fraction of stake for liveness, typically 1/3).
@@ -196,23 +199,44 @@ pub struct FibreClientConfig {
 }
 
 impl FibreClientConfig {
+    /// Creates a `FibreClientConfig` with the default protocol parameters.
+    pub fn new(chain_id: impl Into<String>) -> Result<Self, FibreError> {
+        Self::from_params(chain_id, &DEFAULT_PROTOCOL_PARAMS)
+    }
+
     /// Creates a `FibreClientConfig` from protocol parameters.
-    pub fn from_params(params: &ProtocolParams) -> Self {
-        Self {
-            chain_id: String::new(),
+    pub fn from_params(
+        chain_id: impl Into<String>,
+        params: &ProtocolParams,
+    ) -> Result<Self, FibreError> {
+        let chain_id = chain_id.into();
+        if chain_id.is_empty() {
+            return Err(FibreError::InvalidChainId(
+                "chain ID must not be empty".into(),
+            ));
+        }
+        if chain_id.len() > MAX_CHAIN_ID_SIZE {
+            return Err(FibreError::InvalidChainId(format!(
+                "chain ID length {} exceeds maximum {}",
+                chain_id.len(),
+                MAX_CHAIN_ID_SIZE
+            )));
+        }
+
+        Ok(Self {
+            chain_id,
             safety_threshold: params.safety_threshold,
             liveness_threshold: params.liveness_threshold,
             min_rows_per_validator: params.min_rows_per_validator(),
             max_message_size: params.max_message_size(),
             upload_concurrency: params.max_validator_count,
             download_concurrency: params.max_validator_count,
-        }
+        })
     }
-}
 
-impl Default for FibreClientConfig {
-    fn default() -> Self {
-        Self::from_params(&DEFAULT_PROTOCOL_PARAMS)
+    /// Returns the chain ID.
+    pub fn chain_id(&self) -> &str {
+        &self.chain_id
     }
 }
 
@@ -446,13 +470,28 @@ mod tests {
     }
 
     #[test]
-    fn fibre_client_config_default() {
-        let cfg = FibreClientConfig::default();
+    fn fibre_client_config_defaults() {
+        let cfg = FibreClientConfig::new("test-chain").unwrap();
+        assert_eq!(cfg.chain_id(), "test-chain");
         assert_eq!(cfg.safety_threshold, crate::test_utils::fraction(2, 3));
         assert_eq!(cfg.liveness_threshold, crate::test_utils::fraction(1, 3));
         assert_eq!(cfg.min_rows_per_validator, 148);
         assert_eq!(cfg.upload_concurrency, 100);
         assert_eq!(cfg.download_concurrency, 100);
+    }
+
+    #[test]
+    fn fibre_client_config_rejects_invalid_chain_id() {
+        assert!(matches!(
+            FibreClientConfig::new(""),
+            Err(FibreError::InvalidChainId(_))
+        ));
+
+        let too_long = "x".repeat(MAX_CHAIN_ID_SIZE + 1);
+        assert!(matches!(
+            FibreClientConfig::new(too_long),
+            Err(FibreError::InvalidChainId(_))
+        ));
     }
 
     #[test]
