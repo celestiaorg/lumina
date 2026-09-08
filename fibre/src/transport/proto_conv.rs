@@ -21,6 +21,16 @@ use crate::payment_promise::PaymentPromise;
 use crate::validator::ValidatorInfo;
 use crate::validator_client::DownloadResponse;
 
+fn proof_hashes_as_bytes(hashes: &[[u8; 32]]) -> Vec<Bytes> {
+    let mut storage = Vec::with_capacity(hashes.len() * 32);
+    for hash in hashes {
+        storage.extend_from_slice(hash);
+    }
+
+    let mut storage = Bytes::from(storage);
+    (0..hashes.len()).map(|_| storage.split_to(32)).collect()
+}
+
 impl From<&PaymentPromise> for proto::PaymentPromise {
     fn from(pp: &PaymentPromise) -> Self {
         let creation_timestamp = system_time_to_timestamp(pp.creation_timestamp);
@@ -48,11 +58,7 @@ pub(crate) fn row_proof_to_blob_row(proof: &rsema1d::RowInclusionProof) -> proto
     proto::BlobRow {
         index: proof.index as u32,
         data: proof.row.clone(),
-        proof: proof
-            .row_proof
-            .iter()
-            .map(|hash| Bytes::copy_from_slice(hash))
-            .collect(),
+        proof: proof_hashes_as_bytes(&proof.row_proof),
     }
 }
 

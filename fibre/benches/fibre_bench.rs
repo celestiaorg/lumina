@@ -89,6 +89,16 @@ fn generate_data(len: usize) -> Vec<u8> {
     data
 }
 
+fn proof_hashes_as_bytes(hashes: &[[u8; 32]]) -> Vec<Bytes> {
+    let mut storage = Vec::with_capacity(hashes.len() * 32);
+    for hash in hashes {
+        storage.extend_from_slice(hash);
+    }
+
+    let mut storage = Bytes::from(storage);
+    (0..hashes.len()).map(|_| storage.split_to(32)).collect()
+}
+
 fn make_validators(count: usize) -> (Vec<ed25519_dalek::SigningKey>, Vec<ValidatorInfo>) {
     (0..count)
         .map(|i| {
@@ -285,11 +295,7 @@ fn bench_parse_download_response(c: &mut Criterion) {
             proto::BlobRow {
                 index: proof.index as u32,
                 data: proof.row,
-                proof: proof
-                    .row_proof
-                    .iter()
-                    .map(|hash| Bytes::copy_from_slice(hash))
-                    .collect(),
+                proof: proof_hashes_as_bytes(&proof.row_proof),
             }
         })
         .collect();
@@ -339,11 +345,7 @@ fn bench_upload_shard_encode(c: &mut Criterion) {
             .map(|proof| proto::BlobRow {
                 index: proof.index as u32,
                 data: proof.row.clone(),
-                proof: proof
-                    .row_proof
-                    .iter()
-                    .map(|hash| Bytes::copy_from_slice(hash))
-                    .collect(),
+                proof: proof_hashes_as_bytes(&proof.row_proof),
             })
             .collect();
         let rlcs: Vec<u8> = rlcs.iter().flat_map(|rlc| rlc.to_bytes()).collect();

@@ -218,10 +218,7 @@ impl GrpcClient {
 
     /// Get transactions matching a Tendermint event query.
     #[grpc_method(TxServiceClient::get_txs_event)]
-    fn get_txs_event(
-        &self,
-        request: GetTxsEventRequest,
-    ) -> AsyncGrpcCall<GetTxsEventResponse>;
+    fn get_txs_event(&self, request: GetTxsEventRequest) -> AsyncGrpcCall<GetTxsEventResponse>;
 
     /// Broadcast prepared and serialised transaction
     #[grpc_method(TxServiceClient::simulate)]
