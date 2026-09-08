@@ -10,7 +10,7 @@ use lumina_node::{
     node::{HeaderExError, Node, NodeError, P2pError},
     store::{InMemoryStore, Store, VerifiedExtendedHeaders},
     test_utils::{
-        gen_filled_store, listening_test_node_builder, test_node_builder, wait_listening,
+        gen_filled_store, listening_test_node_builder, test_node_builder, wait_for_listeners,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -70,7 +70,7 @@ async fn client_server() {
         .await
         .unwrap();
 
-    let server_addrs = wait_listening(&server).await;
+    let server_addrs = wait_for_listeners(&server).await;
 
     // Client node
     let client = test_node_builder()
@@ -185,7 +185,7 @@ async fn head_selection_with_multiple_peers() {
 
     let mut server_addrs = vec![];
     for s in &servers {
-        server_addrs.extend_from_slice(&wait_listening(s).await[..]);
+        server_addrs.extend(wait_for_listeners(s).await);
     }
 
     // Client Node
@@ -205,7 +205,7 @@ async fn head_selection_with_multiple_peers() {
         .collect::<Vec<_>>();
     wait_peers_connected(&client, &server_ids).await;
 
-    let client_addr = wait_listening(&client).await;
+    let client_addr = wait_for_listeners(&client).await;
 
     // Rogue node, connects to client so isn't trusted
     let rogue_node = listening_test_node_builder()
@@ -310,7 +310,7 @@ async fn replaced_header_server_store() {
         .await
         .unwrap();
 
-    let server_addrs = wait_listening(&server).await;
+    let server_addrs = wait_for_listeners(&server).await;
 
     let client = listening_test_node_builder()
         .bootnodes(server_addrs)
@@ -363,7 +363,7 @@ async fn invalidated_header_server_store() {
         .await
         .unwrap();
 
-    let server_addrs = wait_listening(&server).await;
+    let server_addrs = wait_for_listeners(&server).await;
 
     let client = listening_test_node_builder()
         .bootnodes(server_addrs)
@@ -426,7 +426,7 @@ async fn unverified_header_server_store() {
         .await
         .unwrap();
 
-    let server_addrs = wait_listening(&server).await;
+    let server_addrs = wait_for_listeners(&server).await;
 
     let client = listening_test_node_builder()
         .bootnodes(server_addrs)

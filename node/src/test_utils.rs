@@ -65,13 +65,8 @@ pub fn listening_test_node_builder() -> NodeBuilder<InMemoryBlockstore, InMemory
     test_node_builder().listen(["/ip4/0.0.0.0/tcp/0".parse().unwrap()])
 }
 
-/// Wait until `node` reports at least one listening address and return them.
-///
-/// Listening on an unspecified address (e.g. `/ip4/0.0.0.0/tcp/0`) resolves the concrete
-/// per-interface addresses asynchronously, so [`Node::listeners`] can return an empty list
-/// right after the node started, even after it connected to a peer. Tests that pass the
-/// addresses as bootnodes to another node must use this instead of `listeners()` directly.
-pub async fn wait_listening<B, S>(node: &Node<B, S>) -> Vec<Multiaddr>
+/// Wait until the node reports at least one listening address.
+pub async fn wait_for_listeners<B, S>(node: &Node<B, S>) -> Vec<Multiaddr>
 where
     B: Blockstore + 'static,
     S: Store + 'static,
