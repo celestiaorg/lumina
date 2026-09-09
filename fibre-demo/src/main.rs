@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use celestia_fibre::{
-    Blob, BlobConfig, DownloadOptions, FibreClient, FibreClientConfig, GrpcHostRegistry,
+    BlobConfig, DownloadOptions, EncodedBlob, FibreClient, FibreClientConfig, GrpcHostRegistry,
     GrpcSetGetter, GrpcValidatorConnector,
 };
 use celestia_grpc::{GrpcClient, TxConfig};
@@ -66,10 +66,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let host_registry = Arc::new(GrpcHostRegistry::new(app_grpc.clone()));
 
     let fibre = FibreClient::builder()
-        .config(FibreClientConfig {
-            chain_id: cli.chain_id.clone(),
-            ..FibreClientConfig::default()
-        })
+        .config(FibreClientConfig::new(cli.chain_id.clone())?)
         .set_getter(GrpcSetGetter::new(core_grpc))
         .connector(GrpcValidatorConnector::new(host_registry, cli.chain_id))
         .build()?;
@@ -85,12 +82,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .cycle()
         .take(cli.blob_size)
         .collect();
-    let blob = Blob::new(&data, BlobConfig::for_version(0)?)?;
+    let blob = EncodedBlob::new(&data, BlobConfig::for_version(0)?)?;
     let blob_id = blob.id().clone();
     println!(
         "uploading blob {blob_id} ({} data bytes, {} paid upload bytes)",
         data.len(),
-        blob.upload_size().expect("blob has data"),
+        blob.upload_size(),
     );
 
     let signed = fibre.upload(&signing_key, namespace, blob).await?;
@@ -120,7 +117,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let downloaded = fibre.download(&blob_id, DownloadOptions::default()).await?;
-    assert_eq!(downloaded.data(), Some(data.as_slice()));
+    assert_eq!(downloaded.data(), data.as_slice());
     println!("download roundtrip OK, {} bytes match", data.len());
 
     Ok(())
