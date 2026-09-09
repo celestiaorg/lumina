@@ -90,7 +90,7 @@ tokio-util = "0.7.14"
 tokio-stream = "0.1.18"
 tonic = { version = "0.14", default-features = false }
 tonic-build = { version = "0.13", default-features = false }
-tonic-web-wasm-client = { package = "onechat-tonic-web-wasm-client", version = "0.1.0" }
+tonic-web-wasm-client = { git = "https://github.com/citizen-stig/tonic-web-wasm-client", rev = "63475e30134d9acea25f1e9048379d54871a9cb3" }
 thiserror = "2.0.3"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.15"
