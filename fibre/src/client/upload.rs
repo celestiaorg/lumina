@@ -7,7 +7,6 @@
 //! The [`FibreClient::upload_and_prepare()`] method encodes a blob, uploads it to validators,
 //! and returns a `MsgPayForFibre` ready for broadcast by the caller.
 
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
@@ -98,9 +97,7 @@ impl FibreClient {
 
         let mut promise = PaymentPromise {
             chain_id: self.cfg.chain_id().to_owned(),
-            height: NonZeroU64::new(val_set.height).ok_or_else(|| {
-                FibreError::InvalidPaymentPromise("height must be positive, got 0".into())
-            })?,
+            height: val_set.height(),
             namespace,
             upload_size: upload_size_u32,
             blob_version: blob.config().blob_version as u32,
@@ -220,32 +217,39 @@ impl FibreClient {
         // Phase 1: Spawn all upload tasks up-front so that every validator is
         // contacted regardless of how quickly the signature threshold is met.
         for (val_idx, row_indices) in validator_tasks {
-            let permit = self
-                .upload_semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| FibreError::Other("upload semaphore closed".into()))?;
+            let permit = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Err(FibreError::Cancelled),
+                permit = self.upload_semaphore.clone().acquire_owned() => permit
+                    .map_err(|_| FibreError::Other("upload semaphore closed".into()))?,
+            };
 
             let connector = Arc::clone(&self.connector);
-            let validator = val_set.validators[val_idx].clone();
+            let validator = val_set.validators()[val_idx].clone();
             let promise = promise.clone();
             let blob = Arc::clone(blob);
+            let task_cancel = cancel_token.clone();
 
             spawn_task(&mut futures, val_idx, async move {
                 let _permit = permit;
-                // Generate row proofs in this task, parallelizing
-                // proof generation across validators.
-                let mut proofs = Vec::with_capacity(row_indices.len());
-                for row_idx in &row_indices {
-                    proofs.push(blob.row(*row_idx)?);
-                }
+                tokio::select! {
+                    biased;
+                    _ = task_cancel.cancelled() => Err(FibreError::Cancelled),
+                    result = async {
+                        // Generate row proofs in this task, parallelizing
+                        // proof generation across validators.
+                        let mut proofs = Vec::with_capacity(row_indices.len());
+                        for row_idx in &row_indices {
+                            proofs.push(blob.row(*row_idx)?);
+                        }
 
-                let conn = connector.connect(&validator).await?;
-                let resp = conn
-                    .upload_shard(&promise, &proofs, blob.rlc_coeffs())
-                    .await?;
-                Ok(resp.validator_signature)
+                        let conn = connector.connect(&validator).await?;
+                        let resp = conn
+                            .upload_shard(&promise, &proofs, blob.rlc_coeffs())
+                            .await?;
+                        Ok(resp.validator_signature)
+                    } => result,
+                }
             });
         }
 
@@ -253,16 +257,23 @@ impl FibreClient {
         // Already-spawned tasks continue uploading in the background after
         // this function returns.
         loop {
+            if cancel_token.is_cancelled() {
+                return Err(FibreError::Cancelled);
+            }
             if futures.is_empty() {
                 break;
             }
 
             tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    return Err(FibreError::Cancelled);
+                }
                 task_result = futures.next() => {
                     match task_result {
                         Some((val_idx, Some(Ok(signature)))) => {
                             stats.successful += 1;
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             match sig_set.add(validator, &signature) {
                                 Ok(threshold_met) => {
                                     if threshold_met {
@@ -283,7 +294,7 @@ impl FibreClient {
                         }
                         Some((val_idx, Some(Err(e)))) => {
                             stats.failed += 1;
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             tracing::warn!(
                                 validator = %validator.address_hex(),
                                 error = %e,
@@ -292,7 +303,7 @@ impl FibreClient {
                         }
                         Some((val_idx, None)) => {
                             stats.failed += 1;
-                            let validator = &val_set.validators[val_idx];
+                            let validator = &val_set.validators()[val_idx];
                             tracing::warn!(
                                 validator = %validator.address_hex(),
                                 "upload task dropped unexpectedly"
@@ -300,9 +311,6 @@ impl FibreClient {
                         }
                         None => break,
                     }
-                }
-                _ = cancel_token.cancelled() => {
-                    return Err(FibreError::Cancelled);
                 }
             }
         }
@@ -317,19 +325,24 @@ impl FibreClient {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use celestia_types::nmt::Namespace;
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
-    use crate::blob::EncodedBlob;
+    use crate::blob::{BlobID, EncodedBlob};
     use crate::config::BlobConfig;
     use crate::error::FibreError;
+    use crate::payment_promise::PaymentPromise;
     use crate::test_utils::{
         FailingConnector, MockConnector, MockValidatorConnection, build_test_client,
         make_connector, make_validator,
     };
     use crate::validator::{ValidatorInfo, ValidatorSet};
+    use crate::validator_client::{
+        DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
+    };
 
     fn make_test_blob() -> EncodedBlob {
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
@@ -347,10 +360,7 @@ mod tests {
         let validators = vec![make_validator(100, 1)];
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: vec![val],
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(vec![val], 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();
@@ -379,10 +389,7 @@ mod tests {
 
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 42,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 42).unwrap();
 
         let sk = test_signing_key();
         let client = build_test_client(val_set, connector, "test-chain");
@@ -429,10 +436,7 @@ mod tests {
             connector.add(info.address, conn);
         }
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         let blob = make_test_blob();
@@ -460,10 +464,9 @@ mod tests {
             make_validator(100, 2),
             make_validator(100, 3),
         ];
-        let val_set = ValidatorSet {
-            validators: validators.iter().map(|(_, info)| info.clone()).collect(),
-            height: 1,
-        };
+        let val_set =
+            ValidatorSet::try_new(validators.iter().map(|(_, info)| info.clone()).collect(), 1)
+                .unwrap();
         let client = build_test_client(val_set, make_connector(&validators), "test-chain");
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
@@ -493,10 +496,7 @@ mod tests {
             inner: make_connector(&[v1, v2, v3]),
             fail_addresses: vec![val_infos[3].address, val_infos[4].address],
         };
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 1).unwrap();
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
@@ -533,10 +533,7 @@ mod tests {
             fail_addresses,
         };
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 10,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 10).unwrap();
 
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let blob = make_test_blob();
@@ -589,10 +586,7 @@ mod tests {
             fail_addresses,
         };
 
-        let val_set = ValidatorSet {
-            validators: val_infos,
-            height: 10,
-        };
+        let val_set = ValidatorSet::try_new(val_infos, 10).unwrap();
 
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let blob = make_test_blob();
@@ -609,16 +603,130 @@ mod tests {
         }
     }
 
+    struct HangingConnection {
+        entered: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ValidatorConnection for HangingConnection {
+        async fn upload_shard(
+            &self,
+            _promise: &PaymentPromise,
+            _rows: &[rsema1d::RowInclusionProof],
+            _rlc_coeffs: &[rsema1d::GF128],
+        ) -> Result<UploadResponse, FibreError> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            let _guard = DropCounter(Arc::clone(&self.dropped));
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+
+        async fn download_shard(&self, _blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
+            Err(FibreError::Other("download not supported".into()))
+        }
+    }
+
+    struct HangingConnector {
+        conn: Arc<HangingConnection>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ValidatorConnector for HangingConnector {
+        async fn connect(
+            &self,
+            _validator: &ValidatorInfo,
+        ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
+            Ok(Arc::clone(&self.conn) as Arc<dyn ValidatorConnection>)
+        }
+    }
+
+    #[tokio::test]
+    async fn close_cancels_inflight_upload_tasks() {
+        let validators = [make_validator(100, 1), make_validator(100, 2)];
+        let val_set =
+            ValidatorSet::try_new(validators.iter().map(|(_, info)| info.clone()).collect(), 1)
+                .unwrap();
+        let entered = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let connector = HangingConnector {
+            conn: Arc::new(HangingConnection {
+                entered: Arc::clone(&entered),
+                dropped: Arc::clone(&dropped),
+            }),
+        };
+        let client = Arc::new(build_test_client(val_set, connector, "test-chain"));
+        let upload_client = Arc::clone(&client);
+        let sk = test_signing_key();
+        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
+        let blob = make_test_blob();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let upload_task = lumina_utils::executor::spawn(async move {
+            let result = upload_client.upload(&sk, namespace, blob).await;
+            let _ = result_tx.send(result);
+        });
+
+        while entered.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        client.close();
+
+        let result = result_rx.await.unwrap();
+        upload_task.join().await;
+        assert!(matches!(result, Err(FibreError::Cancelled)));
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            while dropped.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("upload tasks were not cancelled by close()");
+    }
+
+    #[tokio::test]
+    async fn upload_requires_signature_when_fraction_rounds_to_zero() {
+        let validator = make_validator(1, 1);
+        let val_set = ValidatorSet::try_new(vec![validator.1.clone()], 1).unwrap();
+        let connector = FailingConnector {
+            inner: MockConnector::new(),
+            fail_addresses: vec![validator.1.address],
+        };
+        let client = build_test_client(val_set, connector, "test-chain");
+
+        let result = client
+            .upload(
+                &test_signing_key(),
+                Namespace::from_raw(&[0u8; 29]).unwrap(),
+                make_test_blob(),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(FibreError::NotEnoughSignatures {
+                collected: 0,
+                required: 1
+            })
+        ));
+    }
+
     #[tokio::test]
     async fn put_fails_when_client_closed() {
         let (_, val) = make_validator(100, 1);
         let validators = vec![make_validator(100, 1)];
         let connector = make_connector(&validators);
 
-        let val_set = ValidatorSet {
-            validators: vec![val],
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(vec![val], 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();

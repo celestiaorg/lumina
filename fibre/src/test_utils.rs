@@ -232,19 +232,12 @@ impl ValidatorConnector for FailingConnector {
 }
 
 /// Create a validator with a deterministic ed25519 keypair.
-pub(crate) fn make_validator(power: i64, seed: u8) -> (Ed25519SigningKey, ValidatorInfo) {
+pub(crate) fn make_validator(power: u64, seed: u8) -> (Ed25519SigningKey, ValidatorInfo) {
     let mut key_bytes = [0u8; 32];
     key_bytes[0] = seed;
     let ed_key = Ed25519SigningKey::from_bytes(&key_bytes);
     let pubkey = ed_key.verifying_key();
-    (
-        ed_key,
-        ValidatorInfo {
-            address: [seed; 20],
-            pubkey,
-            voting_power: power,
-        },
-    )
+    (ed_key, ValidatorInfo::try_new(pubkey, power).unwrap())
 }
 
 /// Standard test blob configuration: K=4, N=4, min_row_size=64.
