@@ -654,10 +654,11 @@ mod tests {
     #[tokio::test]
     async fn close_cancels_inflight_upload_tasks() {
         let validators = [make_validator(100, 1), make_validator(100, 2)];
-        let val_set = ValidatorSet {
-            validators: validators.iter().map(|(_, info)| info.clone()).collect(),
-            height: 1,
-        };
+        let val_set = ValidatorSet::try_new(
+            validators.iter().map(|(_, info)| info.clone()).collect(),
+            1,
+        )
+        .unwrap();
         let entered = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
         let connector = HangingConnector {
