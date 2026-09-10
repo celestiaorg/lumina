@@ -345,24 +345,17 @@ mod tests {
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
-    use crate::blob::{BlobID, EncodedBlob};
-    use crate::config::BlobConfig;
+    use crate::blob::BlobID;
     use crate::error::FibreError;
     use crate::payment_promise::PaymentPromise;
     use crate::test_utils::{
-        FailingConnector, MockConnector, MockValidatorConnection, build_test_client,
-        make_connector, make_validator,
+        FailingConnector, MockConnector, build_test_client, connector_with_handles, make_connector,
+        test_blob, validator_set,
     };
-    use crate::validator::{ValidatorInfo, ValidatorSet};
+    use crate::validator::ValidatorInfo;
     use crate::validator_client::{
         DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
     };
-
-    fn make_test_blob() -> EncodedBlob {
-        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
-        let data: Vec<u8> = (0u8..200).collect();
-        EncodedBlob::new(&data, cfg).unwrap()
-    }
 
     fn test_signing_key() -> SigningKey {
         SigningKey::random(&mut OsRng)
@@ -370,17 +363,14 @@ mod tests {
 
     #[tokio::test]
     async fn upload_fails_when_client_closed() {
-        let (_, val) = make_validator(100, 1);
-        let validators = vec![make_validator(100, 1)];
+        let (validators, val_set) = validator_set(&[100], 1);
         let connector = make_connector(&validators);
-
-        let val_set = ValidatorSet::try_new(vec![val], 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();
 
         let sk = test_signing_key();
-        let blob = make_test_blob();
+        let (blob, _) = test_blob(200);
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
         let result = client.upload(&sk, namespace, blob).await;
         assert!(result.is_err());
@@ -392,22 +382,12 @@ mod tests {
 
     #[tokio::test]
     async fn upload_collects_signatures() {
-        let validators = vec![
-            make_validator(100, 1),
-            make_validator(100, 2),
-            make_validator(100, 3),
-        ];
-
-        let val_infos: Vec<ValidatorInfo> =
-            validators.iter().map(|(_, info)| info.clone()).collect();
-
+        let (validators, val_set) = validator_set(&[100, 100, 100], 42);
         let connector = make_connector(&validators);
-
-        let val_set = ValidatorSet::try_new(val_infos, 42).unwrap();
 
         let sk = test_signing_key();
         let client = build_test_client(val_set, connector, "test-chain");
-        let blob = make_test_blob();
+        let (blob, _) = test_blob(200);
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
         let result = client.upload(&sk, namespace, blob).await;
@@ -430,30 +410,11 @@ mod tests {
 
     #[tokio::test]
     async fn upload_delivers_to_all_validators() {
-        let validators = vec![
-            make_validator(100, 1),
-            make_validator(100, 2),
-            make_validator(100, 3),
-            make_validator(100, 4),
-            make_validator(100, 5),
-        ];
-
-        let val_infos: Vec<ValidatorInfo> =
-            validators.iter().map(|(_, info)| info.clone()).collect();
-
-        // Build the connector manually so we can inspect each connection after upload.
-        let mut connector = MockConnector::new();
-        let mut connections: Vec<Arc<MockValidatorConnection>> = Vec::new();
-        for (ed_key, info) in &validators {
-            let conn = Arc::new(MockValidatorConnection::new(ed_key.clone()));
-            connections.push(conn.clone());
-            connector.add(info.address, conn);
-        }
-
-        let val_set = ValidatorSet::try_new(val_infos, 1).unwrap();
+        let (validators, val_set) = validator_set(&[100, 100, 100, 100, 100], 1);
+        let (connector, connections) = connector_with_handles(&validators);
 
         let client = build_test_client(val_set, connector, "test-chain");
-        let blob = make_test_blob();
+        let (blob, _) = test_blob(200);
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
         // Upload returns once signature threshold is met.
@@ -473,19 +434,13 @@ mod tests {
 
     #[tokio::test]
     async fn upload_completion_reports_all_successes() {
-        let validators = vec![
-            make_validator(100, 1),
-            make_validator(100, 2),
-            make_validator(100, 3),
-        ];
-        let val_set =
-            ValidatorSet::try_new(validators.iter().map(|(_, info)| info.clone()).collect(), 1)
-                .unwrap();
+        let (validators, val_set) = validator_set(&[100, 100, 100], 1);
         let client = build_test_client(val_set, make_connector(&validators), "test-chain");
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
+        let (blob, _) = test_blob(200);
 
         let (_, completion) = client
-            .upload_with_completion(&test_signing_key(), namespace, make_test_blob())
+            .upload_with_completion(&test_signing_key(), namespace, blob)
             .await
             .unwrap();
         let stats = completion.wait().await;
@@ -496,26 +451,20 @@ mod tests {
 
     #[tokio::test]
     async fn upload_preserves_signature_positions_and_reports_completion() {
-        let v1 = make_validator(200, 1);
-        let v2 = make_validator(200, 2);
-        let v3 = make_validator(200, 3);
-        let v4 = make_validator(100, 4);
-        let v5 = make_validator(100, 5);
-        let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4, v5];
-        let val_infos: Vec<ValidatorInfo> = all_validators
-            .iter()
-            .map(|(_, info)| info.clone())
-            .collect();
+        let (validators, val_set) = validator_set(&[200, 200, 200, 100, 100], 1);
         let failing_connector = FailingConnector {
-            inner: make_connector(&[v1, v2, v3]),
-            fail_addresses: vec![val_infos[3].address, val_infos[4].address],
+            inner: make_connector(&validators[..3]),
+            fail_addresses: validators[3..]
+                .iter()
+                .map(|(_, validator)| validator.address)
+                .collect(),
         };
-        let val_set = ValidatorSet::try_new(val_infos, 1).unwrap();
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
+        let (blob, _) = test_blob(200);
 
         let (signed, completion) = client
-            .upload_with_completion(&test_signing_key(), namespace, make_test_blob())
+            .upload_with_completion(&test_signing_key(), namespace, blob)
             .await
             .unwrap();
 
@@ -531,36 +480,20 @@ mod tests {
 
     #[tokio::test]
     async fn upload_fails_when_not_enough_signatures() {
-        let v1 = make_validator(100, 1);
-        let v2 = make_validator(100, 2);
-        let v3 = make_validator(100, 3);
-        let v4 = make_validator(100, 4);
-        let v5 = make_validator(100, 5);
-
-        let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
-        let val_infos: Vec<ValidatorInfo> = all_validators
+        let (validators, val_set) = validator_set(&[100, 100, 100, 100, 100], 10);
+        let inner = make_connector(&validators[..1]);
+        let fail_addresses = validators[1..]
             .iter()
-            .map(|(_, info)| info.clone())
+            .map(|(_, validator)| validator.address)
             .collect();
-
-        let successful = vec![v1];
-        let inner = make_connector(&successful);
-        let fail_addresses = vec![
-            val_infos[1].address,
-            val_infos[2].address,
-            val_infos[3].address,
-            val_infos[4].address,
-        ];
 
         let failing_connector = FailingConnector {
             inner,
             fail_addresses,
         };
 
-        let val_set = ValidatorSet::try_new(val_infos, 10).unwrap();
-
         let client = build_test_client(val_set, failing_connector, "test-chain");
-        let blob = make_test_blob();
+        let (blob, _) = test_blob(200);
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
         let result = client.upload(&test_signing_key(), namespace, blob).await;
@@ -624,10 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_cancels_inflight_upload_tasks() {
-        let validators = [make_validator(100, 1), make_validator(100, 2)];
-        let val_set =
-            ValidatorSet::try_new(validators.iter().map(|(_, info)| info.clone()).collect(), 1)
-                .unwrap();
+        let (_, val_set) = validator_set(&[100, 100], 1);
         let entered = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
         let connector = HangingConnector {
@@ -640,7 +570,7 @@ mod tests {
         let upload_client = Arc::clone(&client);
         let sk = test_signing_key();
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
-        let blob = make_test_blob();
+        let (blob, _) = test_blob(200);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let upload_task = lumina_utils::executor::spawn(async move {
             let result = upload_client.upload(&sk, namespace, blob).await;
@@ -666,11 +596,10 @@ mod tests {
 
     #[tokio::test]
     async fn upload_requires_signature_when_fraction_rounds_to_zero() {
-        let validator = make_validator(1, 1);
-        let val_set = ValidatorSet::try_new(vec![validator.1.clone()], 1).unwrap();
+        let (validators, val_set) = validator_set(&[1], 1);
         let connector = FailingConnector {
             inner: MockConnector::new(),
-            fail_addresses: vec![validator.1.address],
+            fail_addresses: vec![validators[0].1.address],
         };
         let client = build_test_client(val_set, connector, "test-chain");
 
@@ -678,7 +607,7 @@ mod tests {
             .upload(
                 &test_signing_key(),
                 Namespace::from_raw(&[0u8; 29]).unwrap(),
-                make_test_blob(),
+                test_blob(200).0,
             )
             .await;
 
@@ -693,11 +622,8 @@ mod tests {
 
     #[tokio::test]
     async fn put_fails_when_client_closed() {
-        let (_, val) = make_validator(100, 1);
-        let validators = vec![make_validator(100, 1)];
+        let (validators, val_set) = validator_set(&[100], 1);
         let connector = make_connector(&validators);
-
-        let val_set = ValidatorSet::try_new(vec![val], 1).unwrap();
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();
