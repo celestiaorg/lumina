@@ -158,6 +158,241 @@ mod tests {
     use crate::host_registry::HostRegistry;
     use crate::test_utils::make_validator;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    mod wire {
+        use std::num::NonZeroU64;
+        use std::sync::Mutex;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        use celestia_proto::celestia::fibre::v1::fibre_server::{Fibre, FibreServer};
+        use celestia_proto::celestia::fibre::v1::{
+            BlobShard, DownloadShardRequest, DownloadShardResponse, UploadShardRequest,
+            UploadShardResponse,
+        };
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::service::TowerToHyperService;
+        use k256::ecdsa::SigningKey;
+        use serde::Deserialize;
+        use tokio::io::DuplexStream;
+        use tokio_rustls::rustls::ServerConfig;
+        use tokio_rustls::rustls::pki_types::{
+            CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime,
+        };
+
+        use super::*;
+        use crate::blob::{BlobID, EncodedBlob};
+        use crate::config::BlobConfig;
+        use crate::error::ShardError;
+        use crate::payment_promise::PaymentPromise;
+        use crate::transport::io_connector::{BoxedFibreIo, FibreIoConnector};
+
+        const MALFORMED_COMMITMENT: [u8; 32] = [2; 32];
+        const TIMEOUT_COMMITMENT: [u8; 32] = [3; 32];
+
+        struct DuplexConnector(Mutex<Option<DuplexStream>>);
+
+        #[async_trait::async_trait]
+        impl FibreIoConnector for DuplexConnector {
+            async fn connect(
+                &self,
+                _host: String,
+                _port: u16,
+            ) -> Result<BoxedFibreIo, std::io::Error> {
+                let stream = self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("test client should open one connection");
+                Ok(Box::pin(stream))
+            }
+        }
+
+        struct WireService {
+            upload: Mutex<Option<UploadShardRequest>>,
+            downloads: Mutex<Vec<Vec<u8>>>,
+            valid_blob_id: Vec<u8>,
+            shard: BlobShard,
+        }
+
+        #[async_trait::async_trait]
+        impl Fibre for WireService {
+            async fn upload_shard(
+                self: Arc<Self>,
+                request: tonic::Request<UploadShardRequest>,
+            ) -> Result<tonic::Response<UploadShardResponse>, tonic::Status> {
+                *self.upload.lock().unwrap() = Some(request.into_inner());
+                Ok(tonic::Response::new(UploadShardResponse {
+                    validator_signature: vec![7; 64],
+                }))
+            }
+
+            async fn download_shard(
+                self: Arc<Self>,
+                request: tonic::Request<DownloadShardRequest>,
+            ) -> Result<tonic::Response<DownloadShardResponse>, tonic::Status> {
+                let blob_id = request.into_inner().blob_id;
+                self.downloads.lock().unwrap().push(blob_id.clone());
+                if blob_id == self.valid_blob_id {
+                    return Ok(tonic::Response::new(DownloadShardResponse {
+                        shard: Some(self.shard.clone()),
+                    }));
+                }
+                let commitment = &blob_id[1..];
+                if commitment == MALFORMED_COMMITMENT {
+                    return Ok(tonic::Response::new(DownloadShardResponse { shard: None }));
+                }
+                if commitment == TIMEOUT_COMMITMENT {
+                    std::future::pending().await
+                } else {
+                    Err(tonic::Status::not_found("unknown blob"))
+                }
+            }
+        }
+
+        #[derive(Deserialize)]
+        struct IdentityVectors {
+            cases: Vec<IdentityVector>,
+        }
+
+        #[derive(Deserialize)]
+        struct IdentityVector {
+            name: String,
+            cert_der: String,
+            tls_priv_seed: String,
+            verifier_chain_id: String,
+            verifier_consensus_pub: String,
+            verify_at: u64,
+        }
+
+        fn identity() -> IdentityVector {
+            serde_json::from_str::<IdentityVectors>(include_str!("testdata/identity_vectors.json"))
+                .unwrap()
+                .cases
+                .into_iter()
+                .find(|vector| vector.name == "valid")
+                .unwrap()
+        }
+
+        fn tls_acceptor(vector: &IdentityVector) -> tokio_rustls::TlsAcceptor {
+            let cert_der = hex::decode(&vector.cert_der).unwrap();
+            let seed = hex::decode(&vector.tls_priv_seed).unwrap();
+            let mut pkcs8 = hex::decode("302e020100300506032b657004220420").unwrap();
+            pkcs8.extend_from_slice(&seed);
+            let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+            let mut config = ServerConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(cert_der)],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8)),
+                )
+                .unwrap();
+            config.alpn_protocols = vec![b"h2".to_vec()];
+            tokio_rustls::TlsAcceptor::from(Arc::new(config))
+        }
+
+        #[tokio::test]
+        async fn grpc_tls_roundtrip_rejects_malformed_response_and_times_out() {
+            let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+            let blob = EncodedBlob::new(b"wire payload", cfg).unwrap();
+            let valid_id = blob.id().clone();
+            let rows = vec![blob.row(0).unwrap()];
+            let shard = proto_conv::build_upload_shard(&rows, blob.rlc_coeffs());
+            let signing_key = SigningKey::from_slice(&[9; 32]).unwrap();
+            let mut promise = PaymentPromise {
+                chain_id: "wire-chain".into(),
+                height: NonZeroU64::new(42).unwrap(),
+                namespace: celestia_types::nmt::Namespace::const_v0([4; 10]),
+                upload_size: blob.upload_size() as u32,
+                blob_version: 0,
+                commitment: valid_id.commitment(),
+                creation_timestamp: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+                signer_pubkey: *signing_key.verifying_key(),
+                signature: None,
+            };
+            promise.sign(&signing_key).unwrap();
+            let expected_upload = UploadShardRequest {
+                promise: Some((&promise).into()),
+                shard: Some(shard.clone()),
+            };
+
+            let service = Arc::new(WireService {
+                upload: Mutex::new(None),
+                downloads: Mutex::new(Vec::new()),
+                valid_blob_id: valid_id.as_bytes().to_vec(),
+                shard,
+            });
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            let vector = identity();
+            let acceptor = tls_acceptor(&vector);
+            let server_service = FibreServer::from_arc(service.clone());
+            let server = tokio::spawn(async move {
+                let tls = acceptor.accept(server_io).await.unwrap();
+                hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(tls), TowerToHyperService::new(server_service))
+                    .await
+            });
+
+            let key_bytes: [u8; 32] = hex::decode(&vector.verifier_consensus_pub)
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let client = crate::transport::tls::grpc_client_at(
+                "https://wire.test:443".into(),
+                ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).unwrap(),
+                vector.verifier_chain_id,
+                Arc::new(DuplexConnector(Mutex::new(Some(client_io)))),
+                UnixTime::since_unix_epoch(Duration::from_secs(vector.verify_at)),
+            )
+            .unwrap();
+            let connection = GrpcValidatorConnection { client };
+
+            let upload = connection
+                .upload_shard(&promise, &rows, blob.rlc_coeffs())
+                .await
+                .unwrap();
+            assert_eq!(upload.validator_signature, vec![7; 64]);
+            assert_eq!(*service.upload.lock().unwrap(), Some(expected_upload));
+
+            let download = connection.download_shard(&valid_id).await.unwrap();
+            assert_eq!(download.rows[0].index, rows[0].index);
+            assert_eq!(download.rows[0].row.as_ref(), rows[0].row);
+            assert_eq!(download.rows[0].row_proof, rows[0].row_proof);
+            assert_eq!(download.rlcs, blob.rlc_coeffs());
+
+            let malformed_id = BlobID::new(0, MALFORMED_COMMITMENT);
+            assert!(matches!(
+                connection.download_shard(&malformed_id).await,
+                Err(FibreError::InvalidShard(ShardError::MissingShard))
+            ));
+
+            let timeout_id = BlobID::new(0, TIMEOUT_COMMITMENT);
+            let error = connection
+                .client
+                .download_shard(timeout_id.as_bytes().to_vec())
+                .timeout(Duration::from_millis(100))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                celestia_grpc::Error::TonicError(status)
+                    if matches!(status.code(), tonic::Code::DeadlineExceeded | tonic::Code::Cancelled)
+            ));
+
+            assert_eq!(
+                *service.downloads.lock().unwrap(),
+                vec![
+                    valid_id.as_bytes().to_vec(),
+                    malformed_id.as_bytes().to_vec(),
+                    timeout_id.as_bytes().to_vec(),
+                ]
+            );
+            server.abort();
+        }
+    }
+
     struct MockHostRegistry {
         hosts: std::collections::HashMap<[u8; 20], Host>,
         call_count: AtomicUsize,
