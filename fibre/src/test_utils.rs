@@ -136,7 +136,9 @@ impl ValidatorConnection for MockValidatorConnection {
         rlc_vector: &[rsema1d::GF128],
     ) -> Result<UploadResponse, FibreError> {
         if self.fail {
-            return Err(FibreError::Other("mock connection failure".into()));
+            return Err(FibreError::GrpcClient(
+                tonic::Status::unavailable("mock connection failure").into(),
+            ));
         }
 
         // Record what was uploaded and notify waiters.
@@ -162,7 +164,9 @@ impl ValidatorConnection for MockValidatorConnection {
 
     async fn download_shard(&self, blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
         if self.fail {
-            return Err(FibreError::Other("mock connection failure".into()));
+            return Err(FibreError::GrpcClient(
+                tonic::Status::unavailable("mock connection failure").into(),
+            ));
         }
 
         self.stored
@@ -207,7 +211,7 @@ impl ValidatorConnector for MockConnector {
             .get(&validator.address)
             .cloned()
             .map(|c| c as Arc<dyn ValidatorConnection>)
-            .ok_or_else(|| FibreError::HostNotFound(validator.address_hex()))
+            .ok_or(FibreError::HostNotFound(validator.address))
     }
 }
 
@@ -225,7 +229,7 @@ impl ValidatorConnector for FailingConnector {
         validator: &ValidatorInfo,
     ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
         if self.fail_addresses.contains(&validator.address) {
-            return Err(FibreError::HostNotFound(validator.address_hex()));
+            return Err(FibreError::HostNotFound(validator.address));
         }
         self.inner.connect(validator).await
     }

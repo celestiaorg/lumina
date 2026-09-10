@@ -15,7 +15,7 @@ use crate::blob::{Blob, BlobID, BlobReconstruction, ShardVerifier, VerifiedRows}
 use crate::client::FibreClient;
 #[cfg(test)]
 use crate::config::BlobConfig;
-use crate::error::FibreError;
+use crate::error::{FibreError, ShardError};
 use crate::validator::ValidatorSet;
 
 /// Options for configuring blob download behavior.
@@ -39,9 +39,12 @@ impl FibreClient {
     /// # Errors
     ///
     /// - [`FibreError::ClientClosed`] if the client has been closed.
+    /// - [`FibreError::Cancelled`] if the operation is cancelled while in progress.
     /// - [`FibreError::NotFound`] if no validator returned any rows.
     /// - [`FibreError::NotEnoughShards`] if too few unique rows were collected.
-    /// - Any error from reconstruction (commitment mismatch, encoding, etc.).
+    /// - [`FibreError::UnsupportedBlobVersion`] if the blob ID version is unsupported.
+    /// - [`FibreError::Encoding`] or [`FibreError::InvalidBlobHeader`] if reconstruction fails.
+    /// - Any error returned while retrieving the validator set.
     pub async fn download(&self, id: &BlobID, opts: DownloadOptions) -> Result<Blob, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
@@ -136,8 +139,7 @@ impl FibreClient {
 
             tokio::select! {
                 result = self.download_semaphore.clone().acquire_owned(), if need_more => {
-                    let global_permit = result
-                        .map_err(|_| FibreError::Other("global semaphore closed".into()))?;
+                    let global_permit = result.expect("client semaphores are never closed");
                     let val_idx = cur_idx;
                     cur_idx += 1;
                     let (rows, info) = selected[val_idx];
@@ -159,7 +161,7 @@ impl FibreClient {
                                 let conn = connector.connect(&validator).await?;
                                 let shard = conn.download_shard(&blob_id).await?;
                                 if shard.rows.is_empty() {
-                                    return Err(FibreError::EmptyShardResponse);
+                                    return Err(ShardError::Empty.into());
                                 }
                                 // Verify here so the heavy crypto runs off the
                                 // select! loop and per-task instead of serially.
@@ -278,7 +280,7 @@ mod tests {
             } else if validator.address == self.blocked_address {
                 None
             } else {
-                return Err(FibreError::HostNotFound(validator.address_hex()));
+                return Err(FibreError::HostNotFound(validator.address));
             };
 
             Ok(Arc::new(CoordinatedConnection {
@@ -297,7 +299,9 @@ mod tests {
             _rows: &[rsema1d::RowInclusionProof],
             _rlc_coeffs: &[rsema1d::GF128],
         ) -> Result<UploadResponse, FibreError> {
-            Err(FibreError::Other("upload not supported".into()))
+            Err(FibreError::GrpcClient(
+                tonic::Status::unimplemented("upload not supported").into(),
+            ))
         }
 
         async fn download_shard(&self, _blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
@@ -617,7 +621,7 @@ mod tests {
         let cfg = test_blob_config();
         let data: Vec<u8> = (0u8..=149).collect();
 
-        // 3 validators; validator 0 returns NotFound (no proofs stored)
+        // 3 validators; validator 0 returns an empty shard
         let validators = [
             make_validator(100, 1),
             make_validator(100, 2),
@@ -630,8 +634,9 @@ mod tests {
         let blob_id = blob.id().clone();
         let total_rows = cfg.total_rows();
 
-        // Validator 0 has an empty store (returns NotFound)
+        // Validator 0 has an empty shard response
         let empty_conn = Arc::new(MockValidatorConnection::new(validators[0].0.clone()));
+        empty_conn.store_proofs(blob_id.commitment(), Vec::new(), Vec::new());
 
         // Validators 1 and 2 have proofs
         let good_conns: Vec<Arc<MockValidatorConnection>> = validators[1..]

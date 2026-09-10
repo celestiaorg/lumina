@@ -33,7 +33,10 @@ pub use config::{
 };
 pub use domain::blob::{Blob, BlobID, Commitment, EncodedBlob};
 pub use domain::payment_promise::{PaymentPromise, SignedPaymentPromise};
-pub use error::{FibreError, Result};
+pub use error::{
+    BlobHeaderError, BlobIdError, FibreClientBuilderError, FibreError, PaymentPromiseError, Result,
+    ShardError, ValidatorSetError,
+};
 pub use transport::grpc_validator_client::GrpcValidatorConnector;
 pub use transport::host_registry::{GrpcHostRegistry, Host, HostRegistry};
 #[cfg(target_arch = "wasm32")]

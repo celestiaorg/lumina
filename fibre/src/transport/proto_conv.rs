@@ -15,7 +15,9 @@ use tendermint_proto::google::protobuf::Timestamp;
 #[cfg(test)]
 use tendermint_proto::v0_38::crypto::public_key::Sum as CryptoKeySum;
 
-use crate::error::FibreError;
+#[cfg(test)]
+use crate::error::ValidatorSetError;
+use crate::error::{FibreError, ShardError};
 use crate::payment_promise::PaymentPromise;
 #[cfg(test)]
 use crate::validator::{ValidatorInfo, ValidatorSet};
@@ -71,11 +73,9 @@ pub(crate) fn blob_row_to_row_proof(
         .into_iter()
         .map(|h| {
             let len = h.len();
-            h.as_ref().try_into().map_err(|_| {
-                FibreError::InvalidData(
-                    format!("proof hash has invalid length {len}, expected 32",),
-                )
-            })
+            h.as_ref()
+                .try_into()
+                .map_err(|_| ShardError::ProofHashLength(len).into())
         })
         .collect::<Result<Vec<[u8; 32]>, FibreError>>()?;
 
@@ -113,15 +113,10 @@ pub(crate) fn build_upload_shard(
 pub fn parse_download_response(
     resp: proto::DownloadShardResponse,
 ) -> Result<DownloadResponse, FibreError> {
-    let shard = resp
-        .shard
-        .ok_or_else(|| FibreError::InvalidData("download response missing shard".into()))?;
+    let shard = resp.shard.ok_or(ShardError::MissingShard)?;
 
     if shard.rlcs.is_empty() || !shard.rlcs.len().is_multiple_of(16) {
-        return Err(FibreError::InvalidData(format!(
-            "rlc vector has invalid length {}, expected a non-zero multiple of 16",
-            shard.rlcs.len()
-        )));
+        return Err(ShardError::RlcVectorLength(shard.rlcs.len()).into());
     }
     let rlcs = shard
         .rlcs
@@ -167,12 +162,10 @@ fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
 }
 
 #[cfg(test)]
-pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> Result<SystemTime, FibreError> {
+pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> SystemTime {
     if t.seconds >= 0 {
         let d = Duration::new(t.seconds as u64, t.nanos as u32);
-        UNIX_EPOCH
-            .checked_add(d)
-            .ok_or_else(|| FibreError::Other("timestamp overflow".into()))
+        UNIX_EPOCH.checked_add(d).expect("timestamp overflow")
     } else {
         // Reverse the protobuf convention: if nanos > 0 the actual
         // duration is (|seconds| - 1) seconds + (1e9 - nanos) subsec nanos.
@@ -182,9 +175,7 @@ pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> Result<SystemTime, Fibr
             ((-t.seconds) as u64, 0u32)
         };
         let d = Duration::new(secs, nanos);
-        UNIX_EPOCH
-            .checked_sub(d)
-            .ok_or_else(|| FibreError::Other("timestamp underflow".into()))
+        UNIX_EPOCH.checked_sub(d).expect("timestamp underflow")
     }
 }
 
@@ -253,8 +244,10 @@ mod tests {
             data: vec![0u8; 64].into(),
             proof: vec![vec![0u8; 31].into()], // wrong length
         };
-        let result = blob_row_to_row_proof(row);
-        assert!(result.is_err());
+        assert!(matches!(
+            blob_row_to_row_proof(row),
+            Err(FibreError::InvalidShard(ShardError::ProofHashLength(31)))
+        ));
     }
 
     #[test]
@@ -295,19 +288,28 @@ mod tests {
     #[test]
     fn parse_download_response_missing_shard() {
         let resp = proto::DownloadShardResponse { shard: None };
-        assert!(parse_download_response(resp).is_err());
+        assert!(matches!(
+            parse_download_response(resp),
+            Err(FibreError::InvalidShard(ShardError::MissingShard))
+        ));
     }
 
     #[test]
     fn parse_download_response_invalid_rlc_length() {
         for rlcs in [vec![], vec![1u8; 15]] {
+            let expected_len = rlcs.len();
             let resp = proto::DownloadShardResponse {
                 shard: Some(proto::BlobShard {
                     rows: vec![],
                     rlcs: rlcs.into(),
                 }),
             };
-            assert!(parse_download_response(resp).is_err());
+            assert!(matches!(
+                parse_download_response(resp),
+                Err(FibreError::InvalidShard(ShardError::RlcVectorLength(
+                    len
+                ))) if len == expected_len
+            ));
         }
     }
 
@@ -315,7 +317,7 @@ mod tests {
     fn timestamp_roundtrip() {
         let now = SystemTime::now();
         let ts = system_time_to_timestamp(now);
-        let back = timestamp_to_system_time(&ts).unwrap();
+        let back = timestamp_to_system_time(&ts);
 
         // Compare with nanosecond tolerance
         let diff = now
@@ -336,7 +338,7 @@ mod tests {
         assert_eq!(ts.seconds, -11);
         assert_eq!(ts.nanos, 500_000_000);
 
-        let back = timestamp_to_system_time(&ts).unwrap();
+        let back = timestamp_to_system_time(&ts);
         let diff = t
             .duration_since(back)
             .or_else(|_| back.duration_since(t))
@@ -351,7 +353,7 @@ mod tests {
         assert_eq!(ts.seconds, -5);
         assert_eq!(ts.nanos, 0);
 
-        let back = timestamp_to_system_time(&ts).unwrap();
+        let back = timestamp_to_system_time(&ts);
         let diff = t
             .duration_since(back)
             .or_else(|_| back.duration_since(t))
@@ -474,6 +476,65 @@ mod tests {
             voting_power: 100,
             proposer_priority: 0,
         };
-        assert!(ValidatorInfo::try_from(&proto_val).is_err());
+        assert!(matches!(
+            ValidatorInfo::try_from(&proto_val),
+            Err(FibreError::InvalidValidatorSet(
+                ValidatorSetError::MissingPublicKey
+            ))
+        ));
+    }
+
+    #[test]
+    fn validator_from_proto_rejects_unsupported_key_type() {
+        let proto_val = tendermint_proto::v0_38::types::Validator {
+            address: vec![],
+            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
+                sum: Some(CryptoKeySum::Secp256k1(vec![0; 33])),
+            }),
+            voting_power: 100,
+            proposer_priority: 0,
+        };
+        assert!(matches!(
+            ValidatorInfo::try_from(&proto_val),
+            Err(FibreError::InvalidValidatorSet(
+                ValidatorSetError::UnsupportedPublicKeyType
+            ))
+        ));
+    }
+
+    #[test]
+    fn validator_from_proto_rejects_wrong_key_length() {
+        let proto_val = tendermint_proto::v0_38::types::Validator {
+            address: vec![],
+            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
+                sum: Some(CryptoKeySum::Ed25519(vec![0; 31])),
+            }),
+            voting_power: 100,
+            proposer_priority: 0,
+        };
+        assert!(matches!(
+            ValidatorInfo::try_from(&proto_val),
+            Err(FibreError::InvalidValidatorSet(
+                ValidatorSetError::PublicKeyLength(31)
+            ))
+        ));
+    }
+
+    #[test]
+    fn validator_from_proto_rejects_invalid_key() {
+        let proto_val = tendermint_proto::v0_38::types::Validator {
+            address: vec![],
+            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
+                sum: Some(CryptoKeySum::Ed25519(vec![2; 32])),
+            }),
+            voting_power: 100,
+            proposer_priority: 0,
+        };
+        assert!(matches!(
+            ValidatorInfo::try_from(&proto_val),
+            Err(FibreError::InvalidValidatorSet(
+                ValidatorSetError::InvalidPublicKey(_)
+            ))
+        ));
     }
 }
