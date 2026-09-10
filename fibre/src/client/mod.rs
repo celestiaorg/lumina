@@ -51,8 +51,10 @@ impl FibreClient {
         self.cancel_token.is_cancelled()
     }
 
-    /// Mark the client as closed so that subsequent and in-flight operations
-    /// are cancelled with [`FibreError::ClientClosed`].
+    /// Mark the client as closed.
+    ///
+    /// Subsequent operations fail with [`FibreError::ClientClosed`], while
+    /// in-flight operations fail with [`FibreError::Cancelled`].
     pub fn close(&self) {
         self.cancel_token.cancel();
     }
