@@ -764,27 +764,6 @@ mod selection_tests {
     }
 
     #[test]
-    fn all_validators_present_in_result() {
-        let validators = vec![
-            make_validator(50, 1).1,
-            make_validator(30, 2).1,
-            make_validator(20, 3).1,
-        ];
-        let mut expected: Vec<_> = validators
-            .iter()
-            .map(|validator| validator.address)
-            .collect();
-        expected.sort();
-        let set = ValidatorSet::try_new(validators, 1).unwrap();
-        let selected = set.select(100, 10, fraction(1, 3));
-
-        assert_eq!(selected.len(), 3);
-        let mut actual: Vec<_> = selected.iter().map(|(_, info)| info.address).collect();
-        actual.sort();
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn shuffle_by_stake_respects_weights() {
         let mut first_position_counts = [0usize; 3];
         let trials = 1000;

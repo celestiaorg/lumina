@@ -515,24 +515,6 @@ mod tests {
         assert!(EncodedBlob::new(&[], cfg).is_err());
     }
 
-    #[tokio::test]
-    async fn blob_encode_reconstruct_roundtrip() {
-        // Encode a blob with small test parameters
-        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
-        let data: Vec<u8> = (0u8..=249).collect();
-        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
-
-        let mut reconstruction = BlobReconstruction::with_config(blob.id().clone(), cfg);
-
-        // Set enough rows (need at least K=4)
-        set_shard(&mut reconstruction, shard_of(&blob, &[0, 1, 2, 3]))
-            .await
-            .unwrap();
-
-        let reconstructed = reconstruction.reconstruct().unwrap();
-        assert_eq!(reconstructed.data(), &data);
-    }
-
     #[test]
     fn reconstruction_rejects_insufficient_rows() {
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);

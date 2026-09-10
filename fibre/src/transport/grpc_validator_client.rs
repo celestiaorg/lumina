@@ -264,34 +264,20 @@ mod tests {
     }
 
     #[test]
-    fn normalize_host_strips_dns_prefix() {
-        assert_eq!(
-            normalize_host("dns:///138.68.236.99:9091"),
-            "https://138.68.236.99:9091"
-        );
-        assert_eq!(
-            normalize_host("dns://138.68.236.99:9091"),
-            "https://138.68.236.99:9091"
-        );
-    }
+    fn normalize_host_cases() {
+        let cases = [
+            ("dns:///138.68.236.99:9091", "https://138.68.236.99:9091"),
+            ("dns://138.68.236.99:9091", "https://138.68.236.99:9091"),
+            ("http://127.0.0.1:9090", "https://127.0.0.1:9090"),
+            (
+                "https://validator.example.com:9090",
+                "https://validator.example.com:9090",
+            ),
+            ("138.68.236.99:9091", "https://138.68.236.99:9091"),
+        ];
 
-    #[test]
-    fn normalize_host_uses_https() {
-        assert_eq!(
-            normalize_host("http://127.0.0.1:9090"),
-            "https://127.0.0.1:9090"
-        );
-        assert_eq!(
-            normalize_host("https://validator.example.com:9090"),
-            "https://validator.example.com:9090"
-        );
-    }
-
-    #[test]
-    fn normalize_host_adds_https_to_bare() {
-        assert_eq!(
-            normalize_host("138.68.236.99:9091"),
-            "https://138.68.236.99:9091"
-        );
+        for (input, expected) in cases {
+            assert_eq!(normalize_host(input), expected);
+        }
     }
 }
