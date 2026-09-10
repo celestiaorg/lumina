@@ -60,6 +60,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+celestia-proto = { workspace = true, features = ["tonic-server"] }
+hyper = { version = "1.8", features = ["server"] }
+hyper-util = { workspace = true, features = ["service"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
