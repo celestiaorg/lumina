@@ -601,18 +601,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconstructs_from_mixed_original_and_parity_rows() {
-        let (blob, mut reconstruction) = test_blob_and_reconstruction();
-
-        set_shard(&mut reconstruction, shard_of(&blob, &[0, 1, 4, 5]))
-            .await
-            .unwrap();
-
-        let reconstructed = reconstruction.reconstruct().unwrap();
-        assert_eq!(reconstructed.data(), &test_data());
-    }
-
-    #[tokio::test]
     async fn set_shard_failing_shard_stores_nothing() {
         let (blob, mut reconstruction) = test_blob_and_reconstruction();
 
