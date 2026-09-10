@@ -244,14 +244,14 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
-    use crate::blob::{BlobID, BlobReconstruction, EncodedBlob};
-    use crate::config::BlobConfig;
+    use crate::blob::{BlobID, BlobReconstruction};
     use crate::error::FibreError;
     use crate::payment_promise::PaymentPromise;
     use crate::test_utils::{
-        MockConnector, MockValidatorConnection, build_test_client, make_validator, test_blob_config,
+        MockConnector, MockValidatorConnection, build_test_client, connector_with_handles,
+        distribute_proofs, make_connector, test_blob, test_blob_config, validator_set,
     };
-    use crate::validator::{ValidatorInfo, ValidatorSet};
+    use crate::validator::ValidatorInfo;
     use crate::validator_client::{
         DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
     };
@@ -313,52 +313,14 @@ mod tests {
         }
     }
 
-    /// Encode a blob, extract all row proofs, and store them on each mock
-    /// validator connection. Returns the BlobID.
-    fn prepare_blob_and_distribute(
-        data: &[u8],
-        connections: &[Arc<MockValidatorConnection>],
-        cfg: &BlobConfig,
-    ) -> BlobID {
-        let blob = EncodedBlob::new(data, cfg.clone()).unwrap();
-        let blob_id = blob.id().clone();
-        let total_rows = cfg.total_rows();
-
-        for conn in connections {
-            let mut proofs = Vec::new();
-            for i in 0..total_rows {
-                proofs.push(blob.row(i).unwrap());
-            }
-            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
-        }
-
-        blob_id
-    }
-
     #[tokio::test]
     async fn download_reconstructs_blob() {
-        let cfg = test_blob_config();
-        let data: Vec<u8> = (0u8..=199).collect();
-
-        let validators = [
-            make_validator(100, 1),
-            make_validator(100, 2),
-            make_validator(100, 3),
-        ];
-        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
-
-        let conns: Vec<Arc<MockValidatorConnection>> = validators
-            .iter()
-            .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
-            .collect();
-
-        let blob_id = prepare_blob_and_distribute(&data, &conns, &cfg);
-
-        let mut connector = MockConnector::new();
-        for (i, (_, v)) in validators.iter().enumerate() {
-            connector.add(v.address, conns[i].clone());
-        }
+        let (blob, data) = test_blob(200);
+        let cfg = blob.config().clone();
+        let blob_id = blob.id().clone();
+        let (validators, val_set) = validator_set(&[100, 100, 100], 1);
+        let (connector, connections) = connector_with_handles(&validators);
+        distribute_proofs(&blob, &connections);
 
         let client = build_test_client(val_set, connector, "test-chain");
         let blob = client.download_with_config(&blob_id, cfg).await.unwrap();
@@ -368,19 +330,10 @@ mod tests {
 
     #[tokio::test]
     async fn download_handles_validator_failure() {
-        let cfg = test_blob_config();
-        let data: Vec<u8> = (0u8..=199).collect();
-
-        // 5 validators; validator 0 and 1 will fail
-        let validators = [
-            make_validator(100, 1),
-            make_validator(100, 2),
-            make_validator(100, 3),
-            make_validator(100, 4),
-            make_validator(100, 5),
-        ];
-        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
+        let (blob, data) = test_blob(200);
+        let cfg = blob.config().clone();
+        let blob_id = blob.id().clone();
+        let (validators, val_set) = validator_set(&[100, 100, 100, 100, 100], 1);
 
         let failing_conn_0 = Arc::new(MockValidatorConnection::new_failing(
             validators[0].0.clone(),
@@ -388,29 +341,10 @@ mod tests {
         let failing_conn_1 = Arc::new(MockValidatorConnection::new_failing(
             validators[1].0.clone(),
         ));
-        let good_conns: Vec<Arc<MockValidatorConnection>> = validators[2..]
-            .iter()
-            .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
-            .collect();
-
-        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
-        let blob_id = blob.id().clone();
-        let total_rows = cfg.total_rows();
-
-        for conn in &good_conns {
-            let mut proofs = Vec::new();
-            for i in 0..total_rows {
-                proofs.push(blob.row(i).unwrap());
-            }
-            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
-        }
-
-        let mut connector = MockConnector::new();
-        connector.add(val_infos[0].address, failing_conn_0);
-        connector.add(val_infos[1].address, failing_conn_1);
-        for (i, conn) in good_conns.iter().enumerate() {
-            connector.add(val_infos[i + 2].address, conn.clone());
-        }
+        let (mut connector, good_connections) = connector_with_handles(&validators[2..]);
+        distribute_proofs(&blob, &good_connections);
+        connector.add(validators[0].1.address, failing_conn_0);
+        connector.add(validators[1].1.address, failing_conn_1);
 
         let client = build_test_client(val_set, connector, "test-chain");
         let result = client.download_with_config(&blob_id, cfg).await.unwrap();
@@ -420,40 +354,29 @@ mod tests {
 
     #[tokio::test]
     async fn download_handles_tampered_shard() {
-        let cfg = test_blob_config();
-        let data: Vec<u8> = (0u8..=199).collect();
-
-        let validators = [make_validator(100, 1), make_validator(100, 2)];
-        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
-
-        let conns: Vec<Arc<MockValidatorConnection>> = validators
-            .iter()
-            .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
-            .collect();
-
-        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
+        let (blob, data) = test_blob(200);
+        let cfg = blob.config().clone();
         let blob_id = blob.id().clone();
+        let (validators, val_set) = validator_set(&[100, 100], 1);
+        let val_infos = val_set.validators().to_vec();
+        let (connector, connections) = connector_with_handles(&validators);
         let total_rows = cfg.total_rows();
 
-        for (i, conn) in conns.iter().enumerate() {
-            let mut proofs = Vec::new();
-            for row in 0..total_rows {
+        let corrupted_proofs = (0..total_rows)
+            .map(|row| {
                 let mut proof = blob.row(row).unwrap();
-                if i == 0 {
-                    let mut corrupted = proof.row.to_vec();
-                    corrupted[0] ^= 1;
-                    proof.row = corrupted.into();
-                }
-                proofs.push(proof);
-            }
-            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
-        }
-
-        let mut connector = MockConnector::new();
-        for (i, (_, v)) in validators.iter().enumerate() {
-            connector.add(v.address, conns[i].clone());
-        }
+                let mut corrupted = proof.row.to_vec();
+                corrupted[0] ^= 1;
+                proof.row = corrupted.into();
+                proof
+            })
+            .collect();
+        connections[0].store_proofs(
+            blob_id.commitment(),
+            corrupted_proofs,
+            blob.rlc_coeffs().to_vec(),
+        );
+        distribute_proofs(&blob, &connections[1..]);
 
         let client = build_test_client(val_set, connector, "test-chain");
         let mut reconstruction = BlobReconstruction::with_config(blob_id, cfg.clone());
@@ -478,13 +401,11 @@ mod tests {
 
     #[tokio::test]
     async fn download_cancels_inflight_tasks_after_reaching_threshold() {
-        let cfg = test_blob_config();
-        let data: Vec<u8> = (0u8..=199).collect();
-        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
+        let (blob, _) = test_blob(200);
+        let cfg = blob.config().clone();
         let blob_id = blob.id().clone();
-        let validators = [make_validator(100, 1), make_validator(100, 2)];
-        let val_infos: Vec<_> = validators.iter().map(|(_, info)| info.clone()).collect();
-        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
+        let (_, val_set) = validator_set(&[100, 100], 1);
+        let val_infos = val_set.validators().to_vec();
         let response = DownloadResponse {
             rows: (0..cfg.total_rows())
                 .map(|index| {
@@ -526,22 +447,16 @@ mod tests {
 
     #[tokio::test]
     async fn download_fails_when_not_enough_shards() {
-        let cfg = test_blob_config();
-        let data: Vec<u8> = (0u8..=99).collect();
-
-        // Single validator that fails
-        let validators = [make_validator(100, 1)];
-        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
+        let (blob, _) = test_blob(100);
+        let cfg = blob.config().clone();
+        let blob_id = blob.id().clone();
+        let (validators, val_set) = validator_set(&[100], 1);
 
         let failing_conn = Arc::new(MockValidatorConnection::new_failing(
             validators[0].0.clone(),
         ));
         let mut connector = MockConnector::new();
-        connector.add(val_infos[0].address, failing_conn);
-
-        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
-        let blob_id = blob.id().clone();
+        connector.add(validators[0].1.address, failing_conn);
 
         let client = build_test_client(val_set, connector, "test-chain");
         let result = client.download_with_config(&blob_id, cfg).await;
@@ -555,12 +470,8 @@ mod tests {
     #[tokio::test]
     async fn download_fails_when_client_closed() {
         let cfg = test_blob_config();
-        let (key, val) = make_validator(100, 1);
-        let val_set = ValidatorSet::try_new(vec![val.clone()], 1).unwrap();
-
-        let conn = Arc::new(MockValidatorConnection::new(key));
-        let mut connector = MockConnector::new();
-        connector.add(val.address, conn);
+        let (validators, val_set) = validator_set(&[100], 1);
+        let connector = make_connector(&validators);
 
         let client = build_test_client(val_set, connector, "test-chain");
         client.close();
@@ -576,44 +487,15 @@ mod tests {
 
     #[tokio::test]
     async fn download_empty_response_triggers_replacement() {
-        let cfg = test_blob_config();
-        let data: Vec<u8> = (0u8..=149).collect();
-
-        // 3 validators; validator 0 returns an empty shard
-        let validators = [
-            make_validator(100, 1),
-            make_validator(100, 2),
-            make_validator(100, 3),
-        ];
-        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet::try_new(val_infos.clone(), 1).unwrap();
-
-        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
+        let (blob, data) = test_blob(150);
+        let cfg = blob.config().clone();
         let blob_id = blob.id().clone();
-        let total_rows = cfg.total_rows();
-
-        // Validator 0 has an empty shard response
-        let empty_conn = Arc::new(MockValidatorConnection::new(validators[0].0.clone()));
-        empty_conn.store_proofs(blob_id.commitment(), Vec::new(), Vec::new());
-
-        // Validators 1 and 2 have proofs
-        let good_conns: Vec<Arc<MockValidatorConnection>> = validators[1..]
-            .iter()
-            .map(|(k, _)| {
-                let conn = Arc::new(MockValidatorConnection::new(k.clone()));
-                let mut proofs = Vec::new();
-                for i in 0..total_rows {
-                    proofs.push(blob.row(i).unwrap());
-                }
-                conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
-                conn
-            })
-            .collect();
-
-        let mut connector = MockConnector::new();
-        connector.add(val_infos[0].address, empty_conn);
-        connector.add(val_infos[1].address, good_conns[0].clone());
-        connector.add(val_infos[2].address, good_conns[1].clone());
+        let (validators, val_set) = validator_set(&[100, 100, 100], 1);
+        let (mut connector, good_connections) = connector_with_handles(&validators[1..]);
+        distribute_proofs(&blob, &good_connections);
+        let empty_connection = Arc::new(MockValidatorConnection::new(validators[0].0.clone()));
+        empty_connection.store_proofs(blob_id.commitment(), Vec::new(), Vec::new());
+        connector.add(validators[0].1.address, empty_connection);
 
         let client = build_test_client(val_set, connector, "test-chain");
         let downloaded = client.download_with_config(&blob_id, cfg).await.unwrap();
