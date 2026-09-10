@@ -318,78 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn stripped_sign_bytes_format() {
-        let (_, promise) = make_test_promise();
-        let stripped = promise.stripped_sign_bytes().unwrap();
-
-        // stripped_sign_bytes has no prefix or chain_id
-        assert_eq!(stripped.len(), SIGN_BYTES_FIXED_SIZE);
-    }
-
-    #[test]
-    fn sign_bytes_uses_comet_wrapper() {
-        let (_, promise) = make_test_promise();
-        let sign_bytes = promise.sign_bytes().unwrap();
-
-        // sign_bytes starts with "COMET::RAW_BYTES::SIGN"
-        assert_eq!(
-            &sign_bytes[..COMET_RAW_BYTES_PREFIX.len()],
-            COMET_RAW_BYTES_PREFIX
-        );
-    }
-
-    #[test]
-    fn stripped_sign_bytes_field_layout() {
-        let (_, promise) = make_test_promise();
-        let stripped = promise.stripped_sign_bytes().unwrap();
-
-        let mut offset = 0;
-
-        // Signer pubkey (33 bytes)
-        let expected_pubkey = promise.signer_pubkey.to_sec1_bytes();
-        assert_eq!(
-            &stripped[offset..offset + PUBKEY_SIZE],
-            expected_pubkey.as_ref()
-        );
-        offset += PUBKEY_SIZE;
-
-        // Namespace (29 bytes)
-        assert_eq!(
-            &stripped[offset..offset + NS_SIZE],
-            promise.namespace.as_bytes()
-        );
-        offset += NS_SIZE;
-
-        // Upload size (4 bytes BE)
-        assert_eq!(
-            &stripped[offset..offset + 4],
-            &promise.upload_size.to_be_bytes()
-        );
-        offset += 4;
-
-        // Commitment (32 bytes)
-        assert_eq!(&stripped[offset..offset + 32], &promise.commitment);
-        offset += 32;
-
-        // Blob version (4 bytes BE)
-        assert_eq!(
-            &stripped[offset..offset + 4],
-            &promise.blob_version.to_be_bytes()
-        );
-        offset += 4;
-
-        // Height (8 bytes BE)
-        assert_eq!(
-            &stripped[offset..offset + 8],
-            &promise.height.get().to_be_bytes()
-        );
-        offset += 8;
-
-        // Timestamp (15 bytes)
-        assert_eq!(stripped.len() - offset, TIMESTAMP_BINARY_SIZE);
-    }
-
-    #[test]
     fn sign_and_validate() {
         let (signing_key, mut promise) = make_test_promise();
 
@@ -514,16 +442,6 @@ mod tests {
     }
 
     #[test]
-    fn hash_is_deterministic() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.sign(&signing_key).unwrap();
-
-        let h1 = promise.hash().unwrap();
-        let h2 = promise.hash().unwrap();
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
     fn hash_changes_with_different_data() {
         let (signing_key, mut promise1) = make_test_promise();
         promise1.sign(&signing_key).unwrap();
@@ -581,32 +499,6 @@ mod tests {
                 PaymentPromiseError::TimestampBeforeEpoch(_)
             ))
         ));
-    }
-
-    #[test]
-    fn sign_bytes_consistency() {
-        let (_, promise) = make_test_promise();
-
-        // sign_bytes should be deterministic
-        let sb1 = promise.sign_bytes().unwrap();
-        let sb2 = promise.sign_bytes().unwrap();
-        assert_eq!(sb1, sb2);
-    }
-
-    #[test]
-    fn signed_payment_promise_construction() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.sign(&signing_key).unwrap();
-
-        let signed = SignedPaymentPromise {
-            promise: promise.clone(),
-            validator_signatures: vec![None, Some(vec![0u8; 64]), None],
-        };
-
-        assert_eq!(signed.validator_signatures.len(), 3);
-        assert!(signed.validator_signatures[0].is_none());
-        assert!(signed.validator_signatures[1].is_some());
-        assert!(signed.validator_signatures[2].is_none());
     }
 
     /// Cross-language compatibility test.

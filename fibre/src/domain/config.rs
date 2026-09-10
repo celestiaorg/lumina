@@ -322,107 +322,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_total_rows() {
-        assert_eq!(DEFAULT_PROTOCOL_PARAMS.total_rows(), 16384);
+    fn default_configuration_values() {
+        let blob_config = BlobConfig::v0();
+        let client_config = FibreClientConfig::new("test-chain").unwrap();
+        let cases = [
+            ("total rows", DEFAULT_PROTOCOL_PARAMS.total_rows(), 16384),
+            ("parity rows", DEFAULT_PROTOCOL_PARAMS.parity_rows(), 12288),
+            (
+                "maximum rows per validator",
+                DEFAULT_PROTOCOL_PARAMS.max_rows_per_validator(),
+                4096,
+            ),
+            (
+                "minimum rows per validator",
+                DEFAULT_PROTOCOL_PARAMS.min_rows_per_validator(),
+                148,
+            ),
+            (
+                "validators for reconstruction",
+                DEFAULT_PROTOCOL_PARAMS.validators_for_reconstruction(),
+                34,
+            ),
+            ("blob version", blob_config.blob_version as usize, 0),
+            ("original rows", blob_config.original_rows, 4096),
+            ("blob parity rows", blob_config.parity_rows, 12288),
+            ("blob total rows", blob_config.total_rows(), 16384),
+            (
+                "maximum data size",
+                blob_config.max_data_size,
+                (1 << 27) - BLOB_HEADER_LEN,
+            ),
+            (
+                "client minimum rows per validator",
+                client_config.min_rows_per_validator,
+                148,
+            ),
+            ("upload concurrency", client_config.upload_concurrency, 100),
+            (
+                "download concurrency",
+                client_config.download_concurrency,
+                100,
+            ),
+        ];
+
+        for (name, actual, expected) in cases {
+            assert_eq!(actual, expected, "{name}");
+        }
+        assert_eq!(client_config.chain_id(), "test-chain");
+        assert_eq!(
+            client_config.safety_threshold,
+            crate::test_utils::fraction(2, 3)
+        );
+        assert_eq!(
+            client_config.liveness_threshold,
+            crate::test_utils::fraction(1, 3)
+        );
     }
 
     #[test]
-    fn default_parity_rows() {
-        assert_eq!(DEFAULT_PROTOCOL_PARAMS.parity_rows(), 12288);
-    }
+    fn row_size_cases() {
+        let cases = [
+            ("exact fit", 8, 64, 64 * 8, 64),
+            ("rounding", 8, 64, 100 + BLOB_HEADER_LEN, 64),
+            ("small data", 8, 64, 1 + BLOB_HEADER_LEN, 64),
+            ("large data", 8, 64, 10000 + BLOB_HEADER_LEN, 1280),
+            ("different minimum", 4, 128, 1000 + BLOB_HEADER_LEN, 256),
+            ("zero", 8, 64, 0, 0),
+        ];
 
-    #[test]
-    fn default_max_rows_per_validator() {
-        assert_eq!(DEFAULT_PROTOCOL_PARAMS.max_rows_per_validator(), 4096);
-    }
-
-    #[test]
-    fn default_min_rows_per_validator() {
-        // unique_decode_samples = ceil(100 / (1 - log2(1.25))) = ceil(147.47...) = 148
-        // reconstruction_samples = ceil(4096 / 34) = 121
-        // max(148, 121) = 148
-        assert_eq!(DEFAULT_PROTOCOL_PARAMS.min_rows_per_validator(), 148);
-    }
-
-    #[test]
-    fn default_validators_for_reconstruction() {
-        // ceil(100 * 1 / 3) = ceil(33.33) = 34
-        assert_eq!(DEFAULT_PROTOCOL_PARAMS.validators_for_reconstruction(), 34);
-    }
-
-    #[test]
-    fn row_size_exact_fit() {
-        let p = ProtocolParams {
-            rows: 8,
-            min_row_size: 64,
-            ..DEFAULT_PROTOCOL_PARAMS
-        };
-        // 64 * 8 = 512 bytes, exactly 8 rows of 64
-        assert_eq!(p.row_size(0, 64 * 8), 64);
-    }
-
-    #[test]
-    fn row_size_needs_rounding() {
-        let p = ProtocolParams {
-            rows: 8,
-            min_row_size: 64,
-            ..DEFAULT_PROTOCOL_PARAMS
-        };
-        // ceil(105/8) = 14, rounded up to 64
-        assert_eq!(p.row_size(0, 100 + BLOB_HEADER_LEN), 64);
-    }
-
-    #[test]
-    fn row_size_small_data() {
-        let p = ProtocolParams {
-            rows: 8,
-            min_row_size: 64,
-            ..DEFAULT_PROTOCOL_PARAMS
-        };
-        // ceil(6/8) = 1, rounded up to 64
-        assert_eq!(p.row_size(0, 1 + BLOB_HEADER_LEN), 64);
-    }
-
-    #[test]
-    fn row_size_large_data() {
-        let p = ProtocolParams {
-            rows: 8,
-            min_row_size: 64,
-            ..DEFAULT_PROTOCOL_PARAMS
-        };
-        // ceil(10005/8) = 1251, rounded up to 1280 (20*64)
-        assert_eq!(p.row_size(0, 10000 + BLOB_HEADER_LEN), 1280);
-    }
-
-    #[test]
-    fn row_size_different_min() {
-        let p = ProtocolParams {
-            rows: 4,
-            min_row_size: 128,
-            ..DEFAULT_PROTOCOL_PARAMS
-        };
-        // ceil(1005/4) = 252, rounded up to 256 (2*128)
-        assert_eq!(p.row_size(0, 1000 + BLOB_HEADER_LEN), 256);
-    }
-
-    #[test]
-    fn row_size_zero() {
-        let p = ProtocolParams {
-            rows: 8,
-            min_row_size: 64,
-            ..DEFAULT_PROTOCOL_PARAMS
-        };
-        assert_eq!(p.row_size(0, 0), 0);
-    }
-
-    #[test]
-    fn blob_config_v0_defaults() {
-        let cfg = BlobConfig::v0();
-        assert_eq!(cfg.blob_version, 0);
-        assert_eq!(cfg.original_rows, 4096);
-        assert_eq!(cfg.parity_rows, 12288);
-        assert_eq!(cfg.total_rows(), 16384);
-        assert_eq!(cfg.max_data_size, (1 << 27) - BLOB_HEADER_LEN);
+        for (name, rows, min_row_size, total_len, expected) in cases {
+            let params = ProtocolParams {
+                rows,
+                min_row_size,
+                ..DEFAULT_PROTOCOL_PARAMS
+            };
+            assert_eq!(params.row_size(0, total_len), expected, "{name}");
+        }
     }
 
     #[test]
@@ -432,17 +407,6 @@ mod tests {
         let data_len = 1000;
         let row_size = cfg.row_size(data_len);
         assert_eq!(cfg.upload_size(data_len), row_size * cfg.original_rows);
-    }
-
-    #[test]
-    fn fibre_client_config_defaults() {
-        let cfg = FibreClientConfig::new("test-chain").unwrap();
-        assert_eq!(cfg.chain_id(), "test-chain");
-        assert_eq!(cfg.safety_threshold, crate::test_utils::fraction(2, 3));
-        assert_eq!(cfg.liveness_threshold, crate::test_utils::fraction(1, 3));
-        assert_eq!(cfg.min_rows_per_validator, 148);
-        assert_eq!(cfg.upload_concurrency, 100);
-        assert_eq!(cfg.download_concurrency, 100);
     }
 
     #[test]

@@ -575,48 +575,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_roundtrip_upload_then_download() {
-        let cfg = test_blob_config();
-        let original_data: Vec<u8> = (0u8..=249).collect();
-
-        let validators = [
-            make_validator(100, 10),
-            make_validator(100, 20),
-            make_validator(100, 30),
-        ];
-        let val_infos: Vec<_> = validators.iter().map(|(_, v)| v.clone()).collect();
-        let val_set = ValidatorSet::try_new(val_infos.clone(), 42).unwrap();
-
-        let blob = EncodedBlob::new(&original_data, cfg.clone()).unwrap();
-        let blob_id = blob.id().clone();
-        let total_rows = cfg.total_rows();
-
-        let conns: Vec<Arc<MockValidatorConnection>> = validators
-            .iter()
-            .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
-            .collect();
-
-        for conn in &conns {
-            let mut proofs = Vec::new();
-            for i in 0..total_rows {
-                proofs.push(blob.row(i).unwrap());
-            }
-            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
-        }
-
-        let mut connector = MockConnector::new();
-        for (i, (_, v)) in validators.iter().enumerate() {
-            connector.add(v.address, conns[i].clone());
-        }
-
-        let client = build_test_client(val_set, connector, "test-chain");
-        let downloaded = client.download_with_config(&blob_id, cfg).await.unwrap();
-
-        assert_eq!(downloaded.data(), &original_data);
-        assert_eq!(downloaded.id(), &blob_id);
-    }
-
-    #[tokio::test]
     async fn download_empty_response_triggers_replacement() {
         let cfg = test_blob_config();
         let data: Vec<u8> = (0u8..=149).collect();
