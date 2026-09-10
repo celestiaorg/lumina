@@ -3,9 +3,9 @@
 //! Defines the fundamental protocol constants from which all other
 //! configuration values are derived.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
-use crate::error::FibreError;
+use crate::error::{FibreError, ProtocolParamsError};
 
 /// Maximum allowed chain ID length.
 pub(crate) const MAX_CHAIN_ID_SIZE: usize = 20;
@@ -48,7 +48,7 @@ impl Fraction {
 #[derive(Debug, Clone)]
 pub struct ProtocolParams {
     /// Number of original data rows (K in rsema1d). Default: 4096.
-    pub rows: usize,
+    pub rows: NonZeroUsize,
     /// Fraction of total rows that are original (K / (K + N)). Default: 0.25.
     pub encoding_ratio: f64,
     /// Maximum expected validator count. Default: 100.
@@ -67,8 +67,8 @@ pub struct ProtocolParams {
 
 /// Compile-time default protocol parameters.
 pub const DEFAULT_PROTOCOL_PARAMS: ProtocolParams = ProtocolParams {
-    rows: 4096,           // 1 << 12
-    encoding_ratio: 0.25, // 3x parity (12288 parity rows, 16384 total)
+    rows: NonZeroUsize::new(4096).unwrap(), // 1 << 12
+    encoding_ratio: 0.25,                   // 3x parity (12288 parity rows, 16384 total)
     max_validator_count: 100,
     unique_decoding_security_bits: 100,
     safety_threshold: Fraction::new(NonZeroU64::new(2).unwrap(), NonZeroU64::new(3).unwrap()),
@@ -81,14 +81,59 @@ pub const DEFAULT_PROTOCOL_PARAMS: ProtocolParams = ProtocolParams {
 const BLOB_HEADER_LEN: usize = 5;
 
 impl ProtocolParams {
+    /// Validates protocol parameters before deriving runtime configuration.
+    pub fn validate(&self) -> Result<(), FibreError> {
+        if !self.encoding_ratio.is_finite()
+            || self.encoding_ratio <= 0.0
+            || self.encoding_ratio >= 1.0
+        {
+            return Err(ProtocolParamsError::EncodingRatio(self.encoding_ratio).into());
+        }
+
+        let total_rows = self.total_rows();
+        if total_rows > 65536 {
+            return Err(ProtocolParamsError::TooManyRows(total_rows).into());
+        }
+        if total_rows == self.rows.get() {
+            return Err(ProtocolParamsError::NoParityRows.into());
+        }
+        if self.max_validator_count == 0 {
+            return Err(ProtocolParamsError::ZeroValidatorCount.into());
+        }
+        if self.safety_threshold.numerator > self.safety_threshold.denominator {
+            return Err(ProtocolParamsError::SafetyThresholdAboveOne.into());
+        }
+        if self.liveness_threshold.numerator > self.liveness_threshold.denominator {
+            return Err(ProtocolParamsError::LivenessThresholdAboveOne.into());
+        }
+
+        let liveness_ratio = self.liveness_threshold.numerator.get() as f64
+            / self.liveness_threshold.denominator.get() as f64;
+        if liveness_ratio < self.encoding_ratio {
+            return Err(ProtocolParamsError::LivenessThresholdBelowEncodingRatio.into());
+        }
+        if self.max_blob_size <= BLOB_HEADER_LEN {
+            return Err(ProtocolParamsError::BlobSizeTooSmall {
+                size: self.max_blob_size,
+                header_size: BLOB_HEADER_LEN,
+            }
+            .into());
+        }
+        if self.min_row_size == 0 || !self.min_row_size.is_multiple_of(64) {
+            return Err(ProtocolParamsError::InvalidRowSize(self.min_row_size).into());
+        }
+
+        Ok(())
+    }
+
     /// Returns the total number of rows (K + N).
     pub fn total_rows(&self) -> usize {
-        (self.rows as f64 / self.encoding_ratio) as usize
+        (self.rows.get() as f64 / self.encoding_ratio) as usize
     }
 
     /// Returns the number of parity rows (N in rsema1d).
     pub fn parity_rows(&self) -> usize {
-        self.total_rows() - self.rows
+        self.total_rows() - self.rows.get()
     }
 
     /// Returns the maximum number of rows a single validator could receive.
@@ -104,7 +149,8 @@ impl ProtocolParams {
         let max_stake_den = self.safety_threshold.denominator.get() as usize;
 
         // rows = ceil(rows * max_stake / liveness_threshold)
-        let num = self.rows * max_stake_num * self.liveness_threshold.denominator.get() as usize;
+        let num =
+            self.rows.get() * max_stake_num * self.liveness_threshold.denominator.get() as usize;
         let den = max_stake_den * self.liveness_threshold.numerator.get() as usize;
         num.div_ceil(den)
     }
@@ -132,7 +178,7 @@ impl ProtocolParams {
         // We need enough rows from liveness_threshold fraction of validators to reconstruct.
         let reconstruction_samples = {
             let validators_for_reconstruction = self.validators_for_reconstruction();
-            self.rows.div_ceil(validators_for_reconstruction)
+            self.rows.get().div_ceil(validators_for_reconstruction)
         };
 
         unique_decode_samples.max(reconstruction_samples)
@@ -154,7 +200,7 @@ impl ProtocolParams {
     /// Panics if `blob_version` is not 0.
     pub fn row_size(&self, blob_version: u8, total_len: usize) -> usize {
         assert_eq!(blob_version, 0, "unsupported blob version: {blob_version}");
-        compute_row_size(total_len, self.rows, self.min_row_size)
+        compute_row_size(total_len, self.rows.get(), self.min_row_size)
     }
 
     /// Returns the maximum row size based on `max_blob_size`.
@@ -193,6 +239,7 @@ impl FibreClientConfig {
     ) -> Result<Self, FibreError> {
         let chain_id = chain_id.into();
         validate_chain_id(&chain_id)?;
+        params.validate()?;
 
         Ok(Self {
             chain_id,
@@ -233,24 +280,24 @@ impl BlobConfig {
     /// Creates a `BlobConfig` for blob version 0 with default protocol parameters.
     pub fn v0() -> Self {
         Self::from_params(0, &DEFAULT_PROTOCOL_PARAMS)
+            .expect("default protocol parameters are valid")
     }
 
     /// Creates a `BlobConfig` from the given blob version and protocol parameters.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `blob_version` is not 0.
-    pub fn from_params(blob_version: u8, params: &ProtocolParams) -> Self {
-        assert_eq!(blob_version, 0, "unsupported blob version: {blob_version}");
+    pub fn from_params(blob_version: u8, params: &ProtocolParams) -> Result<Self, FibreError> {
+        if blob_version != 0 {
+            return Err(FibreError::UnsupportedBlobVersion(blob_version));
+        }
+        params.validate()?;
 
-        Self {
+        Ok(Self {
             blob_version,
-            original_rows: params.rows,
+            original_rows: params.rows.get(),
             parity_rows: params.parity_rows(),
             max_data_size: params.max_blob_size - BLOB_HEADER_LEN,
-            rows: params.rows,
+            rows: params.rows.get(),
             min_row_size: params.min_row_size,
-        }
+        })
     }
 
     /// Returns the total number of rows (original + parity).
@@ -277,10 +324,7 @@ impl BlobConfig {
     ///
     /// Returns an error if the version is not supported.
     pub fn for_version(version: u8) -> Result<Self, crate::error::FibreError> {
-        match version {
-            0 => Ok(Self::v0()),
-            _ => Err(crate::error::FibreError::UnsupportedBlobVersion(version)),
-        }
+        Self::from_params(version, &DEFAULT_PROTOCOL_PARAMS)
     }
 
     /// Creates a `BlobConfig` with custom parameters for testing.
@@ -392,7 +436,7 @@ mod tests {
 
         for (name, rows, min_row_size, total_len, expected) in cases {
             let params = ProtocolParams {
-                rows,
+                rows: NonZeroUsize::new(rows).unwrap(),
                 min_row_size,
                 ..DEFAULT_PROTOCOL_PARAMS
             };
@@ -424,28 +468,130 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "safety threshold numerator must not exceed denominator")]
-    fn safety_threshold_above_one_panics() {
-        let params = ProtocolParams {
-            safety_threshold: Fraction::new(
-                NonZeroU64::new(3).unwrap(),
-                NonZeroU64::new(2).unwrap(),
+    fn protocol_parameter_boundaries() {
+        type ErrorCheck = fn(&ProtocolParamsError) -> bool;
+        type Case = (&'static str, fn(&mut ProtocolParams), Option<ErrorCheck>);
+        let cases: &[Case] = &[
+            ("defaults", |_| {}, None),
+            (
+                "one data byte",
+                |p| p.max_blob_size = BLOB_HEADER_LEN + 1,
+                None,
             ),
-            ..DEFAULT_PROTOCOL_PARAMS
-        };
+            (
+                "zero encoding ratio",
+                |p| p.encoding_ratio = 0.0,
+                Some(|error| matches!(error, ProtocolParamsError::EncodingRatio(0.0))),
+            ),
+            (
+                "negative encoding ratio",
+                |p| p.encoding_ratio = -0.25,
+                Some(|error| matches!(error, ProtocolParamsError::EncodingRatio(-0.25))),
+            ),
+            (
+                "unit encoding ratio",
+                |p| p.encoding_ratio = 1.0,
+                Some(|error| matches!(error, ProtocolParamsError::EncodingRatio(1.0))),
+            ),
+            (
+                "encoding ratio above one",
+                |p| p.encoding_ratio = 1.25,
+                Some(|error| matches!(error, ProtocolParamsError::EncodingRatio(1.25))),
+            ),
+            (
+                "non-finite encoding ratio",
+                |p| p.encoding_ratio = f64::NAN,
+                Some(
+                    |error| matches!(error, ProtocolParamsError::EncodingRatio(ratio) if ratio.is_nan()),
+                ),
+            ),
+            (
+                "too many total rows",
+                |p| {
+                    p.rows = NonZeroUsize::new(32769).unwrap();
+                    p.encoding_ratio = 0.5;
+                },
+                Some(|error| matches!(error, ProtocolParamsError::TooManyRows(65538))),
+            ),
+            (
+                "no parity rows",
+                |p| p.encoding_ratio = 0.999_999_999,
+                Some(|error| matches!(error, ProtocolParamsError::NoParityRows)),
+            ),
+            (
+                "zero validators",
+                |p| p.max_validator_count = 0,
+                Some(|error| matches!(error, ProtocolParamsError::ZeroValidatorCount)),
+            ),
+            (
+                "safety above one",
+                |p| p.safety_threshold = crate::test_utils::fraction(3, 2),
+                Some(|error| matches!(error, ProtocolParamsError::SafetyThresholdAboveOne)),
+            ),
+            (
+                "liveness above one",
+                |p| p.liveness_threshold = crate::test_utils::fraction(3, 2),
+                Some(|error| matches!(error, ProtocolParamsError::LivenessThresholdAboveOne)),
+            ),
+            (
+                "liveness below encoding ratio",
+                |p| p.liveness_threshold = crate::test_utils::fraction(1, 5),
+                Some(|error| {
+                    matches!(
+                        error,
+                        ProtocolParamsError::LivenessThresholdBelowEncodingRatio
+                    )
+                }),
+            ),
+            (
+                "blob smaller than header",
+                |p| p.max_blob_size = BLOB_HEADER_LEN - 1,
+                Some(|error| {
+                    matches!(
+                        error,
+                        ProtocolParamsError::BlobSizeTooSmall {
+                            size: 4,
+                            header_size: 5
+                        }
+                    )
+                }),
+            ),
+            (
+                "zero row size",
+                |p| p.min_row_size = 0,
+                Some(|error| matches!(error, ProtocolParamsError::InvalidRowSize(0))),
+            ),
+            (
+                "misaligned row size",
+                |p| p.min_row_size = 65,
+                Some(|error| matches!(error, ProtocolParamsError::InvalidRowSize(65))),
+            ),
+        ];
 
-        params.max_rows_per_validator();
-    }
+        for (name, mutate, expected_error) in cases {
+            let mut params = DEFAULT_PROTOCOL_PARAMS;
+            mutate(&mut params);
 
-    #[test]
-    fn liveness_threshold_must_exceed_encoding_ratio() {
-        let p = &DEFAULT_PROTOCOL_PARAMS;
-        let liveness_ratio = p.liveness_threshold.numerator.get() as f64
-            / p.liveness_threshold.denominator.get() as f64;
-        assert!(
-            liveness_ratio >= p.encoding_ratio,
-            "LivenessThreshold ({liveness_ratio}) must be >= EncodingRatio ({})",
-            p.encoding_ratio
-        );
+            for result in [
+                params.validate(),
+                FibreClientConfig::from_params("test-chain", &params).map(|_| ()),
+                BlobConfig::from_params(0, &params).map(|_| ()),
+            ] {
+                match expected_error {
+                    Some(check) => match result {
+                        Err(FibreError::InvalidProtocolParams(error)) => {
+                            assert!(check(&error), "{name}: got {error:?}")
+                        }
+                        other => panic!("{name}: got {other:?}"),
+                    },
+                    None => assert!(result.is_ok(), "{name}: got {result:?}"),
+                }
+            }
+        }
+
+        assert!(matches!(
+            BlobConfig::from_params(1, &DEFAULT_PROTOCOL_PARAMS),
+            Err(FibreError::UnsupportedBlobVersion(1))
+        ));
     }
 }
