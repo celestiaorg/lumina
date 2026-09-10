@@ -88,9 +88,9 @@ time = { version = "0.3.35", default-features = false }
 tokio = "1.49.0"
 tokio-util = "0.7.14"
 tokio-stream = "0.1.18"
-tonic = { version = "0.13", default-features = false }
+tonic = { version = "0.14", default-features = false }
 tonic-build = { version = "0.13", default-features = false }
-tonic-web-wasm-client = "0.7"
+tonic-web-wasm-client = { git = "https://github.com/devashishdxt/tonic-web-wasm-client", rev = "59b01bf36b83e5eaaca032a15937902c0a20958e" }
 thiserror = "2.0.3"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.15"

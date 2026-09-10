@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use prost::Message;
 use tonic::Status;
-use tonic::codec::{Codec, EncodeBuf, Encoder, ProstCodec};
+use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
 
 #[derive(Debug, Clone)]
 pub struct PreallocProstCodec<T, U> {
@@ -25,14 +25,38 @@ where
     type Encode = T;
     type Decode = U;
     type Encoder = PreallocProstEncoder<T>;
-    type Decoder = <ProstCodec<T, U> as Codec>::Decoder;
+    type Decoder = ProstDecoder<U>;
 
     fn encoder(&mut self) -> Self::Encoder {
         PreallocProstEncoder::default()
     }
 
     fn decoder(&mut self) -> Self::Decoder {
-        ProstCodec::<T, U>::default().decoder()
+        ProstDecoder::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProstDecoder<U> {
+    marker: PhantomData<U>,
+}
+
+impl<U> Default for ProstDecoder<U> {
+    fn default() -> Self {
+        Self {
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<U: Message + Default> Decoder for ProstDecoder<U> {
+    type Item = U;
+    type Error = Status;
+
+    fn decode(&mut self, buf: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
+        Message::decode(buf)
+            .map(Some)
+            .map_err(|e| Status::internal(e.to_string()))
     }
 }
 
