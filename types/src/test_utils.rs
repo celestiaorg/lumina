@@ -169,7 +169,7 @@ impl ExtendedHeaderGenerator {
         let time = self
             .spoofed_block_time
             .map(|t| t.0)
-            .unwrap_or_else(Time::now);
+            .unwrap_or_else(|| time_after(header.time()));
         generate_next(1, header, time, &self.key, None)
     }
 
@@ -200,7 +200,7 @@ impl ExtendedHeaderGenerator {
         let time = self
             .spoofed_block_time
             .map(|t| t.0)
-            .unwrap_or_else(Time::now);
+            .unwrap_or_else(|| time_after(header.time()));
         generate_next(1, header, time, &self.key, Some(dah))
     }
 
@@ -314,7 +314,10 @@ impl ExtendedHeaderGenerator {
     // exact same timestamp
     fn get_and_increment_time(&mut self, amount: u64) -> Time {
         let Some((spoofed_time, block_time)) = self.spoofed_block_time.take() else {
-            return Time::now();
+            return self
+                .current_header
+                .as_ref()
+                .map_or_else(Time::now, |header| time_after(header.time()));
         };
 
         let block_time_ms: u64 = block_time.as_millis().try_into().expect("u64 overflow");
@@ -325,6 +328,20 @@ impl ExtendedHeaderGenerator {
 
         timestamp
     }
+}
+
+/// Current time, guaranteed to be strictly after `prev`.
+///
+/// Header verification requires the timestamp of each header to be after
+/// the one of its parent. On `wasm32` the clock (`js_sys::Date`) has a
+/// millisecond resolution, so two headers generated within the same
+/// millisecond would get the same timestamp. In that case the time is
+/// advanced by a nanosecond past the previous header instead.
+fn time_after(prev: Time) -> Time {
+    Time::now().max(
+        prev.checked_add(Duration::from_nanos(1))
+            .expect("not to overflow"),
+    )
 }
 
 impl Default for ExtendedHeaderGenerator {
@@ -972,6 +989,27 @@ mod tests {
         assert_eq!(header6.height(), 6);
         assert_eq!(another_header_6_to_10[0].height(), 6);
         assert_ne!(header6.hash(), another_header_6_to_10[0].hash());
+    }
+
+    #[test]
+    fn generated_time_is_strictly_after_previous() {
+        let mut generator = ExtendedHeaderGenerator::new();
+
+        // Put the previous header ahead of the wall clock, so that
+        // `Time::now()` can not be after it.
+        let future = Time::now().checked_add(Duration::from_secs(5)).unwrap();
+        generator.set_time(future, Duration::from_secs(1));
+        let header1 = generator.next();
+        generator.reset_time();
+        assert!(header1.time().after(Time::now()));
+
+        // `next` and `next_of` must still produce verifiable headers
+        // with a time after the previous one.
+        let header2 = generator.next();
+        header1.verify(&header2).unwrap();
+
+        let another_header2 = generator.next_of(&header1);
+        header1.verify(&another_header2).unwrap();
     }
 
     #[test]
