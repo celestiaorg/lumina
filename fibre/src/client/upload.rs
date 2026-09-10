@@ -58,6 +58,16 @@ impl FibreClient {
     ///
     /// Returns a [`SignedPaymentPromise`] once enough validator signatures
     /// have been collected to meet the safety threshold.
+    ///
+    /// # Errors
+    ///
+    /// - [`FibreError::ClientClosed`] if the client has been closed.
+    /// - [`FibreError::Cancelled`] if the client is closed while the upload is in progress.
+    /// - [`FibreError::BlobTooLarge`] if the upload size does not fit the wire format.
+    /// - [`FibreError::InvalidValidatorSet`] if the validator set height is zero.
+    /// - [`FibreError::InvalidPaymentPromise`] if the payment promise cannot be signed.
+    /// - [`FibreError::NotEnoughSignatures`] if the voting-power threshold is not met.
+    /// - Any error returned while retrieving the validator set.
     pub async fn upload(
         &self,
         signing_key: &k256::ecdsa::SigningKey,
@@ -75,6 +85,10 @@ impl FibreClient {
     /// The signed payment promise is returned once enough validator signatures
     /// have been collected to meet the safety threshold. The completion handle
     /// can then be awaited to drain every validator upload started for the blob.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`FibreClient::upload`].
     pub async fn upload_with_completion(
         &self,
         signing_key: &k256::ecdsa::SigningKey,
@@ -221,7 +235,7 @@ impl FibreClient {
                 biased;
                 _ = cancel_token.cancelled() => return Err(FibreError::Cancelled),
                 permit = self.upload_semaphore.clone().acquire_owned() => permit
-                    .map_err(|_| FibreError::Other("upload semaphore closed".into()))?,
+                    .expect("client semaphores are never closed"),
             };
 
             let connector = Arc::clone(&self.connector);
@@ -632,7 +646,7 @@ mod tests {
         }
 
         async fn download_shard(&self, _blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
-            Err(FibreError::Other("download not supported".into()))
+            unreachable!("download not supported")
         }
     }
 
