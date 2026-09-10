@@ -6004,7 +6004,7 @@ dependencies = [
 [[package]]
 name = "tonic-web-wasm-client"
 version = "0.9.1"
-source = "git+https://github.com/citizen-stig/tonic-web-wasm-client?rev=63475e30134d9acea25f1e9048379d54871a9cb3#63475e30134d9acea25f1e9048379d54871a9cb3"
+source = "git+https://github.com/devashishdxt/tonic-web-wasm-client?rev=59b01bf36b83e5eaaca032a15937902c0a20958e#59b01bf36b83e5eaaca032a15937902c0a20958e"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
