@@ -380,13 +380,26 @@ mod tests {
     }
 
     #[test]
-    fn validator_from_proto_valid() {
-        let (pubkey, proto_val) = proto_validator(100);
+    fn validator_from_proto_matches_upstream_address() {
+        // Independently generated with celestia-app v9.0.6's CometBFT Ed25519
+        // PubKey.Address() at app commit 6f4b596e47f80683adb1a161ca7cb640dcd9d206.
+        let pubkey =
+            hex::decode("cecc1507dc1ddd7295951c290888f095adb9044d1b73d696e6df065d683bd4fc")
+                .unwrap();
+        let address = hex::decode("fa4d86c3b551aa6cd7c3759d040c037ef2c6379f").unwrap();
+        let proto_val = tendermint_proto::v0_38::types::Validator {
+            address: address.clone(),
+            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
+                sum: Some(CryptoKeySum::Ed25519(pubkey.clone())),
+            }),
+            voting_power: 100,
+            proposer_priority: 0,
+        };
 
         let info = ValidatorInfo::try_from(&proto_val).unwrap();
-        assert_eq!(info.public_key(), &pubkey);
+        assert_eq!(info.public_key().as_bytes(), pubkey.as_slice());
         assert_eq!(info.voting_power(), 100);
-        assert_eq!(info.address().as_slice(), proto_val.address);
+        assert_eq!(info.address().as_slice(), address);
     }
 
     #[test]
@@ -469,72 +482,56 @@ mod tests {
     }
 
     #[test]
-    fn validator_from_proto_missing_key() {
-        let proto_val = tendermint_proto::v0_38::types::Validator {
-            address: vec![],
-            pub_key: None,
-            voting_power: 100,
-            proposer_priority: 0,
-        };
-        assert!(matches!(
-            ValidatorInfo::try_from(&proto_val),
-            Err(FibreError::InvalidValidatorSet(
-                ValidatorSetError::MissingPublicKey
-            ))
-        ));
-    }
-
-    #[test]
-    fn validator_from_proto_rejects_unsupported_key_type() {
-        let proto_val = tendermint_proto::v0_38::types::Validator {
-            address: vec![],
-            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
-                sum: Some(CryptoKeySum::Secp256k1(vec![0; 33])),
+    fn validator_from_proto_rejects_malformed_keys() {
+        let public_key = |sum| Some(tendermint_proto::v0_38::crypto::PublicKey { sum });
+        type ErrorCheck = fn(&ValidatorSetError) -> bool;
+        type Case = (
+            &'static str,
+            Option<tendermint_proto::v0_38::crypto::PublicKey>,
+            ErrorCheck,
+        );
+        let cases: [Case; 6] = [
+            ("missing key", None, |error| {
+                matches!(error, ValidatorSetError::MissingPublicKey)
             }),
-            voting_power: 100,
-            proposer_priority: 0,
-        };
-        assert!(matches!(
-            ValidatorInfo::try_from(&proto_val),
-            Err(FibreError::InvalidValidatorSet(
-                ValidatorSetError::UnsupportedPublicKeyType
-            ))
-        ));
-    }
-
-    #[test]
-    fn validator_from_proto_rejects_wrong_key_length() {
-        let proto_val = tendermint_proto::v0_38::types::Validator {
-            address: vec![],
-            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
-                sum: Some(CryptoKeySum::Ed25519(vec![0; 31])),
+            ("missing key kind", public_key(None), |error| {
+                matches!(error, ValidatorSetError::UnsupportedPublicKeyType)
             }),
-            voting_power: 100,
-            proposer_priority: 0,
-        };
-        assert!(matches!(
-            ValidatorInfo::try_from(&proto_val),
-            Err(FibreError::InvalidValidatorSet(
-                ValidatorSetError::PublicKeyLength(31)
-            ))
-        ));
-    }
+            (
+                "wrong key kind",
+                public_key(Some(CryptoKeySum::Secp256k1(vec![1; 33]))),
+                |error| matches!(error, ValidatorSetError::UnsupportedPublicKeyType),
+            ),
+            (
+                "short key",
+                public_key(Some(CryptoKeySum::Ed25519(vec![1; 31]))),
+                |error| matches!(error, ValidatorSetError::PublicKeyLength(31)),
+            ),
+            (
+                "long key",
+                public_key(Some(CryptoKeySum::Ed25519(vec![1; 33]))),
+                |error| matches!(error, ValidatorSetError::PublicKeyLength(33)),
+            ),
+            (
+                "invalid point",
+                public_key(Some(CryptoKeySum::Ed25519(vec![2; 32]))),
+                |error| matches!(error, ValidatorSetError::InvalidPublicKey(_)),
+            ),
+        ];
 
-    #[test]
-    fn validator_from_proto_rejects_invalid_key() {
-        let proto_val = tendermint_proto::v0_38::types::Validator {
-            address: vec![],
-            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
-                sum: Some(CryptoKeySum::Ed25519(vec![2; 32])),
-            }),
-            voting_power: 100,
-            proposer_priority: 0,
-        };
-        assert!(matches!(
-            ValidatorInfo::try_from(&proto_val),
-            Err(FibreError::InvalidValidatorSet(
-                ValidatorSetError::InvalidPublicKey(_)
-            ))
-        ));
+        for (name, pub_key, expected) in cases {
+            let proto_val = tendermint_proto::v0_38::types::Validator {
+                address: vec![],
+                pub_key,
+                voting_power: 100,
+                proposer_priority: 0,
+            };
+            match ValidatorInfo::try_from(&proto_val) {
+                Err(FibreError::InvalidValidatorSet(error)) => {
+                    assert!(expected(&error), "{name}: got {error:?}")
+                }
+                other => panic!("{name}: got {other:?}"),
+            }
+        }
     }
 }

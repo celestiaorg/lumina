@@ -53,6 +53,9 @@ impl SignatureSet {
         let min_required_voting_power = (total_voting_power as u128)
             * (target_voting_power.numerator.get() as u128)
             / (target_voting_power.denominator.get() as u128);
+        // celestiaorg/celestia-app v9.0.6 floors without clamping:
+        // https://github.com/celestiaorg/celestia-app/blob/6f4b596e47f80683adb1a161ca7cb640dcd9d206/fibre/validator/signature_set.go#L29-L35
+        // Fibre intentionally requires one signature when that calculation is zero.
         let min_required_voting_power =
             u64::try_from(min_required_voting_power.max(1)).unwrap_or(u64::MAX);
 
@@ -298,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn threshold_always_requires_voting_power() {
+    fn threshold_requires_one_signature_when_floor_is_zero() {
         let (sk, validator) = make_validator(1, 1);
         let data = b"minimum threshold";
         let ss = SignatureSet::new(vec![validator.clone()], fraction(2, 3), data.to_vec());
