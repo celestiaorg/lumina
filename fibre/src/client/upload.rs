@@ -306,14 +306,31 @@ impl FibreClient {
                                 }
                             }
                         }
-                        Some((val_idx, Some(Err(e)))) => {
+                        Some((val_idx, Some(Err(error)))) => {
                             stats.failed += 1;
                             let validator = &val_set.validators()[val_idx];
-                            tracing::warn!(
-                                validator = %validator.address_hex(),
-                                error = %e,
-                                "shard upload failed"
-                            );
+                            match error {
+                                FibreError::GrpcRequest {
+                                    method,
+                                    endpoint,
+                                    source,
+                                } => {
+                                    tracing::warn!(
+                                        validator = %validator.address_hex(),
+                                        method,
+                                        %endpoint,
+                                        error = %source,
+                                        "shard upload failed"
+                                    );
+                                }
+                                error => {
+                                    tracing::warn!(
+                                        validator = %validator.address_hex(),
+                                        %error,
+                                        "shard upload failed"
+                                    );
+                                }
+                            }
                         }
                         Some((val_idx, None)) => {
                             stats.failed += 1;
