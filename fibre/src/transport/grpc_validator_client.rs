@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use celestia_grpc::GrpcClient;
 
@@ -20,6 +21,8 @@ use crate::validator::ValidatorInfo;
 use crate::validator_client::{
     DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
 };
+
+const UPLOAD_SHARD_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Factory that resolves validator hosts and caches gRPC connections.
 pub struct GrpcValidatorConnector {
@@ -138,16 +141,21 @@ impl ValidatorConnection for GrpcValidatorConnection {
             shard: Some(proto_shard),
         };
 
-        let response = self.client.upload_shard(request).await.map_err(|error| {
-            tracing::warn!(
-                method = "UploadShard",
-                validator = %self.validator,
-                endpoint = %self.endpoint,
-                %error,
-                "Fibre gRPC request failed"
-            );
-            error
-        })?;
+        let response = self
+            .client
+            .upload_shard(request)
+            .timeout(UPLOAD_SHARD_TIMEOUT)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    method = "UploadShard",
+                    validator = %self.validator,
+                    endpoint = %self.endpoint,
+                    %error,
+                    "Fibre gRPC request failed"
+                );
+                error
+            })?;
 
         Ok(UploadResponse {
             validator_signature: response.validator_signature,
