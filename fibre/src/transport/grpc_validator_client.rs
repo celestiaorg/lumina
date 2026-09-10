@@ -79,13 +79,17 @@ impl ValidatorConnector for GrpcValidatorConnector {
         let url = normalize_host(&host.0);
 
         let client = crate::transport::tls::grpc_client(
-            url,
+            &url,
             validator.pubkey,
             self.chain_id.clone(),
             self.io_connector.clone(),
         )?;
 
-        let conn = Arc::new(GrpcValidatorConnection { client });
+        let conn = Arc::new(GrpcValidatorConnection {
+            client,
+            validator_address: validator.address,
+            endpoint: url,
+        });
 
         // Re-check cache under lock: another task may have inserted a
         // connection for this validator while we were resolving/building.
@@ -113,6 +117,8 @@ fn normalize_host(raw: &str) -> String {
 /// Wraps a [`GrpcClient`] for issuing upload/download RPCs.
 pub struct GrpcValidatorConnection {
     client: GrpcClient,
+    validator_address: [u8; 20],
+    endpoint: String,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -132,7 +138,19 @@ impl ValidatorConnection for GrpcValidatorConnection {
             shard: Some(proto_shard),
         };
 
-        let response = self.client.upload_shard(request).await?;
+        let response = self
+            .client
+            .upload_shard(request)
+            .await
+            .inspect_err(|error| {
+                tracing::warn!(
+                    method = "UploadShard",
+                    validator = %hex::encode_upper(self.validator_address),
+                    endpoint = %self.endpoint,
+                    %error,
+                    "Fibre gRPC request failed"
+                );
+            })?;
 
         Ok(UploadResponse {
             validator_signature: response.validator_signature,
