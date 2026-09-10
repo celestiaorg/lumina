@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_completion_reports_successes_and_failures() {
+    async fn upload_preserves_signature_positions_and_reports_completion() {
         let v1 = make_validator(200, 1);
         let v2 = make_validator(200, 2);
         let v3 = make_validator(200, 3);
@@ -514,62 +514,19 @@ mod tests {
         let client = build_test_client(val_set, failing_connector, "test-chain");
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
-        let (_, completion) = client
+        let (signed, completion) = client
             .upload_with_completion(&test_signing_key(), namespace, make_test_blob())
             .await
             .unwrap();
+
+        assert_eq!(signed.validator_signatures.len(), 5);
+        assert!(signed.validator_signatures[..3].iter().all(Option::is_some));
+        assert!(signed.validator_signatures[3..].iter().all(Option::is_none));
+
         let stats = completion.wait().await;
 
         assert_eq!(stats.successful, 3);
         assert_eq!(stats.failed, 2);
-    }
-
-    #[tokio::test]
-    async fn upload_returns_when_threshold_met() {
-        let v1 = make_validator(200, 1);
-        let v2 = make_validator(200, 2);
-        let v3 = make_validator(200, 3);
-        let v4 = make_validator(100, 4);
-        let v5 = make_validator(100, 5);
-
-        let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
-        let val_infos: Vec<ValidatorInfo> = all_validators
-            .iter()
-            .map(|(_, info)| info.clone())
-            .collect();
-
-        let successful = vec![v1, v2, v3];
-        let inner = make_connector(&successful);
-        let fail_addresses = vec![val_infos[3].address, val_infos[4].address];
-
-        let failing_connector = FailingConnector {
-            inner,
-            fail_addresses,
-        };
-
-        let val_set = ValidatorSet::try_new(val_infos, 10).unwrap();
-
-        let client = build_test_client(val_set, failing_connector, "test-chain");
-        let blob = make_test_blob();
-        let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
-
-        let result = client.upload(&test_signing_key(), namespace, blob).await;
-        assert!(
-            result.is_ok(),
-            "upload should succeed with 3/5 validators: {:?}",
-            result.err()
-        );
-
-        let signed = result.unwrap();
-        let sig_count = signed
-            .validator_signatures
-            .iter()
-            .filter(|s| s.is_some())
-            .count();
-        assert!(
-            sig_count >= 2,
-            "expected at least 2 signatures, got {sig_count}"
-        );
     }
 
     #[tokio::test]
