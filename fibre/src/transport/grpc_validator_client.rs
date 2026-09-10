@@ -87,7 +87,6 @@ impl ValidatorConnector for GrpcValidatorConnector {
 
         let conn = Arc::new(GrpcValidatorConnection {
             client,
-            validator_address: validator.address,
             endpoint: url,
         });
 
@@ -117,7 +116,6 @@ fn normalize_host(raw: &str) -> String {
 /// Wraps a [`GrpcClient`] for issuing upload/download RPCs.
 pub struct GrpcValidatorConnection {
     client: GrpcClient,
-    validator_address: [u8; 20],
     endpoint: String,
 }
 
@@ -138,19 +136,15 @@ impl ValidatorConnection for GrpcValidatorConnection {
             shard: Some(proto_shard),
         };
 
-        let response = self
-            .client
-            .upload_shard(request)
-            .await
-            .inspect_err(|error| {
-                tracing::warn!(
-                    method = "UploadShard",
-                    validator = %hex::encode_upper(self.validator_address),
-                    endpoint = %self.endpoint,
-                    %error,
-                    "Fibre gRPC request failed"
-                );
-            })?;
+        let response =
+            self.client
+                .upload_shard(request)
+                .await
+                .map_err(|source| FibreError::GrpcRequest {
+                    method: "UploadShard",
+                    endpoint: self.endpoint.clone(),
+                    source,
+                })?;
 
         Ok(UploadResponse {
             validator_signature: response.validator_signature,
