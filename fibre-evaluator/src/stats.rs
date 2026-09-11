@@ -25,6 +25,9 @@ pub(crate) enum Event {
         stage: &'static str,
         elapsed: Duration,
     },
+    IgnoredValidatorUploads {
+        count: u64,
+    },
     LifecycleSuccess {
         payload_bytes: u64,
         paid_bytes: u64,
@@ -48,6 +51,7 @@ pub(crate) struct Stats {
     started: u64,
     successes: u64,
     failures: u64,
+    ignored_validator_uploads: u64,
     payload_bytes: u64,
     paid_bytes: u64,
     failures_by_stage: BTreeMap<&'static str, u64>,
@@ -100,6 +104,9 @@ impl Stats {
                 self.record_latency("queue", queue_latency);
             }
             Event::StageFinished { stage, elapsed } => self.record_latency(stage, elapsed),
+            Event::IgnoredValidatorUploads { count } => {
+                self.ignored_validator_uploads += count;
+            }
             Event::LifecycleSuccess {
                 payload_bytes,
                 paid_bytes,
@@ -144,6 +151,7 @@ impl Stats {
             in_flight = self.started.saturating_sub(completed),
             verified = self.successes,
             failed = self.failures,
+            ignored_validator_uploads = self.ignored_validator_uploads,
             blobs_per_second = %format_args!("{:.2}", per_second(self.successes, elapsed)),
             paid_gib_per_second = %format_args!("{:.6}", per_second(self.paid_bytes, elapsed) / GIB),
             "periodic stats"
@@ -243,6 +251,13 @@ impl Stats {
             "counter",
             "Blob lifecycles that failed.",
             self.failures,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_ignored_validator_uploads_total",
+            "counter",
+            "Validator uploads ignored because the payment promise was already processed.",
+            self.ignored_validator_uploads,
         );
         metric(
             &mut output,
@@ -404,6 +419,7 @@ pub(crate) fn print_final_report(
         started = stats.started,
         verified = stats.successes,
         failed = stats.failures,
+        ignored_validator_uploads = stats.ignored_validator_uploads,
         success_percent = %format_args!(
             "{:.2}",
             success_percent(stats.successes, stats.successes + stats.failures)
@@ -496,6 +512,7 @@ mod tests {
         stats.apply(Event::Started {
             queue_latency: Duration::from_millis(2),
         });
+        stats.apply(Event::IgnoredValidatorUploads { count: 2 });
         stats.apply(Event::LifecycleFailure {
             client: 1,
             signer: "signer-1".to_string(),
@@ -515,6 +532,7 @@ mod tests {
         assert_eq!(stats.dropped_scheduler_late, 1);
         assert_eq!(stats.successes, 1);
         assert_eq!(stats.failures, 1);
+        assert_eq!(stats.ignored_validator_uploads, 2);
         assert_eq!(stats.payload_bytes, 100);
         assert_eq!(stats.paid_bytes, 105);
         assert_eq!(stats.failures_by_stage["download"], 1);
@@ -527,6 +545,7 @@ mod tests {
         let metrics = stats.encode_prometheus(Duration::from_secs(2), 2, 1.5);
         assert!(metrics.contains("fibre_evaluator_scheduled_total 7\n"));
         assert!(metrics.contains("fibre_evaluator_started_total 1\n"));
+        assert!(metrics.contains("fibre_evaluator_ignored_validator_uploads_total 2\n"));
         assert!(metrics.contains("fibre_evaluator_stage_failures_total{stage=\"download\"} 1\n"));
         assert!(metrics.contains(
             "fibre_evaluator_stage_latency_milliseconds{stage=\"total\",quantile=\"0.5\"} 10\n"

@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+pub(crate) const PAYMENT_PROMISE_ALREADY_PROCESSED: &str = "payment promise verification failed: stateful validation: rpc error: code = Internal desc = payment promise has already been processed";
+
 /// All errors that can occur in the Fibre client library.
 #[derive(Debug, Error)]
 pub enum FibreError {
@@ -139,6 +141,17 @@ pub enum FibreError {
     Other(String),
 }
 
+impl FibreError {
+    pub(crate) fn is_payment_promise_already_processed(&self) -> bool {
+        matches!(
+            self,
+            FibreError::GrpcClient(celestia_grpc::Error::TonicError(status))
+                if status.code() == tonic::Code::InvalidArgument
+                    && status.message() == PAYMENT_PROMISE_ALREADY_PROCESSED
+        )
+    }
+}
+
 impl From<tonic::Status> for FibreError {
     fn from(err: tonic::Status) -> Self {
         FibreError::Grpc(Box::new(err))
@@ -153,3 +166,36 @@ impl From<k256::ecdsa::Error> for FibreError {
 
 /// Convenience alias for `std::result::Result<T, FibreError>`.
 pub type Result<T> = std::result::Result<T, FibreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grpc_error(code: tonic::Code, message: &'static str) -> FibreError {
+        FibreError::GrpcClient(celestia_grpc::Error::TonicError(Box::new(
+            tonic::Status::new(code, message),
+        )))
+    }
+
+    #[test]
+    fn identifies_payment_promise_already_processed() {
+        assert!(
+            grpc_error(
+                tonic::Code::InvalidArgument,
+                PAYMENT_PROMISE_ALREADY_PROCESSED
+            )
+            .is_payment_promise_already_processed()
+        );
+        assert!(
+            !grpc_error(tonic::Code::Internal, PAYMENT_PROMISE_ALREADY_PROCESSED)
+                .is_payment_promise_already_processed()
+        );
+        assert!(
+            !grpc_error(
+                tonic::Code::InvalidArgument,
+                "payment promise has already been processed"
+            )
+            .is_payment_promise_already_processed()
+        );
+    }
+}

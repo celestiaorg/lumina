@@ -759,6 +759,11 @@ async fn run_writer_lifecycle(
         stage: "full_fanout",
         elapsed: full_fanout_started.elapsed(),
     });
+    if fanout.ignored_already_processed > 0 {
+        let _ = event_tx.send(Event::IgnoredValidatorUploads {
+            count: fanout.ignored_already_processed as u64,
+        });
+    }
 
     lifecycle_result?;
     if fanout.failed > 0 {
@@ -767,7 +772,7 @@ async fn run_writer_lifecycle(
             error: anyhow!(
                 "{} of {} validator uploads failed",
                 fanout.failed,
-                fanout.successful + fanout.failed
+                fanout.successful + fanout.failed + fanout.ignored_already_processed
             ),
         });
     }

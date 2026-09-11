@@ -146,14 +146,25 @@ impl ValidatorConnection for GrpcValidatorConnection {
             .upload_shard(request)
             .timeout(UPLOAD_SHARD_TIMEOUT)
             .await
+            .map_err(FibreError::from)
             .map_err(|error| {
-                tracing::warn!(
-                    method = "UploadShard",
-                    validator = %self.validator,
-                    endpoint = %self.endpoint,
-                    %error,
-                    "Fibre gRPC request failed"
-                );
+                if error.is_payment_promise_already_processed() {
+                    tracing::debug!(
+                        method = "UploadShard",
+                        validator = %self.validator,
+                        endpoint = %self.endpoint,
+                        %error,
+                        "Fibre gRPC request failed"
+                    );
+                } else {
+                    tracing::warn!(
+                        method = "UploadShard",
+                        validator = %self.validator,
+                        endpoint = %self.endpoint,
+                        %error,
+                        "Fibre gRPC request failed"
+                    );
+                }
                 error
             })?;
 

@@ -32,6 +32,8 @@ pub struct UploadCompletionStats {
     pub successful: usize,
     /// Validator upload tasks that failed or ended without a result.
     pub failed: usize,
+    /// Validator upload tasks rejected because their payment promise was already processed.
+    pub ignored_already_processed: usize,
 }
 
 /// Completion handle for all validator uploads started for a blob.
@@ -46,6 +48,9 @@ impl UploadCompletion {
         while let Some((_, result)) = self.tasks.next().await {
             match result {
                 Some(Ok(_)) => self.stats.successful += 1,
+                Some(Err(error)) if error.is_payment_promise_already_processed() => {
+                    self.stats.ignored_already_processed += 1;
+                }
                 Some(Err(_)) | None => self.stats.failed += 1,
             }
         }
@@ -331,6 +336,8 @@ mod tests {
     use k256::ecdsa::SigningKey;
     use rand::rngs::OsRng;
 
+    use super::{TaskSet, UploadCompletion, UploadCompletionStats, spawn_task};
+
     use crate::blob::{BlobID, EncodedBlob};
     use crate::config::BlobConfig;
     use crate::error::FibreError;
@@ -508,6 +515,28 @@ mod tests {
 
         assert_eq!(stats.successful, 3);
         assert_eq!(stats.failed, 2);
+    }
+
+    #[tokio::test]
+    async fn upload_completion_ignores_payment_promise_already_processed() {
+        let mut tasks = TaskSet::new();
+        spawn_task(&mut tasks, 0, async {
+            Err(FibreError::GrpcClient(celestia_grpc::Error::TonicError(
+                Box::new(tonic::Status::invalid_argument(
+                    crate::error::PAYMENT_PROMISE_ALREADY_PROCESSED,
+                )),
+            )))
+        });
+        let completion = UploadCompletion {
+            tasks,
+            stats: UploadCompletionStats::default(),
+        };
+
+        let stats = completion.wait().await;
+
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.ignored_already_processed, 1);
     }
 
     #[tokio::test]
