@@ -414,11 +414,26 @@ jobs:
       with:
         tool: cargo-msrv
 
+    # `cargo msrv` fetches the Rust release index before checking anything, and
+    # that fetch occasionally fails with a connection reset. Retry the step a
+    # few times before treating it as a failure.
     - name: Run msrv verify for native
-      run: cargo msrv verify --manifest-path ./${{ matrix.crate.dir }}/Cargo.toml --all-features
+      run: |
+        for attempt in 1 2 3; do
+          cargo msrv verify --manifest-path ./${{ matrix.crate.dir }}/Cargo.toml --all-features && exit 0
+          echo "attempt $attempt failed, retrying"
+          sleep 10
+        done
+        exit 1
 
     - name: Run msrv verify for wasm32
-      run: cargo msrv verify --manifest-path ./${{ matrix.crate.dir }}/Cargo.toml --all-features --target wasm32-unknown-unknown
+      run: |
+        for attempt in 1 2 3; do
+          cargo msrv verify --manifest-path ./${{ matrix.crate.dir }}/Cargo.toml --all-features --target wasm32-unknown-unknown && exit 0
+          echo "attempt $attempt failed, retrying"
+          sleep 10
+        done
+        exit 1
 
 
   required:
