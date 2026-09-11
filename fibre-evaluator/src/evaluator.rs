@@ -58,6 +58,7 @@ struct ReaderContext {
     app_grpc: GrpcClient,
     namespace: Namespace,
     verify_crc: bool,
+    start_height: u64,
 }
 
 struct CompletedBlob {
@@ -72,7 +73,12 @@ struct WorkItem {
 
 enum Work {
     Write(u64),
-    Read(BlobID),
+    Read(ReaderBlob),
+}
+
+struct ReaderBlob {
+    id: BlobID,
+    height: u64,
 }
 
 struct StageFailure {
@@ -94,6 +100,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     for client in 1..=client_count {
         let context = Arc::new(
             build_lifecycle_context(client, &cli)
+                .await
                 .with_context(|| format!("client {client} setup failed"))?,
         );
         let identity = match &context.workload {
@@ -221,7 +228,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext> {
+async fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext> {
     let private_key = cli
         .private_keys
         .get(client - 1)
@@ -256,10 +263,18 @@ fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext>
 
     let namespace = Namespace::new_v0(cli.namespace.as_bytes()).context("parsing namespace")?;
     let workload = if cli.reader_only {
+        let start_height = app_grpc
+            .get_latest_block()
+            .await
+            .context("querying reader start height")?
+            .header
+            .height
+            .value();
         Workload::Reader(ReaderContext {
             app_grpc,
             namespace,
             verify_crc: cli.verify_crc,
+            start_height,
         })
     } else {
         let private_key = private_key.expect("required by clap in writer mode");
@@ -426,6 +441,10 @@ async fn run_reader_source(
 
     let mut page = 1;
     let mut seen = HashSet::new();
+    tracing::info!(
+        start_height = reader.start_height,
+        "reader waiting for new Fibre payments"
+    );
     let stopped_at_deadline = loop {
         tokio::select! {
             biased;
@@ -470,20 +489,25 @@ async fn read_available_blobs(
                 order_by: OrderBy::Asc.into(),
                 page: *page,
                 limit: PAGE_LIMIT,
-                query: format!("message.action='{}'", MsgPayForFibre::type_url()),
+                query: format!(
+                    "message.action='{}' AND tx.height > {}",
+                    MsgPayForFibre::type_url(),
+                    reader.start_height
+                ),
                 ..Default::default()
             })
             .await
             .context("querying Fibre payments")?;
 
-        for blob_id in blob_ids_in_namespace(response.txs, reader.namespace)? {
-            if seen.contains(&blob_id) {
+        for blob in blob_ids_in_namespace(response.txs, reader.namespace)? {
+            if seen.contains(&blob.id) {
                 continue;
             }
+            let blob_id = blob.id.clone();
             let _ = event_tx.send(Event::Scheduled { count: 1 });
             work_tx
                 .send(WorkItem {
-                    work: Work::Read(blob_id.clone()),
+                    work: Work::Read(blob),
                     scheduled_at: Instant::now(),
                 })
                 .await
@@ -499,8 +523,11 @@ async fn read_available_blobs(
     }
 }
 
-fn blob_ids_in_namespace(txs: Vec<CosmosTx>, namespace: Namespace) -> Result<Vec<BlobID>> {
-    let mut blob_ids = Vec::new();
+fn blob_ids_in_namespace(
+    txs: impl IntoIterator<Item = CosmosTx>,
+    namespace: Namespace,
+) -> Result<Vec<ReaderBlob>> {
+    let mut blobs = Vec::new();
     for tx in txs {
         let Some(body) = tx.body else {
             continue;
@@ -526,10 +553,14 @@ fn blob_ids_in_namespace(txs: Vec<CosmosTx>, namespace: Namespace) -> Result<Vec
                 })?;
             let blob_id = BlobID::new(version, commitment);
             blob_id.validate().context("invalid blob ID")?;
-            blob_ids.push(blob_id);
+            let height = u64::try_from(promise.height).context("invalid payment promise height")?;
+            blobs.push(ReaderBlob {
+                id: blob_id,
+                height,
+            });
         }
     }
-    Ok(blob_ids)
+    Ok(blobs)
 }
 
 fn admit_work(
@@ -636,8 +667,8 @@ async fn run_lifecycle(
         (Workload::Writer(writer), Work::Write(sequence)) => {
             run_writer_lifecycle(context, writer, sequence, event_tx).await
         }
-        (Workload::Reader(reader), Work::Read(blob_id)) => {
-            run_reader_lifecycle(context, reader, &blob_id, event_tx).await
+        (Workload::Reader(reader), Work::Read(blob)) => {
+            run_reader_lifecycle(context, reader, &blob, event_tx).await
         }
         _ => unreachable!("work item must match evaluator mode"),
     }
@@ -785,7 +816,7 @@ async fn run_writer_lifecycle(
 async fn run_reader_lifecycle(
     context: &LifecycleContext,
     reader: &ReaderContext,
-    blob_id: &BlobID,
+    blob: &ReaderBlob,
     event_tx: &mpsc::UnboundedSender<Event>,
 ) -> std::result::Result<CompletedBlob, StageFailure> {
     let download_permit = Arc::clone(&context.download_semaphore)
@@ -799,7 +830,12 @@ async fn run_reader_lifecycle(
         "download",
         context.operation_timeout,
         event_tx,
-        context.fibre.download(blob_id, DownloadOptions::default()),
+        context.fibre.download(
+            &blob.id,
+            DownloadOptions {
+                height: Some(blob.height),
+            },
+        ),
     )
     .await;
     drop(download_permit);
@@ -813,7 +849,7 @@ async fn run_reader_lifecycle(
 
     Ok(CompletedBlob {
         payload_bytes: blob.data().len() as u64,
-        paid_bytes: BlobConfig::for_version(blob_id.version())
+        paid_bytes: BlobConfig::for_version(blob.id().version())
             .expect("validated during discovery")
             .upload_size(blob.data().len()) as u64,
     })
@@ -917,6 +953,7 @@ mod tests {
                             namespace: namespace.as_bytes().to_vec(),
                             blob_version: 0,
                             commitment: vec![commitment; 32],
+                            height: 42,
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -931,6 +968,8 @@ mod tests {
         let ids = blob_ids_in_namespace(vec![tx(namespace, 1), tx(other_namespace, 2)], namespace)
             .unwrap();
 
-        assert_eq!(ids, [BlobID::new(0, [1; 32])]);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].id, BlobID::new(0, [1; 32]));
+        assert_eq!(ids[0].height, 42);
     }
 }

@@ -34,7 +34,7 @@ pub(crate) struct Cli {
     #[arg(long, value_parser = parse_namespace)]
     pub(crate) namespace: String,
 
-    /// Discover and download all paid Fibre blobs in the namespace without uploading.
+    /// Discover and download Fibre blobs paid after the startup height without uploading.
     #[arg(
         long,
         conflicts_with_all = [

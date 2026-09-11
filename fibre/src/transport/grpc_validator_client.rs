@@ -22,7 +22,7 @@ use crate::validator_client::{
     DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
 };
 
-const UPLOAD_SHARD_TIMEOUT: Duration = Duration::from_secs(90);
+const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Factory that resolves validator hosts and caches gRPC connections.
 pub struct GrpcValidatorConnector {
@@ -144,7 +144,7 @@ impl ValidatorConnection for GrpcValidatorConnection {
         let response = self
             .client
             .upload_shard(request)
-            .timeout(UPLOAD_SHARD_TIMEOUT)
+            .timeout(SHARD_REQUEST_TIMEOUT)
             .await
             .map_err(FibreError::from)
             .map_err(|error| {
@@ -177,6 +177,7 @@ impl ValidatorConnection for GrpcValidatorConnection {
         let response = self
             .client
             .download_shard(blob_id.as_bytes().to_vec())
+            .timeout(SHARD_REQUEST_TIMEOUT)
             .await?;
 
         proto_conv::parse_download_response(response)
