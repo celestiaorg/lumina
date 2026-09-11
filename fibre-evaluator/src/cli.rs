@@ -117,6 +117,11 @@ pub(crate) struct Cli {
     /// Address serving Prometheus metrics at /metrics.
     #[arg(long, default_value = "0.0.0.0:9464")]
     pub(crate) metrics_listen_addr: SocketAddr,
+
+    /// Export logs over OTLP/HTTP to the local collector (default http://localhost:4318,
+    /// override with OTEL_EXPORTER_OTLP_ENDPOINT). Logs stay on stdout too.
+    #[arg(long)]
+    pub(crate) otel_logs: bool,
 }
 
 fn parse_non_empty(value: &str) -> Result<String, String> {
@@ -251,6 +256,7 @@ mod tests {
         assert_eq!(cli.gas_price, None);
         assert_eq!(cli.stats_interval_seconds, 10);
         assert_eq!(cli.metrics_listen_addr, "0.0.0.0:9464".parse().unwrap());
+        assert!(!cli.otel_logs);
     }
 
     #[test]
@@ -310,6 +316,13 @@ mod tests {
         let mut args = valid_args();
         args.push("--skip-download");
         assert!(Cli::try_parse_from(args).unwrap().skip_download);
+    }
+
+    #[test]
+    fn parses_otel_logs() {
+        let mut args = valid_args();
+        args.push("--otel-logs");
+        assert!(Cli::try_parse_from(args).unwrap().otel_logs);
     }
 
     #[test]
