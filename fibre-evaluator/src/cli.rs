@@ -42,7 +42,8 @@ pub(crate) struct Cli {
             "private_keys",
             "blobs_per_second",
             "blob_size",
-            "skip_download"
+            "skip_download",
+            "wait_for_full_fanout_before_payment"
         ]
     )]
     pub(crate) reader_only: bool,
@@ -106,6 +107,10 @@ pub(crate) struct Cli {
     /// Skip blob download and integrity verification after payment confirmation.
     #[arg(long)]
     pub(crate) skip_download: bool,
+
+    /// Wait for every validator upload before broadcasting payment.
+    #[arg(long)]
+    pub(crate) wait_for_full_fanout_before_payment: bool,
 
     /// Timeout applied separately to each network stage.
     #[arg(long, default_value_t = 120, value_parser = parse_positive_u64)]
@@ -262,6 +267,7 @@ mod tests {
         assert_eq!(cli.max_connections_per_validator.get(), 1);
         assert_eq!(cli.max_in_flight_per_validator, None);
         assert!(!cli.skip_download);
+        assert!(!cli.wait_for_full_fanout_before_payment);
         assert_eq!(cli.operation_timeout_seconds, 120);
         assert_eq!(cli.gas_limit, None);
         assert_eq!(cli.gas_price, None);
@@ -326,7 +332,10 @@ mod tests {
         assert!(cli.blob_size.is_none());
 
         args.push("--verify-crc");
-        assert!(Cli::try_parse_from(args).unwrap().verify_crc);
+        assert!(Cli::try_parse_from(&args).unwrap().verify_crc);
+
+        args.push("--wait-for-full-fanout-before-payment");
+        assert!(Cli::try_parse_from(args).is_err());
     }
 
     #[test]
@@ -341,6 +350,17 @@ mod tests {
         let mut args = valid_args();
         args.push("--skip-download");
         assert!(Cli::try_parse_from(args).unwrap().skip_download);
+    }
+
+    #[test]
+    fn parses_wait_for_full_fanout_before_payment() {
+        let mut args = valid_args();
+        args.push("--wait-for-full-fanout-before-payment");
+        assert!(
+            Cli::try_parse_from(args)
+                .unwrap()
+                .wait_for_full_fanout_before_payment
+        );
     }
 
     #[test]

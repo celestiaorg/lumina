@@ -1,5 +1,4 @@
 use std::io;
-use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -7,26 +6,26 @@ use tokio::time::Instant;
 
 use crate::stats::SharedStats;
 
+#[derive(Clone, Copy)]
+pub(crate) struct Config {
+    pub(crate) started_at: Instant,
+    pub(crate) client_count: usize,
+    pub(crate) blobs_per_second: f64,
+    pub(crate) workload: &'static str,
+    pub(crate) wait_for_full_fanout_before_payment: bool,
+    pub(crate) download_concurrency: usize,
+}
+
 pub(crate) async fn serve(
     listener: TcpListener,
     stats: SharedStats,
-    started_at: Instant,
-    client_count: usize,
-    blobs_per_second: f64,
+    config: Config,
 ) -> io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let stats = stats.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_request(
-                stream,
-                stats,
-                started_at.elapsed(),
-                client_count,
-                blobs_per_second,
-            )
-            .await
-            {
+            if let Err(error) = handle_request(stream, stats, config).await {
                 tracing::warn!(%error, "serving Prometheus metrics failed");
             }
         });
@@ -36,9 +35,7 @@ pub(crate) async fn serve(
 async fn handle_request(
     mut stream: TcpStream,
     stats: SharedStats,
-    elapsed: Duration,
-    client_count: usize,
-    blobs_per_second: f64,
+    config: Config,
 ) -> io::Result<()> {
     let mut request = [0; 1024];
     let bytes_read = stream.read(&mut request).await?;
@@ -47,7 +44,14 @@ async fn handle_request(
         (
             "200 OK",
             "text/plain; version=0.0.4; charset=utf-8",
-            stats.encode_prometheus(elapsed, client_count, blobs_per_second),
+            stats.encode_prometheus(
+                config.started_at.elapsed(),
+                config.client_count,
+                config.blobs_per_second,
+                config.workload,
+                config.wait_for_full_fanout_before_payment,
+                config.download_concurrency,
+            ),
         )
     } else {
         (
@@ -75,7 +79,18 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let stats = Arc::new(RwLock::new(Stats::default()));
-        let server = tokio::spawn(serve(listener, stats, Instant::now(), 2, 1.5));
+        let server = tokio::spawn(serve(
+            listener,
+            stats,
+            Config {
+                started_at: Instant::now(),
+                client_count: 2,
+                blobs_per_second: 1.5,
+                workload: "writer",
+                wait_for_full_fanout_before_payment: false,
+                download_concurrency: 4,
+            },
+        ));
 
         let mut stream = TcpStream::connect(address).await.unwrap();
         stream
@@ -89,6 +104,10 @@ mod tests {
         assert!(response.contains("Content-Type: text/plain; version=0.0.4; charset=utf-8"));
         assert!(response.contains("fibre_evaluator_clients 2\n"));
         assert!(response.contains("fibre_evaluator_aggregate_target_blobs_per_second 3\n"));
+        assert!(response.contains(
+            "fibre_evaluator_run_info{workload=\"writer\",full_fanout_before_payment=\"false\"} 1\n"
+        ));
+        assert!(response.contains("fibre_evaluator_download_concurrency_limit 4\n"));
         server.abort();
     }
 }

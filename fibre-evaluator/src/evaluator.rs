@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use celestia_fibre::{
     BlobConfig, BlobID, DownloadOptions, EncodedBlob, FibreClient, FibreClientConfig,
-    GrpcHostRegistry, GrpcSetGetter, GrpcValidatorConnector,
+    GrpcHostRegistry, GrpcSetGetter, GrpcValidatorConnector, UploadCompletion,
 };
 use celestia_grpc::{GrpcClient, TxConfig};
 use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
@@ -52,6 +52,7 @@ struct WriterContext {
     encode_pool: Arc<rayon::ThreadPool>,
     encode_semaphore: Arc<Semaphore>,
     skip_download: bool,
+    wait_for_full_fanout_before_payment: bool,
 }
 
 struct ReaderContext {
@@ -145,6 +146,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         download_concurrency = cli.download_concurrency,
         max_connections_per_validator = %cli.max_connections_per_validator,
         max_in_flight_per_validator = ?cli.max_in_flight_per_validator,
+        wait_for_full_fanout_before_payment = cli.wait_for_full_fanout_before_payment,
         download_enabled = cli.reader_only || !cli.skip_download,
         gas_limit = ?cli.gas_limit,
         gas_price = ?cli.gas_price,
@@ -181,9 +183,14 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     let metrics_handle = tokio::spawn(metrics::serve(
         metrics_listener,
         Arc::clone(&shared_stats),
-        started_at,
-        client_count,
-        blobs_per_second,
+        metrics::Config {
+            started_at,
+            client_count,
+            blobs_per_second,
+            workload: if cli.reader_only { "reader" } else { "writer" },
+            wait_for_full_fanout_before_payment: cli.wait_for_full_fanout_before_payment,
+            download_concurrency: cli.download_concurrency,
+        },
     ));
     let stats_handle = tokio::spawn(run_stats_collector(
         event_rx,
@@ -322,6 +329,7 @@ async fn build_lifecycle_context(
             encode_pool: Arc::new(encode_pool),
             encode_semaphore: Arc::new(Semaphore::new(cli.encode_concurrency)),
             skip_download: cli.skip_download,
+            wait_for_full_fanout_before_payment: cli.wait_for_full_fanout_before_payment,
         }))
     };
 
@@ -453,6 +461,7 @@ async fn run_reader_source(
 
     let mut page = 1;
     let mut seen = HashSet::new();
+    let mut scanned_transactions = 0;
     tracing::info!(
         start_height = reader.start_height,
         "reader waiting for new Fibre payments"
@@ -466,15 +475,24 @@ async fn run_reader_source(
                 tracing::info!("received Ctrl+C; stopping namespace reads");
                 break false;
             }
-            _ = poll.tick() => {
-                read_available_blobs(
+            _ = poll.tick() => {}
+        }
+        tokio::select! {
+            biased;
+            _ = &mut deadline_sleep => break true,
+            result = &mut ctrl_c => {
+                result.context("listening for Ctrl+C")?;
+                tracing::info!("received Ctrl+C; stopping namespace reads");
+                break false;
+            }
+            result = read_available_blobs(
                     &work_tx,
                     &event_tx,
                     reader,
                     &mut page,
                     &mut seen,
-                ).await?;
-            }
+                    &mut scanned_transactions,
+                ) => result?,
         }
     };
 
@@ -491,6 +509,7 @@ async fn read_available_blobs(
     reader: &ReaderContext,
     page: &mut u64,
     seen: &mut HashSet<BlobID>,
+    scanned_transactions: &mut u64,
 ) -> Result<()> {
     const PAGE_LIMIT: u64 = 100;
 
@@ -511,12 +530,19 @@ async fn read_available_blobs(
             .await
             .context("querying Fibre payments")?;
 
+        let available = response.total;
+        let page_start = page.saturating_sub(1).saturating_mul(PAGE_LIMIT);
+        let transactions_in_page = response.txs.len() as u64;
+        let _ = event_tx.send(Event::ReaderPaymentProgress {
+            available,
+            scanned: *scanned_transactions,
+        });
+
         for blob in blob_ids_in_namespace(response.txs, reader.namespace)? {
             if seen.contains(&blob.id) {
                 continue;
             }
             let blob_id = blob.id.clone();
-            let _ = event_tx.send(Event::Scheduled { count: 1 });
             work_tx
                 .send(WorkItem {
                     work: Work::Read(blob),
@@ -524,11 +550,20 @@ async fn read_available_blobs(
                 })
                 .await
                 .context("lifecycle dispatcher stopped")?;
+            let _ = event_tx.send(Event::Scheduled { count: 1 });
             let _ = event_tx.send(Event::Admitted);
             seen.insert(blob_id);
         }
 
-        if page.saturating_mul(PAGE_LIMIT) >= response.total {
+        *scanned_transactions = (*scanned_transactions)
+            .max(page_start.saturating_add(transactions_in_page))
+            .min(available);
+        let _ = event_tx.send(Event::ReaderPaymentProgress {
+            available,
+            scanned: *scanned_transactions,
+        });
+
+        if page.saturating_mul(PAGE_LIMIT) >= available {
             return Ok(());
         }
         *page += 1;
@@ -739,6 +774,16 @@ async fn run_writer_lifecycle(
             .upload_with_completion(&writer.signing_key, writer.namespace, blob),
     )
     .await?;
+    let mut completion = Some(completion);
+    if writer.wait_for_full_fanout_before_payment {
+        wait_for_full_fanout(
+            completion.take().unwrap(),
+            full_fanout_started,
+            event_tx,
+            true,
+        )
+        .await?;
+    }
     let lifecycle_result = async {
         let message = MsgPayForFibre {
             signer: writer.signer.to_string(),
@@ -797,10 +842,31 @@ async fn run_writer_lifecycle(
     }
     .await;
 
+    let fanout_result = match completion {
+        Some(completion) => {
+            wait_for_full_fanout(completion, full_fanout_started, event_tx, false).await
+        }
+        None => Ok(()),
+    };
+
+    lifecycle_result?;
+    fanout_result?;
+    Ok(CompletedBlob {
+        payload_bytes: writer.payload_size as u64,
+        paid_bytes: writer.paid_size as u64,
+    })
+}
+
+async fn wait_for_full_fanout(
+    completion: UploadCompletion,
+    started: Instant,
+    event_tx: &mpsc::UnboundedSender<Event>,
+    require_all: bool,
+) -> std::result::Result<(), StageFailure> {
     let fanout = completion.wait().await;
     let _ = event_tx.send(Event::StageFinished {
         stage: "full_fanout",
-        elapsed: full_fanout_started.elapsed(),
+        elapsed: started.elapsed(),
     });
     if fanout.ignored_already_processed > 0 {
         let _ = event_tx.send(Event::IgnoredValidatorUploads {
@@ -808,21 +874,23 @@ async fn run_writer_lifecycle(
         });
     }
 
-    lifecycle_result?;
-    if fanout.failed > 0 {
+    let incomplete = fanout.failed
+        + if require_all {
+            fanout.ignored_already_processed
+        } else {
+            0
+        };
+    if incomplete > 0 {
         return Err(StageFailure {
             stage: "full_fanout",
             error: anyhow!(
-                "{} of {} validator uploads failed",
-                fanout.failed,
+                "{} of {} validator uploads did not complete",
+                incomplete,
                 fanout.successful + fanout.failed + fanout.ignored_already_processed
             ),
         });
     }
-    Ok(CompletedBlob {
-        payload_bytes: writer.payload_size as u64,
-        paid_bytes: writer.paid_size as u64,
-    })
+    Ok(())
 }
 
 async fn run_reader_lifecycle(
@@ -831,6 +899,8 @@ async fn run_reader_lifecycle(
     blob: &ReaderBlob,
     event_tx: &mpsc::UnboundedSender<Event>,
 ) -> std::result::Result<CompletedBlob, StageFailure> {
+    let download_wait_started = Instant::now();
+    let _ = event_tx.send(Event::ReaderDownloadWaiting);
     let download_permit = Arc::clone(&context.download_semaphore)
         .acquire_owned()
         .await
@@ -838,6 +908,9 @@ async fn run_reader_lifecycle(
             stage: "download",
             error: anyhow!(error),
         })?;
+    let _ = event_tx.send(Event::ReaderDownloadStarted {
+        wait_elapsed: download_wait_started.elapsed(),
+    });
     let downloaded = run_timed_stage(
         "download",
         context.operation_timeout,
@@ -850,6 +923,7 @@ async fn run_reader_lifecycle(
         ),
     )
     .await;
+    let _ = event_tx.send(Event::ReaderDownloadFinished);
     drop(download_permit);
     let blob = downloaded?;
     if reader.verify_crc {

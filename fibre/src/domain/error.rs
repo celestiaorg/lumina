@@ -142,6 +142,14 @@ pub enum FibreError {
 }
 
 impl FibreError {
+    pub(crate) fn is_grpc_not_found(&self) -> bool {
+        matches!(
+            self,
+            FibreError::GrpcClient(celestia_grpc::Error::TonicError(status))
+                if status.code() == tonic::Code::NotFound
+        )
+    }
+
     pub(crate) fn is_payment_promise_already_processed(&self) -> bool {
         matches!(
             self,
@@ -197,5 +205,12 @@ mod tests {
             )
             .is_payment_promise_already_processed()
         );
+    }
+
+    #[test]
+    fn identifies_grpc_not_found() {
+        assert!(grpc_error(tonic::Code::NotFound, "missing").is_grpc_not_found());
+        assert!(!grpc_error(tonic::Code::Internal, "missing").is_grpc_not_found());
+        assert!(!FibreError::NotFound.is_grpc_not_found());
     }
 }

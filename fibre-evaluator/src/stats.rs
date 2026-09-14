@@ -25,6 +25,15 @@ pub(crate) enum Event {
         stage: &'static str,
         elapsed: Duration,
     },
+    ReaderDownloadWaiting,
+    ReaderDownloadStarted {
+        wait_elapsed: Duration,
+    },
+    ReaderDownloadFinished,
+    ReaderPaymentProgress {
+        available: u64,
+        scanned: u64,
+    },
     IgnoredValidatorUploads {
         count: u64,
     },
@@ -52,6 +61,10 @@ pub(crate) struct Stats {
     successes: u64,
     failures: u64,
     ignored_validator_uploads: u64,
+    reader_downloads_active: u64,
+    reader_downloads_waiting: u64,
+    reader_payment_transactions_available: u64,
+    reader_payment_transactions_scanned: u64,
     payload_bytes: u64,
     paid_bytes: u64,
     failures_by_stage: BTreeMap<&'static str, u64>,
@@ -104,6 +117,19 @@ impl Stats {
                 self.record_latency("queue", queue_latency);
             }
             Event::StageFinished { stage, elapsed } => self.record_latency(stage, elapsed),
+            Event::ReaderDownloadWaiting => self.reader_downloads_waiting += 1,
+            Event::ReaderDownloadStarted { wait_elapsed } => {
+                self.reader_downloads_waiting = self.reader_downloads_waiting.saturating_sub(1);
+                self.reader_downloads_active += 1;
+                self.record_latency("download_wait", wait_elapsed);
+            }
+            Event::ReaderDownloadFinished => {
+                self.reader_downloads_active = self.reader_downloads_active.saturating_sub(1);
+            }
+            Event::ReaderPaymentProgress { available, scanned } => {
+                self.reader_payment_transactions_available = available;
+                self.reader_payment_transactions_scanned = scanned;
+            }
             Event::IgnoredValidatorUploads { count } => {
                 self.ignored_validator_uploads += count;
             }
@@ -152,6 +178,11 @@ impl Stats {
             verified = self.successes,
             failed = self.failures,
             ignored_validator_uploads = self.ignored_validator_uploads,
+            reader_downloads_active = self.reader_downloads_active,
+            reader_downloads_waiting = self.reader_downloads_waiting,
+            reader_payment_transactions_pending = self
+                .reader_payment_transactions_available
+                .saturating_sub(self.reader_payment_transactions_scanned),
             blobs_per_second = %format_args!("{:.2}", per_second(self.successes, elapsed)),
             paid_gib_per_second = %format_args!("{:.6}", per_second(self.paid_bytes, elapsed) / GIB),
             "periodic stats"
@@ -163,11 +194,20 @@ impl Stats {
         elapsed: Duration,
         client_count: usize,
         blobs_per_second: f64,
+        workload: &'static str,
+        wait_for_full_fanout_before_payment: bool,
+        download_concurrency: usize,
     ) -> String {
         let completed = self.successes + self.failures;
         let payload_bps = per_second(self.payload_bytes, elapsed);
         let paid_bps = per_second(self.paid_bytes, elapsed);
         let mut output = String::new();
+
+        writeln!(
+            output,
+            "# HELP fibre_evaluator_run_info Static evaluator run information.\n# TYPE fibre_evaluator_run_info gauge\nfibre_evaluator_run_info{{workload=\"{workload}\",full_fanout_before_payment=\"{wait_for_full_fanout_before_payment}\"}} 1"
+        )
+        .unwrap();
 
         metric(
             &mut output,
@@ -230,6 +270,49 @@ impl Stats {
             "gauge",
             "Blob lifecycles currently in flight.",
             self.started.saturating_sub(completed),
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_reader_downloads_active",
+            "gauge",
+            "Reader blob downloads holding a download concurrency permit.",
+            self.reader_downloads_active,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_reader_downloads_waiting",
+            "gauge",
+            "Reader blob downloads waiting for a download concurrency permit.",
+            self.reader_downloads_waiting,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_download_concurrency_limit",
+            "gauge",
+            "Configured maximum concurrent blob downloads.",
+            download_concurrency,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_reader_payment_transactions_available",
+            "gauge",
+            "Fibre payment transactions available to the reader since startup.",
+            self.reader_payment_transactions_available,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_reader_payment_transactions_scanned",
+            "gauge",
+            "Fibre payment transactions scanned by the reader since startup.",
+            self.reader_payment_transactions_scanned,
+        );
+        metric(
+            &mut output,
+            "fibre_evaluator_reader_payment_transactions_pending",
+            "gauge",
+            "Fibre payment transactions not yet scanned by the reader.",
+            self.reader_payment_transactions_available
+                .saturating_sub(self.reader_payment_transactions_scanned),
         );
         metric(
             &mut output,
@@ -447,6 +530,7 @@ pub(crate) fn print_final_report(
         "full_fanout",
         "payment_broadcast",
         "payment_confirmation",
+        "download_wait",
         "download",
         "total",
     ] {
@@ -512,6 +596,15 @@ mod tests {
         stats.apply(Event::Started {
             queue_latency: Duration::from_millis(2),
         });
+        stats.apply(Event::ReaderDownloadWaiting);
+        stats.apply(Event::ReaderDownloadStarted {
+            wait_elapsed: Duration::from_millis(5),
+        });
+        stats.apply(Event::ReaderDownloadFinished);
+        stats.apply(Event::ReaderPaymentProgress {
+            available: 12,
+            scanned: 7,
+        });
         stats.apply(Event::IgnoredValidatorUploads { count: 2 });
         stats.apply(Event::LifecycleFailure {
             client: 1,
@@ -533,19 +626,29 @@ mod tests {
         assert_eq!(stats.successes, 1);
         assert_eq!(stats.failures, 1);
         assert_eq!(stats.ignored_validator_uploads, 2);
+        assert_eq!(stats.reader_downloads_active, 0);
+        assert_eq!(stats.reader_downloads_waiting, 0);
+        assert_eq!(stats.reader_payment_transactions_available, 12);
+        assert_eq!(stats.reader_payment_transactions_scanned, 7);
         assert_eq!(stats.payload_bytes, 100);
         assert_eq!(stats.paid_bytes, 105);
         assert_eq!(stats.failures_by_stage["download"], 1);
         assert_eq!(stats.latencies["queue"], [Duration::from_millis(2)]);
+        assert_eq!(stats.latencies["download_wait"], [Duration::from_millis(5)]);
         assert_eq!(
             stats.latencies["total"],
             [Duration::from_millis(10), Duration::from_millis(20)]
         );
 
-        let metrics = stats.encode_prometheus(Duration::from_secs(2), 2, 1.5);
+        let metrics = stats.encode_prometheus(Duration::from_secs(2), 2, 1.5, "reader", false, 24);
         assert!(metrics.contains("fibre_evaluator_scheduled_total 7\n"));
         assert!(metrics.contains("fibre_evaluator_started_total 1\n"));
         assert!(metrics.contains("fibre_evaluator_ignored_validator_uploads_total 2\n"));
+        assert!(metrics.contains(
+            "fibre_evaluator_run_info{workload=\"reader\",full_fanout_before_payment=\"false\"} 1\n"
+        ));
+        assert!(metrics.contains("fibre_evaluator_download_concurrency_limit 24\n"));
+        assert!(metrics.contains("fibre_evaluator_reader_payment_transactions_pending 5\n"));
         assert!(metrics.contains("fibre_evaluator_stage_failures_total{stage=\"download\"} 1\n"));
         assert!(metrics.contains(
             "fibre_evaluator_stage_latency_milliseconds{stage=\"total\",quantile=\"0.5\"} 10\n"

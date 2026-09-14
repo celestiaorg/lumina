@@ -194,11 +194,19 @@ impl FibreClient {
                         Some((val_idx, Some(Err(error)))) => {
                             let (rows, info) = selected[val_idx];
                             inflight_rows = inflight_rows.saturating_sub(rows);
-                            tracing::warn!(
-                                validator = %info.address_hex(),
-                                %error,
-                                "shard download or verification failed"
-                            );
+                            if error.is_grpc_not_found() {
+                                tracing::debug!(
+                                    validator = %info.address_hex(),
+                                    %error,
+                                    "shard not found on validator"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    validator = %info.address_hex(),
+                                    %error,
+                                    "shard download or verification failed"
+                                );
+                            }
                             // Invariant violated — loop will spawn more validators.
                         }
                         Some((val_idx, None)) => {
