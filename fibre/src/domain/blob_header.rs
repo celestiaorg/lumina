@@ -2,7 +2,6 @@
 //!
 //! The blob header is prepended to the original data before splitting into rows.
 
-use crate::config::BlobConfig;
 use crate::error::{BlobHeaderError, FibreError};
 
 /// Length of the version field in bytes.
@@ -10,179 +9,112 @@ const BLOB_VERSION_LEN: usize = 1;
 /// Length of the data size field in bytes.
 const BLOB_DATA_SIZE_LEN: usize = 4;
 
-/// Version 0 blob header placed at the start of the first row.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BlobHeaderV0 {
-    /// Size of the original data (excluding header).
-    pub data_size: u32,
+const VERSION: u8 = 0;
+
+/// Total header size in bytes.
+pub(crate) const SIZE: usize = BLOB_VERSION_LEN + BLOB_DATA_SIZE_LEN;
+
+/// Encode the header and data into a flat buffer.
+///
+/// The caller must ensure `buf` is at least `SIZE + data.len()` bytes long.
+pub(crate) fn encode(data: &[u8], buf: &mut [u8]) {
+    buf[0] = VERSION;
+    buf[BLOB_VERSION_LEN..SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
+    buf[SIZE..SIZE + data.len()].copy_from_slice(data);
 }
 
-impl BlobHeaderV0 {
-    /// Total header size in bytes.
-    pub const HEADER_SIZE: usize = BLOB_VERSION_LEN + BLOB_DATA_SIZE_LEN;
-
-    /// Create a new version 0 blob header with the given data size.
-    pub fn new(data_size: usize) -> Self {
-        Self {
-            data_size: data_size as u32,
-        }
+/// Decode the header and extract the original data from reconstructed rows.
+pub(crate) fn decode(
+    rows: &rsema1d::RowMatrix,
+    max_data_size: usize,
+) -> Result<Vec<u8>, FibreError> {
+    if rows.rows() == 0 {
+        return Err(BlobHeaderError::NoRows.into());
     }
 
-    /// Encode the header into the first bytes of the provided buffer.
-    ///
-    /// The buffer must be at least `HEADER_SIZE` bytes long.
-    fn encode(&self, buf: &mut [u8]) {
-        buf[0] = 0; // version 0
-        buf[BLOB_VERSION_LEN..Self::HEADER_SIZE].copy_from_slice(&self.data_size.to_be_bytes());
+    if rows.row_size() < SIZE {
+        return Err(BlobHeaderError::FirstRowTooSmall(rows.row_size()).into());
     }
 
-    /// Decode the header from the provided buffer.
-    ///
-    /// Returns an error if the version byte is not 0.
-    fn decode(buf: &[u8]) -> Result<Self, FibreError> {
-        if buf[0] != 0 {
-            return Err(FibreError::UnsupportedBlobVersion(buf[0]));
-        }
-        let data_size =
-            u32::from_be_bytes(buf[BLOB_VERSION_LEN..Self::HEADER_SIZE].try_into().unwrap());
-        Ok(Self { data_size })
+    let buf = rows.as_row_major();
+    if buf[0] != VERSION {
+        return Err(FibreError::UnsupportedBlobVersion(buf[0]));
     }
 
-    /// Encode the header and data into a flat buffer.
-    ///
-    /// The caller must ensure `buf` is at least `HEADER_SIZE + data.len()` bytes.
-    pub fn encode_into_buffer(&self, data: &[u8], buf: &mut [u8]) {
-        self.encode(buf);
-        buf[Self::HEADER_SIZE..Self::HEADER_SIZE + data.len()].copy_from_slice(data);
+    let data_size = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+    if data_size == 0 {
+        return Err(BlobHeaderError::ZeroDataSize.into());
+    }
+    if data_size as usize > max_data_size {
+        return Err(BlobHeaderError::DataSizeExceedsMax {
+            size: data_size,
+            max: max_data_size,
+        }
+        .into());
     }
 
-    /// Decode the header and extract original data from rows.
-    pub fn decode_from_rows(
-        rows: &[&[u8]],
-        cfg: &BlobConfig,
-    ) -> Result<(Self, Vec<u8>), FibreError> {
-        if rows.is_empty() {
-            return Err(BlobHeaderError::NoRows.into());
+    let data_size = data_size as usize;
+    let payload = &buf[SIZE..];
+    let Some(data) = payload.get(..data_size) else {
+        return Err(BlobHeaderError::DataSizeMismatch {
+            copied: payload.len(),
+            expected: data_size,
         }
+        .into());
+    };
 
-        if rows[0].len() < Self::HEADER_SIZE {
-            return Err(BlobHeaderError::FirstRowTooSmall(rows[0].len()).into());
-        }
-
-        // Decode header from first row
-        let header = Self::decode(rows[0])?;
-
-        // Validate blob size is within reasonable bounds
-        if header.data_size == 0 {
-            return Err(BlobHeaderError::ZeroDataSize.into());
-        }
-        if header.data_size as usize > cfg.max_data_size {
-            return Err(BlobHeaderError::DataSizeExceedsMax {
-                size: header.data_size,
-                max: cfg.max_data_size,
-            }
-            .into());
-        }
-
-        let data_size = header.data_size as usize;
-
-        // Pre-allocate data buffer (excluding header)
-        let mut data = vec![0u8; data_size];
-        let mut offset = 0;
-        for (i, row) in rows.iter().enumerate() {
-            if offset >= data_size {
-                break;
-            }
-            // Skip header in first row
-            let row_data = if i == 0 {
-                &row[Self::HEADER_SIZE..]
-            } else {
-                row
-            };
-
-            let remaining = data_size - offset;
-            let to_copy = remaining.min(row_data.len());
-            data[offset..offset + to_copy].copy_from_slice(&row_data[..to_copy]);
-            offset += to_copy;
-        }
-
-        if offset != data_size {
-            return Err(BlobHeaderError::DataSizeMismatch {
-                copied: offset,
-                expected: data_size,
-            }
-            .into());
-        }
-
-        Ok((header, data))
-    }
+    Ok(data.to_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn test_blob_config() -> BlobConfig {
-        BlobConfig::new_test(0, 4, 4, 1024, 4, 64)
+    fn rows(data: Vec<u8>, row_count: usize, row_size: usize) -> rsema1d::RowMatrix {
+        rsema1d::RowMatrix::with_shape(data, row_count, row_size).unwrap()
     }
 
     #[test]
     fn header_size_is_five() {
-        assert_eq!(BlobHeaderV0::HEADER_SIZE, 5);
+        assert_eq!(SIZE, 5);
     }
 
     #[test]
-    fn encode_decode_header() {
-        let header = BlobHeaderV0::new(256);
-        let mut buf = [0u8; BlobHeaderV0::HEADER_SIZE];
-        header.encode(&mut buf);
+    fn encode_decode() {
+        let data = vec![1u8; 100];
+        let mut buf = vec![0u8; 128];
+        encode(&data, &mut buf);
 
-        assert_eq!(buf[0], 0); // version
-        assert_eq!(u32::from_be_bytes(buf[1..5].try_into().unwrap()), 256);
-
-        let decoded = BlobHeaderV0::decode(&buf).unwrap();
-        assert_eq!(decoded.data_size, 256);
-    }
-
-    #[test]
-    fn encode_into_buffer_writes_header_and_data() {
-        let data = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let header = BlobHeaderV0::new(data.len());
-        let mut buf = vec![0u8; 64];
-        header.encode_into_buffer(&data, &mut buf);
-
-        // Header: version 0, data_size 10
         assert_eq!(buf[0], 0);
-        assert_eq!(u32::from_be_bytes(buf[1..5].try_into().unwrap()), 10);
-        // Data immediately after header
-        assert_eq!(&buf[5..15], &data);
-        // Rest is zero-padded
-        assert!(buf[15..].iter().all(|&b| b == 0));
+        assert_eq!(u32::from_be_bytes(buf[1..5].try_into().unwrap()), 100);
+        assert_eq!(&buf[5..105], data);
+        assert!(buf[105..].iter().all(|&b| b == 0));
+
+        assert_eq!(decode(&rows(buf, 2, 64), 1024).unwrap(), data);
     }
 
     #[test]
     fn decode_invalid_version() {
-        let mut buf = [0u8; BlobHeaderV0::HEADER_SIZE];
-        buf[0] = 1; // invalid version
-        assert!(BlobHeaderV0::decode(&buf).is_err());
+        let mut row = vec![0u8; 64];
+        row[0] = 1;
+        assert!(matches!(
+            decode(&rows(row, 1, 64), 1024),
+            Err(FibreError::UnsupportedBlobVersion(1))
+        ));
     }
 
     #[test]
     fn decode_empty_rows() {
-        let cfg = test_blob_config();
-        let rows: &[&[u8]] = &[];
         assert!(matches!(
-            BlobHeaderV0::decode_from_rows(rows, &cfg),
+            decode(&rows(Vec::new(), 0, 64), 1024),
             Err(FibreError::InvalidBlobHeader(BlobHeaderError::NoRows))
         ));
     }
 
     #[test]
     fn decode_first_row_too_small() {
-        let cfg = test_blob_config();
-        let row = [0u8; BlobHeaderV0::HEADER_SIZE - 1];
         assert!(matches!(
-            BlobHeaderV0::decode_from_rows(&[&row], &cfg),
+            decode(&rows(vec![0u8; SIZE - 1], 1, SIZE - 1), 1024),
             Err(FibreError::InvalidBlobHeader(
                 BlobHeaderError::FirstRowTooSmall(4)
             ))
@@ -191,22 +123,18 @@ mod tests {
 
     #[test]
     fn decode_zero_data_size() {
-        let cfg = test_blob_config();
-        let mut row = vec![0u8; 64];
-        row[1..5].copy_from_slice(&0u32.to_be_bytes());
         assert!(matches!(
-            BlobHeaderV0::decode_from_rows(&[row.as_slice()], &cfg),
+            decode(&rows(vec![0u8; 64], 1, 64), 1024),
             Err(FibreError::InvalidBlobHeader(BlobHeaderError::ZeroDataSize))
         ));
     }
 
     #[test]
     fn decode_data_size_exceeds_max() {
-        let cfg = test_blob_config();
         let mut row = vec![0u8; 64];
         row[1..5].copy_from_slice(&1025u32.to_be_bytes());
         assert!(matches!(
-            BlobHeaderV0::decode_from_rows(&[row.as_slice()], &cfg),
+            decode(&rows(row, 1, 64), 1024),
             Err(FibreError::InvalidBlobHeader(
                 BlobHeaderError::DataSizeExceedsMax {
                     size: 1025,
@@ -218,11 +146,10 @@ mod tests {
 
     #[test]
     fn decode_data_size_mismatch() {
-        let cfg = test_blob_config();
-        let mut row = vec![0u8; BlobHeaderV0::HEADER_SIZE];
+        let mut row = vec![0u8; SIZE];
         row[1..5].copy_from_slice(&1u32.to_be_bytes());
         assert!(matches!(
-            BlobHeaderV0::decode_from_rows(&[row.as_slice()], &cfg),
+            decode(&rows(row, 1, SIZE), 1024),
             Err(FibreError::InvalidBlobHeader(
                 BlobHeaderError::DataSizeMismatch {
                     copied: 0,
