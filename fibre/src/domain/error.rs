@@ -255,6 +255,18 @@ pub enum FibreError {
     #[error("grpc client error: {0}")]
     GrpcClient(#[from] celestia_grpc::Error),
 
+    /// A gRPC request to a Fibre validator failed.
+    #[error("Fibre gRPC {method} request to {endpoint} failed: {source}")]
+    GrpcRequest {
+        /// Name of the failed gRPC method.
+        method: &'static str,
+        /// Validator endpoint handling the request.
+        endpoint: String,
+        /// The underlying gRPC failure.
+        #[source]
+        source: celestia_grpc::Error,
+    },
+
     /// An error while building a gRPC client.
     #[error("failed to build gRPC client: {0}")]
     GrpcClientBuilder(#[from] celestia_grpc::GrpcClientBuilderError),

@@ -203,7 +203,7 @@ impl ServerCertVerifier for FibreServerCertVerifier {
 }
 
 pub(crate) fn grpc_client(
-    url: String,
+    url: &str,
     validator_key: VerifyingKey,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
@@ -211,7 +211,7 @@ pub(crate) fn grpc_client(
     let uri = url
         .parse::<http::Uri>()
         .map_err(|source| FibreError::InvalidEndpoint {
-            endpoint: url,
+            endpoint: url.to_owned(),
             source,
         })?;
     let host = uri
@@ -744,7 +744,7 @@ mod tests {
         let url = "not a valid url \0".to_string();
         let key = VerifyingKey::from_bytes(&[1u8; 32]).expect("key should be valid");
         let error = grpc_client(
-            url.clone(),
+            &url,
             key,
             "chain".to_string(),
             Arc::new(crate::transport::io_connector::NativeTcpConnector),
@@ -760,9 +760,10 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn grpc_client_rejects_uri_without_host() {
         let uri: http::Uri = "/relative".parse().expect("relative URI should parse");
+        let url = uri.to_string();
         let key = VerifyingKey::from_bytes(&[1u8; 32]).expect("key should be valid");
         let error = grpc_client(
-            uri.to_string(),
+            &url,
             key,
             "chain".to_string(),
             Arc::new(crate::transport::io_connector::NativeTcpConnector),
