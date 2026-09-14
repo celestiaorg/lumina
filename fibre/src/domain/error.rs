@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use super::blob::BLOB_ID_SIZE;
-use super::blob_header::BlobHeaderV0;
+use super::blob_header;
 use super::config::MAX_CHAIN_ID_SIZE;
 use super::payment_promise::SIGNATURE_SIZE;
 
@@ -23,7 +23,7 @@ pub enum BlobHeaderError {
     NoRows,
     #[error(
         "first row too small: need at least {expected} bytes for header, got {0}",
-        expected = BlobHeaderV0::HEADER_SIZE
+        expected = blob_header::SIZE
     )]
     FirstRowTooSmall(usize),
     #[error("blob size in header must be greater than 0")]

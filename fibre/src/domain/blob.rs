@@ -10,7 +10,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use crate::blob_header::BlobHeaderV0;
+use crate::blob_header;
 use crate::config::BlobConfig;
 use crate::error::{BlobIdError, FibreError, ShardError};
 
@@ -153,7 +153,6 @@ impl EncodedBlob {
             });
         }
 
-        let header = BlobHeaderV0::new(data.len());
         let row_size = cfg.row_size(data.len());
 
         // Allocate the full extended matrix (original + parity rows) up front.
@@ -161,7 +160,7 @@ impl EncodedBlob {
         // zeroed and will be filled by encode_in_place.
         let total_rows = cfg.original_rows + cfg.parity_rows;
         let mut extended = rsema1d::RowMatrix::zeroed(total_rows, row_size)?;
-        header.encode_into_buffer(data, extended.as_row_major_mut());
+        blob_header::encode(data, extended.as_row_major_mut());
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
         let (extended_data, commitment, _) =
             rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
@@ -274,36 +273,32 @@ impl BlobReconstruction {
     ///
     /// Requires at least `original_rows` (K) rows to have been set via `store_rows()`.
     pub(crate) fn reconstruct(self) -> Result<Blob, FibreError> {
-        let mut indices = Vec::new();
-        for (i, row_opt) in self.rows.iter().enumerate() {
-            if row_opt.is_some() {
-                indices.push(i);
+        let k = self.cfg.original_rows;
+        let mut selected_indices = Vec::with_capacity(k);
+        let mut selected_rows = Vec::with_capacity(k);
+        for (index, row) in self.rows.iter().enumerate() {
+            if selected_rows.len() == k {
+                break;
+            }
+            if let Some(row) = row {
+                selected_indices.push(index);
+                selected_rows.push(row.as_slice());
             }
         }
 
-        if indices.len() < self.cfg.original_rows {
+        if selected_rows.len() < k {
             return Err(FibreError::NotEnoughShards {
-                got: indices.len(),
-                need: self.cfg.original_rows,
+                got: selected_rows.len(),
+                need: k,
             });
         }
 
-        let k = self.cfg.original_rows;
-        let selected_indices: Vec<usize> = indices[..k].to_vec();
-        let selected_rows: Vec<&[u8]> = selected_indices
-            .iter()
-            .map(|&i| self.rows[i].as_ref().unwrap().as_slice())
-            .collect();
-        let params = rsema1d::Parameters::new(
-            self.cfg.original_rows,
-            self.cfg.parity_rows,
-            selected_rows[0].len(),
-        )?;
+        let row_size = selected_rows.first().map_or(0, |row| row.len());
+        let params =
+            rsema1d::Parameters::new(self.cfg.original_rows, self.cfg.parity_rows, row_size)?;
 
         let reconstructed = rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
-
-        let original_rows: Vec<&[u8]> = (0..k).map(|i| reconstructed.row(i).unwrap()).collect();
-        let (_, data) = BlobHeaderV0::decode_from_rows(&original_rows, &self.cfg)?;
+        let data = blob_header::decode(&reconstructed, self.cfg.max_data_size)?;
 
         Ok(Blob { id: self.id, data })
     }
