@@ -22,11 +22,12 @@ use crate::validator_client::{
 };
 
 /// Factory that resolves validator hosts and caches gRPC connections.
+#[derive(Clone)]
 pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
-    connections: tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorConnection>>>,
+    connections: Arc<tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorConnection>>>>,
 }
 
 impl GrpcValidatorConnector {
@@ -50,7 +51,7 @@ impl GrpcValidatorConnector {
             host_registry,
             chain_id: chain_id.into(),
             io_connector,
-            connections: tokio::sync::Mutex::new(HashMap::new()),
+            connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 }
