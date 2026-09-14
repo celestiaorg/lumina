@@ -112,6 +112,7 @@ fn normalize_host(raw: &str) -> String {
 /// A connection to a single validator's Fibre gRPC service.
 ///
 /// Wraps a [`GrpcClient`] for issuing upload/download RPCs.
+#[derive(Clone)]
 pub struct GrpcValidatorConnection {
     client: GrpcClient,
 }
