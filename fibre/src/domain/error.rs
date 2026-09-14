@@ -128,6 +128,42 @@ pub enum FibreClientBuilderError {
     MissingConnector,
 }
 
+#[allow(missing_docs)]
+#[derive(Debug, Error)]
+pub enum DiscoveryError {
+    #[error("discovery poll interval must be greater than zero")]
+    ZeroPollInterval,
+    #[error("discovery height {0} exceeds i64::MAX")]
+    HeightTooLarge(u64),
+    #[error("transaction query returned {transactions} transactions and {responses} responses")]
+    ResponseLengthMismatch {
+        transactions: usize,
+        responses: usize,
+    },
+    #[error("transaction query returned an empty page {page} before total {total} was reached")]
+    IncompletePage { page: u64, total: u64 },
+    #[error("transaction query page overflow")]
+    PageOverflow,
+    #[error("transaction query returned invalid height {0}")]
+    InvalidTransactionHeight(i64),
+    #[error("transaction query returned height {height} at or below cursor {from_height}")]
+    UnexpectedTransactionHeight { height: u64, from_height: u64 },
+    #[error("transaction query returned invalid hash '{0}'")]
+    InvalidTransactionHash(String),
+    #[error("successful transaction {0} has no body")]
+    MissingTransactionBody(String),
+    #[error("failed to decode MsgPayForFibre: {0}")]
+    DecodeMessage(#[source] prost::DecodeError),
+    #[error("MsgPayForFibre has no payment promise")]
+    MissingPaymentPromise,
+    #[error("blob version {0} does not fit in a BlobID")]
+    BlobVersionOutOfRange(u32),
+    #[error("Fibre commitment must be 32 bytes, got {0}")]
+    CommitmentLength(usize),
+    #[error("payment promise has invalid validator-set height {0}")]
+    InvalidValidatorSetHeight(i64),
+}
+
 /// All errors that can occur in the Fibre client library.
 #[derive(Debug, Error)]
 pub enum FibreError {
@@ -212,6 +248,14 @@ pub enum FibreError {
     /// The Fibre client builder is missing a required value.
     #[error("client builder error: {0}")]
     Builder(#[from] FibreClientBuilderError),
+
+    /// The client was built without a transaction discovery source.
+    #[error("transaction discovery is not configured")]
+    DiscoveryUnavailable,
+
+    /// An on-chain Fibre discovery response was invalid.
+    #[error("Fibre discovery failed: {0}")]
+    Discovery(#[from] DiscoveryError),
 
     /// WASM transports require an explicit byte-stream connector.
     #[error("a Fibre I/O connector is required on WASM")]

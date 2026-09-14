@@ -2,7 +2,8 @@
 //!
 //! Fibre is an off-chain data availability protocol for Celestia. Instead of putting
 //! blob data on-chain, Fibre distributes it directly to validators via gRPC. Only a
-//! small payment receipt (`MsgPayForFibre`) goes on-chain.
+//! small payment receipt (`MsgPayForFibre`) goes on-chain, which clients can query or
+//! continuously discover by namespace.
 
 #![forbid(unsafe_code)]
 
@@ -25,6 +26,7 @@ mod roundtrip_test;
 mod test_utils;
 
 pub use celestia_grpc::Endpoint;
+pub use client::discovery::{DiscoveredBlob, DiscoveryOptions, FibreStream};
 pub use client::download::DownloadOptions;
 pub use client::upload::{UploadCompletion, UploadCompletionStats};
 pub use client::{FibreClient, FibreClientBuilder};
@@ -34,8 +36,8 @@ pub use config::{
 pub use domain::blob::{Blob, BlobID, Commitment, EncodedBlob};
 pub use domain::payment_promise::{PaymentPromise, SignedPaymentPromise};
 pub use error::{
-    BlobHeaderError, BlobIdError, FibreClientBuilderError, FibreError, PaymentPromiseError, Result,
-    ShardError, ValidatorSetError,
+    BlobHeaderError, BlobIdError, DiscoveryError, FibreClientBuilderError, FibreError,
+    PaymentPromiseError, Result, ShardError, ValidatorSetError,
 };
 pub use transport::grpc_validator_client::GrpcValidatorConnector;
 pub use transport::host_registry::{GrpcHostRegistry, Host, HostRegistry};
