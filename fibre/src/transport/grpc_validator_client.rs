@@ -6,7 +6,9 @@
 //! and download shards over the Fibre gRPC service.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use celestia_grpc::GrpcClient;
@@ -25,21 +27,37 @@ use crate::validator_client::{
 const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Factory that resolves validator hosts and caches gRPC connections.
+#[derive(Clone)]
 pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
-    connections: tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorConnection>>>,
+    max_connections_per_validator: NonZeroUsize,
+    max_in_flight_per_validator: Option<NonZeroUsize>,
+    connections: Arc<tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorPool>>>>,
 }
 
 impl GrpcValidatorConnector {
     /// Create a new connector backed by the given host registry.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(host_registry: Arc<dyn HostRegistry>, chain_id: impl Into<String>) -> Self {
-        Self::new_with_io_connector(
+        Self::new_with_limits(host_registry, chain_id, NonZeroUsize::MIN, None)
+    }
+
+    /// Create a new connector with per-validator connection and request limits.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with_limits(
+        host_registry: Arc<dyn HostRegistry>,
+        chain_id: impl Into<String>,
+        max_connections_per_validator: NonZeroUsize,
+        max_in_flight_per_validator: Option<NonZeroUsize>,
+    ) -> Self {
+        Self::new_with_io_connector_and_limits(
             host_registry,
             chain_id,
             Arc::new(crate::transport::io_connector::NativeTcpConnector),
+            max_connections_per_validator,
+            max_in_flight_per_validator,
         )
     }
 
@@ -49,11 +67,30 @@ impl GrpcValidatorConnector {
         chain_id: impl Into<String>,
         io_connector: Arc<dyn FibreIoConnector>,
     ) -> Self {
+        Self::new_with_io_connector_and_limits(
+            host_registry,
+            chain_id,
+            io_connector,
+            NonZeroUsize::MIN,
+            None,
+        )
+    }
+
+    /// Create a new connector with a caller-provided transport and per-validator limits.
+    pub fn new_with_io_connector_and_limits(
+        host_registry: Arc<dyn HostRegistry>,
+        chain_id: impl Into<String>,
+        io_connector: Arc<dyn FibreIoConnector>,
+        max_connections_per_validator: NonZeroUsize,
+        max_in_flight_per_validator: Option<NonZeroUsize>,
+    ) -> Self {
         Self {
             host_registry,
             chain_id: chain_id.into(),
             io_connector,
-            connections: tokio::sync::Mutex::new(HashMap::new()),
+            max_connections_per_validator,
+            max_in_flight_per_validator,
+            connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -73,7 +110,7 @@ impl ValidatorConnector for GrpcValidatorConnector {
             }
         }
 
-        // Cache miss: resolve host and create a new channel.
+        // Cache miss: resolve host and create a connection pool.
         let host = self.host_registry.get_host(validator).await?;
 
         // Validators may register hosts in gRPC name-resolution format
@@ -81,17 +118,27 @@ impl ValidatorConnector for GrpcValidatorConnector {
         // URI, so normalise the address first.
         let url = normalize_host(&host.0);
 
-        let client = crate::transport::tls::grpc_client(
-            &url,
-            validator.pubkey,
-            self.chain_id.clone(),
-            self.io_connector.clone(),
-        )?;
-
-        let conn = Arc::new(GrpcValidatorConnection {
-            client,
-            validator: validator.address_hex(),
-            endpoint: url,
+        let connections = (0..self.max_connections_per_validator.get())
+            .map(|_| {
+                let client = crate::transport::tls::grpc_client(
+                    &url,
+                    validator.pubkey,
+                    self.chain_id.clone(),
+                    self.io_connector.clone(),
+                )?;
+                Ok(GrpcValidatorConnection {
+                    client,
+                    validator: validator.address_hex(),
+                    endpoint: url.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, FibreError>>()?;
+        let conn = Arc::new(GrpcValidatorPool {
+            connections,
+            next_connection: AtomicUsize::new(0),
+            in_flight: self
+                .max_in_flight_per_validator
+                .map(|limit| tokio::sync::Semaphore::new(limit.get())),
         });
 
         // Re-check cache under lock: another task may have inserted a
@@ -100,6 +147,56 @@ impl ValidatorConnector for GrpcValidatorConnector {
         let conn = cache.entry(validator.address).or_insert(conn).clone();
 
         Ok(conn as Arc<dyn ValidatorConnection>)
+    }
+}
+
+struct GrpcValidatorPool {
+    connections: Vec<GrpcValidatorConnection>,
+    next_connection: AtomicUsize,
+    in_flight: Option<tokio::sync::Semaphore>,
+}
+
+impl GrpcValidatorPool {
+    fn next_connection(&self) -> &GrpcValidatorConnection {
+        let index = self.next_connection.fetch_add(1, Ordering::Relaxed) % self.connections.len();
+        &self.connections[index]
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ValidatorConnection for GrpcValidatorPool {
+    async fn upload_shard(
+        &self,
+        promise: &PaymentPromise,
+        rows: &[rsema1d::RowInclusionProof],
+        rlc_coeffs: &[rsema1d::GF128],
+    ) -> Result<UploadResponse, FibreError> {
+        let _permit = match &self.in_flight {
+            Some(semaphore) => Some(
+                semaphore
+                    .acquire()
+                    .await
+                    .expect("semaphore is never closed"),
+            ),
+            None => None,
+        };
+        self.next_connection()
+            .upload_shard(promise, rows, rlc_coeffs)
+            .await
+    }
+
+    async fn download_shard(&self, blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
+        let _permit = match &self.in_flight {
+            Some(semaphore) => Some(
+                semaphore
+                    .acquire()
+                    .await
+                    .expect("semaphore is never closed"),
+            ),
+            None => None,
+        };
+        self.next_connection().download_shard(blob_id).await
     }
 }
 
@@ -225,12 +322,10 @@ mod tests {
         let connector = GrpcValidatorConnector::new(registry.clone(), "test-chain");
 
         // First connect should call the registry.
-        let conn1 = connector.connect(&validator).await;
-        assert!(conn1.is_ok(), "first connect should succeed");
+        let conn1 = connector.connect(&validator).await.unwrap();
 
         // Second connect should hit the cache.
-        let conn2 = connector.connect(&validator).await;
-        assert!(conn2.is_ok(), "second connect should succeed");
+        let conn2 = connector.connect(&validator).await.unwrap();
 
         // The registry should only have been called once.
         assert_eq!(
@@ -238,6 +333,43 @@ mod tests {
             1,
             "registry should only be called once due to caching"
         );
+        assert!(Arc::ptr_eq(&conn1, &conn2));
+    }
+
+    #[tokio::test]
+    async fn connector_clones_share_configured_pool() {
+        let validator = make_validator(100, 1).1;
+
+        let mut hosts = std::collections::HashMap::new();
+        hosts.insert(validator.address, Host("http://127.0.0.1:9090".to_string()));
+
+        let registry = Arc::new(MockHostRegistry {
+            hosts,
+            call_count: AtomicUsize::new(0),
+        });
+        let connector = GrpcValidatorConnector::new_with_limits(
+            registry,
+            "test-chain",
+            NonZeroUsize::new(3).unwrap(),
+            Some(NonZeroUsize::new(5).unwrap()),
+        );
+
+        let conn1 = connector.connect(&validator).await.unwrap();
+        let conn2 = connector.clone().connect(&validator).await.unwrap();
+        assert!(Arc::ptr_eq(&conn1, &conn2));
+
+        let cache = connector.connections.lock().await;
+        let pool = cache.get(&validator.address).unwrap();
+        assert_eq!(pool.connections.len(), 3);
+        assert!(!std::ptr::eq(
+            pool.next_connection(),
+            pool.next_connection()
+        ));
+
+        let semaphore = pool.in_flight.as_ref().unwrap();
+        let permits = semaphore.try_acquire_many(5).unwrap();
+        assert!(semaphore.try_acquire().is_err());
+        drop(permits);
     }
 
     #[tokio::test]

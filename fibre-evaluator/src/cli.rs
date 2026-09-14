@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 
 use celestia_types::nmt::Namespace;
 use clap::Parser;
@@ -93,6 +94,14 @@ pub(crate) struct Cli {
     /// Maximum concurrent blob downloads.
     #[arg(long, default_value_t = 4, value_parser = parse_positive_usize)]
     pub(crate) download_concurrency: usize,
+
+    /// Maximum open HTTP/2 connections to each validator.
+    #[arg(long, default_value_t = NonZeroUsize::MIN)]
+    pub(crate) max_connections_per_validator: NonZeroUsize,
+
+    /// Maximum concurrent Fibre RPCs to each validator.
+    #[arg(long)]
+    pub(crate) max_in_flight_per_validator: Option<NonZeroUsize>,
 
     /// Skip blob download and integrity verification after payment confirmation.
     #[arg(long)]
@@ -250,6 +259,8 @@ mod tests {
         assert_eq!(cli.tokio_worker_threads, 32);
         assert_eq!(cli.rayon_threads_per_signer, 4);
         assert_eq!(cli.download_concurrency, 4);
+        assert_eq!(cli.max_connections_per_validator.get(), 1);
+        assert_eq!(cli.max_in_flight_per_validator, None);
         assert!(!cli.skip_download);
         assert_eq!(cli.operation_timeout_seconds, 120);
         assert_eq!(cli.gas_limit, None);
@@ -265,6 +276,20 @@ mod tests {
         args.extend(["--private-key", SECOND_VALID_KEY]);
         let cli = Cli::try_parse_from(args).unwrap();
         assert_eq!(cli.private_keys, [VALID_KEY, SECOND_VALID_KEY]);
+    }
+
+    #[test]
+    fn parses_per_validator_limits() {
+        let mut args = valid_args();
+        args.extend([
+            "--max-connections-per-validator",
+            "4",
+            "--max-in-flight-per-validator",
+            "12",
+        ]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.max_connections_per_validator.get(), 4);
+        assert_eq!(cli.max_in_flight_per_validator.unwrap().get(), 12);
     }
 
     #[test]
@@ -338,6 +363,8 @@ mod tests {
             ("--tokio-worker-threads", "0"),
             ("--rayon-threads-per-signer", "0"),
             ("--download-concurrency", "0"),
+            ("--max-connections-per-validator", "0"),
+            ("--max-in-flight-per-validator", "0"),
             ("--operation-timeout-seconds", "0"),
             ("--gas-limit", "0"),
             ("--gas-price", "NaN"),

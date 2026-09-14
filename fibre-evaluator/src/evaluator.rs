@@ -96,10 +96,20 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let mut contexts = Vec::with_capacity(client_count);
     let mut signers = BTreeMap::new();
+    let registry_grpc = GrpcClient::builder()
+        .url(&cli.app_grpc_url)
+        .build()
+        .context("building Fibre host-registry gRPC client")?;
+    let shared_connector = GrpcValidatorConnector::new_with_limits(
+        Arc::new(GrpcHostRegistry::new(registry_grpc)),
+        cli.chain_id.clone(),
+        cli.max_connections_per_validator,
+        cli.max_in_flight_per_validator,
+    );
 
     for client in 1..=client_count {
         let context = Arc::new(
-            build_lifecycle_context(client, &cli)
+            build_lifecycle_context(client, &cli, shared_connector.clone())
                 .await
                 .with_context(|| format!("client {client} setup failed"))?,
         );
@@ -133,6 +143,8 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         tokio_worker_threads = cli.tokio_worker_threads,
         rayon_threads_per_signer = cli.rayon_threads_per_signer,
         download_concurrency = cli.download_concurrency,
+        max_connections_per_validator = %cli.max_connections_per_validator,
+        max_in_flight_per_validator = ?cli.max_in_flight_per_validator,
         download_enabled = cli.reader_only || !cli.skip_download,
         gas_limit = ?cli.gas_limit,
         gas_price = ?cli.gas_price,
@@ -228,7 +240,11 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-async fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleContext> {
+async fn build_lifecycle_context(
+    client: usize,
+    cli: &Cli,
+    shared_connector: GrpcValidatorConnector,
+) -> Result<LifecycleContext> {
     let private_key = cli
         .private_keys
         .get(client - 1)
@@ -246,17 +262,13 @@ async fn build_lifecycle_context(client: usize, cli: &Cli) -> Result<LifecycleCo
         .build()
         .context("building core gRPC client")?;
 
-    let host_registry = Arc::new(GrpcHostRegistry::new(app_grpc.clone()));
     let fibre_config =
         FibreClientConfig::new(cli.chain_id.clone()).context("building Fibre client config")?;
     let fibre = Arc::new(
         FibreClient::builder()
             .config(fibre_config)
             .set_getter(GrpcSetGetter::new(core_grpc))
-            .connector(GrpcValidatorConnector::new(
-                host_registry,
-                cli.chain_id.clone(),
-            ))
+            .connector(shared_connector)
             .build()
             .context("building Fibre client")?,
     );
