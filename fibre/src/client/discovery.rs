@@ -24,6 +24,7 @@ use crate::error::{DiscoveryError, FibreError};
 
 const DEFAULT_PAGE_SIZE: u64 = 100;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_BATCH_QUERY_ATTEMPTS: usize = 4;
 
 /// A Fibre blob found through an on-chain `MsgPayForFibre` transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,6 +98,11 @@ impl TransactionEventSource for GrpcClient {
 struct DiscoveryBatch {
     blobs: Vec<DiscoveredBlob>,
     through_height: u64,
+}
+
+enum BatchScan {
+    Complete(DiscoveryBatch),
+    IndexChanged,
 }
 
 impl FibreClient {
@@ -184,12 +190,7 @@ impl FibreClient {
                 match result {
                     Ok(batch) => {
                         let next_cursor = cursor.max(batch.through_height);
-                        let mut next_seen = if next_cursor == cursor {
-                            seen_at_cursor.clone()
-                        } else {
-                            HashSet::new()
-                        };
-                        let mut new_blobs = Vec::new();
+                        let mut next_seen = HashSet::new();
 
                         for blob in batch.blobs {
                             let key = (blob.tx_hash, blob.id.clone());
@@ -199,19 +200,16 @@ impl FibreClient {
                                 next_seen.insert(key);
                             }
                             if !already_seen {
-                                new_blobs.push(blob);
+                                if cancel_token.is_cancelled() {
+                                    yield Err(FibreError::Cancelled);
+                                    return;
+                                }
+                                yield Ok(blob);
                             }
                         }
 
                         cursor = next_cursor;
                         seen_at_cursor = next_seen;
-                        for blob in new_blobs {
-                            if cancel_token.is_cancelled() {
-                                yield Err(FibreError::Cancelled);
-                                return;
-                            }
-                            yield Ok(blob);
-                        }
                     }
                     Err(FibreError::GrpcClient(error)) if error.is_network_error() => {
                         yield Err(FibreError::GrpcClient(error));
@@ -253,20 +251,38 @@ async fn query_batch(
 ) -> Result<DiscoveryBatch, FibreError> {
     validate_from_height(from_height)?;
 
+    for _ in 0..MAX_BATCH_QUERY_ATTEMPTS {
+        match scan_batch(source, namespace, from_height, page_size, cancel_token).await? {
+            BatchScan::Complete(batch) => return Ok(batch),
+            BatchScan::IndexChanged => continue,
+        }
+    }
+
+    Err(DiscoveryError::UnstablePagination.into())
+}
+
+async fn scan_batch(
+    source: &dyn TransactionEventSource,
+    namespace: Namespace,
+    from_height: u64,
+    page_size: NonZeroU64,
+    cancel_token: &CancellationToken,
+) -> Result<BatchScan, FibreError> {
+    let message_type_url = MsgPayForFibre::type_url();
+    let query = format!("message.action='{message_type_url}' AND tx.height > {from_height}");
     let mut blobs = Vec::new();
     let mut through_height = from_height;
     let mut fetched = 0u64;
     let mut page = 1u64;
+    let mut previous_total = 0;
+    let mut seen_transactions = HashSet::new();
 
     loop {
         let request = GetTxsEventRequest {
             order_by: OrderBy::Asc.into(),
             page,
             limit: page_size.get(),
-            query: format!(
-                "message.action='{}' AND tx.height > {from_height}",
-                MsgPayForFibre::type_url()
-            ),
+            query: query.clone(),
             ..Default::default()
         };
 
@@ -284,6 +300,11 @@ async fn query_batch(
             .into());
         }
 
+        // Page-number queries are not snapshots, so a changing result set invalidates this scan.
+        if response.total < previous_total {
+            return Ok(BatchScan::IndexChanged);
+        }
+
         let page_len = u64::try_from(response.txs.len()).unwrap_or(u64::MAX);
         if page_len == 0 && fetched < response.total {
             return Err(DiscoveryError::IncompletePage {
@@ -293,7 +314,14 @@ async fn query_batch(
             .into());
         }
 
+        previous_total = response.total;
+
         for (tx, tx_response) in response.txs.into_iter().zip(response.tx_responses) {
+            let tx_hash = parse_tx_hash(&tx_response.txhash)?;
+            if !seen_transactions.insert(tx_hash) {
+                return Ok(BatchScan::IndexChanged);
+            }
+
             let tx_height = parse_tx_height(tx_response.height, from_height)?;
             through_height = through_height.max(tx_height);
 
@@ -301,24 +329,26 @@ async fn query_batch(
                 continue;
             }
 
-            let tx_hash_text = tx_response.txhash;
-            let tx_hash: Hash = tx_hash_text
-                .parse()
-                .map_err(|_| DiscoveryError::InvalidTransactionHash(tx_hash_text.clone()))?;
-            decode_transaction(tx, namespace, tx_height, tx_hash, &tx_hash_text, &mut blobs)?;
+            decode_transaction(
+                tx,
+                namespace,
+                tx_height,
+                tx_hash,
+                &tx_response.txhash,
+                &message_type_url,
+                &mut blobs,
+            )?;
         }
 
         fetched = fetched.saturating_add(page_len);
-        if fetched >= response.total {
-            break;
+        if fetched >= previous_total {
+            return Ok(BatchScan::Complete(DiscoveryBatch {
+                blobs,
+                through_height,
+            }));
         }
         page = page.checked_add(1).ok_or(DiscoveryError::PageOverflow)?;
     }
-
-    Ok(DiscoveryBatch {
-        blobs,
-        through_height,
-    })
 }
 
 fn validate_from_height(from_height: u64) -> Result<(), DiscoveryError> {
@@ -342,12 +372,23 @@ fn parse_tx_height(height: i64, from_height: u64) -> Result<u64, DiscoveryError>
     Ok(height)
 }
 
+fn parse_tx_hash(hash: &str) -> Result<Hash, DiscoveryError> {
+    let parsed = hash
+        .parse()
+        .map_err(|_| DiscoveryError::InvalidTransactionHash(hash.to_owned()))?;
+    if parsed == Hash::None {
+        return Err(DiscoveryError::InvalidTransactionHash(hash.to_owned()));
+    }
+    Ok(parsed)
+}
+
 fn decode_transaction(
     tx: Tx,
     namespace: Namespace,
     tx_height: u64,
     tx_hash: Hash,
     tx_hash_text: &str,
+    message_type_url: &str,
     blobs: &mut Vec<DiscoveredBlob>,
 ) -> Result<(), FibreError> {
     let body = tx
@@ -355,7 +396,7 @@ fn decode_transaction(
         .ok_or_else(|| DiscoveryError::MissingTransactionBody(tx_hash_text.to_owned()))?;
 
     for message in body.messages {
-        if message.type_url != MsgPayForFibre::type_url() {
+        if message.type_url != message_type_url {
             continue;
         }
 
@@ -563,6 +604,76 @@ mod tests {
                 MsgPayForFibre::type_url()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn query_restarts_after_page_boundaries_shift() {
+        let namespace = Namespace::new_v0(b"fibre-eval").unwrap();
+        let first = transaction(
+            vec![payment_message(namespace, vec![1; 32], 0, 11)],
+            11,
+            1,
+            0,
+        );
+        let second = transaction(
+            vec![payment_message(namespace, vec![2; 32], 0, 12)],
+            12,
+            2,
+            0,
+        );
+        let late = transaction(
+            vec![payment_message(namespace, vec![3; 32], 0, 10)],
+            10,
+            3,
+            0,
+        );
+        let source = MockSource::new([
+            Ok(response([first.clone()], 2)),
+            Ok(response([first.clone()], 3)),
+            Ok(response([late, first, second], 3)),
+        ]);
+        let client = test_client(source.clone());
+
+        let blobs = client.query_discovered(namespace, 9).await.unwrap();
+
+        let ids: Vec<_> = blobs.into_iter().map(|blob| blob.id).collect();
+        assert_eq!(
+            ids,
+            [
+                BlobID::new(0, [3; 32]),
+                BlobID::new(0, [1; 32]),
+                BlobID::new(0, [2; 32]),
+            ]
+        );
+        let pages: Vec<_> = source
+            .requests()
+            .into_iter()
+            .map(|request| request.page)
+            .collect();
+        assert_eq!(pages, [1, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn query_rejects_an_index_that_never_stabilizes() {
+        let namespace = Namespace::new_v0(b"fibre-eval").unwrap();
+        let entry = transaction(
+            vec![payment_message(namespace, vec![1; 32], 0, 11)],
+            11,
+            1,
+            0,
+        );
+        let responses = (0..MAX_BATCH_QUERY_ATTEMPTS).flat_map(|_| {
+            [
+                Ok(response([entry.clone()], 2)),
+                Ok(response([entry.clone()], 2)),
+            ]
+        });
+        let client = test_client(MockSource::new(responses));
+
+        assert!(matches!(
+            client.query_discovered(namespace, 10).await,
+            Err(FibreError::Discovery(DiscoveryError::UnstablePagination))
+        ));
     }
 
     #[tokio::test]
