@@ -8,39 +8,6 @@ use reed_solomon_simd::engine::DefaultEngine;
 use reed_solomon_simd::rate::{HighRateDecoder, RateDecoder};
 use std::num::NonZeroUsize;
 
-struct StripeDecoder {
-    decoder: HighRateDecoder<DefaultEngine>,
-    restored: Vec<u8>,
-}
-
-impl StripeDecoder {
-    fn new(k: usize, n: usize, stripe_size: usize, missing_count: usize) -> Result<Self> {
-        let decoder = RateDecoder::new(k, n, stripe_size, DefaultEngine::new(), None)
-            .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {:?}", e)))?;
-
-        Ok(Self {
-            decoder,
-            restored: Vec::with_capacity(missing_count * stripe_size),
-        })
-    }
-
-    fn decode(
-        &mut self,
-        rows: &[&[u8]],
-        indices: &[usize],
-        params: &Parameters,
-        stripe: Stripe,
-    ) -> Result<()> {
-        let result = decode_stripe(&mut self.decoder, rows, indices, params, stripe)?;
-        self.restored.clear();
-        for (_, shard) in result.restored_original_iter() {
-            self.restored.extend_from_slice(shard);
-        }
-
-        Ok(())
-    }
-}
-
 // Reuse the decoder's work buffer across stripes.
 fn decode_stripe<'a>(
     decoder: &'a mut HighRateDecoder<DefaultEngine>,
@@ -138,12 +105,13 @@ pub(super) fn reconstruct_data_with_work_budget(
         }
         if seen[index] {
             let error = if index < params.k {
-                format!("Failed to add original shard: DuplicateOriginalShardIndex {{ index: {index} }}")
+                let error = reed_solomon_simd::Error::DuplicateOriginalShardIndex { index };
+                format!("Failed to add original shard: {error:?}")
             } else {
-                format!(
-                    "Failed to add recovery shard: DuplicateRecoveryShardIndex {{ index: {} }}",
-                    index - params.k
-                )
+                let error = reed_solomon_simd::Error::DuplicateRecoveryShardIndex {
+                    index: index - params.k,
+                };
+                format!("Failed to add recovery shard: {error:?}")
             };
             return Err(Error::ReedSolomon(error));
         }
@@ -200,16 +168,6 @@ fn reconstruct_data_with_plan(
         return Ok(all_original);
     }
 
-    let missing_indices: Vec<_> = missing
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &missing)| missing.then_some(index))
-        .collect();
-    let mut missing_positions = vec![usize::MAX; params.k];
-    for (position, &index) in missing_indices.iter().enumerate() {
-        missing_positions[index] = position;
-    }
-
     let stripe_size = plan.stripe_size();
     let parallelism = plan.parallelism();
     assert!(stripe_size.is_multiple_of(MIN_STRIPE));
@@ -223,33 +181,31 @@ fn reconstruct_data_with_plan(
     let slot_count = parallelism.min(stripes.len());
     let mut decoders = (0..slot_count)
         .into_par_iter()
-        .map(|_| StripeDecoder::new(params.k, params.n, stripe_size, missing_indices.len()))
+        .map(|_| {
+            RateDecoder::new(params.k, params.n, stripe_size, DefaultEngine::new(), None)
+                .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {e:?}")))
+        })
         .collect::<Result<Vec<_>>>()?;
 
     for batch in stripes.chunks(parallelism) {
-        decoders[..batch.len()]
+        let results = decoders[..batch.len()]
             .par_iter_mut()
             .zip(batch.par_iter())
-            .try_for_each(|(decoder, &stripe)| decoder.decode(rows, indices, params, stripe))?;
+            .map(|(decoder, &stripe)| decode_stripe(decoder, rows, indices, params, stripe))
+            .collect::<Result<Vec<_>>>()?;
 
-        let restored: Vec<_> = decoders[..batch.len()]
-            .iter()
-            .map(|decoder| decoder.restored.as_slice())
-            .collect();
         all_original
             .as_row_major_mut()
             .par_chunks_mut(row_size)
             .enumerate()
             .for_each(|(index, row)| {
-                let position = missing_positions[index];
-                if position == usize::MAX {
+                if !missing[index] {
                     return;
                 }
 
-                for (&stripe, restored) in batch.iter().zip(&restored) {
-                    let start = position * stripe.len;
+                for (&stripe, result) in batch.iter().zip(&results) {
                     row[stripe.offset..stripe.offset + stripe.len]
-                        .copy_from_slice(&restored[start..start + stripe.len]);
+                        .copy_from_slice(result.restored_original(index).unwrap());
                 }
             });
     }
@@ -306,12 +262,22 @@ mod tests {
         let params = Parameters::new(8, 24, 768).unwrap();
         let original = make_original(&params);
         let extended = ExtendedData::generate(&original, &params).unwrap();
-        for indices in [vec![0, 3, 8, 11, 15, 20, 25, 31], (8..16).collect()] {
+        for indices in [
+            vec![0, 3, 8, 11, 15, 20, 25, 31],
+            (8..16).collect(),
+            vec![25, 3, 11, 0, 31, 20, 8, 15, 27],
+        ] {
             let rows: Vec<_> = indices.iter().map(|&i| extended.row(i).unwrap()).collect();
-            let reconstructed =
-                reconstruct_data_with_plan(&rows, &indices, &params, test_stripe_plan(512, 2))
-                    .unwrap();
-            assert_eq!(reconstructed.as_row_major(), original.as_row_major());
+            for stripe_size in [512, 320] {
+                let reconstructed = reconstruct_data_with_plan(
+                    &rows,
+                    &indices,
+                    &params,
+                    test_stripe_plan(stripe_size, 2),
+                )
+                .unwrap();
+                assert_eq!(reconstructed.as_row_major(), original.as_row_major());
+            }
             for budget in [1, 4096, 32768] {
                 let reconstructed = reconstruct_data_with_work_budget(
                     &rows,
@@ -392,10 +358,6 @@ mod tests {
             reconstruct_data(&row_refs, &[0, 1, 2, 8], &params),
             Err(Error::InvalidIndex(8, 8))
         ));
-        assert!(matches!(
-            reconstruct_data(&row_refs, &[0, 1, 2, 2], &params),
-            Err(Error::ReedSolomon(_))
-        ));
 
         let short = [0u8; 32];
         let mut short_rows = row_refs;
@@ -404,5 +366,28 @@ mod tests {
             reconstruct_data(&short_rows, &[0, 1, 2, 3], &params),
             Err(Error::InvalidParameters(_))
         ));
+    }
+
+    #[test]
+    fn duplicate_shard_errors_preserve_backend_messages() {
+        let params = Parameters::new(4, 4, 64).unwrap();
+        let rows = [&[0u8; 64][..]; 4];
+        for (indices, expected) in [
+            (
+                [0, 1, 2, 2],
+                "Failed to add original shard: DuplicateOriginalShardIndex { index: 2 }",
+            ),
+            (
+                [0, 1, 5, 5],
+                "Failed to add recovery shard: DuplicateRecoveryShardIndex { index: 1 }",
+            ),
+        ] {
+            let Error::ReedSolomon(message) =
+                reconstruct_data(&rows, &indices, &params).unwrap_err()
+            else {
+                panic!("expected a Reed-Solomon error");
+            };
+            assert_eq!(message, expected);
+        }
     }
 }

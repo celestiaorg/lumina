@@ -128,7 +128,7 @@ pub fn reconstruct(rows: &[&[u8]], indices: &[usize], params: &Parameters) -> Re
 
 /// Reconstruct original rows with an explicit combined Reed-Solomon work-buffer budget.
 ///
-/// The budget is in bytes and excludes output and staging buffers. Budgets smaller
+/// The budget is in bytes and excludes output buffers. Budgets smaller
 /// than one decoder work buffer for a 64-byte stripe use that minimum allocation.
 pub fn reconstruct_with_work_budget(
     rows: &[&[u8]],
