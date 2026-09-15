@@ -7,6 +7,7 @@
 //! Use [`FibreClientBuilder`] (via [`FibreClient::builder()`]) to construct
 //! an instance.
 
+pub(crate) mod discovery;
 pub(crate) mod download;
 pub(crate) mod task;
 pub(crate) mod upload;
@@ -20,6 +21,8 @@ use crate::error::{FibreClientBuilderError, FibreError};
 use crate::validator::SetGetter;
 use crate::validator_client::ValidatorConnector;
 
+use self::discovery::TransactionEventSource;
+
 /// The Fibre DA client.
 ///
 /// Provides `upload()` for distributing blobs to validators and collecting
@@ -30,6 +33,7 @@ pub struct FibreClient {
     pub(crate) cfg: FibreClientConfig,
     pub(crate) set_getter: Arc<dyn SetGetter>,
     pub(crate) connector: Arc<dyn ValidatorConnector>,
+    pub(crate) discovery_source: Option<Arc<dyn TransactionEventSource>>,
     pub(crate) upload_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) download_semaphore: Arc<tokio::sync::Semaphore>,
     pub(crate) cancel_token: CancellationToken,
@@ -138,6 +142,7 @@ impl FibreClient {
 
         Self::builder()
             .config(config)
+            .discovery_client(grpc_client.clone())
             .set_getter(crate::validator::GrpcSetGetter::new(grpc_client))
             .connector(connector)
             .build()
@@ -149,6 +154,7 @@ pub struct FibreClientBuilder {
     config: Option<FibreClientConfig>,
     set_getter: Option<Arc<dyn SetGetter>>,
     connector: Option<Arc<dyn ValidatorConnector>>,
+    discovery_source: Option<Arc<dyn TransactionEventSource>>,
 }
 
 impl FibreClientBuilder {
@@ -158,6 +164,7 @@ impl FibreClientBuilder {
             config: None,
             set_getter: None,
             connector: None,
+            discovery_source: None,
         }
     }
 
@@ -179,6 +186,21 @@ impl FibreClientBuilder {
         self
     }
 
+    /// Sets the gRPC client used to discover on-chain Fibre payments.
+    pub fn discovery_client(mut self, client: celestia_grpc::GrpcClient) -> Self {
+        self.discovery_source = Some(Arc::new(client));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn discovery_source(
+        mut self,
+        source: impl TransactionEventSource + 'static,
+    ) -> Self {
+        self.discovery_source = Some(Arc::new(source));
+        self
+    }
+
     /// Builds the [`FibreClient`].
     pub fn build(self) -> Result<FibreClient, FibreError> {
         let cfg = self.config.ok_or(FibreClientBuilderError::MissingConfig)?;
@@ -195,6 +217,7 @@ impl FibreClientBuilder {
             cfg,
             set_getter,
             connector,
+            discovery_source: self.discovery_source,
             cancel_token: CancellationToken::new(),
         })
     }
@@ -271,6 +294,7 @@ mod tests {
             .expect("from_endpoint should succeed");
 
         assert_eq!(client.config().chain_id(), "test-123");
+        assert!(client.discovery_source.is_some());
     }
 
     #[test]

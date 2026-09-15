@@ -23,10 +23,11 @@ rand.workspace = true
 chacha8rand = "0.1.2"
 
 # Async runtime
+async-stream.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 futures.workspace = true
-lumina-utils = { workspace = true, features = ["executor"] }
+lumina-utils = { workspace = true, features = ["executor", "time"] }
 
 # gRPC
 der = { version = "0.7.2", features = ["derive"] }
