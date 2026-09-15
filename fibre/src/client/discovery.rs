@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::blob::BlobID;
 use crate::client::FibreClient;
-use crate::error::{DiscoveryError, FibreError, Result};
+use crate::error::{DiscoveryError, FibreError};
 
 const DEFAULT_PAGE_SIZE: u64 = 100;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -59,7 +59,7 @@ impl Default for DiscoveryOptions {
 /// Stream of Fibre blobs discovered through on-chain payments.
 #[must_use = "streams do nothing unless polled"]
 pub struct FibreStream {
-    inner: Pin<Box<dyn Stream<Item = Result<DiscoveredBlob>> + Send + 'static>>,
+    inner: Pin<Box<dyn Stream<Item = Result<DiscoveredBlob, FibreError>> + Send + 'static>>,
 }
 
 impl fmt::Debug for FibreStream {
@@ -69,7 +69,7 @@ impl fmt::Debug for FibreStream {
 }
 
 impl Stream for FibreStream {
-    type Item = Result<DiscoveredBlob>;
+    type Item = Result<DiscoveredBlob, FibreError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.get_mut().inner.as_mut().poll_next(cx)
@@ -81,7 +81,7 @@ pub(crate) trait TransactionEventSource: Send + Sync {
     async fn get_txs_event(
         &self,
         request: GetTxsEventRequest,
-    ) -> std::result::Result<GetTxsEventResponse, celestia_grpc::Error>;
+    ) -> Result<GetTxsEventResponse, celestia_grpc::Error>;
 }
 
 #[async_trait::async_trait]
@@ -89,7 +89,7 @@ impl TransactionEventSource for GrpcClient {
     async fn get_txs_event(
         &self,
         request: GetTxsEventRequest,
-    ) -> std::result::Result<GetTxsEventResponse, celestia_grpc::Error> {
+    ) -> Result<GetTxsEventResponse, celestia_grpc::Error> {
         GrpcClient::get_txs_event(self, request).await
     }
 }
@@ -109,7 +109,7 @@ impl FibreClient {
         &self,
         namespace: Namespace,
         from_height: u64,
-    ) -> Result<Vec<DiscoveredBlob>> {
+    ) -> Result<Vec<DiscoveredBlob>, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
@@ -134,7 +134,11 @@ impl FibreClient {
     /// The first query runs when the stream is first polled. Transient network errors are
     /// yielded and retried; malformed responses and non-transient errors end the stream. A
     /// discovered blob's validator-set height can be passed to [`DownloadOptions::height`](crate::DownloadOptions::height).
-    pub fn discover(&self, namespace: Namespace, from_height: u64) -> Result<FibreStream> {
+    pub fn discover(
+        &self,
+        namespace: Namespace,
+        from_height: u64,
+    ) -> Result<FibreStream, FibreError> {
         self.discover_with_options(namespace, from_height, DiscoveryOptions::default())
     }
 
@@ -144,7 +148,7 @@ impl FibreClient {
         namespace: Namespace,
         from_height: u64,
         options: DiscoveryOptions,
-    ) -> Result<FibreStream> {
+    ) -> Result<FibreStream, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
@@ -246,7 +250,7 @@ async fn query_batch(
     from_height: u64,
     page_size: NonZeroU64,
     cancel_token: &CancellationToken,
-) -> Result<DiscoveryBatch> {
+) -> Result<DiscoveryBatch, FibreError> {
     validate_from_height(from_height)?;
 
     let mut blobs = Vec::new();
@@ -317,14 +321,14 @@ async fn query_batch(
     })
 }
 
-fn validate_from_height(from_height: u64) -> Result<()> {
+fn validate_from_height(from_height: u64) -> Result<(), DiscoveryError> {
     if from_height > i64::MAX as u64 {
-        return Err(DiscoveryError::HeightTooLarge(from_height).into());
+        return Err(DiscoveryError::HeightTooLarge(from_height));
     }
     Ok(())
 }
 
-fn parse_tx_height(height: i64, from_height: u64) -> Result<u64> {
+fn parse_tx_height(height: i64, from_height: u64) -> Result<u64, DiscoveryError> {
     let height = u64::try_from(height)
         .ok()
         .filter(|height| *height > 0)
@@ -333,8 +337,7 @@ fn parse_tx_height(height: i64, from_height: u64) -> Result<u64> {
         return Err(DiscoveryError::UnexpectedTransactionHeight {
             height,
             from_height,
-        }
-        .into());
+        });
     }
     Ok(height)
 }
@@ -346,7 +349,7 @@ fn decode_transaction(
     tx_hash: Hash,
     tx_hash_text: &str,
     blobs: &mut Vec<DiscoveredBlob>,
-) -> Result<()> {
+) -> Result<(), FibreError> {
     let body = tx
         .body
         .ok_or_else(|| DiscoveryError::MissingTransactionBody(tx_hash_text.to_owned()))?;
@@ -407,7 +410,7 @@ mod tests {
     use crate::test_utils::{MockConnector, MockSetGetter, make_validator};
     use crate::validator::ValidatorSet;
 
-    type SourceResult = std::result::Result<GetTxsEventResponse, celestia_grpc::Error>;
+    type SourceResult = Result<GetTxsEventResponse, celestia_grpc::Error>;
 
     #[derive(Clone, Default)]
     struct MockSource {
@@ -433,7 +436,7 @@ mod tests {
         async fn get_txs_event(
             &self,
             request: GetTxsEventRequest,
-        ) -> std::result::Result<GetTxsEventResponse, celestia_grpc::Error> {
+        ) -> Result<GetTxsEventResponse, celestia_grpc::Error> {
             self.requests.lock().unwrap().push(request);
             self.responses
                 .lock()
