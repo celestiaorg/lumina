@@ -179,6 +179,12 @@ impl FibreClientBuilder {
         self
     }
 
+    /// Sets an already shared validator connection factory.
+    pub fn shared_connector(mut self, connector: Arc<dyn ValidatorConnector>) -> Self {
+        self.connector = Some(connector);
+        self
+    }
+
     /// Builds the [`FibreClient`].
     pub fn build(self) -> Result<FibreClient, FibreError> {
         let cfg = self.config.ok_or(FibreClientBuilderError::MissingConfig)?;
@@ -314,6 +320,26 @@ mod tests {
                 FibreClientBuilderError::MissingConnector
             ))
         ));
+    }
+
+    #[test]
+    fn builder_shared_connector_preserves_arc() {
+        let connector: Arc<dyn ValidatorConnector> = Arc::new(DummyConnector);
+
+        let client_a = FibreClient::builder()
+            .config(FibreClientConfig::new("test-chain").unwrap())
+            .set_getter(DummySetGetter)
+            .shared_connector(connector.clone())
+            .build()
+            .unwrap();
+        let client_b = FibreClient::builder()
+            .config(FibreClientConfig::new("test-chain").unwrap())
+            .set_getter(DummySetGetter)
+            .shared_connector(connector)
+            .build()
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&client_a.connector, &client_b.connector));
     }
 
     #[test]
