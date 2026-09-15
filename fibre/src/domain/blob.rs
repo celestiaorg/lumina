@@ -10,9 +10,9 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use crate::blob_header::BlobHeaderV0;
+use crate::blob_header;
 use crate::config::BlobConfig;
-use crate::error::FibreError;
+use crate::error::{BlobIdError, FibreError, ShardError};
 
 /// A 32-byte SHA-256 commitment hash. Re-exports rsema1d's Commitment type.
 pub type Commitment = rsema1d::Commitment;
@@ -72,11 +72,7 @@ impl BlobID {
     /// Returns an error if the slice is not exactly `BLOB_ID_SIZE` bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, FibreError> {
         if bytes.len() != BLOB_ID_SIZE {
-            return Err(FibreError::InvalidBlobId(format!(
-                "blob ID must be {} bytes, got {}",
-                BLOB_ID_SIZE,
-                bytes.len()
-            )));
+            return Err(BlobIdError::Length(bytes.len()).into());
         }
         let mut id = [0u8; BLOB_ID_SIZE];
         id.copy_from_slice(bytes);
@@ -85,8 +81,7 @@ impl BlobID {
 
     /// Construct a BlobID from a hex-encoded string.
     pub fn from_hex(s: &str) -> Result<Self, FibreError> {
-        let bytes = hex::decode(s)
-            .map_err(|e| FibreError::InvalidBlobId(format!("decoding hex: {}", e)))?;
+        let bytes = hex::decode(s).map_err(BlobIdError::Hex)?;
         Self::from_bytes(&bytes)
     }
 }
@@ -158,7 +153,6 @@ impl EncodedBlob {
             });
         }
 
-        let header = BlobHeaderV0::new(data.len());
         let row_size = cfg.row_size(data.len());
 
         // Allocate the full extended matrix (original + parity rows) up front.
@@ -166,7 +160,7 @@ impl EncodedBlob {
         // zeroed and will be filled by encode_in_place.
         let total_rows = cfg.original_rows + cfg.parity_rows;
         let mut extended = rsema1d::RowMatrix::zeroed(total_rows, row_size)?;
-        header.encode_into_buffer(data, extended.as_row_major_mut());
+        blob_header::encode(data, extended.as_row_major_mut());
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
         let (extended_data, commitment, _) =
             rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
@@ -279,36 +273,32 @@ impl BlobReconstruction {
     ///
     /// Requires at least `original_rows` (K) rows to have been set via `store_rows()`.
     pub(crate) fn reconstruct(self) -> Result<Blob, FibreError> {
-        let mut indices = Vec::new();
-        for (i, row_opt) in self.rows.iter().enumerate() {
-            if row_opt.is_some() {
-                indices.push(i);
+        let k = self.cfg.original_rows;
+        let mut selected_indices = Vec::with_capacity(k);
+        let mut selected_rows = Vec::with_capacity(k);
+        for (index, row) in self.rows.iter().enumerate() {
+            if selected_rows.len() == k {
+                break;
+            }
+            if let Some(row) = row {
+                selected_indices.push(index);
+                selected_rows.push(row.as_slice());
             }
         }
 
-        if indices.len() < self.cfg.original_rows {
+        if selected_rows.len() < k {
             return Err(FibreError::NotEnoughShards {
-                got: indices.len(),
-                need: self.cfg.original_rows,
+                got: selected_rows.len(),
+                need: k,
             });
         }
 
-        let k = self.cfg.original_rows;
-        let selected_indices: Vec<usize> = indices[..k].to_vec();
-        let selected_rows: Vec<&[u8]> = selected_indices
-            .iter()
-            .map(|&i| self.rows[i].as_ref().unwrap().as_slice())
-            .collect();
-        let params = rsema1d::Parameters::new(
-            self.cfg.original_rows,
-            self.cfg.parity_rows,
-            selected_rows[0].len(),
-        )?;
+        let row_size = selected_rows.first().map_or(0, |row| row.len());
+        let params =
+            rsema1d::Parameters::new(self.cfg.original_rows, self.cfg.parity_rows, row_size)?;
 
         let reconstructed = rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
-
-        let original_rows: Vec<&[u8]> = (0..k).map(|i| reconstructed.row(i).unwrap()).collect();
-        let (_, data) = BlobHeaderV0::decode_from_rows(&original_rows, &self.cfg)?;
+        let data = blob_header::decode(&reconstructed, self.cfg.max_data_size)?;
 
         Ok(Blob { id: self.id, data })
     }
@@ -371,9 +361,7 @@ impl ShardVerifier {
         for proof in rows {
             let index = proof.index;
             if index >= total_rows {
-                return Err(FibreError::InvalidData(format!(
-                    "row index {index} out of bounds (total rows: {total_rows})"
-                )));
+                return Err(ShardError::RowIndexOutOfBounds { index, total_rows }.into());
             }
             if seen[index] || already_stored.get(index).copied().unwrap_or(false) {
                 continue;
@@ -389,9 +377,11 @@ impl ShardVerifier {
         let row_size = needed[0].row.len();
         let max_row_size = self.cfg.row_size(self.cfg.max_data_size);
         if row_size == 0 || row_size > max_row_size {
-            return Err(FibreError::InvalidData(format!(
-                "row size {row_size} out of bounds (max {max_row_size})"
-            )));
+            return Err(ShardError::RowSizeOutOfBounds {
+                row_size,
+                max_row_size,
+            }
+            .into());
         }
 
         let (context, verified) = {
@@ -399,9 +389,7 @@ impl ShardVerifier {
             match cache.as_ref() {
                 Some((cached_rlcs, context)) => {
                     if cached_rlcs != rlcs {
-                        return Err(FibreError::InvalidData(
-                            "rlc vector does not match the verified one".into(),
-                        ));
+                        return Err(ShardError::RlcVectorMismatch.into());
                     }
                     (Arc::clone(context), 0)
                 }
@@ -466,8 +454,22 @@ mod tests {
 
     #[test]
     fn blob_id_from_bytes_wrong_length() {
-        assert!(BlobID::from_bytes(&[0u8; 10]).is_err());
-        assert!(BlobID::from_bytes(&[0u8; 34]).is_err());
+        assert!(matches!(
+            BlobID::from_bytes(&[0u8; 10]),
+            Err(FibreError::InvalidBlobId(BlobIdError::Length(10)))
+        ));
+        assert!(matches!(
+            BlobID::from_bytes(&[0u8; 34]),
+            Err(FibreError::InvalidBlobId(BlobIdError::Length(34)))
+        ));
+    }
+
+    #[test]
+    fn blob_id_from_hex_rejects_invalid_hex() {
+        assert!(matches!(
+            BlobID::from_hex("not hex"),
+            Err(FibreError::InvalidBlobId(BlobIdError::Hex(_)))
+        ));
     }
 
     #[test]
@@ -663,7 +665,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, FibreError::InvalidData(_)), "got {err}");
+        assert!(matches!(
+            err,
+            FibreError::InvalidShard(ShardError::RowSizeOutOfBounds { .. })
+        ));
     }
 
     #[tokio::test]
@@ -681,7 +686,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, FibreError::InvalidData(_)), "got {err}");
+        assert!(matches!(
+            err,
+            FibreError::InvalidShard(ShardError::RowIndexOutOfBounds { .. })
+        ));
     }
 
     #[tokio::test]
@@ -798,7 +806,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, FibreError::InvalidData(_)), "got {err}");
+        assert!(matches!(
+            err,
+            FibreError::InvalidShard(ShardError::RlcVectorMismatch)
+        ));
         assert_eq!(
             fresh_reconstruction
                 .stored_rows_bitmap()

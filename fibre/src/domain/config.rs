@@ -5,8 +5,20 @@
 
 use std::num::NonZeroU64;
 
-use super::payment_promise::MAX_CHAIN_ID_SIZE;
 use crate::error::FibreError;
+
+use super::blob_header;
+
+/// Maximum allowed chain ID length.
+pub(crate) const MAX_CHAIN_ID_SIZE: usize = 20;
+
+pub(crate) fn validate_chain_id(chain_id: &str) -> Result<(), FibreError> {
+    let len = chain_id.len();
+    if len == 0 || len > MAX_CHAIN_ID_SIZE {
+        return Err(FibreError::InvalidChainId { len });
+    }
+    Ok(())
+}
 
 /// Fraction represented as numerator/denominator.
 ///
@@ -66,9 +78,6 @@ pub const DEFAULT_PROTOCOL_PARAMS: ProtocolParams = ProtocolParams {
     max_blob_size: 1 << 27, // 128 MiB
     min_row_size: 64,       // 1 << 6
 };
-
-/// The blob header length in bytes.
-const BLOB_HEADER_LEN: usize = 5;
 
 impl ProtocolParams {
     /// Returns the total number of rows (K + N).
@@ -182,18 +191,7 @@ impl FibreClientConfig {
         params: &ProtocolParams,
     ) -> Result<Self, FibreError> {
         let chain_id = chain_id.into();
-        if chain_id.is_empty() {
-            return Err(FibreError::InvalidChainId(
-                "chain ID must not be empty".into(),
-            ));
-        }
-        if chain_id.len() > MAX_CHAIN_ID_SIZE {
-            return Err(FibreError::InvalidChainId(format!(
-                "chain ID length {} exceeds maximum {}",
-                chain_id.len(),
-                MAX_CHAIN_ID_SIZE
-            )));
-        }
+        validate_chain_id(&chain_id)?;
 
         Ok(Self {
             chain_id,
@@ -248,7 +246,7 @@ impl BlobConfig {
             blob_version,
             original_rows: params.rows,
             parity_rows: params.parity_rows(),
-            max_data_size: params.max_blob_size - BLOB_HEADER_LEN,
+            max_data_size: params.max_blob_size - blob_header::SIZE,
             rows: params.rows,
             min_row_size: params.min_row_size,
         }
@@ -264,7 +262,7 @@ impl BlobConfig {
     /// The data length is the raw data size (without header). The header length
     /// is added internally before computing the row size.
     pub fn row_size(&self, data_len: usize) -> usize {
-        compute_row_size(data_len + BLOB_HEADER_LEN, self.rows, self.min_row_size)
+        compute_row_size(data_len + blob_header::SIZE, self.rows, self.min_row_size)
     }
 
     /// Calculates the upload size of blob data with padding and without parity.
@@ -370,7 +368,7 @@ mod tests {
             ..DEFAULT_PROTOCOL_PARAMS
         };
         // ceil(105/8) = 14, rounded up to 64
-        assert_eq!(p.row_size(0, 100 + BLOB_HEADER_LEN), 64);
+        assert_eq!(p.row_size(0, 100 + blob_header::SIZE), 64);
     }
 
     #[test]
@@ -381,7 +379,7 @@ mod tests {
             ..DEFAULT_PROTOCOL_PARAMS
         };
         // ceil(6/8) = 1, rounded up to 64
-        assert_eq!(p.row_size(0, 1 + BLOB_HEADER_LEN), 64);
+        assert_eq!(p.row_size(0, 1 + blob_header::SIZE), 64);
     }
 
     #[test]
@@ -392,7 +390,7 @@ mod tests {
             ..DEFAULT_PROTOCOL_PARAMS
         };
         // ceil(10005/8) = 1251, rounded up to 1280 (20*64)
-        assert_eq!(p.row_size(0, 10000 + BLOB_HEADER_LEN), 1280);
+        assert_eq!(p.row_size(0, 10000 + blob_header::SIZE), 1280);
     }
 
     #[test]
@@ -403,7 +401,7 @@ mod tests {
             ..DEFAULT_PROTOCOL_PARAMS
         };
         // ceil(1005/4) = 252, rounded up to 256 (2*128)
-        assert_eq!(p.row_size(0, 1000 + BLOB_HEADER_LEN), 256);
+        assert_eq!(p.row_size(0, 1000 + blob_header::SIZE), 256);
     }
 
     #[test]
@@ -423,7 +421,7 @@ mod tests {
         assert_eq!(cfg.original_rows, 4096);
         assert_eq!(cfg.parity_rows, 12288);
         assert_eq!(cfg.total_rows(), 16384);
-        assert_eq!(cfg.max_data_size, (1 << 27) - BLOB_HEADER_LEN);
+        assert_eq!(cfg.max_data_size, (1 << 27) - blob_header::SIZE);
     }
 
     #[test]
@@ -450,13 +448,13 @@ mod tests {
     fn fibre_client_config_rejects_invalid_chain_id() {
         assert!(matches!(
             FibreClientConfig::new(""),
-            Err(FibreError::InvalidChainId(_))
+            Err(FibreError::InvalidChainId { len: 0 })
         ));
 
         let too_long = "x".repeat(MAX_CHAIN_ID_SIZE + 1);
         assert!(matches!(
             FibreClientConfig::new(too_long),
-            Err(FibreError::InvalidChainId(_))
+            Err(FibreError::InvalidChainId { len }) if len == MAX_CHAIN_ID_SIZE + 1
         ));
     }
 

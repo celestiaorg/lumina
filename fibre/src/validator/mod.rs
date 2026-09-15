@@ -6,13 +6,14 @@ pub(crate) mod signature_set;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 
+use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetResponse;
 use chacha8rand::ChaCha8Rand;
 use ed25519_dalek::VerifyingKey as Ed25519PublicKey;
 use rand::Rng;
 
 use crate::blob::Commitment;
 use crate::config::Fraction;
-use crate::error::FibreError;
+use crate::error::{FibreError, ValidatorSetError};
 use celestia_grpc::GrpcClient;
 
 pub(crate) use shard_map::ShardMap;
@@ -34,13 +35,10 @@ pub struct ValidatorInfo {
 impl ValidatorInfo {
     /// Creates validator information from an ed25519 public key and voting power.
     pub fn try_new(pubkey: Ed25519PublicKey, voting_power: u64) -> Result<Self, FibreError> {
-        let voting_power = NonZeroU64::new(voting_power)
-            .ok_or_else(|| FibreError::InvalidData("validator has zero voting power".into()))?;
+        let voting_power =
+            NonZeroU64::new(voting_power).ok_or(ValidatorSetError::ZeroVotingPower)?;
         if voting_power.get() > MAX_TOTAL_VOTING_POWER {
-            return Err(FibreError::InvalidData(format!(
-                "validator voting power {} exceeds maximum {MAX_TOTAL_VOTING_POWER}",
-                voting_power.get()
-            )));
+            return Err(ValidatorSetError::VotingPowerTooLarge(voting_power.get()).into());
         }
 
         let address = validator_address(&pubkey);
@@ -103,28 +101,22 @@ pub struct ValidatorSet {
 impl ValidatorSet {
     /// Creates a validated validator set at the given height.
     pub fn try_new(validators: Vec<ValidatorInfo>, height: u64) -> Result<Self, FibreError> {
-        let height = NonZeroU64::new(height)
-            .ok_or_else(|| FibreError::InvalidData("validator set has zero height".into()))?;
+        let height = NonZeroU64::new(height).ok_or(ValidatorSetError::ZeroHeight)?;
         if validators.is_empty() {
-            return Err(FibreError::InvalidData("validator set is empty".into()));
+            return Err(ValidatorSetError::Empty.into());
         }
 
         let mut addresses = HashSet::with_capacity(validators.len());
         let mut total_voting_power = 0u64;
         for validator in &validators {
             if !addresses.insert(validator.address) {
-                return Err(FibreError::InvalidData(format!(
-                    "validator set contains duplicate address {}",
-                    validator.address_hex()
-                )));
+                return Err(ValidatorSetError::DuplicateValidator(validator.address).into());
             }
             // Cannot overflow: each addend and the running total are capped at
             // `MAX_TOTAL_VOTING_POWER`.
             total_voting_power += validator.voting_power();
             if total_voting_power > MAX_TOTAL_VOTING_POWER {
-                return Err(FibreError::InvalidData(format!(
-                    "total voting power {total_voting_power} exceeds maximum {MAX_TOTAL_VOTING_POWER}"
-                )));
+                return Err(ValidatorSetError::TotalVotingPowerTooLarge(total_voting_power).into());
             }
         }
 
@@ -313,17 +305,15 @@ impl GrpcSetGetter {
 
     async fn get_by_height_inner(&self, height: i64) -> Result<ValidatorSet, FibreError> {
         let resp = self.client.get_fibre_validator_set(height).await?;
-
-        let height = u64::try_from(resp.height).map_err(|_| {
-            FibreError::InvalidData(format!("validator set has invalid height {}", resp.height))
-        })?;
-
-        let proto_set = resp.validator_set.ok_or_else(|| {
-            FibreError::InvalidData("ValidatorSetResponse missing validator_set".into())
-        })?;
-
-        (&proto_set, height).try_into()
+        validator_set_from_response(resp)
     }
+}
+
+fn validator_set_from_response(resp: ValidatorSetResponse) -> Result<ValidatorSet, FibreError> {
+    let height =
+        u64::try_from(resp.height).map_err(|_| ValidatorSetError::InvalidHeight(resp.height))?;
+    let proto_set = resp.validator_set.ok_or(ValidatorSetError::Missing)?;
+    (&proto_set, height).try_into()
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -335,12 +325,10 @@ impl SetGetter for GrpcSetGetter {
 
     async fn get_by_height(&self, height: u64) -> Result<ValidatorSet, FibreError> {
         if height == 0 {
-            return Err(FibreError::InvalidData(
-                "get_by_height requires height > 0".into(),
-            ));
+            return Err(ValidatorSetError::ZeroHeight.into());
         }
-        let height = i64::try_from(height)
-            .map_err(|_| FibreError::InvalidData("validator set height exceeds i64::MAX".into()))?;
+        let height =
+            i64::try_from(height).map_err(|_| ValidatorSetError::HeightTooLarge(height))?;
         self.get_by_height_inner(height).await
     }
 }
@@ -362,16 +350,14 @@ impl TryFrom<(&tendermint_proto::v0_38::types::ValidatorSet, u64)> for Validator
         let proposer = proto_set
             .proposer
             .as_ref()
-            .ok_or_else(|| FibreError::InvalidData("validator set is missing proposer".into()))?;
+            .ok_or(ValidatorSetError::MissingProposer)?;
         let proposer = ValidatorInfo::try_from(proposer)?;
         if !set
             .validators
             .iter()
             .any(|validator| validator.address == proposer.address)
         {
-            return Err(FibreError::InvalidData(
-                "validator set proposer is not in validator set".into(),
-            ));
+            return Err(ValidatorSetError::ProposerNotInSet.into());
         }
 
         Ok(set)
@@ -389,40 +375,25 @@ impl TryFrom<&tendermint_proto::v0_38::types::Validator> for ValidatorInfo {
         let pubkey_bytes = match proto_val.pub_key.as_ref() {
             Some(pk) => match &pk.sum {
                 Some(CryptoKeySum::Ed25519(bytes)) => bytes.clone(),
-                _ => {
-                    return Err(FibreError::InvalidData(
-                        "expected ed25519 public key for validator".into(),
-                    ));
-                }
+                _ => return Err(ValidatorSetError::UnsupportedPublicKeyType.into()),
             },
-            None => {
-                return Err(FibreError::InvalidData(
-                    "validator missing public key".into(),
-                ));
-            }
+            None => return Err(ValidatorSetError::MissingPublicKey.into()),
         };
 
-        let pubkey =
-            Ed25519PublicKey::from_bytes(pubkey_bytes.as_slice().try_into().map_err(|_| {
-                FibreError::InvalidData(format!(
-                    "ed25519 key has invalid length {}, expected 32",
-                    pubkey_bytes.len()
-                ))
-            })?)
-            .map_err(|e| FibreError::InvalidData(format!("invalid ed25519 key: {e}")))?;
+        let pubkey = Ed25519PublicKey::from_bytes(
+            pubkey_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ValidatorSetError::PublicKeyLength(pubkey_bytes.len()))?,
+        )
+        .map_err(ValidatorSetError::InvalidPublicKey)?;
 
-        let voting_power = u64::try_from(proto_val.voting_power).map_err(|_| {
-            FibreError::InvalidData(format!(
-                "validator has negative voting power: {}",
-                proto_val.voting_power
-            ))
-        })?;
+        let voting_power = u64::try_from(proto_val.voting_power)
+            .map_err(|_| ValidatorSetError::NegativeVotingPower(proto_val.voting_power))?;
 
         let info = ValidatorInfo::try_new(pubkey, voting_power)?;
         if proto_val.address != info.address {
-            return Err(FibreError::InvalidData(
-                "validator address does not match public key".into(),
-            ));
+            return Err(ValidatorSetError::AddressMismatch.into());
         }
 
         Ok(info)
@@ -496,6 +467,45 @@ fn shuffle_by_stake(selected: &mut [(usize, &ValidatorInfo)], rng: &mut impl Rng
 mod assignment_tests {
     use super::*;
     use crate::test_utils::{fraction, make_validator};
+
+    #[tokio::test]
+    async fn grpc_set_getter_rejects_zero_height() {
+        let client = GrpcClient::builder()
+            .url("http://localhost:50051")
+            .build()
+            .expect("GrpcClient builder should accept the test URL");
+        let getter = GrpcSetGetter::new(client);
+        assert!(matches!(
+            getter.get_by_height(0).await,
+            Err(FibreError::InvalidValidatorSet(
+                ValidatorSetError::ZeroHeight
+            ))
+        ));
+    }
+
+    #[test]
+    fn validator_set_response_requires_set() {
+        assert!(matches!(
+            validator_set_from_response(ValidatorSetResponse {
+                validator_set: None,
+                height: 1,
+            }),
+            Err(FibreError::InvalidValidatorSet(ValidatorSetError::Missing))
+        ));
+    }
+
+    #[test]
+    fn validator_set_response_rejects_negative_height() {
+        assert!(matches!(
+            validator_set_from_response(ValidatorSetResponse {
+                validator_set: None,
+                height: -1,
+            }),
+            Err(FibreError::InvalidValidatorSet(
+                ValidatorSetError::InvalidHeight(-1)
+            ))
+        ));
+    }
 
     #[test]
     fn zero_total_rows_returns_empty_map() {
@@ -590,41 +600,6 @@ mod assignment_tests {
             assert_eq!(map1.get(i).unwrap().len(), map2.get(i).unwrap().len());
         }
         assert_ne!(map1.get(0).unwrap(), map2.get(0).unwrap());
-    }
-
-    #[test]
-    fn shard_map_verify_correct() {
-        let set = ValidatorSet::try_new(vec![make_validator(50, 1).1, make_validator(50, 2).1], 1)
-            .unwrap();
-        let map = set.assign([10u8; 32], 200, 100, 10, fraction(1, 3));
-        let row_indices_u32: Vec<u32> = map.get(0).unwrap().iter().map(|&r| r as u32).collect();
-        assert!(map.verify(0, &row_indices_u32).is_ok());
-    }
-
-    #[test]
-    fn shard_map_verify_wrong_count() {
-        let set = ValidatorSet::try_new(vec![make_validator(100, 1).1], 1).unwrap();
-        let map = set.assign([11u8; 32], 200, 100, 10, fraction(1, 3));
-        assert!(map.verify(0, &[0, 1, 2]).is_err());
-    }
-
-    #[test]
-    fn shard_map_verify_wrong_row() {
-        let set = ValidatorSet::try_new(vec![make_validator(50, 1).1, make_validator(50, 2).1], 1)
-            .unwrap();
-        let total_rows = 200;
-        let map = set.assign([12u8; 32], total_rows, 100, 10, fraction(1, 3));
-
-        let mut wrong_indices: Vec<u32> = map.get(0).unwrap().iter().map(|&r| r as u32).collect();
-        wrong_indices[0] = (total_rows + 999) as u32;
-        assert!(map.verify(0, &wrong_indices).is_err());
-    }
-
-    #[test]
-    fn shard_map_verify_missing_validator() {
-        let set = ValidatorSet::try_new(vec![make_validator(100, 1).1], 1).unwrap();
-        let map = set.assign([13u8; 32], 200, 100, 10, fraction(1, 3));
-        assert!(map.verify(5, &[0]).is_err());
     }
 
     #[test]

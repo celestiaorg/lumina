@@ -109,6 +109,37 @@ impl FromGrpcResponse<GasInfo> for SimulateResponse {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_txs_event_request_is_forwarded_unchanged() {
+        let request = GetTxsEventRequest {
+            page: 3,
+            limit: 25,
+            query: "tx.height > 10".into(),
+            ..Default::default()
+        };
+
+        let converted = request.clone().into_parameter();
+
+        assert_eq!(converted, request);
+    }
+
+    #[test]
+    fn get_txs_event_response_is_forwarded_unchanged() {
+        let response = GetTxsEventResponse {
+            total: 42,
+            ..Default::default()
+        };
+
+        let converted = response.clone().try_from_response().unwrap();
+
+        assert_eq!(converted, response);
+    }
+}
+
 #[cfg(all(target_arch = "wasm32", feature = "wasm-bindgen"))]
 pub use wbg::*;
 

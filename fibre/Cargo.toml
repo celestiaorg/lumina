@@ -45,7 +45,6 @@ thiserror.workspace = true
 tracing.workspace = true
 hex.workspace = true
 async-trait.workspace = true
-bech32 = "0.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["net"] }
