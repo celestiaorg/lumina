@@ -1,13 +1,14 @@
 use std::hint::black_box;
 use std::num::NonZeroUsize;
+use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
-use rayon::prelude::*;
 use rsema1d::{reconstruct, reconstruct_with_work_budget, ExtendedData, Parameters, RowMatrix};
 
 const K: usize = 4096;
 const N: usize = 12288;
 const ROW_SIZE: usize = 32768;
+const SAMPLES: usize = 5;
 
 fn measure<F>(operation: F) -> Duration
 where
@@ -67,51 +68,33 @@ fn concurrent_reconstruct(
     params: &Parameters,
     work_budget: Option<NonZeroUsize>,
 ) -> Duration {
-    measure(|| {
-        std::thread::scope(|scope| {
-            for &input in inputs {
-                scope.spawn(move || {
-                    let rows = rows(input, indices);
+    let barrier = Barrier::new(inputs.len() + 1);
+    std::thread::scope(|scope| {
+        for &input in inputs {
+            let barrier = &barrier;
+            scope.spawn(move || {
+                let rows = rows(input, indices);
+                for _ in 0..=SAMPLES {
+                    barrier.wait();
                     black_box(reconstruct_rows(&rows, indices, params, work_budget));
-                });
-            }
-        });
-    })
-}
-
-fn striped_reconstruct(
-    input: &ExtendedData,
-    indices: &[usize],
-    stripes: usize,
-    work_budget: Option<NonZeroUsize>,
-) -> (Duration, Vec<RowMatrix>) {
-    assert!(ROW_SIZE.is_multiple_of(stripes));
-    let rows = rows(input, indices);
-    let stripe_size = ROW_SIZE / stripes;
-    let started = Instant::now();
-    let result = (0..stripes)
-        .into_par_iter()
-        .map(|stripe| {
-            let start = stripe * stripe_size;
-            let end = start + stripe_size;
-            let stripe_rows: Vec<_> = rows.iter().map(|row| &row[start..end]).collect();
-            let params = Parameters::new(K, N, stripe_size).unwrap();
-            reconstruct_rows(&stripe_rows, indices, &params, work_budget)
-        })
-        .collect();
-    (started.elapsed(), result)
-}
-
-fn validate_striped(result: &[RowMatrix], original: &RowMatrix, stripes: usize) {
-    let stripe_size = ROW_SIZE / stripes;
-    for row in 0..K {
-        let original_row = original.row(row).unwrap();
-        for (stripe, reconstructed) in result.iter().enumerate() {
-            let start = stripe * stripe_size;
-            let end = start + stripe_size;
-            assert_eq!(reconstructed.row(row).unwrap(), &original_row[start..end]);
+                    barrier.wait();
+                }
+            });
         }
-    }
+
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..=SAMPLES {
+            let elapsed = measure(|| {
+                barrier.wait();
+                barrier.wait();
+            });
+            // The first round warms the workers and is excluded from the median.
+            if sample > 0 {
+                samples.push(elapsed);
+            }
+        }
+        median(samples)
+    })
 }
 
 fn make_original(seed: u8) -> RowMatrix {
@@ -132,8 +115,7 @@ fn main() {
         .find(|arg| arg != "--bench")
         .unwrap_or_else(|| "all".into());
     assert!(
-        ["all", "original", "mixed", "parity", "shared", "unique", "striped"]
-            .contains(&selected.as_str()),
+        ["all", "original", "mixed", "parity", "shared", "unique"].contains(&selected.as_str()),
         "unknown case {selected:?}"
     );
     let work_budget = std::env::var("RSEMA1D_RECONSTRUCT_WORK_BUDGET_MIB")
@@ -159,7 +141,8 @@ fn main() {
         if selected != "all" && selected != name {
             continue;
         }
-        let samples = (0..5)
+        reconstruct_once(&input, indices, &params, work_budget);
+        let samples = (0..SAMPLES)
             .map(|_| reconstruct_once(&input, indices, &params, work_budget))
             .collect();
         let label = if name == "mixed" {
@@ -167,7 +150,11 @@ fn main() {
         } else {
             name
         };
-        println!("single {label} median={:?}", median(samples));
+        let elapsed = median(samples);
+        println!(
+            "single {label} median={elapsed:?} blobs_per_second={:.3}",
+            1.0 / elapsed.as_secs_f64()
+        );
     }
 
     if selected == "all" || selected == "shared" {
@@ -175,7 +162,7 @@ fn main() {
             let inputs: Vec<_> = std::iter::repeat_n(&input, concurrency).collect();
             let elapsed = concurrent_reconstruct(&inputs, &mixed_indices, &params, work_budget);
             println!(
-                "concurrent shared count={concurrency} elapsed={elapsed:?} blobs_per_second={:.3}",
+                "concurrent shared count={concurrency} median={elapsed:?} blobs_per_second={:.3}",
                 concurrency as f64 / elapsed.as_secs_f64()
             );
         }
@@ -189,21 +176,8 @@ fn main() {
         let elapsed =
             concurrent_reconstruct(&unique_input_refs, &mixed_indices, &params, work_budget);
         println!(
-            "concurrent unique count=32 elapsed={elapsed:?} blobs_per_second={:.3}",
+            "concurrent unique count=32 median={elapsed:?} blobs_per_second={:.3}",
             unique_inputs.len() as f64 / elapsed.as_secs_f64()
         );
-    }
-
-    if selected == "all" || selected == "striped" {
-        for stripes in [1, 2, 4, 8, 16, 32] {
-            let (elapsed, result) =
-                striped_reconstruct(&input, &mixed_indices, stripes, work_budget);
-            validate_striped(&result, &original, stripes);
-            black_box(result);
-            println!(
-                "striped stripes={stripes} elapsed={elapsed:?} blobs_per_second={:.3}",
-                1.0 / elapsed.as_secs_f64()
-            );
-        }
     }
 }
