@@ -6,30 +6,18 @@
 
 use std::sync::Arc;
 
-use crate::blob::EncodedBlob;
 use crate::test_utils::{
-    MockConnector, MockValidatorConnection, build_test_client, make_connector, make_validator,
-    test_blob_config,
+    MockValidatorConnection, build_test_client, make_connector, test_blob, validator_set,
 };
 
 #[tokio::test]
 async fn upload_then_download_roundtrip() {
-    let cfg = test_blob_config();
-    let original_data: Vec<u8> = (0u8..200).collect();
-
-    let blob = EncodedBlob::new(&original_data, cfg.clone()).unwrap();
+    let (blob, original_data) = test_blob(200);
+    let cfg = blob.config().clone();
     let blob_id = blob.id().clone();
-
-    let validators = vec![
-        make_validator(100, 1),
-        make_validator(100, 2),
-        make_validator(100, 3),
-    ];
+    let (validators, val_set) = validator_set(&[100, 100, 100], 42);
 
     let connector = make_connector(&validators);
-    let val_infos = validators.iter().map(|(_, v)| v.clone()).collect();
-    let val_set = crate::validator::ValidatorSet::try_new(val_infos, 42).unwrap();
-
     let client = build_test_client(val_set, connector, "roundtrip-test");
 
     // Upload.
@@ -72,37 +60,17 @@ async fn upload_then_download_roundtrip() {
 
 #[tokio::test]
 async fn roundtrip_with_partial_validator_failure() {
-    let cfg = test_blob_config();
-    let original_data: Vec<u8> = (0u8..200).collect();
-
-    let blob = EncodedBlob::new(&original_data, cfg.clone()).unwrap();
+    let (blob, original_data) = test_blob(200);
+    let cfg = blob.config().clone();
     let blob_id = blob.id().clone();
-
-    // 5 validators: first 3 succeed, last 2 fail.
-    let v1 = make_validator(200, 1);
-    let v2 = make_validator(200, 2);
-    let v3 = make_validator(200, 3);
-    let v4 = make_validator(100, 4);
-    let v5 = make_validator(100, 5);
-
-    let all_validators = [v1.clone(), v2.clone(), v3.clone(), v4.clone(), v5.clone()];
-
-    let mut connector = MockConnector::new();
-    for (ed_key, info) in &[v1, v2, v3] {
+    let (validators, val_set) = validator_set(&[200, 200, 200, 100, 100], 42);
+    let mut connector = make_connector(&validators[..3]);
+    for (key, validator) in &validators[3..] {
         connector.add(
-            info.address,
-            Arc::new(MockValidatorConnection::new(ed_key.clone())),
+            validator.address,
+            Arc::new(MockValidatorConnection::new_failing(key.clone())),
         );
     }
-    for (ed_key, info) in &[v4, v5] {
-        connector.add(
-            info.address,
-            Arc::new(MockValidatorConnection::new_failing(ed_key.clone())),
-        );
-    }
-
-    let val_infos = all_validators.iter().map(|(_, v)| v.clone()).collect();
-    let val_set = crate::validator::ValidatorSet::try_new(val_infos, 42).unwrap();
 
     let client = build_test_client(val_set, connector, "roundtrip-test");
 
