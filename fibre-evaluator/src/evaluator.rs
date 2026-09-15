@@ -101,12 +101,12 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         .url(&cli.app_grpc_url)
         .build()
         .context("building Fibre host-registry gRPC client")?;
-    let shared_connector = GrpcValidatorConnector::new_with_limits(
+    let shared_connector = Arc::new(GrpcValidatorConnector::new_with_limits(
         Arc::new(GrpcHostRegistry::new(registry_grpc)),
         cli.chain_id.clone(),
         cli.max_connections_per_validator,
         cli.max_in_flight_per_validator,
-    );
+    ));
 
     for client in 1..=client_count {
         let context = Arc::new(
@@ -250,7 +250,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
 async fn build_lifecycle_context(
     client: usize,
     cli: &Cli,
-    shared_connector: GrpcValidatorConnector,
+    shared_connector: Arc<GrpcValidatorConnector>,
 ) -> Result<LifecycleContext> {
     let private_key = cli
         .private_keys
@@ -275,7 +275,7 @@ async fn build_lifecycle_context(
         FibreClient::builder()
             .config(fibre_config)
             .set_getter(GrpcSetGetter::new(core_grpc))
-            .connector(shared_connector)
+            .shared_connector(shared_connector)
             .build()
             .context("building Fibre client")?,
     );

@@ -27,14 +27,13 @@ use crate::validator_client::{
 const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Factory that resolves validator hosts and caches gRPC connections.
-#[derive(Clone)]
 pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
     max_connections_per_validator: NonZeroUsize,
     max_in_flight_per_validator: Option<NonZeroUsize>,
-    connections: Arc<tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorPool>>>>,
+    connections: tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorPool>>>,
 }
 
 impl GrpcValidatorConnector {
@@ -90,7 +89,7 @@ impl GrpcValidatorConnector {
             io_connector,
             max_connections_per_validator,
             max_in_flight_per_validator,
-            connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            connections: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -337,7 +336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connector_clones_share_configured_pool() {
+    async fn connector_arcs_share_configured_pool() {
         let validator = make_validator(100, 1).1;
 
         let mut hosts = std::collections::HashMap::new();
@@ -347,15 +346,15 @@ mod tests {
             hosts,
             call_count: AtomicUsize::new(0),
         });
-        let connector = GrpcValidatorConnector::new_with_limits(
+        let connector = Arc::new(GrpcValidatorConnector::new_with_limits(
             registry,
             "test-chain",
             NonZeroUsize::new(3).unwrap(),
             Some(NonZeroUsize::new(5).unwrap()),
-        );
+        ));
 
         let conn1 = connector.connect(&validator).await.unwrap();
-        let conn2 = connector.clone().connect(&validator).await.unwrap();
+        let conn2 = Arc::clone(&connector).connect(&validator).await.unwrap();
         assert!(Arc::ptr_eq(&conn1, &conn2));
 
         let cache = connector.connections.lock().await;
