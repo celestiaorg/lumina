@@ -121,7 +121,7 @@ impl ValidatorConnector for GrpcValidatorConnector {
         let connections = (0..self.max_connections_per_validator.get())
             .map(|_| {
                 let client = crate::transport::tls::grpc_client(
-                    url,
+                    url.clone(),
                     validator.pubkey,
                     self.chain_id.clone(),
                     self.io_connector.clone(),

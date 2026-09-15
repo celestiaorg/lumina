@@ -264,28 +264,6 @@ pub enum FibreError {
     /// An error from the rsema1d erasure coding library.
     #[error("encoding error: {0}")]
     Encoding(#[from] rsema1d::Error),
-
-    /// A tonic transport error (connection failure, TLS, etc.).
-    #[cfg(not(target_arch = "wasm32"))]
-    #[error("transport error: {0}")]
-    Transport(#[from] tonic::transport::Error),
-
-    /// A secp256k1 ECDSA error (key or signature operations).
-    ///
-    /// Note: `k256::ecdsa::Error` and `ed25519_dalek::SignatureError` are both
-    /// re-exports of `signature::Error`, so we use a single variant for both.
-    /// The `#[from]` trait is not used to avoid conflicting blanket implementations;
-    /// use `FibreError::CryptoSignature(err)` explicitly instead.
-    #[error("cryptographic signature error: {0}")]
-    CryptoSignature(k256::ecdsa::Error),
-
-    /// A protobuf decoding error.
-    #[error("proto decode error: {0}")]
-    ProtoDecode(#[from] prost::DecodeError),
-
-    /// A catch-all error for cases not covered by other variants.
-    #[error("{0}")]
-    Other(String),
 }
 
 impl FibreError {
@@ -304,18 +282,6 @@ impl FibreError {
                 if status.code() == tonic::Code::InvalidArgument
                     && status.message() == PAYMENT_PROMISE_ALREADY_PROCESSED
         )
-    }
-}
-
-impl From<tonic::Status> for FibreError {
-    fn from(err: tonic::Status) -> Self {
-        FibreError::Grpc(Box::new(err))
-    }
-}
-
-impl From<k256::ecdsa::Error> for FibreError {
-    fn from(err: k256::ecdsa::Error) -> Self {
-        FibreError::CryptoSignature(err)
     }
 }
 
