@@ -1,6 +1,5 @@
 //! Discovery of Fibre blobs through on-chain payment transactions.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::pin::Pin;
@@ -22,9 +21,8 @@ use crate::blob::BlobID;
 use crate::client::FibreClient;
 use crate::error::{DiscoveryError, FibreError};
 
-const DEFAULT_PAGE_SIZE: u64 = 100;
+const DEFAULT_PAGE_SIZE: NonZeroU64 = NonZeroU64::new(100).unwrap();
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_BATCH_QUERY_ATTEMPTS: usize = 4;
 
 /// A Fibre blob found through an on-chain `MsgPayForFibre` transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,12 +37,25 @@ pub struct DiscoveredBlob {
     pub tx_hash: Hash,
 }
 
+/// Result of a single discovery query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveryBatch {
+    /// Blobs for the queried namespace, ordered by transaction height and message order.
+    pub blobs: Vec<DiscoveredBlob>,
+    /// Greatest transaction height scanned by the query, counting failed transactions and
+    /// payments for other namespaces. Equals the queried `from_height` when nothing newer was
+    /// indexed. Persist it as the next `from_height` cursor.
+    pub through_height: u64,
+}
+
 /// Options controlling continuous Fibre discovery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DiscoveryOptions {
     /// Delay between completed transaction queries.
     pub poll_interval: Duration,
     /// Maximum number of transactions requested per page.
+    ///
+    /// Consensus nodes cap pages at 100 transactions; larger values are served in pages of 100.
     pub page_size: NonZeroU64,
 }
 
@@ -52,24 +63,24 @@ impl Default for DiscoveryOptions {
     fn default() -> Self {
         Self {
             poll_interval: DEFAULT_POLL_INTERVAL,
-            page_size: NonZeroU64::new(DEFAULT_PAGE_SIZE).expect("default page size is non-zero"),
+            page_size: DEFAULT_PAGE_SIZE,
         }
     }
 }
 
 /// Stream of Fibre blobs discovered through on-chain payments.
 #[must_use = "streams do nothing unless polled"]
-pub struct FibreStream {
+pub struct DiscoveryStream {
     inner: Pin<Box<dyn Stream<Item = Result<DiscoveredBlob, FibreError>> + Send + 'static>>,
 }
 
-impl fmt::Debug for FibreStream {
+impl fmt::Debug for DiscoveryStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FibreStream").finish_non_exhaustive()
+        f.debug_struct("DiscoveryStream").finish_non_exhaustive()
     }
 }
 
-impl Stream for FibreStream {
+impl Stream for DiscoveryStream {
     type Item = Result<DiscoveredBlob, FibreError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -95,27 +106,16 @@ impl TransactionEventSource for GrpcClient {
     }
 }
 
-struct DiscoveryBatch {
-    blobs: Vec<DiscoveredBlob>,
-    through_height: u64,
-}
-
-enum BatchScan {
-    Complete(DiscoveryBatch),
-    IndexChanged,
-}
-
 impl FibreClient {
     /// Query all currently indexed Fibre payments for `namespace` after `from_height`.
     ///
-    /// `from_height` is an exclusive transaction-height cursor. Results are ordered by
-    /// transaction height and message order. After processing the complete result, callers can
-    /// persist the greatest [`DiscoveredBlob::tx_height`] as their next cursor.
+    /// `from_height` is an exclusive transaction-height cursor. After processing the result,
+    /// callers can persist [`DiscoveryBatch::through_height`] as their next cursor.
     pub async fn query_discovered(
         &self,
         namespace: Namespace,
         from_height: u64,
-    ) -> Result<Vec<DiscoveredBlob>, FibreError> {
+    ) -> Result<DiscoveryBatch, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
@@ -124,27 +124,28 @@ impl FibreClient {
             .discovery_source
             .as_deref()
             .ok_or(FibreError::DiscoveryUnavailable)?;
-        let batch = query_batch(
+        query_batch(
             source,
             namespace,
             from_height,
-            NonZeroU64::new(DEFAULT_PAGE_SIZE).expect("default page size is non-zero"),
+            DEFAULT_PAGE_SIZE,
             &self.cancel_token,
         )
-        .await?;
-        Ok(batch.blobs)
+        .await
     }
 
     /// Continuously discover Fibre payments for `namespace` after `from_height`.
     ///
-    /// The first query runs when the stream is first polled. Transient network errors are
-    /// yielded and retried; malformed responses and non-transient errors end the stream. A
-    /// discovered blob's validator-set height can be passed to [`DownloadOptions::height`](crate::DownloadOptions::height).
+    /// The first query runs when the stream is first polled and fetches every indexed payment
+    /// after `from_height` before yielding, so pass a recent cursor when catching up is not
+    /// needed. Transient network errors are yielded and retried; malformed responses and
+    /// non-transient errors end the stream. A discovered blob's validator-set height can be
+    /// passed to [`DownloadOptions::height`](crate::DownloadOptions::height).
     pub fn discover(
         &self,
         namespace: Namespace,
         from_height: u64,
-    ) -> Result<FibreStream, FibreError> {
+    ) -> Result<DiscoveryStream, FibreError> {
         self.discover_with_options(namespace, from_height, DiscoveryOptions::default())
     }
 
@@ -154,14 +155,13 @@ impl FibreClient {
         namespace: Namespace,
         from_height: u64,
         options: DiscoveryOptions,
-    ) -> Result<FibreStream, FibreError> {
+    ) -> Result<DiscoveryStream, FibreError> {
         if self.cancel_token.is_cancelled() {
             return Err(FibreError::ClientClosed);
         }
         if options.poll_interval.is_zero() {
             return Err(DiscoveryError::ZeroPollInterval.into());
         }
-        validate_from_height(from_height)?;
 
         let source = Arc::clone(
             self.discovery_source
@@ -172,16 +172,12 @@ impl FibreClient {
 
         let inner = stream! {
             let mut cursor = from_height;
-            let mut seen_at_cursor = HashSet::new();
 
             loop {
-                // Re-query the latest observed height so that a payment indexed slightly later
-                // than another transaction in the same block cannot be skipped.
-                let query_from_height = cursor.saturating_sub(1).max(from_height);
                 let result = query_batch(
                     source.as_ref(),
                     namespace,
-                    query_from_height,
+                    cursor,
                     options.page_size,
                     &cancel_token,
                 )
@@ -189,34 +185,17 @@ impl FibreClient {
 
                 match result {
                     Ok(batch) => {
-                        let next_cursor = cursor.max(batch.through_height);
-                        let mut next_seen = HashSet::new();
-
+                        cursor = batch.through_height;
                         for blob in batch.blobs {
-                            let key = (blob.tx_hash, blob.id.clone());
-                            let already_seen = blob.tx_height == cursor
-                                && seen_at_cursor.contains(&key);
-                            if blob.tx_height == next_cursor {
-                                next_seen.insert(key);
+                            if cancel_token.is_cancelled() {
+                                yield Err(FibreError::Cancelled);
+                                return;
                             }
-                            if !already_seen {
-                                if cancel_token.is_cancelled() {
-                                    yield Err(FibreError::Cancelled);
-                                    return;
-                                }
-                                yield Ok(blob);
-                            }
+                            yield Ok(blob);
                         }
-
-                        cursor = next_cursor;
-                        seen_at_cursor = next_seen;
                     }
                     Err(FibreError::GrpcClient(error)) if error.is_network_error() => {
                         yield Err(FibreError::GrpcClient(error));
-                    }
-                    Err(FibreError::Cancelled) => {
-                        yield Err(FibreError::Cancelled);
-                        return;
                     }
                     Err(error) => {
                         yield Err(error);
@@ -236,7 +215,7 @@ impl FibreClient {
             }
         };
 
-        Ok(FibreStream {
+        Ok(DiscoveryStream {
             inner: Box::pin(inner),
         })
     }
@@ -249,33 +228,16 @@ async fn query_batch(
     page_size: NonZeroU64,
     cancel_token: &CancellationToken,
 ) -> Result<DiscoveryBatch, FibreError> {
-    validate_from_height(from_height)?;
-
-    for _ in 0..MAX_BATCH_QUERY_ATTEMPTS {
-        match scan_batch(source, namespace, from_height, page_size, cancel_token).await? {
-            BatchScan::Complete(batch) => return Ok(batch),
-            BatchScan::IndexChanged => continue,
-        }
+    if from_height > i64::MAX as u64 {
+        return Err(DiscoveryError::HeightTooLarge(from_height).into());
     }
 
-    Err(DiscoveryError::UnstablePagination.into())
-}
-
-async fn scan_batch(
-    source: &dyn TransactionEventSource,
-    namespace: Namespace,
-    from_height: u64,
-    page_size: NonZeroU64,
-    cancel_token: &CancellationToken,
-) -> Result<BatchScan, FibreError> {
     let message_type_url = MsgPayForFibre::type_url();
     let query = format!("message.action='{message_type_url}' AND tx.height > {from_height}");
     let mut blobs = Vec::new();
     let mut through_height = from_height;
     let mut fetched = 0u64;
     let mut page = 1u64;
-    let mut previous_total = 0;
-    let mut seen_transactions = HashSet::new();
 
     loop {
         let request = GetTxsEventRequest {
@@ -300,12 +262,7 @@ async fn scan_batch(
             .into());
         }
 
-        // Page-number queries are not snapshots, so a changing result set invalidates this scan.
-        if response.total < previous_total {
-            return Ok(BatchScan::IndexChanged);
-        }
-
-        let page_len = u64::try_from(response.txs.len()).unwrap_or(u64::MAX);
+        let page_len = response.txs.len() as u64;
         if page_len == 0 && fetched < response.total {
             return Err(DiscoveryError::IncompletePage {
                 page,
@@ -314,14 +271,7 @@ async fn scan_batch(
             .into());
         }
 
-        previous_total = response.total;
-
         for (tx, tx_response) in response.txs.into_iter().zip(response.tx_responses) {
-            let tx_hash = parse_tx_hash(&tx_response.txhash)?;
-            if !seen_transactions.insert(tx_hash) {
-                return Ok(BatchScan::IndexChanged);
-            }
-
             let tx_height = parse_tx_height(tx_response.height, from_height)?;
             through_height = through_height.max(tx_height);
 
@@ -329,33 +279,26 @@ async fn scan_batch(
                 continue;
             }
 
+            let tx_hash = parse_tx_hash(&tx_response.txhash)?;
             decode_transaction(
                 tx,
                 namespace,
                 tx_height,
                 tx_hash,
-                &tx_response.txhash,
                 &message_type_url,
                 &mut blobs,
             )?;
         }
 
-        fetched = fetched.saturating_add(page_len);
-        if fetched >= previous_total {
-            return Ok(BatchScan::Complete(DiscoveryBatch {
+        fetched += page_len;
+        if fetched >= response.total {
+            return Ok(DiscoveryBatch {
                 blobs,
                 through_height,
-            }));
+            });
         }
-        page = page.checked_add(1).ok_or(DiscoveryError::PageOverflow)?;
+        page += 1;
     }
-}
-
-fn validate_from_height(from_height: u64) -> Result<(), DiscoveryError> {
-    if from_height > i64::MAX as u64 {
-        return Err(DiscoveryError::HeightTooLarge(from_height));
-    }
-    Ok(())
 }
 
 fn parse_tx_height(height: i64, from_height: u64) -> Result<u64, DiscoveryError> {
@@ -387,13 +330,12 @@ fn decode_transaction(
     namespace: Namespace,
     tx_height: u64,
     tx_hash: Hash,
-    tx_hash_text: &str,
     message_type_url: &str,
     blobs: &mut Vec<DiscoveredBlob>,
 ) -> Result<(), FibreError> {
     let body = tx
         .body
-        .ok_or_else(|| DiscoveryError::MissingTransactionBody(tx_hash_text.to_owned()))?;
+        .ok_or_else(|| DiscoveryError::MissingTransactionBody(tx_hash.to_string()))?;
 
     for message in body.messages {
         if message.type_url != message_type_url {
@@ -580,14 +522,16 @@ mod tests {
         let source = MockSource::new([Ok(response([first], 3)), Ok(response([other, failed], 3))]);
         let client = test_client(source.clone());
 
-        let blobs = client.query_discovered(namespace, 10).await.unwrap();
+        let batch = client.query_discovered(namespace, 10).await.unwrap();
 
-        assert_eq!(blobs.len(), 1);
-        assert_eq!(blobs[0].id, BlobID::new(0, [1; 32]));
-        assert_eq!(blobs[0].validator_set_height, 21);
-        assert_eq!(blobs[0].tx_height, 11);
+        // Foreign and failed transactions do not produce blobs but still advance the cursor.
+        assert_eq!(batch.through_height, 13);
+        assert_eq!(batch.blobs.len(), 1);
+        assert_eq!(batch.blobs[0].id, BlobID::new(0, [1; 32]));
+        assert_eq!(batch.blobs[0].validator_set_height, 21);
+        assert_eq!(batch.blobs[0].tx_height, 11);
         assert_eq!(
-            blobs[0].tx_hash,
+            batch.blobs[0].tx_hash,
             hex::encode_upper([1; 32]).parse().unwrap()
         );
 
@@ -595,7 +539,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].page, 1);
         assert_eq!(requests[1].page, 2);
-        assert_eq!(requests[0].limit, DEFAULT_PAGE_SIZE);
+        assert_eq!(requests[0].limit, DEFAULT_PAGE_SIZE.get());
         assert_eq!(requests[0].order_by, OrderBy::Asc as i32);
         assert_eq!(
             requests[0].query,
@@ -607,73 +551,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_restarts_after_page_boundaries_shift() {
+    async fn query_reports_from_height_when_nothing_is_indexed() {
         let namespace = Namespace::new_v0(b"fibre-eval").unwrap();
-        let first = transaction(
-            vec![payment_message(namespace, vec![1; 32], 0, 11)],
-            11,
-            1,
-            0,
-        );
-        let second = transaction(
-            vec![payment_message(namespace, vec![2; 32], 0, 12)],
-            12,
-            2,
-            0,
-        );
-        let late = transaction(
-            vec![payment_message(namespace, vec![3; 32], 0, 10)],
-            10,
-            3,
-            0,
-        );
-        let source = MockSource::new([
-            Ok(response([first.clone()], 2)),
-            Ok(response([first.clone()], 3)),
-            Ok(response([late, first, second], 3)),
-        ]);
-        let client = test_client(source.clone());
+        let client = test_client(MockSource::default());
 
-        let blobs = client.query_discovered(namespace, 9).await.unwrap();
+        let batch = client.query_discovered(namespace, 42).await.unwrap();
 
-        let ids: Vec<_> = blobs.into_iter().map(|blob| blob.id).collect();
-        assert_eq!(
-            ids,
-            [
-                BlobID::new(0, [3; 32]),
-                BlobID::new(0, [1; 32]),
-                BlobID::new(0, [2; 32]),
-            ]
-        );
-        let pages: Vec<_> = source
-            .requests()
-            .into_iter()
-            .map(|request| request.page)
-            .collect();
-        assert_eq!(pages, [1, 2, 1]);
-    }
-
-    #[tokio::test]
-    async fn query_rejects_an_index_that_never_stabilizes() {
-        let namespace = Namespace::new_v0(b"fibre-eval").unwrap();
-        let entry = transaction(
-            vec![payment_message(namespace, vec![1; 32], 0, 11)],
-            11,
-            1,
-            0,
-        );
-        let responses = (0..MAX_BATCH_QUERY_ATTEMPTS).flat_map(|_| {
-            [
-                Ok(response([entry.clone()], 2)),
-                Ok(response([entry.clone()], 2)),
-            ]
-        });
-        let client = test_client(MockSource::new(responses));
-
-        assert!(matches!(
-            client.query_discovered(namespace, 10).await,
-            Err(FibreError::Discovery(DiscoveryError::UnstablePagination))
-        ));
+        assert!(batch.blobs.is_empty());
+        assert_eq!(batch.through_height, 42);
     }
 
     #[tokio::test]
@@ -694,7 +579,7 @@ mod tests {
         );
         let client = test_client(MockSource::new([Ok(response([entry], 1))]));
 
-        let blobs = client.query_discovered(namespace, 29).await.unwrap();
+        let blobs = client.query_discovered(namespace, 29).await.unwrap().blobs;
 
         assert_eq!(blobs.len(), 2);
         assert_eq!(blobs[0].id, BlobID::new(0, [4; 32]));
@@ -803,29 +688,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_advances_cursor_without_repeating_transactions() {
+    async fn stream_advances_cursor_past_scanned_heights() {
         let namespace = Namespace::new_v0(b"fibre-eval").unwrap();
+        let other_namespace = Namespace::new_v0(b"other-data").unwrap();
         let first = transaction(
             vec![payment_message(namespace, vec![1; 32], 0, 11)],
             11,
             1,
             0,
         );
-        let first_again = transaction(
-            vec![payment_message(namespace, vec![1; 32], 0, 11)],
-            11,
-            1,
+        let foreign = transaction(
+            vec![payment_message(other_namespace, vec![9; 32], 0, 12)],
+            12,
+            9,
             0,
         );
-        let late_same_height = transaction(
-            vec![payment_message(namespace, vec![2; 32], 0, 12)],
-            11,
+        let second = transaction(
+            vec![payment_message(namespace, vec![2; 32], 0, 13)],
+            13,
             2,
             0,
         );
         let source = MockSource::new([
             Ok(response([first], 1)),
-            Ok(response([first_again, late_same_height], 2)),
+            Ok(GetTxsEventResponse::default()),
+            Ok(response([foreign], 1)),
+            Ok(response([second], 1)),
         ]);
         let client = test_client(source.clone());
         let mut stream = client
@@ -840,14 +728,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(stream.next().await.unwrap().unwrap().tx_height, 11);
-        let late = stream.next().await.unwrap().unwrap();
-        assert_eq!(late.id, BlobID::new(0, [2; 32]));
-        assert_eq!(late.tx_height, 11);
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(second.id, BlobID::new(0, [2; 32]));
+        assert_eq!(second.tx_height, 13);
 
-        let requests = source.requests();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].query.ends_with("tx.height > 10"));
-        assert!(requests[1].query.ends_with("tx.height > 10"));
+        let queries: Vec<_> = source
+            .requests()
+            .into_iter()
+            .map(|request| request.query)
+            .collect();
+        assert_eq!(queries.len(), 4);
+        assert!(queries[0].ends_with("tx.height > 10"));
+        // An empty poll keeps the cursor; a foreign payment still advances it.
+        assert!(queries[1].ends_with("tx.height > 11"));
+        assert!(queries[2].ends_with("tx.height > 11"));
+        assert!(queries[3].ends_with("tx.height > 12"));
     }
 
     #[tokio::test]

@@ -142,10 +142,6 @@ pub enum DiscoveryError {
     },
     #[error("transaction query returned an empty page {page} before total {total} was reached")]
     IncompletePage { page: u64, total: u64 },
-    #[error("transaction index kept changing while paginating")]
-    UnstablePagination,
-    #[error("transaction query page overflow")]
-    PageOverflow,
     #[error("transaction query returned invalid height {0}")]
     InvalidTransactionHeight(i64),
     #[error("transaction query returned height {height} at or below cursor {from_height}")]

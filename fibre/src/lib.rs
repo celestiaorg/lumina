@@ -26,7 +26,7 @@ mod roundtrip_test;
 mod test_utils;
 
 pub use celestia_grpc::Endpoint;
-pub use client::discovery::{DiscoveredBlob, DiscoveryOptions, FibreStream};
+pub use client::discovery::{DiscoveredBlob, DiscoveryBatch, DiscoveryOptions, DiscoveryStream};
 pub use client::download::DownloadOptions;
 pub use client::upload::{UploadCompletion, UploadCompletionStats};
 pub use client::{FibreClient, FibreClientBuilder};
