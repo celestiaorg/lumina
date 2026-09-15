@@ -33,6 +33,8 @@ The reconstruction sweep uses 4096 original rows, 12288 parity rows, and 32 KiB 
 
 The Criterion `verification_batch` group compares serial verification with Rayon batches of 148 rows for the same dimensions. Keep the machine, thread count, and command fixed when comparing branches, and record the commit and CPU alongside results.
 
+Set `RSEMA1D_RECONSTRUCT_WORK_BUDGET_MIB` to a positive integer to override the reconstruction work-buffer budget in the sweep, for example `RSEMA1D_RECONSTRUCT_WORK_BUDGET_MIB=32 RAYON_NUM_THREADS=8 cargo bench -p rsema1d --bench reconstruct_sweep -- mixed`. Leave it unset to measure the default budget.
+
 ## End-to-End Flow (Library API)
 
 1. Build `Parameters(k, n, row_size)`.
