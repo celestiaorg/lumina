@@ -126,19 +126,6 @@ pub fn reconstruct(rows: &[&[u8]], indices: &[usize], params: &Parameters) -> Re
     reconstruct_data(rows, indices, params)
 }
 
-/// Reconstruct original rows with an explicit combined Reed-Solomon work-buffer budget.
-///
-/// The budget is in bytes and excludes output buffers. Budgets smaller
-/// than one decoder work buffer for a 64-byte stripe use that minimum allocation.
-pub fn reconstruct_with_work_budget(
-    rows: &[&[u8]],
-    indices: &[usize],
-    params: &Parameters,
-    work_budget: NonZeroUsize,
-) -> Result<RowMatrix> {
-    reconstruct::reconstruct_data_with_work_budget(rows, indices, params, work_budget)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

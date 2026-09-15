@@ -9,35 +9,35 @@ use reed_solomon_simd::rate::{HighRateEncoder, RateEncoder};
 use std::num::NonZeroUsize;
 
 /// Leopard operates on 64-byte blocks, so stripes stay block-aligned.
-pub(super) const MIN_STRIPE: usize = 64;
+const MIN_STRIPE: usize = 64;
 
 #[derive(Clone, Copy)]
-pub(super) struct StripePlan {
+struct StripePlan {
     stripe_size: NonZeroUsize,
     parallelism: NonZeroUsize,
 }
 
 impl StripePlan {
-    pub(super) const fn new(stripe_size: NonZeroUsize, parallelism: NonZeroUsize) -> Self {
+    const fn new(stripe_size: NonZeroUsize, parallelism: NonZeroUsize) -> Self {
         Self {
             stripe_size,
             parallelism,
         }
     }
 
-    pub(super) const fn stripe_size(self) -> usize {
+    const fn stripe_size(self) -> usize {
         self.stripe_size.get()
     }
 
-    pub(super) const fn parallelism(self) -> usize {
+    const fn parallelism(self) -> usize {
         self.parallelism.get()
     }
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Stripe {
-    pub(super) offset: usize,
-    pub(super) len: usize,
+struct Stripe {
+    offset: usize,
+    len: usize,
 }
 
 /// Number of shards in the Leopard high-rate work buffer for `(k, n)`.
@@ -46,18 +46,20 @@ fn work_shards(k: usize, n: usize) -> usize {
     k.div_ceil(chunk) * chunk
 }
 
-/// Choose a block-aligned stripe width and bound concurrent work buffers.
-pub(super) fn stripe_plan(
-    work_shards: usize,
+/// Choose a block-aligned stripe width and bound the number encoded at once.
+fn stripe_plan(
+    k: usize,
+    n: usize,
     row_size: usize,
     threads: usize,
     work_budget: NonZeroUsize,
 ) -> Result<StripePlan> {
+    let work_shards = work_shards(k, n);
     let work_budget = work_budget.get();
     let max_parallelism = (work_budget / (work_shards * MIN_STRIPE)).max(1);
     let parallelism = threads.max(1).min(max_parallelism);
-    let per_worker = work_budget / parallelism / work_shards;
-    let stripe = (per_worker / MIN_STRIPE) * MIN_STRIPE;
+    let per_encoder = work_budget / parallelism / work_shards;
+    let stripe = (per_encoder / MIN_STRIPE) * MIN_STRIPE;
     let stripe_size = NonZeroUsize::new(stripe.max(MIN_STRIPE).min(row_size)).ok_or_else(|| {
         Error::InvalidParameters("stripe planner produced a zero stripe size".into())
     })?;
@@ -174,12 +176,7 @@ fn fill_parity_with_work_budget(
     HighRateEncoder::<DefaultEngine>::validate(k, n, MIN_STRIPE)
         .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
-    let plan = stripe_plan(
-        work_shards(k, n),
-        row_size,
-        rayon::current_num_threads(),
-        work_budget,
-    )?;
+    let plan = stripe_plan(k, n, row_size, rayon::current_num_threads(), work_budget)?;
     fill_parity_with_plan(original_rows, parity_rows, k, n, row_size, plan)
 }
 
@@ -469,7 +466,7 @@ mod tests {
             (32768, 32768, 32768, 32, 32, 64, 16),
         ] {
             let work_budget = NonZeroUsize::new(budget_mib << 20).unwrap();
-            let plan = stripe_plan(work_shards(k, n), row_size, threads, work_budget).unwrap();
+            let plan = stripe_plan(k, n, row_size, threads, work_budget).unwrap();
 
             assert_eq!(plan.stripe_size(), expected_stripe);
             assert_eq!(plan.parallelism(), expected_parallelism);
@@ -478,7 +475,7 @@ mod tests {
             );
         }
 
-        assert!(stripe_plan(work_shards(4, 4), 0, 1, NonZeroUsize::MIN).is_err());
+        assert!(stripe_plan(4, 4, 0, 1, NonZeroUsize::MIN).is_err());
     }
 
     /// Striped, parallel parity must be byte-identical to a single Leopard

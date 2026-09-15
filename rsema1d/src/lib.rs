@@ -25,8 +25,8 @@ pub use codec::Commitment;
 pub use codec::{
     create_verification_context, default_work_budget, encode, encode_in_place,
     encode_in_place_with_work_budget, encode_parity, encode_with_work_budget, reconstruct,
-    reconstruct_with_work_budget, verify_row_inclusion, verify_row_inclusion_proof,
-    verify_row_with_context, verify_standalone, verify_standalone_proof, verify_with_context,
+    verify_row_inclusion, verify_row_inclusion_proof, verify_row_with_context, verify_standalone,
+    verify_standalone_proof, verify_with_context,
 };
 
 pub use codec::verify_proof;
