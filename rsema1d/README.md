@@ -20,6 +20,19 @@ cargo test
 ./scripts/run_go_compat.sh
 ```
 
+## Production benchmarks
+
+Run from the workspace root:
+
+```bash
+RAYON_NUM_THREADS=8 cargo bench -p rsema1d --bench reconstruct_sweep -- mixed
+RAYON_NUM_THREADS=8 cargo bench -p rsema1d --bench codec_bench -- verification_batch
+```
+
+The reconstruction sweep uses 4096 original rows, 12288 parity rows, and 32 KiB per row (128 MiB of original data). Select `original`, `mixed` (25% original rows), or `parity` for one reconstruction, `shared` for 1–32 concurrent reconstructions of the same input, or `unique` for 32 concurrent reconstructions of distinct inputs. The default, `all`, runs every case. Each result reports the median of five samples after one warmup and throughput in blobs per second. The `unique` case holds at least 16 GiB of encoded row data; concurrent reconstruction also needs output and decoder buffers.
+
+The Criterion `verification_batch` group compares serial verification with Rayon batches of 148 rows for the same dimensions. Keep the machine, thread count, and command fixed when comparing branches, and record the commit and CPU alongside results.
+
 ## End-to-End Flow (Library API)
 
 1. Build `Parameters(k, n, row_size)`.

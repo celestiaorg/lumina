@@ -52,8 +52,7 @@ pub fn reconstruct_data(
 
     let engine = DefaultEngine::new();
     let mut decoder: HighRateDecoder<DefaultEngine> =
-        RateDecoder::new(params.k, params.n, row_size, engine, None)
-            .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {:?}", e)))?;
+        RateDecoder::new(params.k, params.n, row_size, engine, None)?;
 
     for (i, &index) in indices.iter().enumerate() {
         if index >= params.k + params.n {
@@ -62,21 +61,13 @@ pub fn reconstruct_data(
 
         let row = rows[i];
         if index < params.k {
-            decoder.add_original_shard(index, row).map_err(|e| {
-                Error::ReedSolomon(format!("Failed to add original shard: {:?}", e))
-            })?;
+            decoder.add_original_shard(index, row)?;
         } else {
-            decoder
-                .add_recovery_shard(index - params.k, row)
-                .map_err(|e| {
-                    Error::ReedSolomon(format!("Failed to add recovery shard: {:?}", e))
-                })?;
+            decoder.add_recovery_shard(index - params.k, row)?;
         }
     }
 
-    let result = decoder
-        .decode()
-        .map_err(|e| Error::ReedSolomon(format!("Failed to decode: {:?}", e)))?;
+    let result = decoder.decode()?;
 
     let mut all_original = RowMatrix::zeroed(params.k, row_size)?;
 
@@ -120,5 +111,43 @@ mod tests {
         let reconstructed = reconstruct_data(&rows, &indices, &params).unwrap();
 
         assert_eq!(reconstructed.as_row_major(), original.as_slice());
+    }
+
+    #[test]
+    fn duplicate_shard_errors_preserve_backend_details() {
+        let params = Parameters::new(4, 4, 64).unwrap();
+        let rows = [&[0u8; 64][..]; 4];
+        for (indices, expected) in [
+            (
+                [0, 1, 2, 2],
+                reed_solomon_simd::Error::DuplicateOriginalShardIndex { index: 2 },
+            ),
+            (
+                [0, 1, 5, 5],
+                reed_solomon_simd::Error::DuplicateRecoveryShardIndex { index: 1 },
+            ),
+        ] {
+            let Error::ReedSolomon(actual) =
+                reconstruct_data(&rows, &indices, &params).unwrap_err()
+            else {
+                panic!("expected a Reed-Solomon error");
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn decoder_validation_preserves_error_source() {
+        let params = Parameters::new(1, 65535, 64).unwrap();
+        let rows = [&[0u8; 64][..]];
+        let error = reconstruct_data(&rows, &[0], &params).unwrap_err();
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            source.downcast_ref::<reed_solomon_simd::Error>(),
+            Some(&reed_solomon_simd::Error::UnsupportedShardCount {
+                original_count: 1,
+                recovery_count: 65535,
+            })
+        );
     }
 }
