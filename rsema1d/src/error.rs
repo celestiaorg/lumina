@@ -38,7 +38,7 @@ pub enum Error {
 
     /// An error propagated from the Reed-Solomon backend.
     #[error("Reed-Solomon error: {0}")]
-    ReedSolomon(String),
+    ReedSolomon(#[from] reed_solomon_simd::Error),
 
     /// Proof verification did not succeed.
     #[error("Proof verification failed: {0}")]
