@@ -759,6 +759,7 @@ dependencies = [
  "gloo-net",
  "hex",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "k256",
