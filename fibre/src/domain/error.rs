@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+pub(crate) const PAYMENT_PROMISE_ALREADY_PROCESSED: &str = "payment promise verification failed: stateful validation: rpc error: code = Internal desc = payment promise has already been processed";
+
 use super::blob::BLOB_ID_SIZE;
 use super::blob_header;
 use super::config::MAX_CHAIN_ID_SIZE;
@@ -264,5 +266,64 @@ pub enum FibreError {
     Encoding(#[from] rsema1d::Error),
 }
 
+impl FibreError {
+    pub(crate) fn is_grpc_not_found(&self) -> bool {
+        matches!(
+            self,
+            FibreError::GrpcClient(celestia_grpc::Error::TonicError(status))
+                if status.code() == tonic::Code::NotFound
+        )
+    }
+
+    pub(crate) fn is_payment_promise_already_processed(&self) -> bool {
+        matches!(
+            self,
+            FibreError::GrpcClient(celestia_grpc::Error::TonicError(status))
+                if status.code() == tonic::Code::InvalidArgument
+                    && status.message() == PAYMENT_PROMISE_ALREADY_PROCESSED
+        )
+    }
+}
+
 /// Convenience alias for `std::result::Result<T, FibreError>`.
 pub type Result<T> = std::result::Result<T, FibreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grpc_error(code: tonic::Code, message: &'static str) -> FibreError {
+        FibreError::GrpcClient(celestia_grpc::Error::TonicError(Box::new(
+            tonic::Status::new(code, message),
+        )))
+    }
+
+    #[test]
+    fn identifies_payment_promise_already_processed() {
+        assert!(
+            grpc_error(
+                tonic::Code::InvalidArgument,
+                PAYMENT_PROMISE_ALREADY_PROCESSED
+            )
+            .is_payment_promise_already_processed()
+        );
+        assert!(
+            !grpc_error(tonic::Code::Internal, PAYMENT_PROMISE_ALREADY_PROCESSED)
+                .is_payment_promise_already_processed()
+        );
+        assert!(
+            !grpc_error(
+                tonic::Code::InvalidArgument,
+                "payment promise has already been processed"
+            )
+            .is_payment_promise_already_processed()
+        );
+    }
+
+    #[test]
+    fn identifies_grpc_not_found() {
+        assert!(grpc_error(tonic::Code::NotFound, "missing").is_grpc_not_found());
+        assert!(!grpc_error(tonic::Code::Internal, "missing").is_grpc_not_found());
+        assert!(!FibreError::NotFound.is_grpc_not_found());
+    }
+}

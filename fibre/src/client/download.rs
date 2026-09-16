@@ -25,6 +25,18 @@ pub struct DownloadOptions {
     pub height: Option<u64>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+async fn reconstruct_blob(reconstruction: BlobReconstruction) -> Result<Blob, FibreError> {
+    tokio::task::spawn_blocking(move || reconstruction.reconstruct())
+        .await
+        .expect("blob reconstruction task failed")
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn reconstruct_blob(reconstruction: BlobReconstruction) -> Result<Blob, FibreError> {
+    reconstruction.reconstruct()
+}
+
 impl FibreClient {
     /// Download and reconstruct a blob by its [`BlobID`].
     ///
@@ -57,7 +69,7 @@ impl FibreClient {
         let mut reconstruction = BlobReconstruction::new(id.clone())?;
         self.select_and_download(&val_set, &mut reconstruction)
             .await?;
-        reconstruction.reconstruct()
+        reconstruct_blob(reconstruction).await
     }
 
     /// Internal download with a custom [`BlobConfig`].
@@ -78,7 +90,7 @@ impl FibreClient {
         let mut reconstruction = BlobReconstruction::with_config(id.clone(), blob_cfg);
         self.select_and_download(&val_set, &mut reconstruction)
             .await?;
-        reconstruction.reconstruct()
+        reconstruct_blob(reconstruction).await
     }
 
     async fn select_and_download(
@@ -196,11 +208,19 @@ impl FibreClient {
                         Some((val_idx, Some(Err(error)))) => {
                             let (rows, info) = selected[val_idx];
                             inflight_rows = inflight_rows.saturating_sub(rows);
-                            tracing::warn!(
-                                validator = %info.address_hex(),
-                                %error,
-                                "shard download or verification failed"
-                            );
+                            if error.is_grpc_not_found() {
+                                tracing::debug!(
+                                    validator = %info.address_hex(),
+                                    %error,
+                                    "shard not found on validator"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    validator = %info.address_hex(),
+                                    %error,
+                                    "shard download or verification failed"
+                                );
+                            }
                             // Invariant violated — loop will spawn more validators.
                         }
                         Some((val_idx, None)) => {
