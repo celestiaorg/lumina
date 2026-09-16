@@ -514,7 +514,7 @@ mod tests {
                     let proof = blob.row(index).unwrap();
                     rsema1d::RowProof {
                         index: proof.index,
-                        row: std::borrow::Cow::Owned(proof.row.to_vec()),
+                        row: proof.row.clone(),
                         row_proof: proof.row_proof,
                     }
                 })

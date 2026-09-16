@@ -46,5 +46,7 @@ pub use transport::io_connector::BrowserWebSocketConnector;
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::io_connector::NativeTcpConnector;
 pub use transport::io_connector::{BoxedFibreIo, FibreIo, FibreIoConnector};
-pub use transport::validator_client::{DownloadResponse, ValidatorConnection, ValidatorConnector};
+pub use transport::validator_client::{
+    DownloadResponse, UploadResponse, ValidatorConnection, ValidatorConnector,
+};
 pub use validator::{GrpcSetGetter, SetGetter, ValidatorInfo, ValidatorSet};

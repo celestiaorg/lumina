@@ -1,13 +1,12 @@
 use bytes::Bytes;
-use std::borrow::Cow;
 
 /// Lightweight row proof (works for both original and extended rows).
 #[derive(Debug, Clone)]
-pub struct RowProof<'a> {
+pub struct RowProof {
     /// Row index within the extended data (0..K+N).
     pub index: usize,
-    /// The row bytes.
-    pub row: Cow<'a, [u8]>,
+    /// The row bytes in reference-counted storage.
+    pub row: Bytes,
     /// Merkle proof siblings from leaf to root.
     pub row_proof: Vec<[u8; 32]>,
 }
@@ -62,5 +61,6 @@ mod tests {
 
         let proof = ext_data.generate_row_proof(5).unwrap();
         assert_eq!(proof.index, 5);
+        assert_eq!(proof.row.as_ptr(), ext_data.row(5).unwrap().as_ptr());
     }
 }
