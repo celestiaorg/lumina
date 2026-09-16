@@ -192,8 +192,11 @@ fn reconstruct_data_with_plan(
                 }
 
                 for (&stripe, result) in batch.iter().zip(&results) {
-                    row[stripe.offset..stripe.offset + stripe.len]
-                        .copy_from_slice(result.restored_original(index).unwrap());
+                    // The missing-row guard and successful decode_stripe calls above ensure this exists.
+                    let restored = result
+                        .restored_original(index)
+                        .expect("missing original must be restored after successful decoding");
+                    row[stripe.offset..stripe.offset + stripe.len].copy_from_slice(restored);
                 }
             });
     }
