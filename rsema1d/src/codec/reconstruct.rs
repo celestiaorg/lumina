@@ -16,24 +16,16 @@ fn decode_stripe<'a>(
     params: &Parameters,
     stripe: Stripe,
 ) -> Result<reed_solomon_simd::DecoderResult<'a>> {
-    decoder
-        .reset(params.k, params.n, stripe.len)
-        .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {e:?}")))?;
+    decoder.reset(params.k, params.n, stripe.len)?;
     for (row, &index) in rows.iter().zip(indices) {
         let row = &row[stripe.offset..stripe.offset + stripe.len];
         if index < params.k {
-            decoder
-                .add_original_shard(index, row)
-                .map_err(|e| Error::ReedSolomon(format!("Failed to add original shard: {e:?}")))?;
+            decoder.add_original_shard(index, row)?;
         } else {
-            decoder
-                .add_recovery_shard(index - params.k, row)
-                .map_err(|e| Error::ReedSolomon(format!("Failed to add recovery shard: {e:?}")))?;
+            decoder.add_recovery_shard(index - params.k, row)?;
         }
     }
-    decoder
-        .decode()
-        .map_err(|e| Error::ReedSolomon(format!("Failed to decode: {e:?}")))
+    decoder.decode().map_err(Error::ReedSolomon)
 }
 
 fn decoder_work_shards(k: usize, n: usize) -> usize {
@@ -95,8 +87,7 @@ pub(super) fn reconstruct_data_with_work_budget(
         }
     }
 
-    HighRateDecoder::<DefaultEngine>::validate(params.k, params.n, row_size)
-        .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {:?}", e)))?;
+    HighRateDecoder::<DefaultEngine>::validate(params.k, params.n, row_size)?;
 
     let mut seen = vec![false; params.k + params.n];
     for &index in indices {
@@ -105,13 +96,11 @@ pub(super) fn reconstruct_data_with_work_budget(
         }
         if seen[index] {
             let error = if index < params.k {
-                let error = reed_solomon_simd::Error::DuplicateOriginalShardIndex { index };
-                format!("Failed to add original shard: {error:?}")
+                reed_solomon_simd::Error::DuplicateOriginalShardIndex { index }
             } else {
-                let error = reed_solomon_simd::Error::DuplicateRecoveryShardIndex {
+                reed_solomon_simd::Error::DuplicateRecoveryShardIndex {
                     index: index - params.k,
-                };
-                format!("Failed to add recovery shard: {error:?}")
+                }
             };
             return Err(Error::ReedSolomon(error));
         }
@@ -150,8 +139,7 @@ fn reconstruct_data_with_plan(
 
     if plan.stripe_size() >= row_size {
         let mut decoder =
-            RateDecoder::new(params.k, params.n, row_size, DefaultEngine::new(), None)
-                .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {e:?}")))?;
+            RateDecoder::new(params.k, params.n, row_size, DefaultEngine::new(), None)?;
         let result = decode_stripe(
             &mut decoder,
             rows,
@@ -183,7 +171,7 @@ fn reconstruct_data_with_plan(
         .into_par_iter()
         .map(|_| {
             RateDecoder::new(params.k, params.n, stripe_size, DefaultEngine::new(), None)
-                .map_err(|e| Error::ReedSolomon(format!("Failed to create decoder: {e:?}")))
+                .map_err(Error::ReedSolomon)
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -369,25 +357,40 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_shard_errors_preserve_backend_messages() {
+    fn duplicate_shard_errors_preserve_backend_details() {
         let params = Parameters::new(4, 4, 64).unwrap();
         let rows = [&[0u8; 64][..]; 4];
         for (indices, expected) in [
             (
                 [0, 1, 2, 2],
-                "Failed to add original shard: DuplicateOriginalShardIndex { index: 2 }",
+                reed_solomon_simd::Error::DuplicateOriginalShardIndex { index: 2 },
             ),
             (
                 [0, 1, 5, 5],
-                "Failed to add recovery shard: DuplicateRecoveryShardIndex { index: 1 }",
+                reed_solomon_simd::Error::DuplicateRecoveryShardIndex { index: 1 },
             ),
         ] {
-            let Error::ReedSolomon(message) =
+            let Error::ReedSolomon(actual) =
                 reconstruct_data(&rows, &indices, &params).unwrap_err()
             else {
                 panic!("expected a Reed-Solomon error");
             };
-            assert_eq!(message, expected);
+            assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn decoder_validation_preserves_error_source() {
+        let params = Parameters::new(1, 65535, 64).unwrap();
+        let rows = [&[0u8; 64][..]];
+        let error = reconstruct_data(&rows, &[0], &params).unwrap_err();
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            source.downcast_ref::<reed_solomon_simd::Error>(),
+            Some(&reed_solomon_simd::Error::UnsupportedShardCount {
+                original_count: 1,
+                recovery_count: 65535,
+            })
+        );
     }
 }
