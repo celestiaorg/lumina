@@ -65,9 +65,7 @@ pub(crate) fn row_proof_to_blob_row(proof: &rsema1d::RowInclusionProof) -> proto
 }
 
 /// Convert a proto [`proto::BlobRow`] into a [`rsema1d::RowProof`].
-pub(crate) fn blob_row_to_row_proof(
-    row: proto::BlobRow,
-) -> Result<rsema1d::RowProof<'static>, FibreError> {
+pub(crate) fn blob_row_to_row_proof(row: proto::BlobRow) -> Result<rsema1d::RowProof, FibreError> {
     let row_proof = row
         .proof
         .into_iter()
@@ -81,7 +79,7 @@ pub(crate) fn blob_row_to_row_proof(
 
     Ok(rsema1d::RowProof {
         index: row.index as usize,
-        row: std::borrow::Cow::Owned(row.data.into()),
+        row: row.data,
         row_proof,
     })
 }
@@ -230,10 +228,12 @@ mod tests {
         assert_eq!(blob_row.index, 5);
         assert_eq!(blob_row.data, vec![42u8; 64]);
         assert_eq!(blob_row.proof.len(), 2);
+        let row_ptr = blob_row.data.as_ptr();
 
         let back = blob_row_to_row_proof(blob_row).unwrap();
         assert_eq!(back.index, 5);
         assert_eq!(back.row.as_ref(), &[42u8; 64][..]);
+        assert_eq!(back.row.as_ptr(), row_ptr);
         assert_eq!(back.row_proof, vec![[1u8; 32], [2u8; 32]]);
     }
 

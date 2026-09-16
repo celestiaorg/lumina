@@ -8,7 +8,6 @@ use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
 use rayon::prelude::*;
-use std::borrow::Cow;
 
 fn row_slice(rows: &RowMatrix, index: usize) -> &[u8] {
     rows.row_unchecked(index)
@@ -199,7 +198,7 @@ impl ExtendedData {
     }
 
     /// Generate lightweight row proof (works for both original and extended rows).
-    pub fn generate_row_proof(&self, index: usize) -> Result<RowProof<'_>> {
+    pub fn generate_row_proof(&self, index: usize) -> Result<RowProof> {
         if index >= self.params.total_rows() {
             return Err(Error::InvalidIndex(index, self.params.total_rows()));
         }
@@ -208,7 +207,7 @@ impl ExtendedData {
         let row_proof = self.row_tree.generate_proof(tree_pos);
         Ok(RowProof {
             index,
-            row: Cow::Borrowed(self.row(index)?),
+            row: self.all_rows.row_bytes(index)?,
             row_proof,
         })
     }

@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- export `UploadResponse` so external `ValidatorConnection` implementations can name every trait method type
+
 ### Changed
 
+- [**breaking**] keep decoded protobuf row data in shared `Bytes` instead of copying each row into a `Vec`
 - [**breaking**] replace free-form `FibreError` messages with typed error variants and change `FibreIoConnector::connect` to return `std::io::Error`
 - [**breaking**] split the Fibre blob lifecycle into upload-ready `EncodedBlob`, private reconstruction state, and decoded `Blob`
 - remove the public manual-reconstruction API (`Blob::empty` and `Blob::set_row`); use `FibreClient::download` instead
