@@ -25,6 +25,18 @@ pub struct DownloadOptions {
     pub height: Option<u64>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+async fn reconstruct_blob(reconstruction: BlobReconstruction) -> Result<Blob, FibreError> {
+    tokio::task::spawn_blocking(move || reconstruction.reconstruct())
+        .await
+        .expect("blob reconstruction task failed")
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn reconstruct_blob(reconstruction: BlobReconstruction) -> Result<Blob, FibreError> {
+    reconstruction.reconstruct()
+}
+
 impl FibreClient {
     /// Download and reconstruct a blob by its [`BlobID`].
     ///
@@ -57,7 +69,7 @@ impl FibreClient {
         let mut reconstruction = BlobReconstruction::new(id.clone())?;
         self.select_and_download(&val_set, &mut reconstruction)
             .await?;
-        reconstruction.reconstruct()
+        reconstruct_blob(reconstruction).await
     }
 
     /// Internal download with a custom [`BlobConfig`].
@@ -78,7 +90,7 @@ impl FibreClient {
         let mut reconstruction = BlobReconstruction::with_config(id.clone(), blob_cfg);
         self.select_and_download(&val_set, &mut reconstruction)
             .await?;
-        reconstruction.reconstruct()
+        reconstruct_blob(reconstruction).await
     }
 
     async fn select_and_download(
@@ -313,7 +325,7 @@ mod tests {
         }
     }
 
-    /// Encode a blob, extract all row proofs, and store them on each mock
+    /// Encode a blob, extract parity row proofs, and store them on each mock
     /// validator connection. Returns the BlobID.
     fn prepare_blob_and_distribute(
         data: &[u8],
@@ -326,7 +338,7 @@ mod tests {
 
         for conn in connections {
             let mut proofs = Vec::new();
-            for i in 0..total_rows {
+            for i in cfg.original_rows..total_rows {
                 proofs.push(blob.row(i).unwrap());
             }
             conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
@@ -336,7 +348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_reconstructs_blob() {
+    async fn download_reconstructs_blob_from_parity_rows() {
         let cfg = test_blob_config();
         let data: Vec<u8> = (0u8..=199).collect();
 
