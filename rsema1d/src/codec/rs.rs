@@ -77,8 +77,7 @@ struct StripeEncoder {
 
 impl StripeEncoder {
     fn new(k: usize, n: usize, stripe_size: usize) -> Result<Self> {
-        let encoder = RateEncoder::new(k, n, stripe_size, DefaultEngine::new(), None)
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+        let encoder = RateEncoder::new(k, n, stripe_size, DefaultEngine::new(), None)?;
 
         Ok(Self {
             encoder,
@@ -94,20 +93,14 @@ impl StripeEncoder {
         row_size: usize,
         stripe: Stripe,
     ) -> Result<()> {
-        self.encoder
-            .reset(k, n, stripe.len)
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+        self.encoder.reset(k, n, stripe.len)?;
 
         for row in original_rows.chunks_exact(row_size) {
             self.encoder
-                .add_original_shard(&row[stripe.offset..stripe.offset + stripe.len])
-                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+                .add_original_shard(&row[stripe.offset..stripe.offset + stripe.len])?;
         }
 
-        let result = self
-            .encoder
-            .encode()
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+        let result = self.encoder.encode()?;
 
         self.recovery.clear();
         self.recovery.reserve(n * stripe.len);
@@ -173,8 +166,7 @@ fn fill_parity_with_work_budget(
         )));
     }
 
-    HighRateEncoder::<DefaultEngine>::validate(k, n, MIN_STRIPE)
-        .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+    HighRateEncoder::<DefaultEngine>::validate(k, n, MIN_STRIPE)?;
 
     let plan = stripe_plan(k, n, row_size, rayon::current_num_threads(), work_budget)?;
     fill_parity_with_plan(original_rows, parity_rows, k, n, row_size, plan)
@@ -197,16 +189,11 @@ fn fill_parity_with_plan(
     // below; encode whole rows on the calling thread instead.
     if stripe_size >= row_size {
         let mut encoder: HighRateEncoder<DefaultEngine> =
-            RateEncoder::new(k, n, row_size, DefaultEngine::new(), None)
-                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+            RateEncoder::new(k, n, row_size, DefaultEngine::new(), None)?;
         for row in original_rows.chunks_exact(row_size) {
-            encoder
-                .add_original_shard(row)
-                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+            encoder.add_original_shard(row)?;
         }
-        let result = encoder
-            .encode()
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+        let result = encoder.encode()?;
         for (dst_row, src_row) in parity_rows
             .chunks_exact_mut(row_size)
             .zip(result.recovery_iter())
