@@ -313,7 +313,7 @@ mod tests {
         }
     }
 
-    /// Encode a blob, extract all row proofs, and store them on each mock
+    /// Encode a blob, extract parity row proofs, and store them on each mock
     /// validator connection. Returns the BlobID.
     fn prepare_blob_and_distribute(
         data: &[u8],
@@ -326,7 +326,7 @@ mod tests {
 
         for conn in connections {
             let mut proofs = Vec::new();
-            for i in 0..total_rows {
+            for i in cfg.original_rows..total_rows {
                 proofs.push(blob.row(i).unwrap());
             }
             conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_reconstructs_blob() {
+    async fn download_reconstructs_blob_from_parity_rows() {
         let cfg = test_blob_config();
         let data: Vec<u8> = (0u8..=199).collect();
 
