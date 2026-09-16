@@ -1,9 +1,6 @@
 use crate::field::GF128;
 use reed_solomon_simd::engine::tables::get_exp_log;
 
-/// GF(2^16) has 65535 non-zero elements, so logarithms are `0..=65534`.
-const GF_MODULUS: u32 = 65535;
-
 /// Log-table sentinel for a coefficient limb that is zero (no logarithm).
 const ZERO_LIMB: u16 = u16::MAX;
 
@@ -18,15 +15,11 @@ pub fn extract_symbols(chunk: &[u8; 64]) -> [u16; 32] {
     symbols
 }
 
-/// `(a + b) mod 65535` for two logarithms.
+/// Add two nonzero-element logarithms for indexing `exp`, where `exp[65535] == exp[0]`.
 #[inline(always)]
-const fn add_mod(a: u16, b: u16) -> u16 {
-    let sum = a as u32 + b as u32;
-    (if sum >= GF_MODULUS {
-        sum - GF_MODULUS
-    } else {
-        sum
-    }) as u16
+const fn exp_index(a: u16, b: u16) -> u16 {
+    let (sum, carry) = a.overflowing_add(b);
+    sum.wrapping_add(carry as u16)
 }
 
 /// GF(2^16) logarithms precomputed for every limb of the RLC coefficients.
@@ -84,7 +77,7 @@ impl RlcCoefficientLogs {
                 let log_symbol = log[symbol as usize];
                 for (dst, &limb_log) in acc.iter_mut().zip(limb_logs) {
                     if limb_log != ZERO_LIMB {
-                        *dst ^= exp[add_mod(log_symbol, limb_log) as usize];
+                        *dst ^= exp[exp_index(log_symbol, limb_log) as usize];
                     }
                 }
             }
@@ -184,15 +177,19 @@ mod tests {
     #[test]
     fn precomputed_logs_wrap_exponents() {
         let exp = &get_exp_log().exp;
-        let mut coeffs = vec![GF128::zero(); 32];
-        coeffs[0].limbs[0] = exp[65534];
+        for (coefficient_log, symbol_log) in
+            [(0, 0), (65534, 0), (65534, 1), (65534, 2), (65534, 65534)]
+        {
+            let mut coeffs = vec![GF128::zero(); 32];
+            coeffs[0].limbs[0] = exp[coefficient_log];
 
-        let mut row = [0u8; 64];
-        let symbol = exp[1].to_le_bytes();
-        row[0] = symbol[0];
-        row[32] = symbol[1];
+            let mut row = [0u8; 64];
+            let symbol = exp[symbol_log].to_le_bytes();
+            row[0] = symbol[0];
+            row[32] = symbol[1];
 
-        let table = RlcCoefficientLogs::new(coeffs.clone());
-        assert_eq!(table.compute_rlc(&row), compute_rlc(&row, &coeffs));
+            let table = RlcCoefficientLogs::new(coeffs.clone());
+            assert_eq!(table.compute_rlc(&row), compute_rlc(&row, &coeffs));
+        }
     }
 }
