@@ -30,10 +30,18 @@ fn rows<'a>(input: &'a ExtendedData, indices: &[usize]) -> Vec<&'a [u8]> {
         .collect()
 }
 
+fn reconstruct_rows(rows: &[&[u8]], indices: &[usize], params: &Parameters) -> RowMatrix {
+    reconstruct(rows, indices, params).unwrap()
+}
+
 fn reconstruct_once(input: &ExtendedData, indices: &[usize], params: &Parameters) -> Duration {
     let rows = rows(input, indices);
     measure(|| {
-        black_box(reconstruct(black_box(&rows), black_box(indices), black_box(params)).unwrap());
+        black_box(reconstruct_rows(
+            black_box(&rows),
+            black_box(indices),
+            black_box(params),
+        ));
     })
 }
 
@@ -50,7 +58,7 @@ fn concurrent_reconstruct(
                 let rows = rows(input, indices);
                 for _ in 0..=SAMPLES {
                     barrier.wait();
-                    black_box(reconstruct(&rows, indices, params).unwrap());
+                    black_box(reconstruct_rows(&rows, indices, params));
                     barrier.wait();
                 }
             });
