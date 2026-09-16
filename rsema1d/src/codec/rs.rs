@@ -70,54 +70,28 @@ fn stripe_plan(
     Ok(StripePlan::new(stripe_size, parallelism))
 }
 
-struct StripeEncoder {
-    encoder: HighRateEncoder<DefaultEngine>,
-    recovery: Vec<u8>,
-}
+// Reuse the encoder's work buffer across stripes.
+fn encode_stripe<'a>(
+    encoder: &'a mut HighRateEncoder<DefaultEngine>,
+    original_rows: &[u8],
+    k: usize,
+    n: usize,
+    row_size: usize,
+    stripe: Stripe,
+) -> Result<reed_solomon_simd::EncoderResult<'a>> {
+    encoder
+        .reset(k, n, stripe.len)
+        .map_err(|e| Error::ReedSolomon(e.to_string()))?;
 
-impl StripeEncoder {
-    fn new(k: usize, n: usize, stripe_size: usize) -> Result<Self> {
-        let encoder = RateEncoder::new(k, n, stripe_size, DefaultEngine::new(), None)
+    for row in original_rows.chunks_exact(row_size) {
+        encoder
+            .add_original_shard(&row[stripe.offset..stripe.offset + stripe.len])
             .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-
-        Ok(Self {
-            encoder,
-            recovery: Vec::with_capacity(n * stripe_size),
-        })
     }
 
-    fn encode_stripe(
-        &mut self,
-        original_rows: &[u8],
-        k: usize,
-        n: usize,
-        row_size: usize,
-        stripe: Stripe,
-    ) -> Result<()> {
-        self.encoder
-            .reset(k, n, stripe.len)
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-
-        for row in original_rows.chunks_exact(row_size) {
-            self.encoder
-                .add_original_shard(&row[stripe.offset..stripe.offset + stripe.len])
-                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-        }
-
-        let result = self
-            .encoder
-            .encode()
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-
-        self.recovery.clear();
-        self.recovery.reserve(n * stripe.len);
-        for recovery in result.recovery_iter() {
-            self.recovery.extend_from_slice(recovery);
-        }
-        debug_assert_eq!(self.recovery.len(), n * stripe.len);
-
-        Ok(())
-    }
+    encoder
+        .encode()
+        .map_err(|e| Error::ReedSolomon(e.to_string()))
 }
 
 fn fill_parity(
@@ -193,7 +167,7 @@ fn fill_parity_with_plan(
     assert!(stripe_size.is_multiple_of(MIN_STRIPE));
 
     // A single stripe (always the case for the 64-byte RLC rows in
-    // `extend_rlcs`) gains nothing from the rayon fan-out and staging copy
+    // `extend_rlcs`) gains nothing from the rayon fan-out
     // below; encode whole rows on the calling thread instead.
     if stripe_size >= row_size {
         let mut encoder: HighRateEncoder<DefaultEngine> =
@@ -226,32 +200,30 @@ fn fill_parity_with_plan(
     let slot_count = parallelism.min(stripes.len());
     let mut encoders = (0..slot_count)
         .into_par_iter()
-        .map(|_| StripeEncoder::new(k, n, stripe_size))
+        .map(|_| {
+            RateEncoder::new(k, n, stripe_size, DefaultEngine::new(), None)
+                .map_err(|e| Error::ReedSolomon(e.to_string()))
+        })
         .collect::<Result<Vec<_>>>()?;
 
     // Leopard transforms each 64-byte block position independently. Encode a
     // cache-sized batch of column stripes, then scatter it by parity row so all
     // writes use ordinary disjoint mutable slices.
     for batch in stripes.chunks(parallelism) {
-        encoders[..batch.len()]
+        let results = encoders[..batch.len()]
             .par_iter_mut()
             .zip(batch.par_iter())
-            .try_for_each(|(encoder, &stripe)| {
-                encoder.encode_stripe(original_rows, k, n, row_size, stripe)
-            })?;
-
-        let recovery: Vec<_> = encoders[..batch.len()]
-            .iter()
-            .map(|encoder| encoder.recovery.as_slice())
-            .collect();
+            .map(|(encoder, &stripe)| encode_stripe(encoder, original_rows, k, n, row_size, stripe))
+            .collect::<Result<Vec<_>>>()?;
         parity_rows
             .par_chunks_mut(row_size)
             .enumerate()
             .for_each(|(parity_index, row)| {
-                for (&stripe, recovery) in batch.iter().zip(&recovery) {
-                    let recovery_start = parity_index * stripe.len;
-                    row[stripe.offset..stripe.offset + stripe.len]
-                        .copy_from_slice(&recovery[recovery_start..recovery_start + stripe.len]);
+                for (&stripe, result) in batch.iter().zip(&results) {
+                    let recovery = result
+                        .recovery(parity_index)
+                        .expect("recovery shard must exist after successful encoding");
+                    row[stripe.offset..stripe.offset + stripe.len].copy_from_slice(recovery);
                 }
             });
     }
