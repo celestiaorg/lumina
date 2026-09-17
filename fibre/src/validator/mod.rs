@@ -295,12 +295,16 @@ pub trait SetGetter: Send + Sync {
 /// Production [`SetGetter`] backed by gRPC.
 pub struct GrpcSetGetter {
     client: GrpcClient,
+    cached_height: tokio::sync::Mutex<Option<(i64, ValidatorSet)>>,
 }
 
 impl GrpcSetGetter {
     /// Create a new getter using the given [`GrpcClient`] to the CometBFT node.
     pub fn new(client: GrpcClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            cached_height: tokio::sync::Mutex::new(None),
+        }
     }
 
     async fn get_by_height_inner(&self, height: i64) -> Result<ValidatorSet, FibreError> {
@@ -329,7 +333,15 @@ impl SetGetter for GrpcSetGetter {
         }
         let height =
             i64::try_from(height).map_err(|_| ValidatorSetError::HeightTooLarge(height))?;
-        self.get_by_height_inner(height).await
+        let mut cached = self.cached_height.lock().await;
+        if let Some((cached_height, validators)) = cached.as_ref()
+            && *cached_height == height
+        {
+            return Ok(validators.clone());
+        }
+        let validators = self.get_by_height_inner(height).await?;
+        *cached = Some((height, validators.clone()));
+        Ok(validators)
     }
 }
 
@@ -467,6 +479,89 @@ fn shuffle_by_stake(selected: &mut [(usize, &ValidatorInfo)], rng: &mut impl Rng
 mod assignment_tests {
     use super::*;
     use crate::test_utils::{fraction, make_validator};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn grpc_set_getter_coalesces_height_queries_and_keeps_head_fresh() {
+        use std::convert::Infallible;
+        use std::sync::Arc;
+
+        use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetRequest;
+        use http_body_util::{BodyExt, Full};
+        use prost::{Message, bytes::Bytes};
+        use tendermint_proto::v0_38::{crypto, types};
+
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let transport = tower::service_fn(move |request: http::Request<tonic::body::Body>| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                assert_eq!(
+                    request.uri().path(),
+                    "/tendermint.rpc.grpc.BlockAPI/ValidatorSet"
+                );
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                let height = ValidatorSetRequest::decode(&body[5..]).unwrap().height;
+                let count = {
+                    let mut requests = recorded.lock().unwrap();
+                    requests.push(height);
+                    requests.len() as i64
+                };
+                tokio::task::yield_now().await;
+                if height == 999 {
+                    return Ok::<_, Infallible>(
+                        http::Response::builder()
+                            .header("content-type", "application/grpc")
+                            .header("grpc-status", "8")
+                            .body(Full::new(Bytes::new()))
+                            .unwrap(),
+                    );
+                }
+                let validator = make_validator(10, 1).1;
+                let validator = types::Validator {
+                    address: validator.address().to_vec(),
+                    pub_key: Some(crypto::PublicKey {
+                        sum: Some(crypto::public_key::Sum::Ed25519(
+                            validator.public_key().to_bytes().to_vec(),
+                        )),
+                    }),
+                    voting_power: 10,
+                    proposer_priority: 0,
+                };
+                let response = ValidatorSetResponse {
+                    height: if height == 0 { 1000 + count } else { height },
+                    validator_set: Some(types::ValidatorSet {
+                        validators: vec![validator.clone()],
+                        proposer: Some(validator),
+                        total_voting_power: 10,
+                    }),
+                };
+                let encoded = response.encode_to_vec();
+                let mut frame = vec![0];
+                frame.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+                frame.extend_from_slice(&encoded);
+                Ok(http::Response::builder()
+                    .header("content-type", "application/grpc")
+                    .header("grpc-status", "0")
+                    .body(Full::new(Bytes::from(frame)))
+                    .unwrap())
+            }
+        });
+        let getter =
+            GrpcSetGetter::new(GrpcClient::builder().transport(transport).build().unwrap());
+        for result in futures::future::join_all((0..48).map(|_| getter.get_by_height(42))).await {
+            assert_eq!(result.unwrap().height().get(), 42);
+        }
+        assert_eq!(*requests.lock().unwrap(), [42]);
+        assert_eq!(getter.get_by_height(43).await.unwrap().height().get(), 43);
+        assert_eq!(getter.get_by_height(42).await.unwrap().height().get(), 42);
+        let first_head = getter.head().await.unwrap().height();
+        assert_ne!(getter.head().await.unwrap().height(), first_head);
+        assert!(getter.get_by_height(999).await.is_err());
+        assert!(getter.get_by_height(999).await.is_err());
+        assert_eq!(getter.get_by_height(42).await.unwrap().height().get(), 42);
+        assert_eq!(*requests.lock().unwrap(), [42, 43, 42, 0, 0, 999, 999]);
+    }
 
     #[tokio::test]
     async fn grpc_set_getter_rejects_zero_height() {
