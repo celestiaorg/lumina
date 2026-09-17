@@ -145,7 +145,16 @@ impl ValidatorConnection for GrpcValidatorConnection {
             .download_shard(blob_id.as_bytes().to_vec())
             .await?;
 
-        proto_conv::parse_download_response(response)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::task::spawn_blocking(move || proto_conv::parse_download_response(response))
+                .await
+                .expect("download response conversion task panicked or has been cancelled")
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            proto_conv::parse_download_response(response)
+        }
     }
 }
 
