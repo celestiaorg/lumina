@@ -53,6 +53,9 @@ impl SignatureSet {
         let min_required_voting_power = (total_voting_power as u128)
             * (target_voting_power.numerator.get() as u128)
             / (target_voting_power.denominator.get() as u128);
+        // celestiaorg/celestia-app v9.0.6 floors without clamping:
+        // https://github.com/celestiaorg/celestia-app/blob/6f4b596e47f80683adb1a161ca7cb640dcd9d206/fibre/validator/signature_set.go#L29-L35
+        // Fibre intentionally requires one signature when that calculation is zero.
         let min_required_voting_power =
             u64::try_from(min_required_voting_power.max(1)).unwrap_or(u64::MAX);
 
@@ -147,20 +150,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
 
-    use crate::test_utils::fraction;
-    use rand::RngCore;
-
-    /// Helper: generate a ValidatorInfo with a fresh ed25519 keypair.
-    fn make_validator(voting_power: u64) -> (SigningKey, ValidatorInfo) {
-        let mut secret = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut secret);
-        let signing_key = SigningKey::from_bytes(&secret);
-        let pubkey = signing_key.verifying_key();
-        (
-            signing_key,
-            ValidatorInfo::try_new(pubkey, voting_power).unwrap(),
-        )
-    }
+    use crate::test_utils::{fraction, make_validator};
 
     /// Helper: sign data with a signing key.
     fn sign(key: &SigningKey, data: &[u8]) -> Vec<u8> {
@@ -171,7 +161,7 @@ mod tests {
 
     #[test]
     fn add_valid_signature() {
-        let (sk, val) = make_validator(10);
+        let (sk, val) = make_validator(10, 1);
         let data = b"hello world";
         let sig = sign(&sk, data);
 
@@ -183,10 +173,10 @@ mod tests {
 
     #[test]
     fn add_invalid_signature() {
-        let (_sk, val) = make_validator(10);
+        let (_sk, val) = make_validator(10, 1);
         let data = b"hello world";
         // Sign with a different key to produce an invalid signature.
-        let (wrong_sk, _) = make_validator(10);
+        let (wrong_sk, _) = make_validator(10, 2);
         let bad_sig = sign(&wrong_sk, data);
 
         let ss = SignatureSet::new(vec![val.clone()], fraction(1, 2), data.to_vec());
@@ -203,7 +193,7 @@ mod tests {
 
     #[test]
     fn add_malformed_signature() {
-        let (_, val) = make_validator(10);
+        let (_, val) = make_validator(10, 1);
         let ss = SignatureSet::new(vec![val.clone()], fraction(1, 2), b"data".to_vec());
 
         assert!(matches!(
@@ -217,9 +207,9 @@ mod tests {
     fn threshold_detection() {
         // Three validators with powers 10, 20, 30. Total = 60.
         // Threshold = 2/3 => min_required = 60 * 2 / 3 = 40.
-        let (sk1, v1) = make_validator(10);
-        let (sk2, v2) = make_validator(20);
-        let (sk3, v3) = make_validator(30);
+        let (sk1, v1) = make_validator(10, 1);
+        let (sk2, v2) = make_validator(20, 2);
+        let (sk3, v3) = make_validator(30, 3);
 
         let data = b"threshold test";
 
@@ -244,9 +234,9 @@ mod tests {
 
     #[test]
     fn signatures_returns_ordered() {
-        let (sk1, v1) = make_validator(10);
-        let (sk2, v2) = make_validator(20);
-        let (_sk3, v3) = make_validator(30);
+        let (sk1, v1) = make_validator(10, 1);
+        let (sk2, v2) = make_validator(20, 2);
+        let (_sk3, v3) = make_validator(30, 3);
 
         let data = b"order test";
 
@@ -275,8 +265,8 @@ mod tests {
 
     #[test]
     fn signatures_fails_below_threshold() {
-        let (sk1, v1) = make_validator(10);
-        let (_sk2, v2) = make_validator(20);
+        let (sk1, v1) = make_validator(10, 1);
+        let (_sk2, v2) = make_validator(20, 2);
 
         let data = b"fail test";
 
@@ -301,8 +291,8 @@ mod tests {
 
     #[test]
     fn threshold_uses_floor_and_inclusive_comparison() {
-        let (sk1, v1) = make_validator(33);
-        let (_sk2, v2) = make_validator(17);
+        let (sk1, v1) = make_validator(33, 1);
+        let (_sk2, v2) = make_validator(17, 2);
         let data = b"floor test";
         let ss = SignatureSet::new(vec![v1.clone(), v2], fraction(2, 3), data.to_vec());
 
@@ -311,8 +301,8 @@ mod tests {
     }
 
     #[test]
-    fn threshold_always_requires_voting_power() {
-        let (sk, validator) = make_validator(1);
+    fn threshold_requires_one_signature_when_floor_is_zero() {
+        let (sk, validator) = make_validator(1, 1);
         let data = b"minimum threshold";
         let ss = SignatureSet::new(vec![validator.clone()], fraction(2, 3), data.to_vec());
 
@@ -330,7 +320,7 @@ mod tests {
     fn duplicate_add_is_idempotent() {
         // Adding the same validator twice does NOT double-count voting power.
         // The signature map entry is overwritten but voting_power stays the same.
-        let (sk, v) = make_validator(25);
+        let (sk, v) = make_validator(25, 1);
         let data = b"dup test";
 
         let ss = SignatureSet::new(vec![v.clone()], fraction(2, 3), data.to_vec());
