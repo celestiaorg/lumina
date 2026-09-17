@@ -602,6 +602,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_rows_preserves_source_buffer() {
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
+        let shard = shard_of(&blob, &[0]);
+        let source_ptr = shard.rows[0].row.as_ptr();
+
+        assert_eq!(set_shard(&mut reconstruction, shard).await.unwrap(), 1);
+        assert_eq!(
+            reconstruction.rows[0].as_ref().unwrap().as_ptr(),
+            source_ptr
+        );
+        assert_eq!(
+            reconstruction.rows[0].as_deref(),
+            Some(blob.row(0).unwrap().row.as_ref())
+        );
+    }
+
+    #[tokio::test]
     async fn set_shard_failing_shard_stores_nothing() {
         let (blob, mut reconstruction) = test_blob_and_reconstruction();
 
