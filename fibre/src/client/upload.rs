@@ -250,12 +250,28 @@ impl FibreClient {
                     biased;
                     _ = task_cancel.cancelled() => Err(FibreError::Cancelled),
                     result = async {
-                        // Generate row proofs in this task, parallelizing
-                        // proof generation across validators.
-                        let mut proofs = Vec::with_capacity(row_indices.len());
-                        for row_idx in &row_indices {
-                            proofs.push(blob.row(*row_idx)?);
-                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let proofs = {
+                            let blob = Arc::clone(&blob);
+                            tokio::task::spawn_blocking(move || {
+                                let mut proofs = Vec::with_capacity(row_indices.len());
+                                for row_idx in &row_indices {
+                                    proofs.push(blob.row(*row_idx)?);
+                                }
+                                Ok::<_, FibreError>(proofs)
+                            })
+                            .await
+                            .expect("upload proof generation task panicked or has been cancelled")?
+                        };
+
+                        #[cfg(target_arch = "wasm32")]
+                        let proofs = {
+                            let mut proofs = Vec::with_capacity(row_indices.len());
+                            for row_idx in &row_indices {
+                                proofs.push(blob.row(*row_idx)?);
+                            }
+                            proofs
+                        };
 
                         let conn = connector.connect(&validator).await?;
                         let resp = conn
