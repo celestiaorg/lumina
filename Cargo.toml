@@ -57,6 +57,7 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 hex = "0.4.3"
 http = "1"
 http-body = "1"
+http-body-util = "0.1"
 hyper-util = "0.1.19"
 js-sys = "0.3.77"
 jsonrpsee = "0.26"
