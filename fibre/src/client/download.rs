@@ -29,7 +29,7 @@ pub struct DownloadOptions {
 async fn reconstruct_blob(reconstruction: BlobReconstruction) -> Result<Blob, FibreError> {
     tokio::task::spawn_blocking(move || reconstruction.reconstruct())
         .await
-        .expect("blob reconstruction task failed")
+        .expect("blob reconstruction task panicked or has been cancelled")
 }
 
 #[cfg(target_arch = "wasm32")]
