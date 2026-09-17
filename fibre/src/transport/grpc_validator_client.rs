@@ -125,6 +125,15 @@ impl ValidatorConnection for GrpcValidatorConnection {
         rlc_coeffs: &[rsema1d::GF128],
     ) -> Result<UploadResponse, FibreError> {
         let proto_promise = promise.into();
+        #[cfg(not(target_arch = "wasm32"))]
+        let proto_shard = {
+            let rows = rows.to_vec();
+            let rlc_coeffs = rlc_coeffs.to_vec();
+            tokio::task::spawn_blocking(move || proto_conv::build_upload_shard(&rows, &rlc_coeffs))
+                .await
+                .expect("upload shard construction task panicked or has been cancelled")
+        };
+        #[cfg(target_arch = "wasm32")]
         let proto_shard = proto_conv::build_upload_shard(rows, rlc_coeffs);
 
         let request = celestia_proto::celestia::fibre::v1::UploadShardRequest {
@@ -145,7 +154,16 @@ impl ValidatorConnection for GrpcValidatorConnection {
             .download_shard(blob_id.as_bytes().to_vec())
             .await?;
 
-        proto_conv::parse_download_response(response)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::task::spawn_blocking(move || proto_conv::parse_download_response(response))
+                .await
+                .expect("download response conversion task panicked or has been cancelled")
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            proto_conv::parse_download_response(response)
+        }
     }
 }
 
