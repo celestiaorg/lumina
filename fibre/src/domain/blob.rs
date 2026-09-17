@@ -279,7 +279,7 @@ impl BlobReconstruction {
     /// Reconstruct the original data from accumulated rows.
     ///
     /// Requires at least `original_rows` (K) rows to have been set via `store_rows()`.
-    pub(crate) fn reconstruct(self) -> Result<Blob, FibreError> {
+    pub(crate) fn reconstruct(self, work_budget: Option<NonZeroUsize>) -> Result<Blob, FibreError> {
         let k = self.cfg.original_rows;
         let mut selected_indices = Vec::with_capacity(k);
         let mut selected_rows = Vec::with_capacity(k);
@@ -304,7 +304,15 @@ impl BlobReconstruction {
         let params =
             rsema1d::Parameters::new(self.cfg.original_rows, self.cfg.parity_rows, row_size)?;
 
-        let reconstructed = rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
+        let reconstructed = match work_budget {
+            Some(work_budget) => rsema1d::reconstruct_with_work_budget(
+                &selected_rows,
+                &selected_indices,
+                &params,
+                work_budget,
+            )?,
+            None => rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?,
+        };
         let data = blob_header::decode(reconstructed, self.cfg.max_data_size)?;
 
         Ok(Blob { id: self.id, data })
@@ -517,12 +525,35 @@ mod tests {
         assert!(EncodedBlob::new(&[], cfg).is_err());
     }
 
+    #[tokio::test]
+    async fn explicit_reconstruction_budget_matches_default() {
+        let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
+        let data: Vec<u8> = (0u8..=249).collect();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
+        let mut default = BlobReconstruction::with_config(blob.id().clone(), cfg.clone());
+        let mut budgeted = BlobReconstruction::with_config(blob.id().clone(), cfg);
+
+        set_shard(&mut default, shard_of(&blob, &[1, 3, 4, 6]))
+            .await
+            .unwrap();
+        set_shard(&mut budgeted, shard_of(&blob, &[1, 3, 4, 6]))
+            .await
+            .unwrap();
+
+        let default = default.reconstruct(None).unwrap();
+        let budgeted = budgeted
+            .reconstruct(Some(NonZeroUsize::new(1).unwrap()))
+            .unwrap();
+        assert_eq!(default.data(), budgeted.data());
+        assert_eq!(budgeted.into_data().as_ref(), data);
+    }
+
     #[test]
     fn reconstruction_rejects_insufficient_rows() {
         let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
         let reconstruction = BlobReconstruction::with_config(BlobID::new(0, [0; 32]), cfg);
 
-        let err = reconstruction.reconstruct().unwrap_err();
+        let err = reconstruction.reconstruct(None).unwrap_err();
         assert!(matches!(
             err,
             FibreError::NotEnoughShards { got: 0, need: 4 }
@@ -604,7 +635,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(unique, 4);
-        let reconstructed = reconstruction.reconstruct().unwrap();
+        let reconstructed = reconstruction.reconstruct(None).unwrap();
         assert_eq!(reconstructed.data(), &test_data());
     }
 
