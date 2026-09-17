@@ -44,7 +44,7 @@ executor = ["token", "dep:tokio-util", "dep:tokio", "tokio/rt", "dep:wasm-bindge
 failover = ["executor", "time", "dep:tracing"]
 token = ["dep:tokio-util"]
 time = ["dep:gloo-timers", "dep:tokio", "tokio/time", "dep:send_wrapper", "dep:futures", "dep:pin-project", "dep:web-time"]
-test-utils = ["dep:tokio", "tokio/macros", "dep:wasm-bindgen-test"]
+test-utils = ["time", "dep:tokio", "tokio/macros", "dep:wasm-bindgen-test"]
 make-object = ["dep:js-sys"]
 
 # Workaround is required, because we want to pass through `tls-*` feature flags to tonic,
