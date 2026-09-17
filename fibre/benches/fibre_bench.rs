@@ -2,8 +2,9 @@
 //!
 //! Upload path: blob encoding, per-row proof generation, payment promise
 //! signing, validator signature verification, deterministic shard assignment.
-//! Download path: raw protobuf decoding, response conversion, and a complete
-//! in-memory client download through verification and reconstruction.
+//! Download path: raw protobuf decoding and response conversion. Shard
+//! verification and reconstruction are benchmarked in
+//! `rsema1d/benches/codec_bench.rs`.
 //!
 //! These benchmarks use the production v0 protocol parameters (K=4096,
 //! N=12288) and only the crate's public API.
@@ -34,7 +35,6 @@
 //! current noise floor.
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use criterion::{
@@ -47,9 +47,8 @@ use rand::rngs::OsRng;
 
 use celestia_fibre::transport::proto_conv;
 use celestia_fibre::{
-    BlobConfig, DEFAULT_PROTOCOL_PARAMS, DownloadOptions, DownloadResponse, EncodedBlob,
-    FibreClient, FibreClientConfig, FibreError, Fraction, PaymentPromise, SetGetter,
-    UploadResponse, ValidatorConnection, ValidatorConnector, ValidatorInfo, ValidatorSet,
+    BlobConfig, DEFAULT_PROTOCOL_PARAMS, EncodedBlob, Fraction, PaymentPromise, ValidatorInfo,
+    ValidatorSet,
 };
 use celestia_proto::celestia::fibre::v1 as proto;
 use celestia_types::nmt::Namespace;
@@ -337,112 +336,6 @@ fn bench_parse_download_response(c: &mut Criterion) {
     group.finish();
 }
 
-struct StaticSetGetter(ValidatorSet);
-
-#[async_trait::async_trait]
-impl SetGetter for StaticSetGetter {
-    async fn head(&self) -> Result<ValidatorSet, FibreError> {
-        Ok(self.0.clone())
-    }
-
-    async fn get_by_height(&self, _height: u64) -> Result<ValidatorSet, FibreError> {
-        Ok(self.0.clone())
-    }
-}
-
-struct StaticConnection(DownloadResponse);
-
-#[async_trait::async_trait]
-impl ValidatorConnection for StaticConnection {
-    async fn upload_shard(
-        &self,
-        _promise: &PaymentPromise,
-        _rows: &[rsema1d::RowInclusionProof],
-        _rlc_coeffs: &[rsema1d::GF128],
-    ) -> Result<UploadResponse, FibreError> {
-        unreachable!("download benchmark does not upload")
-    }
-
-    async fn download_shard(
-        &self,
-        _blob_id: &celestia_fibre::BlobID,
-    ) -> Result<DownloadResponse, FibreError> {
-        Ok(self.0.clone())
-    }
-}
-
-struct StaticConnector(Arc<StaticConnection>);
-
-#[async_trait::async_trait]
-impl ValidatorConnector for StaticConnector {
-    async fn connect(
-        &self,
-        _validator: &ValidatorInfo,
-    ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
-        Ok(self.0.clone())
-    }
-}
-
-fn in_memory_download(data_len: usize) -> (FibreClient, celestia_fibre::BlobID) {
-    let data = generate_data(data_len);
-    let blob = EncodedBlob::new(&data, BlobConfig::v0()).unwrap();
-    let id = blob.id().clone();
-    let rows = (0..BlobConfig::v0().original_rows)
-        .map(|index| {
-            let proof = blob.row(index).unwrap();
-            rsema1d::RowProof {
-                index: proof.index,
-                row: proof.row,
-                row_proof: proof.row_proof,
-            }
-        })
-        .collect();
-    let response = DownloadResponse {
-        rows,
-        rlcs: blob.rlc_coeffs().to_vec(),
-    };
-    let (_, validators) = make_validators(1);
-    let set = ValidatorSet::try_new(validators, 1).unwrap();
-    let connector = StaticConnector(Arc::new(StaticConnection(response)));
-    let client = FibreClient::builder()
-        .config(FibreClientConfig::new("benchmark").unwrap())
-        .set_getter(StaticSetGetter(set))
-        .connector(connector)
-        .build()
-        .unwrap();
-    (client, id)
-}
-
-/// Full download orchestration without network I/O: validator selection,
-/// response cloning, proof verification, reconstruction, and header decoding.
-fn bench_in_memory_download(c: &mut Criterion) {
-    let mut group = c.benchmark_group("in_memory_download");
-    group.sample_size(10);
-    group.measurement_time(HEAVY_MEASUREMENT);
-    group.warm_up_time(HEAVY_WARM_UP);
-    group.sampling_mode(SamplingMode::Flat);
-    group.noise_threshold(0.03);
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-
-    for (name, data_len) in [
-        ("1MB", 1 << 20),
-        ("8MB", 8 << 20),
-        ("128MB", BlobConfig::v0().max_data_size),
-    ] {
-        let (client, id) = in_memory_download(data_len);
-        group.throughput(Throughput::Bytes(data_len as u64));
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                runtime
-                    .block_on(client.download(black_box(&id), DownloadOptions::default()))
-                    .unwrap()
-            });
-        });
-    }
-
-    group.finish();
-}
-
 /// Upload path from row proof generation through protobuf encoding for one
 /// production-sized validator shard from a maximum-sized blob.
 fn bench_upload_shard_encode(c: &mut Criterion) {
@@ -504,7 +397,6 @@ criterion_group!(
     bench_signature_set,
     bench_validator_assign,
     bench_parse_download_response,
-    bench_in_memory_download,
     bench_upload_shard_encode
 );
 criterion_main!(benches);

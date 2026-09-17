@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- export `UploadResponse` so external `ValidatorConnection` implementations can name every trait method type
-
 ### Changed
 
 - [**breaking**] keep downloaded row data in shared `Bytes` from protobuf decoding through reconstruction instead of copying each row into a `Vec`
