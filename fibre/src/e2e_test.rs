@@ -52,6 +52,7 @@ async fn put_then_download() {
             &blob_id,
             DownloadOptions {
                 height: Some(promise_height),
+                ..Default::default()
             },
         )
         .await
