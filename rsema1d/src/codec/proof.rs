@@ -44,8 +44,7 @@ mod tests {
     use crate::codec::RowMatrix;
     use crate::params::Parameters;
 
-    #[test]
-    fn test_proof_generation() {
+    fn ext_data() -> ExtendedData {
         let params = Parameters::new(4, 4, 64).unwrap();
 
         let mut original = vec![0u8; params.k * params.row_size];
@@ -54,13 +53,28 @@ mod tests {
         }
 
         let original = RowMatrix::with_shape(original, params.k, params.row_size).unwrap();
-        let ext_data = ExtendedData::generate(&original, &params).unwrap();
+        ExtendedData::generate(&original, &params).unwrap()
+    }
+
+    #[test]
+    fn test_proof_generation() {
+        let ext_data = ext_data();
 
         let proof = ext_data.generate_row_proof(0).unwrap();
         assert_eq!(proof.index, 0);
 
         let proof = ext_data.generate_row_proof(5).unwrap();
         assert_eq!(proof.index, 5);
-        assert_eq!(proof.row.as_ptr(), ext_data.row(5).unwrap().as_ptr());
+    }
+
+    #[test]
+    fn row_proof_shares_frozen_matrix_storage() {
+        let ext_data = ext_data();
+        let proof = ext_data.generate_row_proof(5).unwrap();
+        assert_eq!(
+            proof.row.as_ptr(),
+            ext_data.row(5).unwrap().as_ptr(),
+            "row proof must reference the encoded matrix instead of copying the row"
+        );
     }
 }
