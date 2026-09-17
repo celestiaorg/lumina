@@ -113,3 +113,7 @@ web-sys = "0.3.70"
 # Also check node-wasm's `Cargo.toml`.
 # [profile.release]
 # debug = true
+
+# Allocation profiles need symbols to attribute allocations to call sites.
+[profile.bench]
+debug = 1
