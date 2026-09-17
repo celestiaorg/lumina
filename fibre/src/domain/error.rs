@@ -80,6 +80,29 @@ pub enum PaymentPromiseError {
 
 #[allow(missing_docs)]
 #[derive(Debug, Error)]
+pub enum ProtocolParamsError {
+    #[error("encoding ratio {0} must be finite and between 0 and 1")]
+    EncodingRatio(f64),
+    #[error("total rows {0} exceeds maximum 65536")]
+    TooManyRows(usize),
+    #[error("encoding ratio must produce at least one parity row")]
+    NoParityRows,
+    #[error("maximum validator count must be positive")]
+    ZeroValidatorCount,
+    #[error("safety threshold must not exceed 1")]
+    SafetyThresholdAboveOne,
+    #[error("liveness threshold must not exceed 1")]
+    LivenessThresholdAboveOne,
+    #[error("liveness threshold must be at least the encoding ratio")]
+    LivenessThresholdBelowEncodingRatio,
+    #[error("maximum blob size {size} must exceed header length {header_size}")]
+    BlobSizeTooSmall { size: usize, header_size: usize },
+    #[error("minimum row size {0} must be a positive multiple of 64")]
+    InvalidRowSize(usize),
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Error)]
 pub enum ValidatorSetError {
     #[error("validator set response is missing validator_set")]
     Missing,
@@ -208,6 +231,10 @@ pub enum FibreError {
         /// Actual chain ID length in bytes.
         len: usize,
     },
+
+    /// The protocol parameters are invalid.
+    #[error("invalid protocol parameters: {0}")]
+    InvalidProtocolParams(#[from] ProtocolParamsError),
 
     /// The Fibre client builder is missing a required value.
     #[error("client builder error: {0}")]
