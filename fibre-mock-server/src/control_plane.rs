@@ -64,8 +64,8 @@ impl BlockApi for MockBlockApi {
 
         Ok(Response::new(ValidatorSetResponse {
             validator_set: Some(ValidatorSet {
+                proposer: validators.first().cloned(),
                 validators,
-                proposer: None,
                 total_voting_power,
             }),
             height: self.height,
