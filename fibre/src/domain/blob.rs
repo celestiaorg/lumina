@@ -326,6 +326,7 @@ impl BlobReconstruction {
 #[derive(Debug)]
 pub(crate) struct VerifiedRows(Vec<rsema1d::RowProof>);
 
+#[cfg(target_arch = "wasm32")]
 const ROWS_PER_YIELD: usize = 16;
 
 /// Verifies downloaded shards against a blob's commitment.
@@ -358,8 +359,8 @@ impl ShardVerifier {
     ///
     /// Rows already stored (per `already_stored`) or repeated within the
     /// response are skipped before any cryptography runs, bounding the work
-    /// to the number of still-missing rows. Yields periodically so verification
-    /// does not monopolize the executor.
+    /// to the number of still-missing rows. Native verification runs on the
+    /// blocking pool; WASM yields periodically.
     pub(crate) async fn verify(
         &self,
         rows: Vec<rsema1d::RowProof>,
@@ -414,23 +415,52 @@ impl ShardVerifier {
                         self.cfg.parity_rows,
                         row_size,
                     )?;
-                    let context = Arc::new(rsema1d::VerificationContext::new(rlcs, &params)?);
-                    rsema1d::verify_row_with_context(&needed[0], &self.commitment, &context)?;
-                    *cache = Some((rlcs.to_vec(), Arc::clone(&context)));
+                    let commitment = self.commitment;
+                    let rlcs = rlcs.to_vec();
+                    let create_context = move || {
+                        let context = Arc::new(rsema1d::VerificationContext::new(&rlcs, &params)?);
+                        rsema1d::verify_row_with_context(&needed[0], &commitment, &context)?;
+                        Ok::<_, FibreError>((context, needed, rlcs))
+                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let (context, rows, rlcs) =
+                        tokio::task::spawn_blocking(create_context)
+                            .await
+                            .expect("verification context task panicked or has been cancelled")?;
+                    #[cfg(target_arch = "wasm32")]
+                    let (context, rows, rlcs) = create_context()?;
+
+                    needed = rows;
+                    *cache = Some((rlcs, Arc::clone(&context)));
                     (context, 1)
                 }
             }
         };
 
-        let remaining = &needed[verified..];
-        for (index, proof) in remaining.iter().enumerate() {
-            rsema1d::verify_row_with_context(proof, &self.commitment, &context)?;
-            if (index + 1).is_multiple_of(ROWS_PER_YIELD) && index + 1 < remaining.len() {
-                lumina_utils::executor::yield_now().await;
-            }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let commitment = self.commitment;
+            tokio::task::spawn_blocking(move || {
+                for proof in &needed[verified..] {
+                    rsema1d::verify_row_with_context(proof, &commitment, &context)?;
+                }
+                Ok(VerifiedRows(needed))
+            })
+            .await
+            .expect("shard verification task panicked or has been cancelled")
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let remaining = &needed[verified..];
+            for (index, proof) in remaining.iter().enumerate() {
+                rsema1d::verify_row_with_context(proof, &self.commitment, &context)?;
+                if (index + 1).is_multiple_of(ROWS_PER_YIELD) && index + 1 < remaining.len() {
+                    lumina_utils::executor::yield_now().await;
+                }
+            }
 
-        Ok(VerifiedRows(needed))
+            Ok(VerifiedRows(needed))
+        }
     }
 }
 
@@ -790,6 +820,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(reconstruction.store_rows(verified), 1);
+    }
+
+    #[tokio::test]
+    async fn verify_concurrent_shards() {
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
+        let verifier = ShardVerifier::new(&reconstruction);
+        let stored = reconstruction.stored_rows_bitmap();
+        let first = shard_of(&blob, &[0, 1]);
+        let second = shard_of(&blob, &[2, 3]);
+        let (first, second) = tokio::join!(
+            verifier.verify(first.rows, &first.rlcs, &stored),
+            verifier.verify(second.rows, &second.rlcs, &stored),
+        );
+
+        assert_eq!(reconstruction.store_rows(first.unwrap()), 2);
+        assert_eq!(reconstruction.store_rows(second.unwrap()), 2);
+        assert_eq!(reconstruction.reconstruct().unwrap().data(), &test_data());
     }
 
     #[tokio::test]
