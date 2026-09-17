@@ -244,7 +244,7 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
-    use crate::blob::{BlobID, BlobReconstruction, EncodedBlob};
+    use crate::blob::{Blob, BlobID, BlobReconstruction, EncodedBlob};
     use crate::config::BlobConfig;
     use crate::error::FibreError;
     use crate::payment_promise::PaymentPromise;
@@ -313,33 +313,15 @@ mod tests {
         }
     }
 
-    /// Encode a blob, extract parity row proofs, and store them on each mock
-    /// validator connection. Returns the BlobID.
-    fn prepare_blob_and_distribute(
+    const DOWNLOAD_ROW_CONFIGS: [(usize, usize); 5] = [(2, 2), (3, 5), (4, 4), (8, 24), (10, 6)];
+
+    async fn download_from_rows(
         data: &[u8],
-        connections: &[Arc<MockValidatorConnection>],
-        cfg: &BlobConfig,
-    ) -> BlobID {
+        cfg: BlobConfig,
+        row_indices: &[usize],
+    ) -> Result<Blob, FibreError> {
         let blob = EncodedBlob::new(data, cfg.clone()).unwrap();
         let blob_id = blob.id().clone();
-        let total_rows = cfg.total_rows();
-
-        for conn in connections {
-            let mut proofs = Vec::new();
-            for i in cfg.original_rows..total_rows {
-                proofs.push(blob.row(i).unwrap());
-            }
-            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
-        }
-
-        blob_id
-    }
-
-    #[tokio::test]
-    async fn download_reconstructs_blob_from_parity_rows() {
-        let cfg = test_blob_config();
-        let data: Vec<u8> = (0u8..=199).collect();
-
         let validators = [
             make_validator(100, 1),
             make_validator(100, 2),
@@ -353,7 +335,10 @@ mod tests {
             .map(|(k, _)| Arc::new(MockValidatorConnection::new(k.clone())))
             .collect();
 
-        let blob_id = prepare_blob_and_distribute(&data, &conns, &cfg);
+        for conn in &conns {
+            let proofs = row_indices.iter().map(|&i| blob.row(i).unwrap()).collect();
+            conn.store_proofs(blob_id.commitment(), proofs, blob.rlc_coeffs().to_vec());
+        }
 
         let mut connector = MockConnector::new();
         for (i, (_, v)) in validators.iter().enumerate() {
@@ -361,9 +346,83 @@ mod tests {
         }
 
         let client = build_test_client(val_set, connector, "test-chain");
-        let blob = client.download_with_config(&blob_id, cfg).await.unwrap();
+        client.download_with_config(&blob_id, cfg).await
+    }
 
-        assert_eq!(blob.data(), &data);
+    #[tokio::test]
+    async fn download_reconstructs_blob_with_missing_rows() {
+        let data: Vec<u8> = (0u8..=199).collect();
+
+        for (k, parity) in DOWNLOAD_ROW_CONFIGS {
+            let cfg = BlobConfig::new_test(0, k, parity, 4096, k, 64);
+            let total = cfg.total_rows();
+            let mixed: Vec<_> = (0..k).step_by(2).chain(k..k + k / 2).collect();
+            let mut cases: Vec<(&str, Vec<usize>)> = vec![
+                ("all rows", (0..total).collect()),
+                ("originals only", (0..k).collect()),
+                ("missing first original", (1..total).collect()),
+                (
+                    "missing middle original",
+                    (0..total).filter(|&i| i != k / 2).collect(),
+                ),
+                (
+                    "missing last original",
+                    (0..total).filter(|&i| i != k - 1).collect(),
+                ),
+                ("mixed exactly K", mixed.clone()),
+                ("mixed reversed", mixed.into_iter().rev().collect()),
+            ];
+            if parity >= k {
+                cases.push(("parity only exactly K", (k..2 * k).collect()));
+                cases.push(("all parity", (k..total).collect()));
+            }
+
+            for (name, rows) in cases {
+                let blob = download_from_rows(&data, cfg.clone(), &rows)
+                    .await
+                    .unwrap_or_else(|error| panic!("{name}, K={k}, parity={parity}: {error}"));
+                assert_eq!(blob.data(), &data, "{name}, K={k}, parity={parity}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn download_rejects_insufficient_unique_rows() {
+        let data: Vec<u8> = (0u8..=199).collect();
+
+        for (k, parity) in DOWNLOAD_ROW_CONFIGS {
+            let cfg = BlobConfig::new_test(0, k, parity, 4096, k, 64);
+            let mut cases: Vec<(&str, Vec<usize>, usize)> = vec![
+                ("no rows", vec![], 0),
+                ("K-1 originals", (0..k - 1).collect(), k - 1),
+                ("K-1 mixed", (0..k - 2).chain([k]).collect(), k - 1),
+                ("duplicate rows", vec![0; k], 1),
+            ];
+            if parity < k {
+                cases.push((
+                    "all parity insufficient",
+                    (k..cfg.total_rows()).collect(),
+                    parity,
+                ));
+            }
+
+            for (name, rows, expected_got) in cases {
+                let error = download_from_rows(&data, cfg.clone(), &rows)
+                    .await
+                    .unwrap_err();
+                match error {
+                    FibreError::NotFound if expected_got == 0 => {}
+                    FibreError::NotEnoughShards { got, need } if expected_got > 0 => {
+                        assert_eq!(
+                            (got, need),
+                            (expected_got, k),
+                            "{name}, K={k}, parity={parity}"
+                        );
+                    }
+                    error => panic!("{name}, K={k}, parity={parity}: unexpected {error}"),
+                }
+            }
+        }
     }
 
     #[tokio::test]
