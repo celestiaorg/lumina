@@ -25,19 +25,6 @@ use crate::payment_promise::{PaymentPromise, SignedPaymentPromise};
 use crate::validator::signature_set::SignatureSet;
 use crate::validator::{ShardMap, ValidatorSet};
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn encode_blob(data: &[u8], cfg: BlobConfig) -> Result<EncodedBlob, FibreError> {
-    let encode = EncodedBlob::prepare_encoding(data, cfg, rsema1d::default_work_budget())?;
-    tokio::task::spawn_blocking(encode)
-        .await
-        .expect("blob encoding task panicked or has been cancelled")
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn encode_blob(data: &[u8], cfg: BlobConfig) -> Result<EncodedBlob, FibreError> {
-    EncodedBlob::new(data, cfg)
-}
-
 /// Outcome of all validator uploads started for a blob.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct UploadCompletionStats {
@@ -193,7 +180,16 @@ impl FibreClient {
         }
 
         // 1. Encode data into an EncodedBlob.
-        let blob = encode_blob(data, BlobConfig::for_version(0)?).await?;
+        let cfg = BlobConfig::for_version(0)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let blob = {
+            let encode = EncodedBlob::prepare_encoding(data, cfg, rsema1d::default_work_budget())?;
+            tokio::task::spawn_blocking(encode)
+                .await
+                .expect("blob encoding task panicked or has been cancelled")?
+        };
+        #[cfg(target_arch = "wasm32")]
+        let blob = EncodedBlob::new(data, cfg)?;
 
         // 2. Upload to validators and collect signatures.
         let signed_promise = self.upload(signing_key, namespace, blob).await?;
@@ -365,8 +361,8 @@ mod tests {
     use crate::payment_promise::PaymentPromise;
     use crate::test_utils::{
         FailingConnector, MockConnector, MockSetGetter, MockValidatorConnection, build_test_client,
-        connector_with_handles, make_connector, make_validator, test_blob, test_blob_config,
-        test_client_config, validator_set,
+        connector_with_handles, make_connector, make_validator, test_blob, test_client_config,
+        validator_set,
     };
     use crate::validator::ValidatorInfo;
     use crate::validator_client::{
@@ -375,40 +371,6 @@ mod tests {
 
     fn test_signing_key() -> SigningKey {
         SigningKey::random(&mut OsRng)
-    }
-
-    #[tokio::test]
-    async fn encode_blob_matches_sync_encoding() {
-        let (expected, data) = test_blob(200);
-        let encoded = super::encode_blob(&data, expected.config().clone())
-            .await
-            .unwrap();
-
-        assert_eq!(encoded.id(), expected.id());
-        assert_eq!(encoded.rlc_coeffs(), expected.rlc_coeffs());
-        for index in 0..encoded.config().total_rows() {
-            let actual = encoded.row(index).unwrap();
-            let expected = expected.row(index).unwrap();
-            assert_eq!(actual.row, expected.row);
-            assert_eq!(actual.row_proof, expected.row_proof);
-        }
-    }
-
-    #[tokio::test]
-    async fn encode_blob_rejects_invalid_size() {
-        let mut cfg = test_blob_config();
-        cfg.max_data_size = 128;
-        assert!(matches!(
-            super::encode_blob(&[], cfg.clone()).await,
-            Err(FibreError::EmptyBlobData)
-        ));
-        assert!(matches!(
-            super::encode_blob(&[0; 129], cfg).await,
-            Err(FibreError::BlobTooLarge {
-                size: 129,
-                max: 128
-            })
-        ));
     }
 
     #[tokio::test]

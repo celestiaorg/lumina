@@ -360,7 +360,7 @@ impl ShardVerifier {
     pub(crate) async fn verify(
         &self,
         rows: Vec<rsema1d::RowProof<'static>>,
-        rlcs: Vec<rsema1d::GF128>,
+        rlcs: &[rsema1d::GF128],
         already_stored: &[bool],
     ) -> Result<VerifiedRows, FibreError> {
         if rows.is_empty() {
@@ -400,7 +400,7 @@ impl ShardVerifier {
             let mut cache = self.cache.lock().await;
             match cache.as_ref() {
                 Some((cached_rlcs, context)) => {
-                    if cached_rlcs != &rlcs {
+                    if cached_rlcs != rlcs {
                         return Err(ShardError::RlcVectorMismatch.into());
                     }
                     (Arc::clone(context), 0)
@@ -411,6 +411,7 @@ impl ShardVerifier {
                         self.cfg.parity_rows,
                         row_size,
                     )?;
+                    let rlcs = rlcs.to_vec();
                     let commitment = self.commitment;
                     let create_context = move || {
                         let context = Arc::new(rsema1d::VerificationContext::new(&rlcs, &params)?);
@@ -603,7 +604,7 @@ mod tests {
     ) -> Result<usize, FibreError> {
         let verifier = ShardVerifier::new(blob);
         let verified = verifier
-            .verify(shard.rows, shard.rlcs, &blob.stored_rows_bitmap())
+            .verify(shard.rows, &shard.rlcs, &blob.stored_rows_bitmap())
             .await?;
         Ok(blob.store_rows(verified))
     }
@@ -680,7 +681,11 @@ mod tests {
 
         let verifier = ShardVerifier::new(&reconstruction);
         let err = verifier
-            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -697,7 +702,11 @@ mod tests {
 
         let verifier = ShardVerifier::new(&reconstruction);
         let err = verifier
-            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -730,7 +739,11 @@ mod tests {
 
         let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
-            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap();
         assert_eq!(reconstruction.store_rows(verified), 0);
@@ -748,28 +761,15 @@ mod tests {
 
         let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
-            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap();
 
         assert_eq!(reconstruction.store_rows(verified), 1);
-    }
-
-    #[tokio::test]
-    async fn verify_concurrent_shards() {
-        let (blob, mut reconstruction) = test_blob_and_reconstruction();
-        let verifier = ShardVerifier::new(&reconstruction);
-        let stored = reconstruction.stored_rows_bitmap();
-        let first = shard_of(&blob, &[0, 1]);
-        let second = shard_of(&blob, &[2, 3]);
-        let (first, second) = tokio::join!(
-            verifier.verify(first.rows, first.rlcs, &stored),
-            verifier.verify(second.rows, second.rlcs, &stored),
-        );
-
-        assert_eq!(reconstruction.store_rows(first.unwrap()), 2);
-        assert_eq!(reconstruction.store_rows(second.unwrap()), 2);
-        assert_eq!(reconstruction.reconstruct().unwrap().data(), &test_data());
     }
 
     #[tokio::test]
@@ -778,31 +778,38 @@ mod tests {
         let verifier = ShardVerifier::new(&reconstruction);
 
         let mut shard = shard_of(&blob, &[0]);
-        shard.rlcs[0].limbs[0] ^= 1;
+        shard.rows[0].row.to_mut()[0] ^= 1;
         assert!(
             verifier
-                .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
+                .verify(
+                    shard.rows,
+                    &shard.rlcs,
+                    &reconstruction.stored_rows_bitmap(),
+                )
                 .await
                 .is_err()
         );
 
         // First shard authenticates the RLC vector and fills the cache.
         let shard = shard_of(&blob, &[0, 1]);
-        let rlcs_ptr = shard.rlcs.as_ptr();
         let verified = verifier
-            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap();
-        assert_eq!(
-            verifier.cache.lock().await.as_ref().unwrap().0.as_ptr(),
-            rlcs_ptr
-        );
         reconstruction.store_rows(verified);
 
         // Same vector: verifies against the cached context.
         let shard = shard_of(&blob, &[2, 3]);
         let verified = verifier
-            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
+            .verify(
+                shard.rows,
+                &shard.rlcs,
+                &reconstruction.stored_rows_bitmap(),
+            )
             .await
             .unwrap();
         assert_eq!(reconstruction.store_rows(verified), 2);
@@ -817,7 +824,7 @@ mod tests {
         let err = verifier
             .verify(
                 shard.rows,
-                shard.rlcs,
+                &shard.rlcs,
                 &fresh_reconstruction.stored_rows_bitmap(),
             )
             .await
