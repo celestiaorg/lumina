@@ -250,12 +250,27 @@ impl FibreClient {
                     biased;
                     _ = task_cancel.cancelled() => Err(FibreError::Cancelled),
                     result = async {
-                        // Generate row proofs in this task, parallelizing
-                        // proof generation across validators.
-                        let mut proofs = Vec::with_capacity(row_indices.len());
-                        for row_idx in &row_indices {
-                            proofs.push(blob.row(*row_idx)?);
-                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let proofs = {
+                            let blob = Arc::clone(&blob);
+                            tokio::task::spawn_blocking(move || {
+                                row_indices
+                                    .into_iter()
+                                    .map(|row_idx| blob.row(row_idx))
+                                    .collect::<Result<Vec<_>, FibreError>>()
+                            })
+                            .await
+                            .expect("upload proof generation task panicked or has been cancelled")?
+                        };
+
+                        #[cfg(target_arch = "wasm32")]
+                        let proofs = {
+                            let mut proofs = Vec::with_capacity(row_indices.len());
+                            for row_idx in &row_indices {
+                                proofs.push(blob.row(*row_idx)?);
+                            }
+                            proofs
+                        };
 
                         let conn = connector.connect(&validator).await?;
                         let resp = conn
@@ -452,8 +467,15 @@ mod tests {
 
         let val_set = ValidatorSet::try_new(val_infos, 1).unwrap();
 
-        let client = build_test_client(val_set, connector, "test-chain");
+        let client = build_test_client(val_set.clone(), connector, "test-chain");
         let blob = make_test_blob();
+        let shard_map = val_set.assign(
+            blob.id().commitment(),
+            blob.config().total_rows(),
+            blob.config().original_rows,
+            client.cfg.min_rows_per_validator,
+            client.cfg.liveness_threshold,
+        );
         let namespace = Namespace::from_raw(&[0u8; 29]).unwrap();
 
         // Upload returns once signature threshold is met.
@@ -468,6 +490,10 @@ mod tests {
             tokio::time::timeout(tokio::time::Duration::from_secs(5), conn.wait_for_upload())
                 .await
                 .unwrap_or_else(|_| panic!("validator {i} did not receive upload data in time"));
+            let batches = conn.uploaded();
+            assert_eq!(batches.len(), 1);
+            let indices: Vec<_> = batches[0].iter().map(|proof| proof.index).collect();
+            assert_eq!(&indices, &shard_map.inner()[&i]);
         }
     }
 
