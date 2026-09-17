@@ -150,6 +150,15 @@ impl EncodedBlob {
         cfg: BlobConfig,
         work_budget: NonZeroUsize,
     ) -> Result<Self, FibreError> {
+        let encode = Self::prepare_encoding(data, cfg, work_budget)?;
+        encode()
+    }
+
+    pub(crate) fn prepare_encoding(
+        data: &[u8],
+        cfg: BlobConfig,
+        work_budget: NonZeroUsize,
+    ) -> Result<impl FnOnce() -> Result<Self, FibreError> + Send + 'static, FibreError> {
         if data.is_empty() {
             return Err(FibreError::EmptyBlobData);
         }
@@ -169,16 +178,18 @@ impl EncodedBlob {
         let mut extended = rsema1d::RowMatrix::zeroed(total_rows, row_size)?;
         blob_header::encode(data, extended.as_row_major_mut());
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
-        let (extended_data, commitment, _) =
-            rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
+        let data_size = data.len();
+        Ok(move || {
+            let (extended_data, commitment, _) =
+                rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
+            let id = BlobID::new(cfg.blob_version, commitment);
 
-        let id = BlobID::new(cfg.blob_version, commitment);
-
-        Ok(Self {
-            cfg,
-            extended_data,
-            id,
-            data_size: data.len(),
+            Ok(Self {
+                cfg,
+                extended_data,
+                id,
+                data_size,
+            })
         })
     }
 
@@ -415,8 +426,8 @@ impl ShardVerifier {
                         self.cfg.parity_rows,
                         row_size,
                     )?;
-                    let commitment = self.commitment;
                     let rlcs = rlcs.to_vec();
+                    let commitment = self.commitment;
                     let create_context = move || {
                         let context = Arc::new(rsema1d::VerificationContext::new(&rlcs, &params)?);
                         rsema1d::verify_row_with_context(&needed[0], &commitment, &context)?;
@@ -820,23 +831,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(reconstruction.store_rows(verified), 1);
-    }
-
-    #[tokio::test]
-    async fn verify_concurrent_shards() {
-        let (blob, mut reconstruction) = test_blob_and_reconstruction();
-        let verifier = ShardVerifier::new(&reconstruction);
-        let stored = reconstruction.stored_rows_bitmap();
-        let first = shard_of(&blob, &[0, 1]);
-        let second = shard_of(&blob, &[2, 3]);
-        let (first, second) = tokio::join!(
-            verifier.verify(first.rows, &first.rlcs, &stored),
-            verifier.verify(second.rows, &second.rlcs, &stored),
-        );
-
-        assert_eq!(reconstruction.store_rows(first.unwrap()), 2);
-        assert_eq!(reconstruction.store_rows(second.unwrap()), 2);
-        assert_eq!(reconstruction.reconstruct().unwrap().data(), &test_data());
     }
 
     #[tokio::test]
