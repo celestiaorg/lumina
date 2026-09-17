@@ -228,13 +228,28 @@ mod tests {
         assert_eq!(blob_row.index, 5);
         assert_eq!(blob_row.data, vec![42u8; 64]);
         assert_eq!(blob_row.proof.len(), 2);
-        let row_ptr = blob_row.data.as_ptr();
 
         let back = blob_row_to_row_proof(blob_row).unwrap();
         assert_eq!(back.index, 5);
         assert_eq!(back.row.as_ref(), &[42u8; 64][..]);
-        assert_eq!(back.row.as_ptr(), row_ptr);
         assert_eq!(back.row_proof, vec![[1u8; 32], [2u8; 32]]);
+    }
+
+    #[test]
+    fn blob_row_to_row_proof_shares_data_buffer() {
+        let data = bytes::Bytes::from(vec![42u8; 64]);
+        let blob_row = proto::BlobRow {
+            index: 5,
+            data: data.clone(),
+            proof: vec![vec![1u8; 32].into()],
+        };
+
+        let back = blob_row_to_row_proof(blob_row).unwrap();
+        assert_eq!(
+            back.row.as_ptr(),
+            data.as_ptr(),
+            "row data must not be copied out of the decoded BlobRow"
+        );
     }
 
     #[test]

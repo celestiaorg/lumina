@@ -217,7 +217,7 @@ impl EncodedBlob {
 pub(crate) struct BlobReconstruction {
     cfg: BlobConfig,
     id: BlobID,
-    rows: Vec<Option<Vec<u8>>>,
+    rows: Vec<Option<bytes::Bytes>>,
 }
 
 impl BlobReconstruction {
@@ -256,7 +256,7 @@ impl BlobReconstruction {
         for proof in rows.0 {
             let row = &mut self.rows[proof.index];
             if row.is_none() {
-                *row = Some(proof.row.to_vec());
+                *row = Some(proof.row);
                 applied += 1;
             }
         }
@@ -282,7 +282,7 @@ impl BlobReconstruction {
             }
             if let Some(row) = row {
                 selected_indices.push(index);
-                selected_rows.push(row.as_slice());
+                selected_rows.push(&row[..]);
             }
         }
 
@@ -557,6 +557,12 @@ mod tests {
         }
     }
 
+    fn flip_first_byte(row: &mut bytes::Bytes) {
+        let mut bytes = row.to_vec();
+        bytes[0] ^= 1;
+        *row = bytes.into();
+    }
+
     async fn set_shard(
         blob: &mut BlobReconstruction,
         shard: TestShard,
@@ -601,9 +607,7 @@ mod tests {
 
         // Tamper with the second row; the whole shard must be rejected.
         let mut shard = shard_of(&blob, &[0, 1]);
-        let mut row = shard.rows[1].row.to_vec();
-        row[0] ^= 1;
-        shard.rows[1].row = row.into();
+        flip_first_byte(&mut shard.rows[1].row);
         assert!(set_shard(&mut reconstruction, shard).await.is_err());
 
         // Row 0 was valid in the failing shard but must not have been stored.
@@ -696,9 +700,7 @@ mod tests {
         // Tampered copy of an already-stored row: it must be skipped by the
         // bitmap pre-filter, so verification never sees (and never rejects) it.
         let mut shard = shard_of(&blob, &[0]);
-        let mut row = shard.rows[0].row.to_vec();
-        row[0] ^= 1;
-        shard.rows[0].row = row.into();
+        flip_first_byte(&mut shard.rows[0].row);
 
         let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
@@ -741,9 +743,7 @@ mod tests {
         let verifier = ShardVerifier::new(&reconstruction);
 
         let mut shard = shard_of(&blob, &[0]);
-        let mut row = shard.rows[0].row.to_vec();
-        row[0] ^= 1;
-        shard.rows[0].row = row.into();
+        flip_first_byte(&mut shard.rows[0].row);
         assert!(
             verifier
                 .verify(

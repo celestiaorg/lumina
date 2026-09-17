@@ -106,7 +106,7 @@ fn make_proto_download_response(data_len: usize) -> proto::DownloadShardResponse
             let proof = blob.row(i).unwrap();
             proto::BlobRow {
                 index: proof.index as u32,
-                data: Bytes::copy_from_slice(&proof.row),
+                data: proof.row,
                 proof: proof_hashes_as_bytes(&proof.row_proof),
             }
         })
@@ -298,25 +298,27 @@ fn bench_validator_assign(c: &mut Criterion) {
     group.finish();
 }
 
-/// Download path: decoding a validator's wire response (proof hash conversion
-/// + RLC vector parse), run once per validator response.
+/// Download path: converting a decoded validator response (proof hash
+/// conversion + RLC vector parse), and prost wire decoding plus conversion at
+/// two blob sizes. Conversion moves row `Bytes` without touching row data, so
+/// only the decode case is swept over blob size.
 fn bench_parse_download_response(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_download_response");
     group.measurement_time(CHEAP_MEASUREMENT);
     group.noise_threshold(0.03);
 
-    for (name, data_len) in [("1MB", 1 << 20), ("128MB", BlobConfig::v0().max_data_size)] {
-        let response = make_proto_download_response(data_len);
-        let wire = Bytes::from(response.encode_to_vec());
-        group.throughput(Throughput::Bytes(wire.len() as u64));
+    let response = make_proto_download_response(1 << 20);
+    group.bench_function(format!("convert_{}_rows", rows_per_shard()), |b| {
+        b.iter_batched(
+            || response.clone(),
+            |response| proto_conv::parse_download_response(response).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
 
-        group.bench_function(format!("convert_{}_rows_{name}", rows_per_shard()), |b| {
-            b.iter_batched(
-                || response.clone(),
-                |response| proto_conv::parse_download_response(response).unwrap(),
-                BatchSize::SmallInput,
-            );
-        });
+    for (name, data_len) in [("1MB", 1 << 20), ("128MB", BlobConfig::v0().max_data_size)] {
+        let wire = Bytes::from(make_proto_download_response(data_len).encode_to_vec());
+        group.throughput(Throughput::Bytes(wire.len() as u64));
         group.bench_function(
             format!("prost_decode_and_convert_{}_rows_{name}", rows_per_shard()),
             |b| {
@@ -335,7 +337,6 @@ fn bench_parse_download_response(c: &mut Criterion) {
     group.finish();
 }
 
-#[derive(Clone)]
 struct StaticSetGetter(ValidatorSet);
 
 #[async_trait::async_trait]
@@ -386,20 +387,14 @@ fn in_memory_download(data_len: usize) -> (FibreClient, celestia_fibre::BlobID) 
     let data = generate_data(data_len);
     let blob = EncodedBlob::new(&data, BlobConfig::v0()).unwrap();
     let id = blob.id().clone();
-    let proofs: Vec<_> = (0..BlobConfig::v0().original_rows)
-        .map(|index| blob.row(index).unwrap())
-        .collect();
-    let mut row_storage = Vec::with_capacity(blob.row_size() * proofs.len());
-    for proof in &proofs {
-        row_storage.extend_from_slice(&proof.row);
-    }
-    let mut row_storage = Bytes::from(row_storage);
-    let rows = proofs
-        .into_iter()
-        .map(|proof| rsema1d::RowProof {
-            index: proof.index,
-            row: row_storage.split_to(blob.row_size()),
-            row_proof: proof.row_proof,
+    let rows = (0..BlobConfig::v0().original_rows)
+        .map(|index| {
+            let proof = blob.row(index).unwrap();
+            rsema1d::RowProof {
+                index: proof.index,
+                row: proof.row,
+                row_proof: proof.row_proof,
+            }
         })
         .collect();
     let response = DownloadResponse {
@@ -451,8 +446,6 @@ fn bench_in_memory_download(c: &mut Criterion) {
 /// Upload path from row proof generation through protobuf encoding for one
 /// production-sized validator shard from a maximum-sized blob.
 fn bench_upload_shard_encode(c: &mut Criterion) {
-    use prost::Message;
-
     let mut group = c.benchmark_group("upload_shard_encode");
     group.measurement_time(CHEAP_MEASUREMENT);
     group.noise_threshold(0.03);
