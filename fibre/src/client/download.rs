@@ -192,7 +192,7 @@ impl FibreClient {
                                 // Verify here so the heavy crypto runs off the
                                 // select! loop and per-task instead of serially.
                                 verifier
-                                    .verify(shard.rows, &shard.rlcs, &already_stored)
+                                    .verify(shard.rows, shard.rlcs, &already_stored)
                                     .await
                             } => result,
                         }
