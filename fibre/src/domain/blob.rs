@@ -217,7 +217,7 @@ impl EncodedBlob {
 pub(crate) struct BlobReconstruction {
     cfg: BlobConfig,
     id: BlobID,
-    rows: Vec<Option<Vec<u8>>>,
+    rows: Vec<Option<bytes::Bytes>>,
 }
 
 impl BlobReconstruction {
@@ -256,7 +256,7 @@ impl BlobReconstruction {
         for proof in rows.0 {
             let row = &mut self.rows[proof.index];
             if row.is_none() {
-                *row = Some(proof.row.into_owned());
+                *row = Some(proof.row);
                 applied += 1;
             }
         }
@@ -282,7 +282,7 @@ impl BlobReconstruction {
             }
             if let Some(row) = row {
                 selected_indices.push(index);
-                selected_rows.push(row.as_slice());
+                selected_rows.push(&row[..]);
             }
         }
 
@@ -309,7 +309,7 @@ impl BlobReconstruction {
 /// Only [`ShardVerifier::verify`] can construct this, so unverified rows
 /// cannot reach the blob's row buffer.
 #[derive(Debug)]
-pub(crate) struct VerifiedRows(Vec<rsema1d::RowProof<'static>>);
+pub(crate) struct VerifiedRows(Vec<rsema1d::RowProof>);
 
 const ROWS_PER_YIELD: usize = 16;
 
@@ -347,7 +347,7 @@ impl ShardVerifier {
     /// does not monopolize the executor.
     pub(crate) async fn verify(
         &self,
-        rows: Vec<rsema1d::RowProof<'static>>,
+        rows: Vec<rsema1d::RowProof>,
         rlcs: &[rsema1d::GF128],
         already_stored: &[bool],
     ) -> Result<VerifiedRows, FibreError> {
@@ -536,7 +536,7 @@ mod tests {
     }
 
     struct TestShard {
-        rows: Vec<rsema1d::RowProof<'static>>,
+        rows: Vec<rsema1d::RowProof>,
         rlcs: Vec<rsema1d::GF128>,
     }
 
@@ -548,13 +548,19 @@ mod tests {
                     let proof = blob.row(i).unwrap();
                     rsema1d::RowProof {
                         index: proof.index,
-                        row: std::borrow::Cow::Owned(proof.row.to_vec()),
+                        row: proof.row.clone(),
                         row_proof: proof.row_proof,
                     }
                 })
                 .collect(),
             rlcs: blob.rlc_coeffs().to_vec(),
         }
+    }
+
+    fn flip_first_byte(row: &mut bytes::Bytes) {
+        let mut bytes = row.to_vec();
+        bytes[0] ^= 1;
+        *row = bytes.into();
     }
 
     async fn set_shard(
@@ -596,12 +602,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_rows_preserves_source_buffer() {
+        let (blob, mut reconstruction) = test_blob_and_reconstruction();
+        let shard = shard_of(&blob, &[0]);
+        let source_ptr = shard.rows[0].row.as_ptr();
+
+        assert_eq!(set_shard(&mut reconstruction, shard).await.unwrap(), 1);
+        assert_eq!(
+            reconstruction.rows[0].as_ref().unwrap().as_ptr(),
+            source_ptr
+        );
+        assert_eq!(
+            reconstruction.rows[0].as_deref(),
+            Some(blob.row(0).unwrap().row.as_ref())
+        );
+    }
+
+    #[tokio::test]
     async fn set_shard_failing_shard_stores_nothing() {
         let (blob, mut reconstruction) = test_blob_and_reconstruction();
 
         // Tamper with the second row; the whole shard must be rejected.
         let mut shard = shard_of(&blob, &[0, 1]);
-        shard.rows[1].row.to_mut()[0] ^= 1;
+        flip_first_byte(&mut shard.rows[1].row);
         assert!(set_shard(&mut reconstruction, shard).await.is_err());
 
         // Row 0 was valid in the failing shard but must not have been stored.
@@ -636,7 +659,7 @@ mod tests {
         let (blob, reconstruction) = test_blob_and_reconstruction();
         let mut shard = shard_of(&blob, &[0]);
         // Larger than row_size(max_data_size) for the test config.
-        shard.rows[0].row = std::borrow::Cow::Owned(vec![0u8; 2048]);
+        shard.rows[0].row = vec![0u8; 2048].into();
 
         let verifier = ShardVerifier::new(&reconstruction);
         let err = verifier
@@ -694,7 +717,7 @@ mod tests {
         // Tampered copy of an already-stored row: it must be skipped by the
         // bitmap pre-filter, so verification never sees (and never rejects) it.
         let mut shard = shard_of(&blob, &[0]);
-        shard.rows[0].row.to_mut()[0] ^= 1;
+        flip_first_byte(&mut shard.rows[0].row);
 
         let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
@@ -716,7 +739,7 @@ mod tests {
             .unwrap();
 
         let mut shard = shard_of(&blob, &[0, 1]);
-        shard.rows[0].row = std::borrow::Cow::Owned(vec![0; 128]);
+        shard.rows[0].row = vec![0; 128].into();
 
         let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
@@ -737,7 +760,7 @@ mod tests {
         let verifier = ShardVerifier::new(&reconstruction);
 
         let mut shard = shard_of(&blob, &[0]);
-        shard.rows[0].row.to_mut()[0] ^= 1;
+        flip_first_byte(&mut shard.rows[0].row);
         assert!(
             verifier
                 .verify(

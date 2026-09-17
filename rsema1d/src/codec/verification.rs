@@ -154,7 +154,7 @@ pub fn verify_standalone(
 
 /// Verify row proof with pre-computed context.
 pub fn verify_with_context(
-    proof: &RowProof<'_>,
+    proof: &RowProof,
     commitment: &[u8; 32],
     context: &VerificationContext,
 ) -> Result<bool> {
@@ -227,7 +227,7 @@ pub fn verify_with_context(
 
 /// Alias for context-based verification.
 pub fn verify_proof(
-    proof: &RowProof<'_>,
+    proof: &RowProof,
     commitment: &[u8; 32],
     context: &VerificationContext,
 ) -> Result<bool> {
@@ -236,7 +236,7 @@ pub fn verify_proof(
 
 /// Convenience alias for context-based verification.
 pub fn verify_row_with_context(
-    proof: &RowProof<'_>,
+    proof: &RowProof,
     commitment: &[u8; 32],
     context: &VerificationContext,
 ) -> Result<()> {
@@ -335,7 +335,9 @@ mod tests {
         let context = VerificationContext::new(ext_data.rlc_original(), &params).unwrap();
 
         let mut invalid = ext_data.generate_row_proof(0).unwrap();
-        invalid.row.to_mut()[0] ^= 1;
+        let mut row = invalid.row.to_vec();
+        row[0] ^= 1;
+        invalid.row = row.into();
         assert!(verify_with_context(&invalid, &ext_data.commitment(), &context).is_err());
         assert!(context.coefficient_logs.get().is_none());
 
