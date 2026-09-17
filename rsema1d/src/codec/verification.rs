@@ -2,7 +2,7 @@ use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::symbols::RlcCoefficientLogs;
 use crate::codec::{compute_rlc, extend_rlcs};
-use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256, MerkleTree};
+use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256_pair, MerkleTree};
 use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
@@ -138,10 +138,7 @@ pub fn verify_standalone(
     let rlc_root =
         reconstruct_root_from_proof(hash_leaf(&rlc.to_bytes()), proof.index, &proof.rlc_proof);
 
-    let mut combined = Vec::with_capacity(64);
-    combined.extend_from_slice(&row_root);
-    combined.extend_from_slice(&rlc_root);
-    let computed_commitment = sha256(&combined);
+    let computed_commitment = sha256_pair(&row_root, &rlc_root);
 
     if computed_commitment != *commitment {
         return Err(Error::VerificationFailed(
@@ -207,10 +204,7 @@ pub fn verify_with_context(
         ));
     }
 
-    let mut combined = Vec::with_capacity(64);
-    combined.extend_from_slice(&row_root);
-    combined.extend_from_slice(&context.rlc_root);
-    let computed_commitment = sha256(&combined);
+    let computed_commitment = sha256_pair(&row_root, &context.rlc_root);
 
     if computed_commitment != *commitment {
         return Err(Error::VerificationFailed(
@@ -269,10 +263,7 @@ pub fn verify_row_inclusion(
     let tree_pos = map_index_to_tree_position(proof.index, params.k);
     let row_root = reconstruct_root_from_proof(hash_leaf(&proof.row), tree_pos, &proof.row_proof);
 
-    let mut combined = Vec::with_capacity(64);
-    combined.extend_from_slice(&row_root);
-    combined.extend_from_slice(&proof.rlc_root);
-    let computed_commitment = sha256(&combined);
+    let computed_commitment = sha256_pair(&row_root, &proof.rlc_root);
 
     if computed_commitment != *commitment {
         return Err(Error::VerificationFailed(
