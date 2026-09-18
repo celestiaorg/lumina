@@ -4,7 +4,6 @@ use tendermint_proto::Protobuf;
 
 use crate::blob::shares_needed_for_blob;
 use crate::hash::Hash;
-use crate::nmt::Namespace;
 use crate::{Error, Result, Share, ShareProof, bail_verification};
 
 /// A proof of inclusion of a [`Blob`] in a [`DataAvailabilityHeader`].
@@ -21,32 +20,24 @@ pub struct BlobProof(pub ShareProof);
 
 impl BlobProof {
     /// Verify the proof against the hash of [`DataAvailabilityHeader`], proving that
-    /// the shares are exactly one blob of a given [`Namespace`].
+    /// the shares are exactly one blob.
     ///
-    /// The proven shares can be turned into a blob with [`Blob::reconstruct`] and
-    /// its [`Commitment`] compared with the expected one.
+    /// The blob is identified by its [`Namespace`] and [`Commitment`], which are not
+    /// proven by this function. Reconstruct the blob from the proven shares with
+    /// [`Blob::reconstruct`] and compare both with the expected ones.
     ///
     /// # Errors
     ///
     /// This function will return an error if:
     ///  - the shares are not a continuous range of shares included in the data root
-    ///  - the shares are not in the given namespace
     ///  - the first share is not a first share of a blob
     ///  - the amount of shares doesn't match the length of the blob
     ///
     /// [`Blob::reconstruct`]: crate::Blob::reconstruct
     /// [`Commitment`]: crate::Commitment
     /// [`DataAvailabilityHeader`]: crate::DataAvailabilityHeader
-    pub fn verify(&self, root: Hash, namespace: Namespace) -> Result<()> {
+    pub fn verify(&self, root: Hash) -> Result<()> {
         self.0.verify(root)?;
-
-        if self.0.namespace_id != namespace {
-            bail_verification!(
-                "proof is for namespace ({:?}), expected ({:?})",
-                self.0.namespace_id,
-                namespace
-            );
-        }
 
         let first_share = self
             .0
@@ -120,7 +111,6 @@ impl From<BlobProof> for RawShareProof {
 mod tests {
     use std::ops::Range;
 
-    use crate::nmt::Namespace;
     use crate::test_utils::{generate_eds_with_blobs, share_proof_for_range, share_proof_for_rows};
     use crate::{Blob, DataAvailabilityHeader, ExtendedDataSquare, Share, ShareProof};
 
@@ -146,7 +136,7 @@ mod tests {
             let index = range.start as u64;
             let proof = proof_for_range(&eds, range);
 
-            proof.verify(root, blobs[0].namespace).unwrap();
+            proof.verify(root).unwrap();
 
             let shares: Vec<_> = proof
                 .0
@@ -181,41 +171,25 @@ mod tests {
                 .all(|blob| blob.commitment != spliced.commitment)
         );
 
-        let err = proof
-            .verify(root, blobs[0].namespace)
-            .unwrap_err()
-            .to_string();
+        let err = proof.verify(root).unwrap_err().to_string();
         assert!(err.contains("not continuous"), "{err}");
     }
 
     #[test]
-    fn verify_rejects_another_namespace() {
-        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
-        let root = DataAvailabilityHeader::from_eds(&eds).hash();
-        let proof = proof_for_range(&eds, 0..3);
-
-        let err = proof
-            .verify(root, Namespace::const_v0([9; 10]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("namespace"), "{err}");
-    }
-
-    #[test]
     fn verify_rejects_part_of_blob() {
-        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         // first 2 shares of a 3 share blob
         let err = proof_for_range(&eds, 0..2)
-            .verify(root, blobs[0].namespace)
+            .verify(root)
             .unwrap_err()
             .to_string();
         assert!(err.contains("occupies"), "{err}");
 
         // first row of a blob spanning 2 rows
         let err = proof_for_range(&eds, 3..4)
-            .verify(root, blobs[0].namespace)
+            .verify(root)
             .unwrap_err()
             .to_string();
         assert!(err.contains("occupies"), "{err}");
@@ -223,12 +197,12 @@ mod tests {
 
     #[test]
     fn verify_rejects_blob_with_extra_shares() {
-        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         // a blob and a share of the next one
         let err = proof_for_range(&eds, 0..4)
-            .verify(root, blobs[0].namespace)
+            .verify(root)
             .unwrap_err()
             .to_string();
         assert!(err.contains("occupies"), "{err}");
@@ -236,11 +210,11 @@ mod tests {
 
     #[test]
     fn verify_rejects_range_starting_mid_blob() {
-        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         let err = proof_for_range(&eds, 1..3)
-            .verify(root, blobs[0].namespace)
+            .verify(root)
             .unwrap_err()
             .to_string();
         assert!(err.contains("Expected first share of a blob"), "{err}");
