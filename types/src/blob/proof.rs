@@ -120,48 +120,11 @@ impl From<BlobProof> for RawShareProof {
 mod tests {
     use std::ops::Range;
 
-    use crate::consts::appconsts::{
-        CONTINUATION_SPARSE_SHARE_CONTENT_SIZE, FIRST_SPARSE_SHARE_CONTENT_SIZE, SHARE_SIZE,
-    };
-    use crate::nmt::{NS_SIZE, Namespace};
-    use crate::test_utils::{random_bytes, share_proof_for_range, share_proof_for_rows};
+    use crate::nmt::Namespace;
+    use crate::test_utils::{generate_eds_with_blobs, share_proof_for_range, share_proof_for_rows};
     use crate::{Blob, DataAvailabilityHeader, ExtendedDataSquare, Share, ShareProof};
 
     use super::BlobProof;
-
-    const NS: Namespace = Namespace::const_v0([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-
-    /// A square with blobs of given lengths in shares, laid out one after another.
-    fn eds_with_blobs(
-        square_width: usize,
-        blob_shares: &[usize],
-    ) -> (ExtendedDataSquare, Vec<Blob>) {
-        let ods_size = square_width / 2;
-        let mut blobs = Vec::new();
-        let mut shares: Vec<Vec<u8>> = Vec::new();
-
-        for len in blob_shares {
-            let data = random_bytes(
-                FIRST_SPARSE_SHARE_CONTENT_SIZE
-                    + (len - 1) * CONTINUATION_SPARSE_SHARE_CONTENT_SIZE,
-            );
-            let blob = Blob::new(NS, data, None).unwrap();
-            shares.extend(blob.to_shares().unwrap().iter().map(Share::to_vec));
-            blobs.push(blob);
-        }
-
-        while shares.len() < ods_size * ods_size {
-            shares.push(
-                [
-                    Namespace::TAIL_PADDING.as_bytes(),
-                    &[0; SHARE_SIZE - NS_SIZE][..],
-                ]
-                .concat(),
-            );
-        }
-
-        (ExtendedDataSquare::from_ods(shares).unwrap(), blobs)
-    }
 
     /// Proof for a range of ODS share indexes, as `share.GetRange` would return.
     fn proof_for_range(eds: &ExtendedDataSquare, range: Range<usize>) -> BlobProof {
@@ -176,14 +139,14 @@ mod tests {
     #[test]
     fn verify_blob() {
         // 3 shares, then a blob spanning rows 0 and 1, then 2 shares
-        let (eds, blobs) = eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         for (idx, range) in [0..3, 3..8, 8..10].into_iter().enumerate() {
             let index = range.start as u64;
             let proof = proof_for_range(&eds, range);
 
-            proof.verify(root, NS).unwrap();
+            proof.verify(root, blobs[0].namespace).unwrap();
 
             let shares: Vec<_> = proof
                 .0
@@ -199,7 +162,7 @@ mod tests {
     #[test]
     fn verify_rejects_blob_spliced_from_two_blobs() {
         // blob B occupies (row 0, col 3) and (row 1, col 0), blob C (row 1, col 1) and (row 1, col 2)
-        let (eds, blobs) = eds_with_blobs(8, &[3, 2, 2]);
+        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 2, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         // first share of B and last share of C, which are not adjacent
@@ -218,13 +181,16 @@ mod tests {
                 .all(|blob| blob.commitment != spliced.commitment)
         );
 
-        let err = proof.verify(root, NS).unwrap_err().to_string();
+        let err = proof
+            .verify(root, blobs[0].namespace)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not continuous"), "{err}");
     }
 
     #[test]
     fn verify_rejects_another_namespace() {
-        let (eds, _) = eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
         let proof = proof_for_range(&eds, 0..3);
 
@@ -237,19 +203,19 @@ mod tests {
 
     #[test]
     fn verify_rejects_part_of_blob() {
-        let (eds, _) = eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         // first 2 shares of a 3 share blob
         let err = proof_for_range(&eds, 0..2)
-            .verify(root, NS)
+            .verify(root, blobs[0].namespace)
             .unwrap_err()
             .to_string();
         assert!(err.contains("occupies"), "{err}");
 
         // first row of a blob spanning 2 rows
         let err = proof_for_range(&eds, 3..4)
-            .verify(root, NS)
+            .verify(root, blobs[0].namespace)
             .unwrap_err()
             .to_string();
         assert!(err.contains("occupies"), "{err}");
@@ -257,12 +223,12 @@ mod tests {
 
     #[test]
     fn verify_rejects_blob_with_extra_shares() {
-        let (eds, _) = eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         // a blob and a share of the next one
         let err = proof_for_range(&eds, 0..4)
-            .verify(root, NS)
+            .verify(root, blobs[0].namespace)
             .unwrap_err()
             .to_string();
         assert!(err.contains("occupies"), "{err}");
@@ -270,11 +236,11 @@ mod tests {
 
     #[test]
     fn verify_rejects_range_starting_mid_blob() {
-        let (eds, _) = eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         let err = proof_for_range(&eds, 1..3)
-            .verify(root, NS)
+            .verify(root, blobs[0].namespace)
             .unwrap_err()
             .to_string();
         assert!(err.contains("Expected first share of a blob"), "{err}");
@@ -282,7 +248,7 @@ mod tests {
 
     #[test]
     fn blob_proof_serde() {
-        let (eds, _) = eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
         let proof = proof_for_range(&eds, 0..3);
 
         let serialized = serde_json::to_string(&proof).unwrap();

@@ -189,10 +189,10 @@ mod tests {
 
     #[test]
     fn continuous_ranges_verify() {
-        for square_width in [2, 4, 8] {
+        for square_width in [2usize, 4, 8] {
+            let ods_shares = (square_width / 2).pow(2);
             let eds = generate_dummy_eds(square_width);
             let root = DataAvailabilityHeader::from_eds(&eds).hash();
-            let ods_shares = (square_width / 2).pow(2);
 
             for start in 0..ods_shares {
                 for end in start + 1..=ods_shares {
