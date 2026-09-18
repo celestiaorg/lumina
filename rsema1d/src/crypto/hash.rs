@@ -8,6 +8,14 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Hash two 32-byte values without allocating a temporary concatenation.
+pub(crate) fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(left);
+    hasher.update(right);
+    hasher.finalize().into()
+}
+
 /// Convert 32-byte hash to GF128 by XORing first and second halves
 pub fn hash_to_gf128(hash: &[u8; 32]) -> GF128 {
     let mut limbs = [0u16; 8];
@@ -57,6 +65,16 @@ mod tests {
         let data = b"hello world";
         let hash = sha256(data);
         assert_eq!(hash.len(), 32);
+    }
+
+    #[test]
+    fn sha256_pair_matches_concatenation() {
+        let left = [1u8; 32];
+        let right = [2u8; 32];
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(&left);
+        combined[32..].copy_from_slice(&right);
+        assert_eq!(sha256_pair(&left, &right), sha256(&combined));
     }
 
     #[test]
