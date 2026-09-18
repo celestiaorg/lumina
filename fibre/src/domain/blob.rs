@@ -10,6 +10,8 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use crate::blob_header;
 use crate::config::BlobConfig;
 use crate::error::{BlobIdError, FibreError, ShardError};
@@ -102,7 +104,7 @@ impl fmt::Debug for BlobID {
 #[derive(Debug)]
 pub struct Blob {
     id: BlobID,
-    data: Vec<u8>,
+    data: Bytes,
 }
 
 impl Blob {
@@ -114,6 +116,11 @@ impl Blob {
     /// Returns the original data without the header.
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    /// Consumes this blob and returns its original data as shared bytes.
+    pub fn into_data(self) -> Bytes {
+        self.data
     }
 }
 
@@ -217,7 +224,7 @@ impl EncodedBlob {
 pub(crate) struct BlobReconstruction {
     cfg: BlobConfig,
     id: BlobID,
-    rows: Vec<Option<bytes::Bytes>>,
+    rows: Vec<Option<Bytes>>,
 }
 
 impl BlobReconstruction {
@@ -298,7 +305,7 @@ impl BlobReconstruction {
             rsema1d::Parameters::new(self.cfg.original_rows, self.cfg.parity_rows, row_size)?;
 
         let reconstructed = rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
-        let data = blob_header::decode(&reconstructed, self.cfg.max_data_size)?;
+        let data = blob_header::decode(reconstructed, self.cfg.max_data_size)?;
 
         Ok(Blob { id: self.id, data })
     }
