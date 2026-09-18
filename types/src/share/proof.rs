@@ -175,70 +175,12 @@ impl From<ShareProof> for RawShareProof {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
-
     use celestia_proto::celestia::core::v1::proof::RowProof as RawRowProof;
-    use nmt_rs::NamespaceProof as NmtNamespaceProof;
 
-    use crate::test_utils::generate_dummy_eds;
+    use crate::test_utils::{generate_dummy_eds, share_proof_for_range, share_proof_for_rows};
     use crate::{DataAvailabilityHeader, ExtendedDataSquare};
 
     use super::ShareProof;
-
-    /// Build a proof from genuine per row proofs, claiming the rows are consecutive.
-    fn proof_for_rows(eds: &ExtendedDataSquare, rows: &[(u16, Range<usize>)]) -> ShareProof {
-        let dah = DataAvailabilityHeader::from_eds(eds);
-        let mut data = Vec::new();
-        let mut share_proofs = Vec::new();
-        let mut row_proof = RawRowProof {
-            start_row: rows[0].0.into(),
-            end_row: u32::from(rows[0].0) + rows.len() as u32 - 1,
-            ..Default::default()
-        };
-
-        for (row, columns) in rows {
-            for column in columns.clone() {
-                data.push(*eds.share(*row, column as u16).unwrap().data());
-            }
-            let proof = eds
-                .row_nmt(*row)
-                .unwrap()
-                .build_range_proof(columns.clone());
-            share_proofs.push(
-                NmtNamespaceProof::PresenceProof {
-                    proof,
-                    ignore_max_ns: true,
-                }
-                .into(),
-            );
-
-            let single = RawRowProof::from(dah.row_proof(*row..=*row).unwrap());
-            row_proof.row_roots.extend(single.row_roots);
-            row_proof.proofs.extend(single.proofs);
-        }
-
-        ShareProof {
-            data,
-            namespace_id: eds.share(0, 0).unwrap().namespace(),
-            share_proofs,
-            row_proof: row_proof.try_into().unwrap(),
-        }
-    }
-
-    /// Build a proof for a range of ODS share indexes.
-    fn proof_for_range(eds: &ExtendedDataSquare, range: Range<usize>) -> ShareProof {
-        let ods_width = usize::from(eds.square_width() / 2);
-        let rows: Vec<_> = (range.start / ods_width..=(range.end - 1) / ods_width)
-            .map(|row| {
-                let row_start = row * ods_width;
-                let start = range.start.max(row_start) - row_start;
-                let end = range.end.min(row_start + ods_width) - row_start;
-                (row as u16, start..end)
-            })
-            .collect();
-
-        proof_for_rows(eds, &rows)
-    }
 
     fn verify_err(proof: &ShareProof, eds: &ExtendedDataSquare) -> String {
         let root = DataAvailabilityHeader::from_eds(eds).hash();
@@ -254,7 +196,9 @@ mod tests {
 
             for start in 0..ods_shares {
                 for end in start + 1..=ods_shares {
-                    proof_for_range(&eds, start..end).verify(root).unwrap();
+                    share_proof_for_range(&eds, start..end)
+                        .verify(root)
+                        .unwrap();
                 }
             }
         }
@@ -265,19 +209,19 @@ mod tests {
         let eds = generate_dummy_eds(8);
 
         // the last share in row 0 is skipped
-        let proof = proof_for_rows(&eds, &[(0, 2..3), (1, 0..2)]);
+        let proof = share_proof_for_rows(&eds, &[(0, 2..3), (1, 0..2)]);
         assert!(verify_err(&proof, &eds).contains("not continuous"));
 
         // the first share in row 1 is skipped
-        let proof = proof_for_rows(&eds, &[(0, 2..4), (1, 1..2)]);
+        let proof = share_proof_for_rows(&eds, &[(0, 2..4), (1, 1..2)]);
         assert!(verify_err(&proof, &eds).contains("not continuous"));
 
         // gaps on both sides
-        let proof = proof_for_rows(&eds, &[(0, 2..3), (1, 1..2)]);
+        let proof = share_proof_for_rows(&eds, &[(0, 2..3), (1, 1..2)]);
         assert!(verify_err(&proof, &eds).contains("not continuous"));
 
         // middle row is not full
-        let proof = proof_for_rows(&eds, &[(0, 3..4), (1, 0..3), (2, 0..1)]);
+        let proof = share_proof_for_rows(&eds, &[(0, 3..4), (1, 0..3), (2, 0..1)]);
         assert!(verify_err(&proof, &eds).contains("not continuous"));
     }
 
@@ -286,8 +230,8 @@ mod tests {
         let eds = generate_dummy_eds(8);
 
         // row 1 is skipped
-        let mut proof = proof_for_range(&eds, 3..5);
-        let row_2 = proof_for_rows(&eds, &[(2, 0..1)]);
+        let mut proof = share_proof_for_range(&eds, 3..5);
+        let row_2 = share_proof_for_rows(&eds, &[(2, 0..1)]);
         proof.data[1] = row_2.data[0];
         proof.share_proofs[1] = row_2.share_proofs[0].clone();
         let mut raw = RawRowProof::from(proof.row_proof);
@@ -303,7 +247,7 @@ mod tests {
     fn shares_from_the_same_row_twice() {
         let eds = generate_dummy_eds(8);
 
-        let proof = proof_for_rows(&eds, &[(0, 0..1), (0, 3..4)]);
+        let proof = share_proof_for_rows(&eds, &[(0, 0..1), (0, 3..4)]);
         assert!(verify_err(&proof, &eds).contains("row proof index"));
     }
 
@@ -312,11 +256,11 @@ mod tests {
         let eds = generate_dummy_eds(8);
 
         // parity shares in the ODS row
-        let proof = proof_for_rows(&eds, &[(0, 3..5)]);
+        let proof = share_proof_for_rows(&eds, &[(0, 3..5)]);
         assert!(verify_err(&proof, &eds).contains("parity"));
 
         // parity row
-        let proof = proof_for_rows(&eds, &[(4, 0..1)]);
+        let proof = share_proof_for_rows(&eds, &[(4, 0..1)]);
         assert!(verify_err(&proof, &eds).contains("outside of the original data square"));
     }
 

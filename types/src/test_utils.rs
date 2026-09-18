@@ -638,6 +638,81 @@ fn blob_len(shares: usize) -> usize {
     FIRST_SPARSE_SHARE_CONTENT_SIZE + (shares - 1) * CONTINUATION_SPARSE_SHARE_CONTENT_SIZE
 }
 
+/// Build a [`ShareProof`] from genuine per row proofs, claiming the rows are consecutive.
+#[cfg(test)]
+pub(crate) fn share_proof_for_rows(
+    eds: &ExtendedDataSquare,
+    rows: &[(u16, std::ops::Range<usize>)],
+) -> crate::ShareProof {
+    use celestia_proto::celestia::core::v1::proof::RowProof as RawRowProof;
+    use nmt_rs::NamespaceProof as NmtNamespaceProof;
+
+    let dah = DataAvailabilityHeader::from_eds(eds);
+    let mut data = Vec::new();
+    let mut share_proofs = Vec::new();
+    let mut row_proof = RawRowProof {
+        start_row: rows[0].0.into(),
+        end_row: u32::from(rows[0].0) + rows.len() as u32 - 1,
+        ..Default::default()
+    };
+
+    for (row, columns) in rows {
+        for column in columns.clone() {
+            data.push(*eds.share(*row, column as u16).unwrap().data());
+        }
+        let proof = eds
+            .row_nmt(*row)
+            .unwrap()
+            .build_range_proof(columns.clone());
+        share_proofs.push(
+            NmtNamespaceProof::PresenceProof {
+                proof,
+                ignore_max_ns: true,
+            }
+            .into(),
+        );
+
+        let single = RawRowProof::from(dah.row_proof(*row..=*row).unwrap());
+        row_proof.row_roots.extend(single.row_roots);
+        row_proof.proofs.extend(single.proofs);
+    }
+
+    crate::ShareProof {
+        data,
+        namespace_id: eds.share(0, 0).unwrap().namespace(),
+        share_proofs,
+        row_proof: row_proof.try_into().unwrap(),
+    }
+}
+
+/// Build a [`ShareProof`] for a range of ODS share indexes.
+///
+/// The range is clipped to each row it spans and translated to the columns of that
+/// row, e.g. for `2..9` in a square of 4 shares wide:
+///
+/// ```text
+/// row 0:  .  .  S  S     2..4
+/// row 1:  S  S  S  S     0..4
+/// row 2:  S  .  .  .     0..1
+/// ```
+#[cfg(test)]
+pub(crate) fn share_proof_for_range(
+    eds: &ExtendedDataSquare,
+    range: std::ops::Range<usize>,
+) -> crate::ShareProof {
+    let ods_size = usize::from(eds.square_width() / 2);
+    let rows: Vec<_> = (range.start / ods_size..=(range.end - 1) / ods_size)
+        .map(|row| {
+            let row_start = row * ods_size;
+            let start = range.start.max(row_start) - row_start;
+            let end = range.end.min(row_start + ods_size) - row_start;
+            (row as u16, start..end)
+        })
+        .collect();
+
+    share_proof_for_rows(eds, &rows)
+}
+
 pub(crate) fn random_bytes(len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
     rand::thread_rng().fill_bytes(&mut buf);

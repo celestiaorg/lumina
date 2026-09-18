@@ -120,14 +120,11 @@ impl From<BlobProof> for RawShareProof {
 mod tests {
     use std::ops::Range;
 
-    use celestia_proto::celestia::core::v1::proof::RowProof as RawRowProof;
-    use nmt_rs::NamespaceProof as NmtNamespaceProof;
-
     use crate::consts::appconsts::{
         CONTINUATION_SPARSE_SHARE_CONTENT_SIZE, FIRST_SPARSE_SHARE_CONTENT_SIZE, SHARE_SIZE,
     };
-    use crate::nmt::{NS_SIZE, Namespace, NamespaceProof};
-    use crate::test_utils::random_bytes;
+    use crate::nmt::{NS_SIZE, Namespace};
+    use crate::test_utils::{random_bytes, share_proof_for_range, share_proof_for_rows};
     use crate::{Blob, DataAvailabilityHeader, ExtendedDataSquare, Share, ShareProof};
 
     use super::BlobProof;
@@ -168,56 +165,12 @@ mod tests {
 
     /// Proof for a range of ODS share indexes, as `share.GetRange` would return.
     fn proof_for_range(eds: &ExtendedDataSquare, range: Range<usize>) -> BlobProof {
-        let ods_size = usize::from(eds.square_width() / 2);
-        let rows: Vec<_> = (range.start / ods_size..=(range.end - 1) / ods_size)
-            .map(|row| {
-                let row_start = row * ods_size;
-                let start = range.start.max(row_start) - row_start;
-                let end = range.end.min(row_start + ods_size) - row_start;
-                (row as u16, start..end)
-            })
-            .collect();
-
-        proof_for_rows(eds, &rows)
+        share_proof_for_range(eds, range).into()
     }
 
     /// Proof built from genuine per row proofs, claiming the rows are consecutive.
     fn proof_for_rows(eds: &ExtendedDataSquare, rows: &[(u16, Range<usize>)]) -> BlobProof {
-        let dah = DataAvailabilityHeader::from_eds(eds);
-        let mut data = Vec::new();
-        let mut share_proofs: Vec<NamespaceProof> = Vec::new();
-        let mut row_proof = RawRowProof {
-            start_row: rows[0].0.into(),
-            end_row: u32::from(rows[0].0) + rows.len() as u32 - 1,
-            ..Default::default()
-        };
-
-        for (row, columns) in rows {
-            let (row, start, end) = (*row, columns.start, columns.end);
-
-            for column in start..end {
-                data.push(*eds.share(row, column as u16).unwrap().data());
-            }
-            let proof = eds.row_nmt(row).unwrap().build_range_proof(start..end);
-            share_proofs.push(
-                NmtNamespaceProof::PresenceProof {
-                    proof,
-                    ignore_max_ns: true,
-                }
-                .into(),
-            );
-
-            let single = RawRowProof::from(dah.row_proof(row..=row).unwrap());
-            row_proof.row_roots.extend(single.row_roots);
-            row_proof.proofs.extend(single.proofs);
-        }
-
-        BlobProof(ShareProof {
-            data,
-            namespace_id: NS,
-            share_proofs,
-            row_proof: row_proof.try_into().unwrap(),
-        })
+        share_proof_for_rows(eds, rows).into()
     }
 
     #[test]
