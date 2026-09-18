@@ -2,8 +2,9 @@
 //!
 //! The blob header is prepended to the original data before splitting into rows.
 
-use crate::error::{BlobHeaderError, FibreError};
 use bytes::Bytes;
+
+use crate::error::{BlobHeaderError, FibreError};
 
 /// Length of the version field in bytes.
 const BLOB_VERSION_LEN: usize = 1;
@@ -34,41 +35,36 @@ pub(crate) fn decode(rows: rsema1d::RowMatrix, max_data_size: usize) -> Result<B
         return Err(BlobHeaderError::FirstRowTooSmall(rows.row_size()).into());
     }
 
-    let backing_len = rows.as_row_major().len();
-    let data_size = {
-        let buf = rows.as_row_major();
-        if buf[0] != VERSION {
-            return Err(FibreError::UnsupportedBlobVersion(buf[0]));
-        }
+    let buf = rows.as_row_major();
+    if buf[0] != VERSION {
+        return Err(FibreError::UnsupportedBlobVersion(buf[0]));
+    }
 
-        let data_size = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
-        if data_size == 0 {
-            return Err(BlobHeaderError::ZeroDataSize.into());
+    let data_size = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+    if data_size == 0 {
+        return Err(BlobHeaderError::ZeroDataSize.into());
+    }
+    if data_size as usize > max_data_size {
+        return Err(BlobHeaderError::DataSizeExceedsMax {
+            size: data_size,
+            max: max_data_size,
         }
-        if data_size as usize > max_data_size {
-            return Err(BlobHeaderError::DataSizeExceedsMax {
-                size: data_size,
-                max: max_data_size,
-            }
-            .into());
-        }
+        .into());
+    }
 
-        let data_size = data_size as usize;
-        let payload = &buf[SIZE..];
-        if payload.get(..data_size).is_none() {
-            return Err(BlobHeaderError::DataSizeMismatch {
-                copied: payload.len(),
-                expected: data_size,
-            }
-            .into());
+    let data_size = data_size as usize;
+    let payload = &buf[SIZE..];
+    let Some(data) = payload.get(..data_size) else {
+        return Err(BlobHeaderError::DataSizeMismatch {
+            copied: payload.len(),
+            expected: data_size,
         }
-        data_size
+        .into());
     };
 
-    if data_size.saturating_mul(2) < backing_len {
-        return Ok(Bytes::copy_from_slice(
-            &rows.as_row_major()[SIZE..SIZE + data_size],
-        ));
+    // Copy small payloads so a blob does not pin the whole K x row_size reconstruction buffer.
+    if data_size < buf.len() / 2 {
+        return Ok(Bytes::copy_from_slice(data));
     }
 
     Ok(rows.into_bytes().slice(SIZE..SIZE + data_size))

@@ -187,9 +187,7 @@ impl RowMatrix {
         self.data.into_vec()
     }
 
-    /// Consumes the matrix and returns its backing storage as shared bytes.
-    ///
-    /// This conversion does not copy heap, memory-mapped, or already shared storage.
+    /// Consumes the matrix and returns its backing storage as shared bytes without copying.
     pub fn into_bytes(self) -> Bytes {
         self.data.into_bytes()
     }
