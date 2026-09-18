@@ -37,6 +37,7 @@ impl BlobProof {
     /// [`Blob::reconstruct`]: crate::Blob::reconstruct
     /// [`Commitment`]: crate::Commitment
     /// [`DataAvailabilityHeader`]: crate::DataAvailabilityHeader
+    /// [`Namespace`]: crate::nmt::Namespace
     pub fn verify(&self, root: Hash) -> Result<()> {
         self.0.verify(root)?;
 
