@@ -81,19 +81,6 @@ impl BlobProof {
 
         Ok(())
     }
-
-    /// Get the index of the blob's first share in the original data square.
-    ///
-    /// The index is only proven if [`BlobProof::verify`] succeeded for the same proof.
-    pub fn index(&self) -> Option<u64> {
-        let merkle_proof = self.0.row_proof.proofs().first()?;
-        let nmt_proof = self.0.share_proofs.first()?;
-        let ods_size = merkle_proof.total as u64 / 4;
-
-        (merkle_proof.index as u64)
-            .checked_mul(ods_size)?
-            .checked_add(u64::from(nmt_proof.start_idx()))
-    }
 }
 
 impl From<ShareProof> for BlobProof {
@@ -155,7 +142,6 @@ mod tests {
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         for (idx, range) in [0..3, 3..8, 8..10].into_iter().enumerate() {
-            let index = range.start as u64;
             let proof = proof_for_range(&eds, range);
 
             proof.verify(root).unwrap();
@@ -167,7 +153,6 @@ mod tests {
                 .map(|share| Share::from_raw(share).unwrap())
                 .collect();
             assert_eq!(Blob::reconstruct(&shares).unwrap(), blobs[idx]);
-            assert_eq!(proof.index(), Some(index));
         }
     }
 
