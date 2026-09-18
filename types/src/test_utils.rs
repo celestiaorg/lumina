@@ -605,12 +605,12 @@ pub fn generate_eds_with_layout(
 ///
 /// Blobs are in the same namespace and are laid out one after another, starting at
 /// the beginning of the square. The rest of the square is filled with tail padding.
-pub fn generate_eds_with_blobs(
+pub fn generate_eds_with_blob_lengths(
     square_width: usize,
-    blob_shares: &[usize],
+    blob_lengths: &[usize],
 ) -> (ExtendedDataSquare, Vec<Blob>) {
     let ns = Namespace::const_v0(rand::random());
-    let layout: Vec<_> = blob_shares
+    let layout: Vec<_> = blob_lengths
         .iter()
         .map(|shares| SquareEntry::Blob(ns, *shares))
         .collect();

@@ -111,7 +111,9 @@ impl From<BlobProof> for RawShareProof {
 mod tests {
     use std::ops::Range;
 
-    use crate::test_utils::{generate_eds_with_blobs, share_proof_for_range, share_proof_for_rows};
+    use crate::test_utils::{
+        generate_eds_with_blob_lengths, share_proof_for_range, share_proof_for_rows,
+    };
     use crate::{Blob, DataAvailabilityHeader, ExtendedDataSquare, Share, ShareProof};
 
     use super::BlobProof;
@@ -129,7 +131,7 @@ mod tests {
     #[test]
     fn verify_blob() {
         // 3 shares, then a blob spanning rows 0 and 1, then 2 shares
-        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, blobs) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         for (idx, range) in [0..3, 3..8, 8..10].into_iter().enumerate() {
@@ -152,7 +154,7 @@ mod tests {
     #[test]
     fn verify_rejects_blob_spliced_from_two_blobs() {
         // blob B occupies (row 0, col 3) and (row 1, col 0), blob C (row 1, col 1) and (row 1, col 2)
-        let (eds, blobs) = generate_eds_with_blobs(8, &[3, 2, 2]);
+        let (eds, blobs) = generate_eds_with_blob_lengths(8, &[3, 2, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         // first share of B and last share of C, which are not adjacent
@@ -177,7 +179,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_part_of_blob() {
-        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         // first 2 shares of a 3 share blob
@@ -197,7 +199,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_blob_with_extra_shares() {
-        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         // a blob and a share of the next one
@@ -210,7 +212,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_range_starting_mid_blob() {
-        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
         let err = proof_for_range(&eds, 1..3)
@@ -222,7 +224,7 @@ mod tests {
 
     #[test]
     fn blob_proof_serde() {
-        let (eds, _) = generate_eds_with_blobs(8, &[3, 5, 2]);
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
         let proof = proof_for_range(&eds, 0..3);
 
         let serialized = serde_json::to_string(&proof).unwrap();
