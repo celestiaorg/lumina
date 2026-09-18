@@ -43,10 +43,7 @@ impl BlobProof {
 
         // reserved namespaces hold compact shares, which have a different layout
         if self.0.namespace_id.is_reserved() {
-            bail_verification!(
-                "namespace ({:?}) is reserved, so it doesn't hold blobs",
-                self.0.namespace_id
-            );
+            return Err(Error::UnexpectedReservedNamespace);
         }
 
         let first_share = self
@@ -121,7 +118,7 @@ mod tests {
         SquareEntry, generate_eds_with_blob_lengths, generate_eds_with_layout,
         share_proof_for_range, share_proof_for_rows,
     };
-    use crate::{Blob, DataAvailabilityHeader, ExtendedDataSquare, Share, ShareProof};
+    use crate::{Blob, DataAvailabilityHeader, Error, ExtendedDataSquare, Share, ShareProof};
 
     use super::BlobProof;
 
@@ -254,11 +251,8 @@ mod tests {
             generate_eds_with_layout(8, &[SquareEntry::Reserved(Namespace::PAY_FOR_BLOB, 5)]);
         let root = DataAvailabilityHeader::from_eds(&eds).hash();
 
-        let err = proof_for_range(&eds, 0..4)
-            .verify(root)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("reserved"), "{err}");
+        let err = proof_for_range(&eds, 0..4).verify(root).unwrap_err();
+        assert!(matches!(err, Error::UnexpectedReservedNamespace), "{err}");
     }
 
     #[test]
