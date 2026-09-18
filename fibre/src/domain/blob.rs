@@ -10,10 +10,11 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use crate::blob_header;
 use crate::config::BlobConfig;
 use crate::error::{BlobIdError, FibreError, ShardError};
-use bytes::Bytes;
 
 /// A 32-byte SHA-256 commitment hash. Re-exports rsema1d's Commitment type.
 pub type Commitment = rsema1d::Commitment;
@@ -279,17 +280,16 @@ impl BlobReconstruction {
     ///
     /// Requires at least `original_rows` (K) rows to have been set via `store_rows()`.
     pub(crate) fn reconstruct(self) -> Result<Blob, FibreError> {
-        let Self { cfg, id, rows } = self;
-        let k = cfg.original_rows;
+        let k = self.cfg.original_rows;
         let mut selected_indices = Vec::with_capacity(k);
         let mut selected_rows = Vec::with_capacity(k);
-        for (index, row) in rows.iter().enumerate() {
+        for (index, row) in self.rows.iter().enumerate() {
             if selected_rows.len() == k {
                 break;
             }
             if let Some(row) = row {
                 selected_indices.push(index);
-                selected_rows.push(row.as_ref());
+                selected_rows.push(&row[..]);
             }
         }
 
@@ -301,14 +301,13 @@ impl BlobReconstruction {
         }
 
         let row_size = selected_rows.first().map_or(0, |row| row.len());
-        let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
+        let params =
+            rsema1d::Parameters::new(self.cfg.original_rows, self.cfg.parity_rows, row_size)?;
 
         let reconstructed = rsema1d::reconstruct(&selected_rows, &selected_indices, &params)?;
-        drop(selected_rows);
-        drop(rows);
-        let data = blob_header::decode(reconstructed, cfg.max_data_size)?;
+        let data = blob_header::decode(reconstructed, self.cfg.max_data_size)?;
 
-        Ok(Blob { id, data })
+        Ok(Blob { id: self.id, data })
     }
 }
 
