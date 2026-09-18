@@ -362,6 +362,16 @@ impl RowProof {
         &self.proofs
     }
 
+    /// Get the index of the first row this proof proves.
+    pub fn start_row(&self) -> u16 {
+        self.start_row
+    }
+
+    /// Get the index of the last row this proof proves.
+    pub fn end_row(&self) -> u16 {
+        self.end_row
+    }
+
     /// Verify the proof against the hash of [`DataAvailabilityHeader`], proving
     /// the inclusion of rows.
     ///
@@ -369,6 +379,8 @@ impl RowProof {
     ///
     /// This function will return an error if:
     ///  - the proof is malformed. Number of proofs, row roots and the span between starting and ending row need to match.
+    ///  - the inner merkle proofs are not for consecutive rows from `start_row` to `end_row`
+    ///  - the inner merkle proofs are not for the same tree of power of 2 size
     ///  - the verification of any inner merkle proof fails
     ///
     /// # Example
@@ -399,8 +411,8 @@ impl RowProof {
             );
         }
 
-        let length = self.end_row - self.start_row + 1;
-        if length as usize != self.proofs.len() {
+        let length = usize::from(self.end_row) - usize::from(self.start_row) + 1;
+        if length != self.proofs.len() {
             bail_verification!(
                 "length based on start_row and end_row ({}) != length of proofs ({})",
                 length,
@@ -412,7 +424,34 @@ impl RowProof {
             bail_verification!("empty hash");
         };
 
-        for (row_root, proof) in self.row_roots.iter().zip(self.proofs.iter()) {
+        // Leaves of the data root tree are row roots followed by column roots of the EDS.
+        let total = self.proofs[0].total;
+        if total < 4 || !total.is_power_of_two() {
+            bail_verification!("invalid data root tree size ({})", total);
+        }
+
+        if usize::from(self.end_row) >= total / 2 {
+            bail_verification!("end_row ({}) points to a column root", self.end_row);
+        }
+
+        for (i, (row_root, proof)) in self.row_roots.iter().zip(&self.proofs).enumerate() {
+            if proof.total != total {
+                bail_verification!(
+                    "row proofs are for different trees ({} != {})",
+                    proof.total,
+                    total
+                );
+            }
+
+            let expected_index = usize::from(self.start_row) + i;
+            if proof.index != expected_index {
+                bail_verification!(
+                    "row proof index ({}) != expected row ({})",
+                    proof.index,
+                    expected_index
+                );
+            }
+
             proof.verify(row_root.to_array(), root)?;
         }
 
@@ -630,6 +669,74 @@ mod tests {
         let mut proof = valid_proof.clone();
         proof.row_roots = proof.row_roots.into_iter().rev().collect();
         proof.verify(dah_root).unwrap_err();
+
+        // proofs and roots for rows other than claimed
+        let mut proof = valid_proof.clone();
+        proof.start_row = 5;
+        proof.end_row = 6;
+        proof.verify(dah_root).unwrap_err();
+
+        // rows in wrong order, with matching proofs
+        let mut proof = valid_proof.clone();
+        proof.row_roots.reverse();
+        proof.proofs.reverse();
+        proof.verify(dah_root).unwrap_err();
+
+        // the same row twice
+        let mut proof = valid_proof.clone();
+        proof.row_roots[1] = proof.row_roots[0].clone();
+        proof.proofs[1] = proof.proofs[0].clone();
+        proof.verify(dah_root).unwrap_err();
+
+        // span overflowing u16
+        let mut proof = valid_proof.clone();
+        proof.start_row = 0;
+        proof.end_row = u16::MAX;
+        proof.row_roots.clear();
+        proof.proofs.clear();
+        proof.verify(dah_root).unwrap_err();
+    }
+
+    #[test]
+    fn row_proof_verify_column_root() {
+        let dah = random_dah(16);
+        let all_roots: Vec<_> = dah
+            .row_roots
+            .iter()
+            .chain(dah.column_roots.iter())
+            .map(|root| root.to_array())
+            .collect();
+
+        let proof = RowProof {
+            row_roots: vec![dah.column_roots[0].clone()],
+            proofs: vec![MerkleProof::new(16, &all_roots).unwrap().0],
+            start_row: 16,
+            end_row: 16,
+        };
+
+        let err = proof.verify(dah.hash()).unwrap_err();
+        assert!(err.to_string().contains("column root"), "{err}");
+    }
+
+    #[test]
+    fn row_proof_verify_wrong_tree_size() {
+        let dah = random_dah(16);
+        let mut proof = dah.row_proof(0..=1).unwrap();
+
+        // Left subtree of 32 leaves tree is the same for a tree with 24 leaves,
+        // so merkle proofs alone still verify with a wrong size.
+        for merkle_proof in &mut proof.proofs {
+            merkle_proof.total = 24;
+        }
+        let Hash::Sha256(root) = dah.hash() else {
+            unreachable!()
+        };
+        proof.proofs[0]
+            .verify(proof.row_roots[0].to_array(), root)
+            .unwrap();
+
+        let err = proof.verify(dah.hash()).unwrap_err();
+        assert!(err.to_string().contains("tree size"), "{err}");
     }
 
     #[test]

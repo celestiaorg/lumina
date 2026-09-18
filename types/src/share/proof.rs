@@ -2,6 +2,8 @@ use celestia_proto::celestia::core::v1::proof::ShareProof as RawShareProof;
 use serde::{Deserialize, Serialize};
 use tendermint_proto::Protobuf;
 
+use std::ops::Range;
+
 use crate::consts::appconsts::SHARE_SIZE;
 use crate::hash::Hash;
 use crate::nmt::NamespaceProof;
@@ -37,15 +39,58 @@ impl ShareProof {
     /// Verify the proof against the hash of [`DataAvailabilityHeader`], proving
     /// the inclusion of shares.
     ///
+    /// The proof doesn't say anything about the height of the block, it is bound to
+    /// the one of the given data root. Use [`ShareProof::covered_range`] to get the
+    /// position of the shares in the square, or [`ShareProof::verify_range`] to check
+    /// that they are at the expected one.
+    ///
     /// # Errors
     ///
     /// This function will return an error if:
     ///  - the proof is malformed. Number of shares, nmt proofs and row proofs needs to match.
+    ///  - the shares are not a continuous range of the original data square
     ///  - the verification of any inner row proof fails
     ///
     /// [`DataAvailabilityHeader`]: crate::DataAvailabilityHeader
     pub fn verify(&self, root: Hash) -> Result<()> {
+        self.covered_range(root)?;
+        Ok(())
+    }
+
+    /// Verify the proof and check that the shares are at the given range of indexes
+    /// in the original data square.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the verification fails or if the shares
+    /// are at a different range than the expected one.
+    pub fn verify_range(&self, root: Hash, range: Range<u64>) -> Result<()> {
+        let covered_range = self.covered_range(root)?;
+
+        if covered_range != range {
+            bail_verification!(
+                "shares are at range ({:?}), expected ({:?})",
+                covered_range,
+                range
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Verify the proof and return the range of indexes the shares occupy in the
+    /// original data square.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the verification fails. See
+    /// [`ShareProof::verify`].
+    pub fn covered_range(&self, root: Hash) -> Result<Range<u64>> {
         let row_roots = self.row_proof.row_roots();
+
+        if self.share_proofs.is_empty() {
+            bail_verification!("proof without shares");
+        }
 
         if self.share_proofs.len() != row_roots.len() {
             bail_verification!(
@@ -55,8 +100,17 @@ impl ShareProof {
             );
         }
 
-        let mut shares_needed = 0;
-        for proof in &self.share_proofs {
+        self.row_proof.verify(root)?;
+
+        // Leaves of the data root tree are row roots followed by column roots of the EDS.
+        // `RowProof::verify` proved that they are the consecutive ones starting at `start_row`.
+        let ods_size = self.row_proof.proofs()[0].total / 4;
+        let start_row = usize::from(self.row_proof.start_row());
+        let last = self.share_proofs.len() - 1;
+
+        let mut data = self.data.as_slice();
+
+        for (i, (proof, row_root)) in self.share_proofs.iter().zip(row_roots).enumerate() {
             if proof.is_of_absence() {
                 bail_verification!("only presence proofs allowed");
             }
@@ -64,31 +118,59 @@ impl ShareProof {
                 bail_verification!("proof without data");
             }
 
-            shares_needed += proof.end_idx() - proof.start_idx();
-        }
+            let row = start_row + i;
+            let start_idx = proof.start_idx() as usize;
+            let end_idx = proof.end_idx() as usize;
 
-        if shares_needed as usize != self.data.len() {
-            bail_verification!(
-                "shares needed ({}) != proof's data length ({})",
-                shares_needed,
-                self.data.len()
-            );
-        }
+            if row >= ods_size {
+                bail_verification!("row ({}) is outside of the original data square", row);
+            }
+            if end_idx > ods_size {
+                bail_verification!("shares in row ({}) extend into parity data", row);
+            }
+            // A range spanning multiple rows must continue from the last column
+            // of a row to the first column of the next one.
+            if i > 0 && start_idx != 0 {
+                bail_verification!(
+                    "shares are not continuous: row ({}) doesn't start at column 0",
+                    row
+                );
+            }
+            if i < last && end_idx != ods_size {
+                bail_verification!(
+                    "shares are not continuous: row ({}) doesn't end at column ({})",
+                    row,
+                    ods_size - 1
+                );
+            }
 
-        self.row_proof.verify(root)?;
+            let shares_in_row = end_idx - start_idx;
+            if data.len() < shares_in_row {
+                bail_verification!(
+                    "shares needed ({}) > proof's data length ({})",
+                    shares_in_row,
+                    data.len()
+                );
+            }
 
-        let mut data = self.data.as_slice();
-
-        for (proof, row) in self.share_proofs.iter().zip(row_roots) {
-            let amount = proof.end_idx() - proof.start_idx();
-            let leaves = &data[..amount as usize];
+            let (leaves, rest) = data.split_at(shares_in_row);
             proof
-                .verify_range(row, leaves, *self.namespace_id)
+                .verify_range(row_root, leaves, *self.namespace_id)
                 .map_err(Error::RangeProofError)?;
-            data = &data[amount as usize..];
+            data = rest;
         }
 
-        Ok(())
+        if !data.is_empty() {
+            bail_verification!("proof has ({}) shares which are not proven", data.len());
+        }
+
+        let ods_size = ods_size as u64;
+        let first_proof = &self.share_proofs[0];
+        let last_proof = &self.share_proofs[last];
+        let start = start_row as u64 * ods_size + u64::from(first_proof.start_idx());
+        let end = (start_row + last) as u64 * ods_size + u64::from(last_proof.end_idx());
+
+        Ok(start..end)
     }
 }
 
@@ -139,9 +221,107 @@ impl From<ShareProof> for RawShareProof {
 
 #[cfg(test)]
 mod tests {
-    use crate::DataAvailabilityHeader;
+    use celestia_proto::celestia::core::v1::proof::RowProof as RawRowProof;
+
+    use crate::test_utils::{generate_dummy_eds, share_proof_for_range, share_proof_for_rows};
+    use crate::{DataAvailabilityHeader, ExtendedDataSquare};
 
     use super::ShareProof;
+
+    fn verify_err(proof: &ShareProof, eds: &ExtendedDataSquare) -> String {
+        let root = DataAvailabilityHeader::from_eds(eds).hash();
+        proof.verify(root).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn continuous_ranges_verify() {
+        for square_width in [2usize, 4, 8] {
+            let ods_shares = (square_width / 2).pow(2);
+            let eds = generate_dummy_eds(square_width);
+            let root = DataAvailabilityHeader::from_eds(&eds).hash();
+
+            for start in 0..ods_shares {
+                for end in start + 1..=ods_shares {
+                    let proof = share_proof_for_range(&eds, start..end);
+                    let range = start as u64..end as u64;
+
+                    proof.verify(root).unwrap();
+                    assert_eq!(proof.covered_range(root).unwrap(), range);
+                    proof.verify_range(root, range).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn verify_range_rejects_another_range() {
+        let eds = generate_dummy_eds(8);
+        let root = DataAvailabilityHeader::from_eds(&eds).hash();
+        let proof = share_proof_for_range(&eds, 3..6);
+
+        let err = proof.verify_range(root, 4..7).unwrap_err().to_string();
+        assert!(err.contains("shares are at range"), "{err}");
+    }
+
+    #[test]
+    fn shares_from_non_adjacent_positions_in_consecutive_rows() {
+        let eds = generate_dummy_eds(8);
+
+        // the last share in row 0 is skipped
+        let proof = share_proof_for_rows(&eds, &[(0, 2..3), (1, 0..2)]);
+        assert!(verify_err(&proof, &eds).contains("not continuous"));
+
+        // the first share in row 1 is skipped
+        let proof = share_proof_for_rows(&eds, &[(0, 2..4), (1, 1..2)]);
+        assert!(verify_err(&proof, &eds).contains("not continuous"));
+
+        // gaps on both sides
+        let proof = share_proof_for_rows(&eds, &[(0, 2..3), (1, 1..2)]);
+        assert!(verify_err(&proof, &eds).contains("not continuous"));
+
+        // middle row is not full
+        let proof = share_proof_for_rows(&eds, &[(0, 3..4), (1, 0..3), (2, 0..1)]);
+        assert!(verify_err(&proof, &eds).contains("not continuous"));
+    }
+
+    #[test]
+    fn shares_from_non_adjacent_rows() {
+        let eds = generate_dummy_eds(8);
+
+        // row 1 is skipped
+        let mut proof = share_proof_for_range(&eds, 3..5);
+        let row_2 = share_proof_for_rows(&eds, &[(2, 0..1)]);
+        proof.data[1] = row_2.data[0];
+        proof.share_proofs[1] = row_2.share_proofs[0].clone();
+        let mut raw = RawRowProof::from(proof.row_proof);
+        let raw_row_2 = RawRowProof::from(row_2.row_proof);
+        raw.row_roots[1] = raw_row_2.row_roots[0].clone();
+        raw.proofs[1] = raw_row_2.proofs[0].clone();
+        proof.row_proof = raw.try_into().unwrap();
+
+        assert!(verify_err(&proof, &eds).contains("row proof index"));
+    }
+
+    #[test]
+    fn shares_from_the_same_row_twice() {
+        let eds = generate_dummy_eds(8);
+
+        let proof = share_proof_for_rows(&eds, &[(0, 0..1), (0, 3..4)]);
+        assert!(verify_err(&proof, &eds).contains("row proof index"));
+    }
+
+    #[test]
+    fn shares_outside_of_ods() {
+        let eds = generate_dummy_eds(8);
+
+        // parity shares in the ODS row
+        let proof = share_proof_for_rows(&eds, &[(0, 3..5)]);
+        assert!(verify_err(&proof, &eds).contains("parity"));
+
+        // parity row
+        let proof = share_proof_for_rows(&eds, &[(4, 0..1)]);
+        assert!(verify_err(&proof, &eds).contains("outside of the original data square"));
+    }
 
     #[test]
     fn share_proof_serde() {
