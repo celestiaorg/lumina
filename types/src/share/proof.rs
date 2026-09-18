@@ -2,6 +2,8 @@ use celestia_proto::celestia::core::v1::proof::ShareProof as RawShareProof;
 use serde::{Deserialize, Serialize};
 use tendermint_proto::Protobuf;
 
+use std::ops::Range;
+
 use crate::consts::appconsts::SHARE_SIZE;
 use crate::hash::Hash;
 use crate::nmt::NamespaceProof;
@@ -37,6 +39,11 @@ impl ShareProof {
     /// Verify the proof against the hash of [`DataAvailabilityHeader`], proving
     /// the inclusion of shares.
     ///
+    /// The proof doesn't say anything about the height of the block, it is bound to
+    /// the one of the given data root. Use [`ShareProof::covered_range`] to get the
+    /// position of the shares in the square, or [`ShareProof::verify_range`] to check
+    /// that they are at the expected one.
+    ///
     /// # Errors
     ///
     /// This function will return an error if:
@@ -46,6 +53,39 @@ impl ShareProof {
     ///
     /// [`DataAvailabilityHeader`]: crate::DataAvailabilityHeader
     pub fn verify(&self, root: Hash) -> Result<()> {
+        self.covered_range(root)?;
+        Ok(())
+    }
+
+    /// Verify the proof and check that the shares are at the given range of indexes
+    /// in the original data square.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the verification fails or if the shares
+    /// are at a different range than the expected one.
+    pub fn verify_range(&self, root: Hash, range: Range<u64>) -> Result<()> {
+        let covered_range = self.covered_range(root)?;
+
+        if covered_range != range {
+            bail_verification!(
+                "shares are at range ({:?}), expected ({:?})",
+                covered_range,
+                range
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Verify the proof and return the range of indexes the shares occupy in the
+    /// original data square.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the verification fails. See
+    /// [`ShareProof::verify`].
+    pub fn covered_range(&self, root: Hash) -> Result<Range<u64>> {
         let row_roots = self.row_proof.row_roots();
 
         if self.share_proofs.is_empty() {
@@ -124,7 +164,13 @@ impl ShareProof {
             bail_verification!("proof has ({}) shares which are not proven", data.len());
         }
 
-        Ok(())
+        let ods_size = ods_size as u64;
+        let first_proof = &self.share_proofs[0];
+        let last_proof = &self.share_proofs[last];
+        let start = start_row as u64 * ods_size + u64::from(first_proof.start_idx());
+        let end = (start_row + last) as u64 * ods_size + u64::from(last_proof.end_idx());
+
+        Ok(start..end)
     }
 }
 
@@ -196,12 +242,25 @@ mod tests {
 
             for start in 0..ods_shares {
                 for end in start + 1..=ods_shares {
-                    share_proof_for_range(&eds, start..end)
-                        .verify(root)
-                        .unwrap();
+                    let proof = share_proof_for_range(&eds, start..end);
+                    let range = start as u64..end as u64;
+
+                    proof.verify(root).unwrap();
+                    assert_eq!(proof.covered_range(root).unwrap(), range);
+                    proof.verify_range(root, range).unwrap();
                 }
             }
         }
+    }
+
+    #[test]
+    fn verify_range_rejects_another_range() {
+        let eds = generate_dummy_eds(8);
+        let root = DataAvailabilityHeader::from_eds(&eds).hash();
+        let proof = share_proof_for_range(&eds, 3..6);
+
+        let err = proof.verify_range(root, 4..7).unwrap_err().to_string();
+        assert!(err.contains("shares are at range"), "{err}");
     }
 
     #[test]
