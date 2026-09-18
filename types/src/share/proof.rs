@@ -60,26 +60,6 @@ impl ShareProof {
             );
         }
 
-        let mut shares_needed = 0;
-        for proof in &self.share_proofs {
-            if proof.is_of_absence() {
-                bail_verification!("only presence proofs allowed");
-            }
-            if proof.start_idx() >= proof.end_idx() {
-                bail_verification!("proof without data");
-            }
-
-            shares_needed += proof.end_idx() - proof.start_idx();
-        }
-
-        if shares_needed as usize != self.data.len() {
-            bail_verification!(
-                "shares needed ({}) != proof's data length ({})",
-                shares_needed,
-                self.data.len()
-            );
-        }
-
         self.row_proof.verify(root)?;
 
         // Leaves of the data root tree are row roots followed by column roots of the EDS.
@@ -91,6 +71,13 @@ impl ShareProof {
         let mut data = self.data.as_slice();
 
         for (i, (proof, row_root)) in self.share_proofs.iter().zip(row_roots).enumerate() {
+            if proof.is_of_absence() {
+                bail_verification!("only presence proofs allowed");
+            }
+            if proof.start_idx() >= proof.end_idx() {
+                bail_verification!("proof without data");
+            }
+
             let row = start_row + i;
             let start_idx = proof.start_idx() as usize;
             let end_idx = proof.end_idx() as usize;
@@ -117,11 +104,24 @@ impl ShareProof {
                 );
             }
 
-            let (leaves, rest) = data.split_at(end_idx - start_idx);
+            let shares_in_row = end_idx - start_idx;
+            if data.len() < shares_in_row {
+                bail_verification!(
+                    "shares needed ({}) > proof's data length ({})",
+                    shares_in_row,
+                    data.len()
+                );
+            }
+
+            let (leaves, rest) = data.split_at(shares_in_row);
             proof
                 .verify_range(row_root, leaves, *self.namespace_id)
                 .map_err(Error::RangeProofError)?;
             data = rest;
+        }
+
+        if !data.is_empty() {
+            bail_verification!("proof has ({}) shares which are not proven", data.len());
         }
 
         Ok(())

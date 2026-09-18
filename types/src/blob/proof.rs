@@ -30,6 +30,7 @@ impl BlobProof {
     ///
     /// This function will return an error if:
     ///  - the shares are not a continuous range of shares included in the data root
+    ///  - the shares are in a reserved namespace
     ///  - the first share is not a first share of a blob
     ///  - the amount of shares doesn't match the length of the blob
     ///
@@ -38,6 +39,14 @@ impl BlobProof {
     /// [`DataAvailabilityHeader`]: crate::DataAvailabilityHeader
     pub fn verify(&self, root: Hash) -> Result<()> {
         self.0.verify(root)?;
+
+        // reserved namespaces hold compact shares, which have a different layout
+        if self.0.namespace_id.is_reserved() {
+            bail_verification!(
+                "namespace ({:?}) is reserved, so it doesn't hold blobs",
+                self.0.namespace_id
+            );
+        }
 
         let first_share = self
             .0
@@ -50,6 +59,11 @@ impl BlobProof {
         let blob_len = first_share
             .sequence_length()
             .ok_or(Error::ExpectedShareWithSequenceStart)?;
+
+        // shares of a zero length sequence are padding, not a blob
+        if blob_len == 0 {
+            bail_verification!("blob has no data");
+        }
 
         // blobs have no end marker, their length in shares comes from the first share
         let shares_needed =
@@ -75,7 +89,9 @@ impl BlobProof {
         let nmt_proof = self.0.share_proofs.first()?;
         let ods_size = merkle_proof.total as u64 / 4;
 
-        Some(merkle_proof.index as u64 * ods_size + u64::from(nmt_proof.start_idx()))
+        (merkle_proof.index as u64)
+            .checked_mul(ods_size)?
+            .checked_add(u64::from(nmt_proof.start_idx()))
     }
 }
 
@@ -111,8 +127,11 @@ impl From<BlobProof> for RawShareProof {
 mod tests {
     use std::ops::Range;
 
+    use crate::consts::appconsts::SHARE_SIZE;
+    use crate::nmt::{NS_SIZE, Namespace};
     use crate::test_utils::{
-        generate_eds_with_blob_lengths, share_proof_for_range, share_proof_for_rows,
+        SquareEntry, generate_eds_with_blob_lengths, generate_eds_with_layout,
+        share_proof_for_range, share_proof_for_rows,
     };
     use crate::{Blob, DataAvailabilityHeader, ExtendedDataSquare, Share, ShareProof};
 
@@ -220,6 +239,40 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Expected first share of a blob"), "{err}");
+    }
+
+    #[test]
+    fn verify_rejects_padding_shares() {
+        let ns = Namespace::const_v0([7; 10]);
+        // padding shares are sequence starts of zero length
+        let mut padding = vec![0u8; SHARE_SIZE];
+        padding[..NS_SIZE].copy_from_slice(ns.as_bytes());
+        padding[NS_SIZE] = 0x01;
+
+        let mut shares = vec![padding];
+        shares.resize(16, [ns.as_bytes(), &[0; SHARE_SIZE - NS_SIZE][..]].concat());
+
+        let eds = ExtendedDataSquare::from_ods(shares).unwrap();
+        let root = DataAvailabilityHeader::from_eds(&eds).hash();
+
+        let err = proof_for_range(&eds, 0..1)
+            .verify(root)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no data"), "{err}");
+    }
+
+    #[test]
+    fn verify_rejects_reserved_namespace() {
+        let (eds, _) =
+            generate_eds_with_layout(8, &[SquareEntry::Reserved(Namespace::PAY_FOR_BLOB, 5)]);
+        let root = DataAvailabilityHeader::from_eds(&eds).hash();
+
+        let err = proof_for_range(&eds, 0..4)
+            .verify(root)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reserved"), "{err}");
     }
 
     #[test]
