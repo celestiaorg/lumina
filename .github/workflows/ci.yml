@@ -109,12 +109,20 @@ jobs:
       if: matrix.crate.devnet
       uses: ./.github/actions/local-devnet
 
-    - name: Run tests
+    - name: Run tests with coverage
+      if: matrix.crate.name != 'lumina-node-wasm'
       env:
         LUMINA_TEST_LOG: ${{ github.workspace }}/test-${{ matrix.crate.name }}.log
       run: cargo llvm-cov --all-features -p ${{ matrix.crate.name }} --lcov --output-path lcov.info
 
+    - name: Run tests without coverage
+      if: matrix.crate.name == 'lumina-node-wasm'
+      env:
+        LUMINA_TEST_LOG: ${{ github.workspace }}/test-${{ matrix.crate.name }}.log
+      run: cargo test --all-features -p ${{ matrix.crate.name }}
+
     - name: Upload coverage
+      if: matrix.crate.name != 'lumina-node-wasm'
       uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
       with:
         disable_search: true
