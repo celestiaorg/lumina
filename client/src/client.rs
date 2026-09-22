@@ -571,7 +571,7 @@ mod tests {
             .with_gas_price(0.004);
         let blob_grpc = blob_client.inner.grpc().unwrap();
         let fibre_grpc = fibre_client.inner.grpc().unwrap();
-        let mut common_height = None;
+        let mut common_block = None;
 
         for _ in 0..5 {
             let height =
@@ -605,18 +605,38 @@ mod tests {
                 (blob_info.unwrap().height, fibre_info.unwrap().height);
 
             if blob_height == fibre_height {
-                common_height = Some(blob_height);
+                common_block = Some((blob_height, promise));
                 break;
             }
         }
 
-        let height = common_height.expect("transactions were not included in the same block");
-        blob_client
+        let (height, promise) =
+            common_block.expect("transactions were not included in the same block");
+        let blobs = blob_client
             .blob()
             .get_all(height, &[namespace])
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(blobs.len(), 2);
+
+        let ordinary = blobs
+            .iter()
+            .find(|returned| returned.share_version == blob.share_version)
+            .expect("ordinary blob missing");
+        assert_eq!(ordinary.namespace, blob.namespace);
+        assert_eq!(ordinary.data, blob.data);
+        assert_eq!(ordinary.signer, blob.signer);
+        assert_eq!(ordinary.commitment, blob.commitment);
+
+        let fibre = blobs
+            .iter()
+            .find(|returned| returned.share_version == 2)
+            .expect("Fibre blob missing");
+        assert_eq!(fibre.namespace, promise.namespace);
+        assert_eq!(fibre.signer, Some(signer_address));
+        assert_eq!(fibre.fibre_blob_version(), Some(promise.blob_version));
+        assert_eq!(fibre.fibre_commitment(), Some(promise.commitment));
     }
 
     #[async_test]

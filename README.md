@@ -122,7 +122,7 @@ For security reasons, browsers only allow WebTransport to be used in [Secure Con
 
 ## Running Go Celestia node for integration
 
-Start a local network with celestia-app v10.2.0-mocha and Fibre running together in the validator container, plus celestia-node v0.34.2-mocha DA nodes. The Alpine images build static binaries from those release tags; no local celestia-app checkout is needed. The first image build downloads Go dependencies and compiles the binaries.
+Start a local network with celestia-app v10.2.0-mocha and Fibre running together in the validator container, plus celestia-node v0.34.2-mocha DA nodes. The images copy prebuilt celestia-app and celestia-node binaries from their release images and download the Fibre release archive; no local celestia-app checkout or Go compilation is needed.
 ```bash
 docker compose -f ci/docker-compose.yml up --build --force-recreate -d --wait --wait-timeout 180
 # and to stop it
