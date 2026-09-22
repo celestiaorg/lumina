@@ -10,6 +10,7 @@ use wasm_bindgen::prelude::*;
 
 mod commitment;
 mod msg_pay_for_blobs;
+mod proof;
 
 use crate::consts::appconsts;
 #[cfg(feature = "uniffi")]
@@ -20,6 +21,7 @@ use crate::{Error, Result, Share, bail_validation};
 
 pub use self::commitment::Commitment;
 pub use self::msg_pay_for_blobs::MsgPayForBlobs;
+pub use self::proof::BlobProof;
 pub use celestia_proto::celestia::blob::v1::MsgPayForBlobs as RawMsgPayForBlobs;
 pub use celestia_proto::proto::blob::v4::BlobProto as RawBlob;
 pub use celestia_proto::proto::blob::v4::BlobTx as RawBlobTx;
