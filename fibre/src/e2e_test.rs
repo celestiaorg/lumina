@@ -18,11 +18,7 @@ struct DockerFibreConnector;
 #[async_trait::async_trait]
 impl FibreIoConnector for DockerFibreConnector {
     async fn connect(&self, host: String, port: u16) -> std::io::Result<BoxedFibreIo> {
-        let host = if host == "fibre" {
-            "127.0.0.1"
-        } else {
-            &host
-        };
+        let host = if host == "fibre" { "127.0.0.1" } else { &host };
         let stream = tokio::net::TcpStream::connect((host, port)).await?;
         Ok(Box::pin(stream))
     }

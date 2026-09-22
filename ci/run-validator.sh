@@ -121,6 +121,7 @@ setup_private_validator() {
   if [ "$P2P_NETWORK" = "private" ]; then
     cp "$CONFIG_DIR/config/priv_validator_key.json" \
       "$CREDENTIALS_DIR/priv_validator_key.json"
+    chmod 0644 "$CREDENTIALS_DIR/priv_validator_key.json"
   fi
   # Derive a new private key for the validator
   create_or_import_key "$NODE_NAME"

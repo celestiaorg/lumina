@@ -25,7 +25,8 @@ services:
     healthcheck: &healthcheck-validator
       # wait for blocks and Fibre host registration
       test: >-
-        celestia-appd query block --type height 3
+        celestia-appd status 2>/dev/null
+        | jq -e '(.sync_info.latest_block_height | tonumber) >= 3'
         && ([ -z "$$FIBRE_HOST" ] || (nc -z localhost 7980
         && celestia-appd query valaddr providers --output json
         | jq -e --arg host "$$FIBRE_HOST" '.providers[] | select(.info.host == $$host)'))

@@ -558,20 +558,6 @@ mod tests {
         let signer_key =
             SigningKey::from_slice(&hex::decode(TEST_PRIV_KEY.trim()).unwrap()).unwrap();
         let signer_address = fibre_client.address().unwrap();
-        let height = NonZeroU64::new(fibre_client.header().head().await.unwrap().height()).unwrap();
-        let mut promise = PaymentPromise {
-            chain_id: fibre_client.chain_id().to_string(),
-            height,
-            namespace,
-            upload_size: 4096,
-            blob_version: 0,
-            commitment: rand::random(),
-            creation_timestamp: SystemTime::now(),
-            signer_pubkey: *signer_key.verifying_key(),
-            signature: None,
-        };
-        promise.sign(&signer_key).unwrap();
-
         let key_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../ci/credentials/priv_validator_key.json");
         let key_json: serde_json::Value =
@@ -580,33 +566,57 @@ mod tests {
             .decode(key_json["priv_key"]["value"].as_str().unwrap())
             .unwrap();
         let validator_key = Ed25519SigningKey::from_bytes(key_bytes[..32].try_into().unwrap());
-        let validator_signature = validator_key.sign(&promise.sign_bytes().unwrap());
-        let message = MsgPayForFibre {
-            signer: signer_address.to_string(),
-            payment_promise: Some((&promise).into()),
-            validator_signatures: vec![validator_signature.to_bytes().to_vec()],
-        };
-
         let tx_config = TxConfig::default()
             .with_gas_limit(1_000_000)
             .with_gas_price(0.004);
         let blob_grpc = blob_client.inner.grpc().unwrap();
         let fibre_grpc = fibre_client.inner.grpc().unwrap();
-        let (blob_tx, fibre_tx) = tokio::join!(
-            blob_grpc.broadcast_blobs(&[blob], tx_config.clone()),
-            fibre_grpc.broadcast_message(message, tx_config),
-        );
-        let (blob_info, fibre_info) =
-            tokio::join!(blob_tx.unwrap().confirm(), fibre_tx.unwrap().confirm());
+        let mut common_height = None;
 
-        for height in [blob_info.unwrap().height, fibre_info.unwrap().height] {
-            blob_client
-                .blob()
-                .get_all(height, &[namespace])
-                .await
-                .unwrap()
-                .unwrap();
+        for _ in 0..5 {
+            let height =
+                NonZeroU64::new(fibre_client.header().head().await.unwrap().height()).unwrap();
+            let mut promise = PaymentPromise {
+                chain_id: fibre_client.chain_id().to_string(),
+                height,
+                namespace,
+                upload_size: 4096,
+                blob_version: 0,
+                commitment: rand::random(),
+                creation_timestamp: SystemTime::now(),
+                signer_pubkey: *signer_key.verifying_key(),
+                signature: None,
+            };
+            promise.sign(&signer_key).unwrap();
+
+            let validator_signature = validator_key.sign(&promise.sign_bytes().unwrap());
+            let message = MsgPayForFibre {
+                signer: signer_address.to_string(),
+                payment_promise: Some((&promise).into()),
+                validator_signatures: vec![validator_signature.to_bytes().to_vec()],
+            };
+            let (blob_tx, fibre_tx) = tokio::join!(
+                blob_grpc.broadcast_blobs(std::slice::from_ref(&blob), tx_config.clone()),
+                fibre_grpc.broadcast_message(message, tx_config.clone()),
+            );
+            let (blob_info, fibre_info) =
+                tokio::join!(blob_tx.unwrap().confirm(), fibre_tx.unwrap().confirm());
+            let (blob_height, fibre_height) =
+                (blob_info.unwrap().height, fibre_info.unwrap().height);
+
+            if blob_height == fibre_height {
+                common_height = Some(blob_height);
+                break;
+            }
         }
+
+        let height = common_height.expect("transactions were not included in the same block");
+        blob_client
+            .blob()
+            .get_all(height, &[namespace])
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[async_test]
