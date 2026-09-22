@@ -97,39 +97,17 @@ create_or_import_key() {
     --keyring-backend "test"
 }
 
-# Saves the hash of the genesis node and the keys funded with the coins
-# to the directory shared with the da node
+# Announce the first block hash to the DA nodes and register the Fibre host.
 provision_da_nodes() {
   local genesis_hash
-  local last_node_idx=$((NODE_COUNT - 1))
-  local addresses=()
-
-  # Save the genesis hash for the DA node
   genesis_hash=$(wait_for_block 1)
-  echo "Saving a genesis hash to $GENESIS_HASH_FILE"
   echo "$genesis_hash" > "$GENESIS_HASH_FILE"
 
-  # Import or create the keys for DA nodes and collect their addresses
-  for node_idx in $(seq 0 "$last_node_idx"); do
-    create_or_import_key "node-$node_idx"
-    addresses+=("$(node_address "node-$node_idx")")
-  done
-
-  # Transfer the coins to DA nodes addresses
-  # Coins transfer need to be after validator registers EVM address, which happens in block 2.
-  # see `setup_private_validator`
-  wait_for_block 3
-
-  echo "Transfering $NODE_COINS coins to DA nodes"
-  echo "y" | celestia-appd tx bank multi-send \
-    "$NODE_NAME" \
-    "${addresses[@]}" \
-    "$NODE_COINS" \
-    --fees 21000utia \
-    --keyring-backend "test" \
-    --chain-id "$P2P_NETWORK"
-
-  echo "Provisioning finished."
+  if [ -n "${FIBRE_HOST:-}" ]; then
+    celestia-appd tx valaddr set-host "$FIBRE_HOST" --from "$NODE_NAME" \
+      --fees 21000utia --keyring-backend test --chain-id "$P2P_NETWORK" \
+      --yes --output json | jq -e '.code == 0'
+  fi
 }
 
 # Set up the validator for a private alone network.
@@ -145,6 +123,30 @@ setup_private_validator() {
   validator_acc_addr="$(node_address "$NODE_NAME")"
   # Create a validator's genesis account for the genesis.json with an initial bag of coins
   celestia-appd genesis add-genesis-account "$validator_acc_addr" "$VALIDATOR_COINS"
+  local node_idx address
+  local addresses=("$validator_acc_addr")
+  for ((node_idx = 0; node_idx < NODE_COUNT; node_idx++)); do
+    create_or_import_key "node-$node_idx"
+    address=$(node_address "node-$node_idx")
+    addresses+=("$address")
+    celestia-appd genesis add-genesis-account "$address" "$NODE_COINS"
+  done
+
+  if [ -n "${FIBRE_HOST:-}" ]; then
+    local fibre_address genesis_file="$CONFIG_DIR/config/genesis.json"
+    fibre_address=$(celestia-appd debug addr "$(printf fibre | sha256sum | cut -c 1-40)" | awk '/Bech32 Acc:/ {print $3}')
+    celestia-appd genesis add-genesis-account "$fibre_address" \
+      "$(((NODE_COUNT + 1) * 1000000000000))utia" --module-name fibre
+    jq --args '
+      {denom: "utia", amount: "1000000000000"} as $balance |
+      .app_state.fibre.escrow_accounts = [
+        $ARGS.positional[] | {signer: ., balance: $balance, available_balance: $balance}
+      ] |
+      (.app_state.auth.accounts[] | select(.name? == "fibre") | .permissions) = []
+    ' "${addresses[@]}" < "$genesis_file" > "$genesis_file.tmp"
+    mv "$genesis_file.tmp" "$genesis_file"
+  fi
+
   # Generate a genesis transaction that creates a validator with a self-delegation
   celestia-appd genesis gentx "$NODE_NAME" 5000000000utia \
     --fees 500utia \
@@ -157,6 +159,9 @@ setup_private_validator() {
   dasel put -f "$CONFIG_DIR/config/config.toml" -t string -v 'tcp://0.0.0.0:26657' rpc.laddr
   # enable transaction indexing
   dasel put -f "$CONFIG_DIR/config/config.toml" -t string -v 'kv' tx_index.indexer
+  if [ -n "${FIBRE_HOST:-}" ]; then
+    dasel put -f "$CONFIG_DIR/config/config.toml" -t string -v '127.0.0.1:26669' priv_validator_grpc_laddr
+  fi
 
   # enable REST API
   dasel put -f "$CONFIG_DIR/config/app.toml" -t bool -v true api.enable
@@ -192,6 +197,7 @@ main() {
   setup_private_validator
   # Spawn a job to provision a bridge node later
   provision_da_nodes &
+  local provision_pid=$!
 
   # celestia-appd overrides quite a few settings if they
   # are not within a sane range for regular deployment.
@@ -208,7 +214,24 @@ main() {
     --grpc.enable \
     --force-no-bbr \
     --delayed-precommit-timeout 500ms \
-    "${extra_flags[@]}"
+    "${extra_flags[@]}" &
+  local service_pids=("$!")
+  trap 'kill "${service_pids[@]}" "$provision_pid" 2>/dev/null || true; wait' EXIT
+  trap 'exit 0' INT TERM
+
+  if [ -n "${FIBRE_HOST:-}" ]; then
+    (
+      wait_for_block 1 >/dev/null
+      exec fibre start \
+        --app-grpc-address localhost:9090 \
+        --signer-grpc-address localhost:26669 \
+        --server-listen-address 0.0.0.0:7980
+    ) &
+    service_pids+=("$!")
+  fi
+
+  wait -n "${service_pids[@]}"
+  exit "$?"
 }
 
 main

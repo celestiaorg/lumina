@@ -122,19 +122,28 @@ For security reasons, browsers only allow WebTransport to be used in [Secure Con
 
 ## Running Go Celestia node for integration
 
-Follow [this guide](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic)
-to authorize yourself in GitHub's container registry.
-
-Starting a Celestia network with single validator and some DA nodes
+Start a local network with celestia-app v10.2.0-mocha and Fibre running together in the validator container, plus celestia-node v0.34.2-mocha DA nodes. The Alpine images build static binaries from those release tags; no local celestia-app checkout is needed. The first image build downloads Go dependencies and compiles the binaries.
 ```bash
-docker compose -f ci/docker-compose.yml up --build --force-recreate -d
+docker compose -f ci/docker-compose.yml up --build --force-recreate -d --wait --wait-timeout 180
 # and to stop it
 docker compose -f ci/docker-compose.yml down
 ```
 > **Note:**
 > You can run more DA nodes by uncommenting/copying the node service definition in `ci/docker-compose.yml`.
 
-To get a JWT token for a topped up account (coins will be transferred in block 2):
+Fibre is registered on-chain as `fibre:7980` on chain `private`; `fibre` is a network alias for the validator container. For a client running on your host, add `127.0.0.1 fibre` to `/etc/hosts` and use `http://localhost:19090` for app gRPC. Fibre itself uses TLS on `localhost:7980`; the validator signing port listens only on container loopback. Clients inside the Compose network can use `validator:9090` and resolve `fibre` directly.
+
+Genesis funds `validator-0` and every configured `node-N` account, initializes `1000000000000utia` of Fibre escrow for each, and funds the Fibre module account backing those balances. Only Fibre host registration requires a startup transaction. The addresses and plaintext test keys are in `ci/credentials/`. These are disposable local test accounts. Check provider registration and escrow with:
+
+```bash
+docker compose -f ci/docker-compose.yml exec validator celestia-appd query valaddr providers
+docker compose -f ci/docker-compose.yml exec validator \
+    celestia-appd query fibre escrow-account "$(cat ci/credentials/node-0.addr)"
+```
+
+Recreating the containers starts a fresh chain and Fibre store while reusing the test keys.
+
+To get a JWT token for a topped up account:
 ```bash
 export CELESTIA_NODE_AUTH_TOKEN=$(docker compose -f ci/docker-compose.yml exec node-1 celestia bridge auth admin --p2p.network private)
 ```

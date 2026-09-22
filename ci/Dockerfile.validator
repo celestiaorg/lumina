@@ -1,14 +1,19 @@
-# A dockerfile for the celestia validator in consensus layer
-# Based on:
-# https://github.com/celestiaorg/celestia-app/blob/main/Dockerfile
+FROM --platform=$BUILDPLATFORM docker.io/golang:1.26.6-alpine AS builder
+ARG CELESTIA_APP_VERSION=v10.2.0-mocha
+ARG TARGETARCH
+WORKDIR /src
+RUN apk add --no-cache git
+RUN git clone --depth 1 --branch "$CELESTIA_APP_VERSION" https://github.com/celestiaorg/celestia-app.git .
+RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -ldflags "-X github.com/cosmos/cosmos-sdk/version.Version=$CELESTIA_APP_VERSION" -o /out/celestia-appd ./cmd/celestia-appd && \
+    CGO_ENABLED=0 GOARCH=$TARGETARCH go build -ldflags "-X main.version=$CELESTIA_APP_VERSION" -o /out/fibre ./fibre/cmd
+
 FROM docker.io/alpine:3.20
 
 ENV CELESTIA_HOME=/root
 
-RUN apk update && apk add --no-cache bash curl jq dasel
+RUN apk add --no-cache bash curl jq dasel
 
-# Copy in the binary
-COPY --from=ghcr.io/celestiaorg/celestia-app:v8.0.8 /bin/celestia-appd /bin/celestia-appd
+COPY --from=builder /out/ /bin/
 
 COPY ./run-validator.sh /opt/entrypoint.sh
 
@@ -18,4 +23,4 @@ COPY ./run-validator.sh /opt/entrypoint.sh
 # 26657 is the default RPC port
 EXPOSE 1317 19090 26656 26657
 
-CMD /opt/entrypoint.sh
+CMD ["/opt/entrypoint.sh"]

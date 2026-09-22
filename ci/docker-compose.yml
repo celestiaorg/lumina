@@ -9,16 +9,26 @@ services:
       - NO_COLOR=1
       # amount of DA nodes to provision (default: 3)
       - NODE_COUNT=3
+      - FIBRE_HOST=fibre:7980
     ports:
       - 127.0.0.1:19090:9090 # grpc
+      - 127.0.0.1:7980:7980 # Fibre (TLS)
       # TODO: uncomment and remove grpcwebproxy below, once CORS works with built-in grpc-web
       #- 127.0.0.1:18080:1317 # grpc-web
     volumes: &vols
       - credentials:/credentials
       - genesis:/genesis
+    networks:
+      default:
+        aliases:
+          - fibre
     healthcheck: &healthcheck-validator
-      # wait for validator to fund all keys
-      test: celestia-appd query block --type height 5
+      # wait for blocks and Fibre host registration
+      test: >-
+        celestia-appd query block --type height 3
+        && ([ -z "$$FIBRE_HOST" ] || (nc -z localhost 7980
+        && celestia-appd query valaddr providers --output json
+        | jq -e --arg host "$$FIBRE_HOST" '.providers[] | select(.info.host == $$host)'))
       interval: 1s
       timeout: 10s
       start_period: 10s
