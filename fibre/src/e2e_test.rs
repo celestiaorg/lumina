@@ -13,6 +13,7 @@ const APP_GRPC_URL: &str = "http://localhost:19090";
 const CHAIN_ID: &str = "private";
 const TEST_PRIVATE_KEY: &str = include_str!("../../ci/credentials/node-0.plaintext-key");
 
+// The on-chain Docker alias is not resolvable by tests running on the host.
 struct DockerFibreConnector;
 
 #[async_trait::async_trait]
