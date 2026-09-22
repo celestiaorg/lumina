@@ -311,6 +311,30 @@ mod tests {
     }
 
     #[test]
+    fn proof_without_shares() {
+        let eds = generate_dummy_eds(8);
+
+        let mut proof = share_proof_for_range(&eds, 0..3);
+        proof.share_proofs.clear();
+        assert!(verify_err(&proof, &eds).contains("proof without shares"));
+    }
+
+    #[test]
+    fn data_not_matching_proofs() {
+        let eds = generate_dummy_eds(8);
+
+        // fewer shares than proven by the proof
+        let mut proof = share_proof_for_range(&eds, 0..3);
+        proof.data.pop();
+        assert!(verify_err(&proof, &eds).contains("shares needed"));
+
+        // more shares than proven by the proof
+        let mut proof = share_proof_for_range(&eds, 0..3);
+        proof.data.push(proof.data[0]);
+        assert!(verify_err(&proof, &eds).contains("not proven"));
+    }
+
+    #[test]
     fn shares_outside_of_ods() {
         let eds = generate_dummy_eds(8);
 

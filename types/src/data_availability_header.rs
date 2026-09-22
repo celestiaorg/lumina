@@ -719,6 +719,34 @@ mod tests {
     }
 
     #[test]
+    fn row_proof_rows() {
+        let dah = random_dah(16);
+        let proof = dah.row_proof(2..=5).unwrap();
+
+        assert_eq!(proof.start_row(), 2);
+        assert_eq!(proof.end_row(), 5);
+    }
+
+    #[test]
+    fn row_proof_verify_empty_hash() {
+        let dah = random_dah(16);
+        let proof = dah.row_proof(0..=1).unwrap();
+
+        let err = proof.verify(Hash::None).unwrap_err();
+        assert!(err.to_string().contains("empty hash"), "{err}");
+    }
+
+    #[test]
+    fn row_proof_verify_proofs_for_different_trees() {
+        let dah = random_dah(16);
+        let mut proof = dah.row_proof(0..=1).unwrap();
+        proof.proofs[1].total *= 2;
+
+        let err = proof.verify(dah.hash()).unwrap_err();
+        assert!(err.to_string().contains("different trees"), "{err}");
+    }
+
+    #[test]
     fn row_proof_verify_wrong_tree_size() {
         let dah = random_dah(16);
         let mut proof = dah.row_proof(0..=1).unwrap();

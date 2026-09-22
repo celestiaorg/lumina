@@ -131,6 +131,8 @@ impl From<BlobProof> for RawShareProof {
 mod tests {
     use std::ops::Range;
 
+    use celestia_proto::celestia::core::v1::proof::ShareProof as RawShareProof;
+
     use crate::consts::appconsts::SHARE_SIZE;
     use crate::nmt::{NS_SIZE, Namespace};
     use crate::test_utils::{
@@ -323,5 +325,16 @@ mod tests {
         // same wire format as the share proof it is made of
         let as_share_proof: ShareProof = serde_json::from_str(&serialized).unwrap();
         assert_eq!(as_share_proof, proof.0);
+    }
+
+    #[test]
+    fn blob_proof_conversions() {
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
+        let proof = proof_for_range(&eds, 0..3);
+
+        assert_eq!(ShareProof::from(proof.clone()), proof.0);
+
+        let raw = RawShareProof::from(proof.clone());
+        assert_eq!(BlobProof::try_from(raw).unwrap(), proof);
     }
 }
