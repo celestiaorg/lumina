@@ -163,7 +163,12 @@ impl Share {
     /// it. Otherwise returns `None`
     pub fn signer(&self) -> Option<AccAddress> {
         let info_byte = self.info_byte()?;
-        if info_byte.is_sequence_start() && info_byte.version() == appconsts::SHARE_VERSION_ONE {
+        if info_byte.is_sequence_start()
+            && matches!(
+                info_byte.version(),
+                appconsts::SHARE_VERSION_ONE | appconsts::SHARE_VERSION_TWO
+            )
+        {
             let signer_bytes =
                 &self.data[SHARE_SIGNER_OFFSET..SHARE_SIGNER_OFFSET + appconsts::SIGNER_SIZE];
             Some(AccAddress::try_from(signer_bytes).expect("must have correct size"))
@@ -182,8 +187,11 @@ impl Share {
         let info_byte = self.info_byte()?;
 
         let start = if info_byte.is_sequence_start() {
-            if info_byte.version() == appconsts::SHARE_VERSION_ONE {
-                // in sparse share v1, last metadata in first share is signer
+            if matches!(
+                info_byte.version(),
+                appconsts::SHARE_VERSION_ONE | appconsts::SHARE_VERSION_TWO
+            ) {
+                // in sparse shares v1 and v2, last metadata in first share is signer
                 SHARE_SIGNER_OFFSET + appconsts::SIGNER_SIZE
             } else {
                 // otherwise last metadata in first share is sequence len
