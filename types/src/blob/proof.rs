@@ -1,4 +1,6 @@
 use celestia_proto::celestia::core::v1::proof::ShareProof as RawShareProof;
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 use tendermint_proto::Protobuf;
 
@@ -40,7 +42,24 @@ impl BlobProof {
     /// [`Namespace`]: crate::nmt::Namespace
     pub fn verify(&self, root: Hash) -> Result<()> {
         self.0.verify(root)?;
+        self.verify_blob_shares()
+    }
 
+    /// Verify the proof like [`BlobProof::verify`] and check that the blob is at the
+    /// given range of indexes in the original data square.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the verification fails or if the shares
+    /// are at a different range than the expected one. See [`BlobProof::verify`] and
+    /// [`ShareProof::verify_range`].
+    pub fn verify_range(&self, root: Hash, range: Range<u64>) -> Result<()> {
+        self.0.verify_range(root, range)?;
+        self.verify_blob_shares()
+    }
+
+    /// Check that the proven shares are exactly one blob.
+    fn verify_blob_shares(&self) -> Result<()> {
         // reserved namespaces hold compact shares, which have a different layout
         if self.0.namespace_id.is_reserved() {
             return Err(Error::UnexpectedReservedNamespace);
@@ -151,6 +170,43 @@ mod tests {
                 .collect();
             assert_eq!(Blob::reconstruct(&shares).unwrap(), blobs[idx]);
         }
+    }
+
+    #[test]
+    fn verify_range_blob() {
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
+        let root = DataAvailabilityHeader::from_eds(&eds).hash();
+
+        for range in [0..3, 3..8, 8..10] {
+            proof_for_range(&eds, range.clone())
+                .verify_range(root, range.start as u64..range.end as u64)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn verify_range_rejects_another_range() {
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
+        let root = DataAvailabilityHeader::from_eds(&eds).hash();
+
+        let err = proof_for_range(&eds, 3..8)
+            .verify_range(root, 3..9)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("shares are at range"), "{err}");
+    }
+
+    #[test]
+    fn verify_range_rejects_part_of_blob() {
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[3, 5, 2]);
+        let root = DataAvailabilityHeader::from_eds(&eds).hash();
+
+        // the range matches, but it is not a whole blob
+        let err = proof_for_range(&eds, 3..4)
+            .verify_range(root, 3..4)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("occupies"), "{err}");
     }
 
     #[test]
