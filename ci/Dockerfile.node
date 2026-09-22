@@ -1,20 +1,13 @@
 # A dockerfile for the celestia bridge node in DA layer
 # Based on:
 # https://github.com/celestiaorg/celestia-node/blob/main/Dockerfile
-FROM --platform=$BUILDPLATFORM docker.io/golang:1.26.8-alpine AS builder
-ARG CELESTIA_NODE_VERSION=v0.34.2-mocha
-ARG TARGETARCH
-WORKDIR /src
-RUN apk add --no-cache git
-RUN git clone --depth 1 --branch "$CELESTIA_NODE_VERSION" https://github.com/celestiaorg/celestia-node.git .
-RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -ldflags "-X github.com/celestiaorg/celestia-node/nodebuilder/node.semanticVersion=$CELESTIA_NODE_VERSION" -o /out/celestia ./cmd/celestia && \
-    CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /out/cel-key ./cmd/cel-key
-
 FROM docker.io/alpine:3.20
 
-RUN apk add --no-cache bash jq dasel
+RUN apk update && apk add --no-cache bash jq dasel
 
-COPY --from=builder /out/ /bin/
+# Copy in the binary
+COPY --from=ghcr.io/celestiaorg/celestia-node:v0.34.2-mocha /bin/celestia /bin/celestia
+COPY --from=ghcr.io/celestiaorg/celestia-node:v0.34.2-mocha /bin/cel-key /bin/cel-key
 
 COPY ./run-node.sh /opt/entrypoint.sh
 COPY ./healthcheck-node.sh /opt/healthcheck.sh
