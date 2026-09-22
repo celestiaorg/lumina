@@ -59,6 +59,8 @@ serde.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+base64.workspace = true
+ed25519-dalek = "2.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

@@ -118,6 +118,10 @@ setup_private_validator() {
 
   # Initialize the validator
   celestia-appd init "$P2P_NETWORK" --chain-id "$P2P_NETWORK"
+  if [ "$P2P_NETWORK" = "private" ]; then
+    cp "$CONFIG_DIR/config/priv_validator_key.json" \
+      "$CREDENTIALS_DIR/priv_validator_key.json"
+  fi
   # Derive a new private key for the validator
   create_or_import_key "$NODE_NAME"
   validator_acc_addr="$(node_address "$NODE_NAME")"

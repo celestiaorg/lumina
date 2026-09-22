@@ -11,6 +11,9 @@ pub mod domain;
 pub mod transport;
 pub mod validator;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod e2e_test;
+
 pub use domain::config;
 pub use domain::error;
 
