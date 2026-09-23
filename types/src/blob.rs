@@ -47,7 +47,9 @@ pub struct Blob {
     pub data: Vec<u8>,
     /// Version indicating the format in which [`Share`]s should be created from this [`Blob`].
     pub share_version: u8,
-    /// The share [`Commitment`], distinct from the embedded [`Blob::fibre_commitment`].
+    /// A [`Commitment`] computed from the [`Blob`]s data.
+    ///
+    /// For share version 2 this is not the Fibre commitment, see [`Blob::fibre_commitment`].
     pub commitment: Commitment,
     /// Index of the blob's first share in the EDS. Only set for blobs retrieved from chain.
     pub index: Option<u64>,
@@ -164,22 +166,21 @@ impl Blob {
 
     /// Returns the embedded Fibre commitment for a v2 blob with a 36-byte payload.
     pub fn fibre_commitment(&self) -> Option<[u8; 32]> {
-        if self.share_version != appconsts::SHARE_VERSION_TWO
-            || self.data.len() != FIBRE_BLOB_DATA_SIZE
-        {
-            return None;
-        }
-        self.data[4..].try_into().ok()
+        self.fibre_payload().map(|(_, commitment)| *commitment)
     }
 
     /// Returns the embedded Fibre blob version for a v2 blob with a 36-byte payload.
     pub fn fibre_blob_version(&self) -> Option<u32> {
-        if self.share_version != appconsts::SHARE_VERSION_TWO
-            || self.data.len() != FIBRE_BLOB_DATA_SIZE
-        {
+        self.fibre_payload()
+            .map(|(version, _)| u32::from_be_bytes(*version))
+    }
+
+    fn fibre_payload(&self) -> Option<(&[u8; 4], &[u8; 32])> {
+        if self.share_version != appconsts::SHARE_VERSION_TWO {
             return None;
         }
-        Some(u32::from_be_bytes(self.data[..4].try_into().ok()?))
+        let (version, commitment) = self.data.split_first_chunk::<4>()?;
+        Some((version, commitment.try_into().ok()?))
     }
 
     /// Validate [`Blob`]s data with the [`Commitment`] it has.
@@ -744,8 +745,9 @@ mod tests {
         assert_eq!(blob.data.len(), 36);
         assert_eq!(blob.fibre_blob_version(), Some(0));
         assert_eq!(blob.fibre_commitment(), Some([0xBB; 32]));
-        assert_ne!(blob.commitment.hash(), &blob.fibre_commitment().unwrap());
-        assert_eq!(share.info_byte().unwrap().as_u8(), 5);
+        let info_byte = share.info_byte().unwrap();
+        assert_eq!(info_byte.version(), appconsts::SHARE_VERSION_TWO);
+        assert!(info_byte.is_sequence_start());
         assert_eq!(share.sequence_length(), Some(36));
         assert_eq!(share.signer(), Some([0xAA; 20].into()));
         assert_eq!(&share.payload().unwrap()[..36], blob.data);

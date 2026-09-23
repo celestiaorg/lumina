@@ -14,6 +14,8 @@ NODE_NAME="validator-0"
 # amounts of the coins for the keys
 NODE_COINS="200000000000000utia"
 VALIDATOR_COINS="1000000000000000utia"
+# Fibre escrow balance of every funded account
+FIBRE_ESCROW="1000000000000"
 # a directory and the files shared with the bridge nodes
 CREDENTIALS_DIR="/credentials"
 # directory where validator will write the genesis hash
@@ -97,17 +99,18 @@ create_or_import_key() {
     --keyring-backend "test"
 }
 
-# Announce the first block hash to the DA nodes and register the Fibre host.
-provision_da_nodes() {
+# Announce the first block hash to the DA nodes
+announce_genesis_hash() {
   local genesis_hash
   genesis_hash=$(wait_for_block 1)
   echo "$genesis_hash" > "$GENESIS_HASH_FILE"
+}
 
-  if [ -n "${FIBRE_HOST:-}" ]; then
-    celestia-appd tx valaddr set-host "$FIBRE_HOST" --from "$NODE_NAME" \
-      --fees 21000utia --keyring-backend test --chain-id "$P2P_NETWORK" \
-      --yes --output json | jq -e '.code == 0'
-  fi
+# Register this validator's Fibre host on-chain
+register_fibre_host() {
+  celestia-appd tx valaddr set-host "$FIBRE_HOST" --from "$NODE_NAME" \
+    --fees 21000utia --keyring-backend test --chain-id "$P2P_NETWORK" \
+    --yes --output json | jq -e '.code == 0'
 }
 
 # Set up the validator for a private alone network.
@@ -118,11 +121,6 @@ setup_private_validator() {
 
   # Initialize the validator
   celestia-appd init "$P2P_NETWORK" --chain-id "$P2P_NETWORK"
-  if [ "$P2P_NETWORK" = "private" ]; then
-    cp "$CONFIG_DIR/config/priv_validator_key.json" \
-      "$CREDENTIALS_DIR/priv_validator_key.json"
-    chmod 0644 "$CREDENTIALS_DIR/priv_validator_key.json"
-  fi
   # Derive a new private key for the validator
   create_or_import_key "$NODE_NAME"
   validator_acc_addr="$(node_address "$NODE_NAME")"
@@ -139,11 +137,14 @@ setup_private_validator() {
 
   if [ -n "${FIBRE_HOST:-}" ]; then
     local fibre_address genesis_file="$CONFIG_DIR/config/genesis.json"
+    # module account address is sha256(module name)[:20]
     fibre_address=$(celestia-appd debug addr "$(printf fibre | sha256sum | cut -c 1-40)" | awk '/Bech32 Acc:/ {print $3}')
+    # the module account backs the escrow of every funded account
     celestia-appd genesis add-genesis-account "$fibre_address" \
-      "$(((NODE_COUNT + 1) * 1000000000000))utia" --module-name fibre
-    jq --args '
-      {denom: "utia", amount: "1000000000000"} as $balance |
+      "$(((NODE_COUNT + 1) * FIBRE_ESCROW))utia" --module-name fibre
+    # `--module-name` grants burner+minter permissions (cosmos-sdk genutil); drop them
+    jq --args --arg escrow "$FIBRE_ESCROW" '
+      {denom: "utia", amount: $escrow} as $balance |
       .app_state.fibre.escrow_accounts = [
         $ARGS.positional[] | {signer: ., balance: $balance, available_balance: $balance}
       ] |
@@ -200,8 +201,13 @@ setup_private_validator() {
 main() {
   # Configure stuff
   setup_private_validator
-  # Spawn a job to provision a bridge node later
-  provision_da_nodes &
+  # Announce genesis and register Fibre once the chain produces blocks
+  (
+    announce_genesis_hash
+    if [ -n "${FIBRE_HOST:-}" ]; then
+      register_fibre_host
+    fi
+  ) &
   local provision_pid=$!
 
   # celestia-appd overrides quite a few settings if they

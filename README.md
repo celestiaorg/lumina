@@ -131,7 +131,7 @@ docker compose -f ci/docker-compose.yml down
 > **Note:**
 > You can run more DA nodes by uncommenting/copying the node service definition in `ci/docker-compose.yml`.
 
-Fibre is registered on-chain as `fibre:7980` on chain `private`; `fibre` is a network alias for the validator container. For a client running on your host, add `127.0.0.1 fibre` to `/etc/hosts` and use `http://localhost:19090` for app gRPC. Fibre itself uses TLS on `localhost:7980`; the validator signing port listens only on container loopback. Clients inside the Compose network can use `validator:9090` and resolve `fibre` directly.
+Fibre is registered on-chain as `localhost:7980` on chain `private` and serves TLS on that address from your host; use `http://localhost:19090` for app gRPC. The validator signing port listens only on container loopback.
 
 Genesis funds `validator-0` and every configured `node-N` account, initializes `1000000000000utia` of Fibre escrow for each, and funds the Fibre module account backing those balances. Only Fibre host registration requires a startup transaction. The addresses and plaintext test keys are in `ci/credentials/`. These are disposable local test accounts. Check provider registration and escrow with:
 

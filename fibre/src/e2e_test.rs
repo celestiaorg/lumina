@@ -1,29 +1,13 @@
-use std::sync::Arc;
-
 use celestia_grpc::{GrpcClient, TxConfig};
 use celestia_types::nmt::Namespace;
 use celestia_types::state::AccAddress;
 use k256::ecdsa::SigningKey;
 
-use crate::{
-    BlobID, BoxedFibreIo, DownloadOptions, FibreClient, FibreClientConfig, FibreIoConnector,
-};
+use crate::{BlobID, DownloadOptions, FibreClient, FibreClientConfig};
 
 const APP_GRPC_URL: &str = "http://localhost:19090";
 const CHAIN_ID: &str = "private";
 const TEST_PRIVATE_KEY: &str = include_str!("../../ci/credentials/node-0.plaintext-key");
-
-// The on-chain Docker alias is not resolvable by tests running on the host.
-struct DockerFibreConnector;
-
-#[async_trait::async_trait]
-impl FibreIoConnector for DockerFibreConnector {
-    async fn connect(&self, host: String, port: u16) -> std::io::Result<BoxedFibreIo> {
-        let host = if host == "fibre" { "127.0.0.1" } else { &host };
-        let stream = tokio::net::TcpStream::connect((host, port)).await?;
-        Ok(Box::pin(stream))
-    }
-}
 
 #[tokio::test]
 async fn put_then_download() {
@@ -36,10 +20,9 @@ async fn put_then_download() {
         .signer_keypair(signing_key.clone())
         .build()
         .unwrap();
-    let fibre_client = FibreClient::from_grpc_client_with_io_connector(
+    let fibre_client = FibreClient::from_grpc_client(
         grpc_client.clone(),
         FibreClientConfig::new(CHAIN_ID).unwrap(),
-        Arc::new(DockerFibreConnector),
     )
     .unwrap();
 

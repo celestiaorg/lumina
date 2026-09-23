@@ -530,15 +530,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn read_blobs_after_blob_and_pay_for_fibre_in_same_namespace() {
-        use std::fs;
-        use std::num::NonZeroU64;
-        use std::path::Path;
-        use std::time::SystemTime;
-
-        use base64::Engine;
-        use celestia_fibre::PaymentPromise;
-        use celestia_proto::celestia::fibre::v1::MsgPayForFibre;
-        use ed25519_dalek::{Signer, SigningKey as Ed25519SigningKey};
+        use celestia_fibre::{FibreClient, FibreClientConfig};
 
         use crate::test_utils::{new_client, node0_client};
         use crate::tx::{SigningKey, TxConfig};
@@ -546,7 +538,7 @@ mod tests {
         use crate::types::nmt::Namespace;
 
         let blob_client = new_client().await;
-        let (_node0_lock, fibre_client) = node0_client().await;
+        let (_node0_lock, node0) = node0_client().await;
         let namespace = Namespace::new_v0(b"same-ns").unwrap();
         let blob = Blob::new(
             namespace,
@@ -557,47 +549,26 @@ mod tests {
 
         let signer_key =
             SigningKey::from_slice(&hex::decode(TEST_PRIV_KEY.trim()).unwrap()).unwrap();
-        let signer_address = fibre_client.address().unwrap();
-        let key_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../ci/credentials/priv_validator_key.json");
-        let key_json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(key_path).unwrap()).unwrap();
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(key_json["priv_key"]["value"].as_str().unwrap())
-            .unwrap();
-        let validator_key = Ed25519SigningKey::from_bytes(key_bytes[..32].try_into().unwrap());
-        let tx_config = TxConfig::default()
-            .with_gas_limit(1_000_000)
-            .with_gas_price(0.004);
+        let signer_address = node0.address().unwrap();
         let blob_grpc = blob_client.inner.grpc().unwrap();
-        let fibre_grpc = fibre_client.inner.grpc().unwrap();
+        let fibre_grpc = node0.inner.grpc().unwrap();
+        let fibre_client = FibreClient::from_grpc_client(
+            fibre_grpc.clone(),
+            FibreClientConfig::new(node0.chain_id().as_str()).unwrap(),
+        )
+        .unwrap();
         let mut common_block = None;
 
         for _ in 0..5 {
-            let height =
-                NonZeroU64::new(fibre_client.header().head().await.unwrap().height()).unwrap();
-            let mut promise = PaymentPromise {
-                chain_id: fibre_client.chain_id().to_string(),
-                height,
-                namespace,
-                upload_size: 4096,
-                blob_version: 0,
-                commitment: rand::random(),
-                creation_timestamp: SystemTime::now(),
-                signer_pubkey: *signer_key.verifying_key(),
-                signature: None,
-            };
-            promise.sign(&signer_key).unwrap();
-
-            let validator_signature = validator_key.sign(&promise.sign_bytes().unwrap());
-            let message = MsgPayForFibre {
-                signer: signer_address.to_string(),
-                payment_promise: Some((&promise).into()),
-                validator_signatures: vec![validator_signature.to_bytes().to_vec()],
-            };
+            // a fresh upload per attempt: the promise embeds the height
+            let msg = fibre_client
+                .upload_and_prepare(&signer_key, namespace, b"fibre blob", &signer_address)
+                .await
+                .unwrap();
+            let promise = msg.payment_promise.clone().unwrap();
             let (blob_tx, fibre_tx) = tokio::join!(
-                blob_grpc.broadcast_blobs(std::slice::from_ref(&blob), tx_config.clone()),
-                fibre_grpc.broadcast_message(message, tx_config.clone()),
+                blob_grpc.broadcast_blobs(std::slice::from_ref(&blob), TxConfig::default()),
+                fibre_grpc.broadcast_message(msg, TxConfig::default()),
             );
             let (blob_info, fibre_info) =
                 tokio::join!(blob_tx.unwrap().confirm(), fibre_tx.unwrap().confirm());
@@ -633,10 +604,13 @@ mod tests {
             .iter()
             .find(|returned| returned.share_version == 2)
             .expect("Fibre blob missing");
-        assert_eq!(fibre.namespace, promise.namespace);
+        assert_eq!(fibre.namespace, namespace);
         assert_eq!(fibre.signer, Some(signer_address));
         assert_eq!(fibre.fibre_blob_version(), Some(promise.blob_version));
-        assert_eq!(fibre.fibre_commitment(), Some(promise.commitment));
+        assert_eq!(
+            fibre.fibre_commitment().map(|c| c.to_vec()),
+            Some(promise.commitment)
+        );
     }
 
     #[async_test]

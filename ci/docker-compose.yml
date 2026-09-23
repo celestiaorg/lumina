@@ -9,7 +9,7 @@ services:
       - NO_COLOR=1
       # amount of DA nodes to provision (default: 3)
       - NODE_COUNT=3
-      - FIBRE_HOST=fibre:7980
+      - FIBRE_HOST=localhost:7980
     ports:
       - 127.0.0.1:19090:9090 # grpc
       - 127.0.0.1:7980:7980 # Fibre (TLS)
@@ -18,18 +18,9 @@ services:
     volumes: &vols
       - credentials:/credentials
       - genesis:/genesis
-    networks:
-      default:
-        aliases:
-          - fibre
     healthcheck: &healthcheck-validator
       # wait for blocks and Fibre host registration
-      test: >-
-        celestia-appd status 2>/dev/null
-        | jq -e '(.sync_info.latest_block_height | tonumber) >= 3'
-        && ([ -z "$$FIBRE_HOST" ] || (nc -z localhost 7980
-        && celestia-appd query valaddr providers --output json
-        | jq -e --arg host "$$FIBRE_HOST" '.providers[] | select(.info.host == $$host)'))
+      test: /opt/healthcheck.sh
       interval: 1s
       timeout: 10s
       start_period: 10s

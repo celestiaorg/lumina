@@ -16,6 +16,7 @@ COPY --from=ghcr.io/celestiaorg/celestia-app:v10.2.0-mocha /bin/celestia-appd /b
 COPY --from=fibre /bin/fibre /bin/fibre
 
 COPY ./run-validator.sh /opt/entrypoint.sh
+COPY ./healthcheck-validator.sh /opt/healthcheck.sh
 
 #  1317 is the default API server port
 # 19090 is the remotely accessible port for gRPC
