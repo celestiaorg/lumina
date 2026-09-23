@@ -262,6 +262,12 @@ pub enum Error {
     #[error("Empty blob list")]
     EmptyBlobList,
 
+    /// Fibre system blobs cannot be submitted via PayForBlobs.
+    #[error(
+        "Share version 2 is reserved for Fibre system blobs and cannot be submitted via PayForBlobs."
+    )]
+    FibreBlobSubmission,
+
     /// Missing delegation response
     #[error("Missing belegation response")]
     MissingDelegationResponse,
@@ -706,6 +712,12 @@ pub enum UniffiError {
     #[error("Empty blob list")]
     EmptyBlobList,
 
+    /// Fibre system blobs cannot be submitted via PayForBlobs.
+    #[error(
+        "Share version 2 is reserved for Fibre system blobs and cannot be submitted via PayForBlobs."
+    )]
+    FibreBlobSubmission,
+
     /// Missing DelegationResponse
     #[error("Missing DelegationResponse")]
     MissingDelegationResponse,
@@ -818,6 +830,7 @@ impl From<Error> for UniffiError {
             Error::MissingSigner => UniffiError::MissingSigner,
             Error::SignerNotSupported => UniffiError::SignerNotSupported,
             Error::EmptyBlobList => UniffiError::EmptyBlobList,
+            Error::FibreBlobSubmission => UniffiError::FibreBlobSubmission,
             Error::MissingDelegationResponse => UniffiError::MissingDelegationResponse,
             Error::MissingDelegation => UniffiError::MissingDelegation,
             Error::MissingBalance => UniffiError::MissingBalance,

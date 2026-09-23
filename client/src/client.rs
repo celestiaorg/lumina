@@ -527,6 +527,65 @@ mod tests {
 
     use crate::test_utils::{TEST_PRIV_KEY, TEST_RPC_URL};
 
+    #[async_test]
+    async fn reject_fibre_blob_submission() {
+        use crate::tx::TxConfig;
+        use crate::types::Blob;
+        use crate::types::blob::RawBlob;
+        use crate::types::nmt::Namespace;
+
+        let grpc = GrpcClient::builder()
+            .endpoint("http://127.0.0.1:1")
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let rpc = FailoverClient::new(
+            vec![RpcEndpoint::new("http://127.0.0.1:1")],
+            None,
+            Some(Duration::from_millis(100)),
+            None,
+            celestia_rpc::DEFAULT_MAX_HEAD_AGE,
+        )
+        .unwrap();
+        let inner = Arc::new(ClientInner {
+            rpc,
+            grpc: Some(grpc),
+            pubkey: None,
+            chain_id: "private".parse().unwrap(),
+        });
+        let blob_api = BlobApi::new(inner.clone());
+        let state_api = StateApi::new(inner);
+        let namespace = Namespace::new_v0(b"fibre").unwrap();
+        let fibre = Blob::from_raw(RawBlob {
+            namespace_id: namespace.id().to_vec(),
+            namespace_version: 0,
+            share_version: 2,
+            data: vec![0; 36],
+            signer: vec![0xAA; 20],
+        })
+        .unwrap();
+        let unsigned = Blob::new(fibre.namespace, vec![1], None).unwrap();
+        let signed = Blob::new(fibre.namespace, vec![2], fibre.signer).unwrap();
+
+        let blobs = [unsigned, signed, fibre];
+        let blob_error = blob_api
+            .submit(&blobs, TxConfig::default())
+            .await
+            .unwrap_err();
+        let state_error = state_api
+            .submit_pay_for_blob(&blobs, TxConfig::default())
+            .await
+            .unwrap_err();
+        for error in [blob_error, state_error] {
+            assert!(matches!(
+                error,
+                Error::Grpc(celestia_grpc::Error::CelestiaTypesError(
+                    celestia_types::Error::FibreBlobSubmission
+                ))
+            ));
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn read_blobs_after_blob_and_pay_for_fibre_in_same_namespace() {
