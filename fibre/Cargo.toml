@@ -45,10 +45,10 @@ thiserror.workspace = true
 tracing.workspace = true
 hex.workspace = true
 async-trait.workspace = true
-bech32 = "0.11"
+bytes.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "rt"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-net = { version = "0.6", default-features = false, features = ["websocket"] }
@@ -61,6 +61,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+celestia-proto = { workspace = true, features = ["tonic-server"] }
+http-body-util.workspace = true
+hyper = { version = "1.8", features = ["server"] }
+hyper-util = { workspace = true, features = ["service"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 

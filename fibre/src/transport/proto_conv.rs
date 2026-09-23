@@ -15,7 +15,9 @@ use tendermint_proto::google::protobuf::Timestamp;
 #[cfg(test)]
 use tendermint_proto::v0_38::crypto::public_key::Sum as CryptoKeySum;
 
-use crate::error::FibreError;
+#[cfg(test)]
+use crate::error::ValidatorSetError;
+use crate::error::{FibreError, ShardError};
 use crate::payment_promise::PaymentPromise;
 #[cfg(test)]
 use crate::validator::{ValidatorInfo, ValidatorSet};
@@ -63,25 +65,21 @@ pub(crate) fn row_proof_to_blob_row(proof: &rsema1d::RowInclusionProof) -> proto
 }
 
 /// Convert a proto [`proto::BlobRow`] into a [`rsema1d::RowProof`].
-pub(crate) fn blob_row_to_row_proof(
-    row: proto::BlobRow,
-) -> Result<rsema1d::RowProof<'static>, FibreError> {
+pub(crate) fn blob_row_to_row_proof(row: proto::BlobRow) -> Result<rsema1d::RowProof, FibreError> {
     let row_proof = row
         .proof
         .into_iter()
         .map(|h| {
             let len = h.len();
-            h.as_ref().try_into().map_err(|_| {
-                FibreError::InvalidData(
-                    format!("proof hash has invalid length {len}, expected 32",),
-                )
-            })
+            h.as_ref()
+                .try_into()
+                .map_err(|_| ShardError::ProofHashLength(len).into())
         })
         .collect::<Result<Vec<[u8; 32]>, FibreError>>()?;
 
     Ok(rsema1d::RowProof {
         index: row.index as usize,
-        row: std::borrow::Cow::Owned(row.data.into()),
+        row: row.data,
         row_proof,
     })
 }
@@ -113,15 +111,10 @@ pub(crate) fn build_upload_shard(
 pub fn parse_download_response(
     resp: proto::DownloadShardResponse,
 ) -> Result<DownloadResponse, FibreError> {
-    let shard = resp
-        .shard
-        .ok_or_else(|| FibreError::InvalidData("download response missing shard".into()))?;
+    let shard = resp.shard.ok_or(ShardError::MissingShard)?;
 
     if shard.rlcs.is_empty() || !shard.rlcs.len().is_multiple_of(16) {
-        return Err(FibreError::InvalidData(format!(
-            "rlc vector has invalid length {}, expected a non-zero multiple of 16",
-            shard.rlcs.len()
-        )));
+        return Err(ShardError::RlcVectorLength(shard.rlcs.len()).into());
     }
     let rlcs = shard
         .rlcs
@@ -167,12 +160,10 @@ fn system_time_to_timestamp(t: SystemTime) -> Timestamp {
 }
 
 #[cfg(test)]
-pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> Result<SystemTime, FibreError> {
+pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> SystemTime {
     if t.seconds >= 0 {
         let d = Duration::new(t.seconds as u64, t.nanos as u32);
-        UNIX_EPOCH
-            .checked_add(d)
-            .ok_or_else(|| FibreError::Other("timestamp overflow".into()))
+        UNIX_EPOCH.checked_add(d).expect("timestamp overflow")
     } else {
         // Reverse the protobuf convention: if nanos > 0 the actual
         // duration is (|seconds| - 1) seconds + (1e9 - nanos) subsec nanos.
@@ -182,9 +173,7 @@ pub(crate) fn timestamp_to_system_time(t: &Timestamp) -> Result<SystemTime, Fibr
             ((-t.seconds) as u64, 0u32)
         };
         let d = Duration::new(secs, nanos);
-        UNIX_EPOCH
-            .checked_sub(d)
-            .ok_or_else(|| FibreError::Other("timestamp underflow".into()))
+        UNIX_EPOCH.checked_sub(d).expect("timestamp underflow")
     }
 }
 
@@ -247,14 +236,33 @@ mod tests {
     }
 
     #[test]
+    fn blob_row_to_row_proof_shares_data_buffer() {
+        let data = bytes::Bytes::from(vec![42u8; 64]);
+        let blob_row = proto::BlobRow {
+            index: 5,
+            data: data.clone(),
+            proof: vec![vec![1u8; 32].into()],
+        };
+
+        let back = blob_row_to_row_proof(blob_row).unwrap();
+        assert_eq!(
+            back.row.as_ptr(),
+            data.as_ptr(),
+            "row data must not be copied out of the decoded BlobRow"
+        );
+    }
+
+    #[test]
     fn blob_row_to_row_proof_invalid_hash_length() {
         let row = proto::BlobRow {
             index: 0,
             data: vec![0u8; 64].into(),
             proof: vec![vec![0u8; 31].into()], // wrong length
         };
-        let result = blob_row_to_row_proof(row);
-        assert!(result.is_err());
+        assert!(matches!(
+            blob_row_to_row_proof(row),
+            Err(FibreError::InvalidShard(ShardError::ProofHashLength(31)))
+        ));
     }
 
     #[test]
@@ -295,19 +303,28 @@ mod tests {
     #[test]
     fn parse_download_response_missing_shard() {
         let resp = proto::DownloadShardResponse { shard: None };
-        assert!(parse_download_response(resp).is_err());
+        assert!(matches!(
+            parse_download_response(resp),
+            Err(FibreError::InvalidShard(ShardError::MissingShard))
+        ));
     }
 
     #[test]
     fn parse_download_response_invalid_rlc_length() {
         for rlcs in [vec![], vec![1u8; 15]] {
+            let expected_len = rlcs.len();
             let resp = proto::DownloadShardResponse {
                 shard: Some(proto::BlobShard {
                     rows: vec![],
                     rlcs: rlcs.into(),
                 }),
             };
-            assert!(parse_download_response(resp).is_err());
+            assert!(matches!(
+                parse_download_response(resp),
+                Err(FibreError::InvalidShard(ShardError::RlcVectorLength(
+                    len
+                ))) if len == expected_len
+            ));
         }
     }
 
@@ -315,7 +332,7 @@ mod tests {
     fn timestamp_roundtrip() {
         let now = SystemTime::now();
         let ts = system_time_to_timestamp(now);
-        let back = timestamp_to_system_time(&ts).unwrap();
+        let back = timestamp_to_system_time(&ts);
 
         // Compare with nanosecond tolerance
         let diff = now
@@ -336,7 +353,7 @@ mod tests {
         assert_eq!(ts.seconds, -11);
         assert_eq!(ts.nanos, 500_000_000);
 
-        let back = timestamp_to_system_time(&ts).unwrap();
+        let back = timestamp_to_system_time(&ts);
         let diff = t
             .duration_since(back)
             .or_else(|_| back.duration_since(t))
@@ -351,7 +368,7 @@ mod tests {
         assert_eq!(ts.seconds, -5);
         assert_eq!(ts.nanos, 0);
 
-        let back = timestamp_to_system_time(&ts).unwrap();
+        let back = timestamp_to_system_time(&ts);
         let diff = t
             .duration_since(back)
             .or_else(|_| back.duration_since(t))
@@ -378,13 +395,26 @@ mod tests {
     }
 
     #[test]
-    fn validator_from_proto_valid() {
-        let (pubkey, proto_val) = proto_validator(100);
+    fn validator_from_proto_matches_upstream_address() {
+        // Independently generated with celestia-app v9.0.6's CometBFT Ed25519
+        // PubKey.Address() at app commit 6f4b596e47f80683adb1a161ca7cb640dcd9d206.
+        let pubkey =
+            hex::decode("cecc1507dc1ddd7295951c290888f095adb9044d1b73d696e6df065d683bd4fc")
+                .unwrap();
+        let address = hex::decode("fa4d86c3b551aa6cd7c3759d040c037ef2c6379f").unwrap();
+        let proto_val = tendermint_proto::v0_38::types::Validator {
+            address: address.clone(),
+            pub_key: Some(tendermint_proto::v0_38::crypto::PublicKey {
+                sum: Some(CryptoKeySum::Ed25519(pubkey.clone())),
+            }),
+            voting_power: 100,
+            proposer_priority: 0,
+        };
 
         let info = ValidatorInfo::try_from(&proto_val).unwrap();
-        assert_eq!(info.public_key(), &pubkey);
+        assert_eq!(info.public_key().as_bytes(), pubkey.as_slice());
         assert_eq!(info.voting_power(), 100);
-        assert_eq!(info.address().as_slice(), proto_val.address);
+        assert_eq!(info.address().as_slice(), address);
     }
 
     #[test]
@@ -467,13 +497,56 @@ mod tests {
     }
 
     #[test]
-    fn validator_from_proto_missing_key() {
-        let proto_val = tendermint_proto::v0_38::types::Validator {
-            address: vec![],
-            pub_key: None,
-            voting_power: 100,
-            proposer_priority: 0,
-        };
-        assert!(ValidatorInfo::try_from(&proto_val).is_err());
+    fn validator_from_proto_rejects_malformed_keys() {
+        let public_key = |sum| Some(tendermint_proto::v0_38::crypto::PublicKey { sum });
+        type ErrorCheck = fn(&ValidatorSetError) -> bool;
+        type Case = (
+            &'static str,
+            Option<tendermint_proto::v0_38::crypto::PublicKey>,
+            ErrorCheck,
+        );
+        let cases: [Case; 6] = [
+            ("missing key", None, |error| {
+                matches!(error, ValidatorSetError::MissingPublicKey)
+            }),
+            ("missing key kind", public_key(None), |error| {
+                matches!(error, ValidatorSetError::UnsupportedPublicKeyType)
+            }),
+            (
+                "wrong key kind",
+                public_key(Some(CryptoKeySum::Secp256k1(vec![1; 33]))),
+                |error| matches!(error, ValidatorSetError::UnsupportedPublicKeyType),
+            ),
+            (
+                "short key",
+                public_key(Some(CryptoKeySum::Ed25519(vec![1; 31]))),
+                |error| matches!(error, ValidatorSetError::PublicKeyLength(31)),
+            ),
+            (
+                "long key",
+                public_key(Some(CryptoKeySum::Ed25519(vec![1; 33]))),
+                |error| matches!(error, ValidatorSetError::PublicKeyLength(33)),
+            ),
+            (
+                "invalid point",
+                public_key(Some(CryptoKeySum::Ed25519(vec![2; 32]))),
+                |error| matches!(error, ValidatorSetError::InvalidPublicKey(_)),
+            ),
+        ];
+
+        for (name, pub_key, expected) in cases {
+            let proto_val = tendermint_proto::v0_38::types::Validator {
+                address: vec![],
+                pub_key,
+                voting_power: 100,
+                proposer_priority: 0,
+            };
+            match ValidatorInfo::try_from(&proto_val) {
+                Err(FibreError::InvalidValidatorSet(error)) => {
+                    assert!(expected(&error), "{name}: got {error:?}")
+                }
+                other => panic!("{name}: got {other:?}"),
+            }
+        }
     }
 }

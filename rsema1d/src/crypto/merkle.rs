@@ -79,7 +79,7 @@ impl MerkleTree {
         assert!(index < self.num_leaves);
 
         // Pre-allocate: depth = log2(num_leaves)
-        let depth = (self.num_leaves as f64).log2() as usize;
+        let depth = self.num_leaves.trailing_zeros() as usize;
         let mut proof = Vec::with_capacity(depth);
 
         let mut pos = index;
@@ -189,15 +189,17 @@ mod tests {
 
     #[test]
     fn proof_generation_and_verification_for_all_leaves() {
-        let leaves = make_leaves(16, 16);
-        let tree = MerkleTree::new(&leaves);
-        let root = tree.root();
+        for (count, depth) in [(1, 0), (2, 1), (4, 2), (16, 4), (128, 7)] {
+            let leaves = make_leaves(count, 16);
+            let tree = MerkleTree::new(&leaves);
+            let root = tree.root();
 
-        for (i, leaf) in leaves.iter().enumerate() {
-            let proof = tree.generate_proof(i);
-            assert_eq!(proof.len(), 4);
-            let leaf_hash = hash_leaf(leaf);
-            assert!(verify_proof(&leaf_hash, i, &proof, &root));
+            for (i, leaf) in leaves.iter().enumerate() {
+                let proof = tree.generate_proof(i);
+                assert_eq!(proof.len(), depth);
+                let leaf_hash = hash_leaf(leaf);
+                assert!(verify_proof(&leaf_hash, i, &proof, &root));
+            }
         }
     }
 
