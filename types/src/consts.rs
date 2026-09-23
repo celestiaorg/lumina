@@ -132,9 +132,60 @@ pub mod appconsts {
         pub const MAX_TX_SIZE: u64 = 8_388_608; // 8MB
     }
 
+    // https://github.com/celestiaorg/celestia-app/blob/v8.0.0-rc0/pkg/appconsts/app_consts.go
+    /// Consts of App v8.
+    pub mod v8 {
+        /// App version.
+        pub const VERSION: u64 = 8;
+        /// Maximum width of the original data square.
+        pub const SQUARE_SIZE_UPPER_BOUND: usize = 512;
+        /// Maximum width of a single subtree root when generating blob's commitment.
+        pub const SUBTREE_ROOT_THRESHOLD: u64 = 64;
+        /// Cost of each byte in a transaction (in units of gas).
+        pub const TX_SIZE_COST_PER_BYTE: u64 = 10;
+        /// Cost of each byte in blob (in units of gas).
+        pub const GAS_PER_BLOB_BYTE: u64 = 8;
+        /// Maximum size of the transaction (in bytes).
+        pub const MAX_TX_SIZE: u64 = 8_388_608; // 8MB
+    }
+
+    // https://github.com/celestiaorg/celestia-app/blob/v9.0.0-mocha/pkg/appconsts/app_consts.go
+    /// Consts of App v9.
+    pub mod v9 {
+        /// App version.
+        pub const VERSION: u64 = 9;
+        /// Maximum width of the original data square.
+        pub const SQUARE_SIZE_UPPER_BOUND: usize = 512;
+        /// Maximum width of a single subtree root when generating blob's commitment.
+        pub const SUBTREE_ROOT_THRESHOLD: u64 = 64;
+        /// Cost of each byte in a transaction (in units of gas).
+        pub const TX_SIZE_COST_PER_BYTE: u64 = 10;
+        /// Cost of each byte in blob (in units of gas).
+        pub const GAS_PER_BLOB_BYTE: u64 = 8;
+        /// Maximum size of the transaction (in bytes).
+        pub const MAX_TX_SIZE: u64 = 8_388_608; // 8MB
+    }
+
+    // https://github.com/celestiaorg/celestia-app/blob/v10.2.0-mocha/pkg/appconsts/app_consts.go
+    /// Consts of App v10.
+    pub mod v10 {
+        /// App version.
+        pub const VERSION: u64 = 10;
+        /// Maximum width of the original data square.
+        pub const SQUARE_SIZE_UPPER_BOUND: usize = 512;
+        /// Maximum width of a single subtree root when generating blob's commitment.
+        pub const SUBTREE_ROOT_THRESHOLD: u64 = 64;
+        /// Cost of each byte in a transaction (in units of gas).
+        pub const TX_SIZE_COST_PER_BYTE: u64 = 10;
+        /// Cost of each byte in blob (in units of gas).
+        pub const GAS_PER_BLOB_BYTE: u64 = 8;
+        /// Maximum size of the transaction (in bytes).
+        pub const MAX_TX_SIZE: u64 = 8_388_608; // 8MB
+    }
+
     /// Maximum width of a single subtree root when generating blob's commitment.
     ///
-    /// This value is the same for all app versions (V1-V7).
+    /// This value is the same for all app versions (V1-V10).
     pub const SUBTREE_ROOT_THRESHOLD: u64 = 64;
 
     // celestia-app/pkg/appconsts/global_consts
