@@ -9,7 +9,6 @@ use rsema1d::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::borrow::Cow;
 use std::fs;
 use std::path::PathBuf;
 
@@ -362,7 +361,7 @@ fn go_fuzzy_vectors_match_rust() {
 
                 let row_proof = RowProof {
                     index: proof.index,
-                    row: Cow::Owned(row),
+                    row: row.into(),
                     row_proof,
                 };
                 verify_with_context(&row_proof, &commitment, &context).unwrap_or_else(|e| {

@@ -748,7 +748,7 @@ name = "celestia-fibre"
 version = "1.1.0-rc.1"
 dependencies = [
  "async-trait",
- "bech32",
+ "bytes",
  "celestia-grpc",
  "celestia-proto",
  "celestia-types",
@@ -760,6 +760,7 @@ dependencies = [
  "gloo-net",
  "hex",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "k256",

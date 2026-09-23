@@ -3,14 +3,13 @@
 //! Contains unified mock implementations used across upload, download, and
 //! roundtrip tests.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 
-use crate::blob::BlobID;
+use crate::blob::{BlobID, EncodedBlob};
 use crate::client::FibreClient;
 use crate::config::{BlobConfig, FibreClientConfig, Fraction};
 use crate::error::FibreError;
@@ -103,7 +102,7 @@ impl MockValidatorConnection {
             .rows
             .extend(proofs.into_iter().map(|proof| rsema1d::RowProof {
                 index: proof.index,
-                row: Cow::Owned(proof.row.to_vec()),
+                row: proof.row.clone(),
                 row_proof: proof.row_proof,
             }));
         entry.rlcs = rlcs;
@@ -136,7 +135,9 @@ impl ValidatorConnection for MockValidatorConnection {
         rlc_vector: &[rsema1d::GF128],
     ) -> Result<UploadResponse, FibreError> {
         if self.fail {
-            return Err(FibreError::Other("mock connection failure".into()));
+            return Err(FibreError::GrpcClient(
+                tonic::Status::unavailable("mock connection failure").into(),
+            ));
         }
 
         // Record what was uploaded and notify waiters.
@@ -162,7 +163,9 @@ impl ValidatorConnection for MockValidatorConnection {
 
     async fn download_shard(&self, blob_id: &BlobID) -> Result<DownloadResponse, FibreError> {
         if self.fail {
-            return Err(FibreError::Other("mock connection failure".into()));
+            return Err(FibreError::GrpcClient(
+                tonic::Status::unavailable("mock connection failure").into(),
+            ));
         }
 
         self.stored
@@ -207,7 +210,7 @@ impl ValidatorConnector for MockConnector {
             .get(&validator.address)
             .cloned()
             .map(|c| c as Arc<dyn ValidatorConnection>)
-            .ok_or_else(|| FibreError::HostNotFound(validator.address_hex()))
+            .ok_or(FibreError::HostNotFound(validator.address))
     }
 }
 
@@ -225,7 +228,7 @@ impl ValidatorConnector for FailingConnector {
         validator: &ValidatorInfo,
     ) -> Result<Arc<dyn ValidatorConnection>, FibreError> {
         if self.fail_addresses.contains(&validator.address) {
-            return Err(FibreError::HostNotFound(validator.address_hex()));
+            return Err(FibreError::HostNotFound(validator.address));
         }
         self.inner.connect(validator).await
     }
@@ -240,9 +243,35 @@ pub(crate) fn make_validator(power: u64, seed: u8) -> (Ed25519SigningKey, Valida
     (ed_key, ValidatorInfo::try_new(pubkey, power).unwrap())
 }
 
+pub(crate) fn validator_set(
+    powers: &[u64],
+    height: u64,
+) -> (Vec<(Ed25519SigningKey, ValidatorInfo)>, ValidatorSet) {
+    let validators: Vec<_> = powers
+        .iter()
+        .enumerate()
+        .map(|(index, &power)| make_validator(power, (index + 1) as u8))
+        .collect();
+    let set = ValidatorSet::try_new(
+        validators
+            .iter()
+            .map(|(_, validator)| validator.clone())
+            .collect(),
+        height,
+    )
+    .unwrap();
+    (validators, set)
+}
+
 /// Standard test blob configuration: K=4, N=4, min_row_size=64.
 pub(crate) fn test_blob_config() -> BlobConfig {
     BlobConfig::new_test(0, 4, 4, 4096, 4, 64)
+}
+
+pub(crate) fn test_blob(len: usize) -> (EncodedBlob, Vec<u8>) {
+    let data = (0..len).map(|index| index as u8).collect::<Vec<_>>();
+    let blob = EncodedBlob::new(&data, test_blob_config()).unwrap();
+    (blob, data)
 }
 
 /// Shorthand for building a [`Fraction`] in tests.
@@ -280,12 +309,27 @@ pub(crate) fn build_test_client(
 
 /// Create a [`MockConnector`] with connections for each validator.
 pub(crate) fn make_connector(validators: &[(Ed25519SigningKey, ValidatorInfo)]) -> MockConnector {
+    connector_with_handles(validators).0
+}
+
+pub(crate) fn connector_with_handles(
+    validators: &[(Ed25519SigningKey, ValidatorInfo)],
+) -> (MockConnector, Vec<Arc<MockValidatorConnection>>) {
     let mut connector = MockConnector::new();
+    let mut connections = Vec::new();
     for (ed_key, info) in validators {
-        connector.add(
-            info.address,
-            Arc::new(MockValidatorConnection::new(ed_key.clone())),
-        );
+        let connection = Arc::new(MockValidatorConnection::new(ed_key.clone()));
+        connector.add(info.address, Arc::clone(&connection));
+        connections.push(connection);
     }
-    connector
+    (connector, connections)
+}
+
+pub(crate) fn distribute_proofs(blob: &EncodedBlob, connections: &[Arc<MockValidatorConnection>]) {
+    for connection in connections {
+        let proofs = (0..blob.config().total_rows())
+            .map(|index| blob.row(index).unwrap())
+            .collect();
+        connection.store_proofs(blob.id().commitment(), proofs, blob.rlc_coeffs().to_vec());
+    }
 }

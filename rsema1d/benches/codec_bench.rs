@@ -6,6 +6,7 @@ use criterion::{
 };
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use rayon::prelude::*;
 use rsema1d::{
     encode, encode_in_place, reconstruct, ExtendedData, Parameters, RowMatrix, VerificationContext,
 };
@@ -192,6 +193,52 @@ fn bench_verification_context(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_verification_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("verification_batch");
+    group
+        .sampling_mode(SamplingMode::Flat)
+        .sample_size(10)
+        .warm_up_time(Duration::from_secs(3))
+        .measurement_time(Duration::from_secs(20));
+
+    let (k, n, row_size) = (4096, 12288, 32768);
+    let params = Parameters::new(k, n, row_size).unwrap();
+    let data = RowMatrix::with_shape(generate_test_data(k, row_size), k, row_size).unwrap();
+    let extended = ExtendedData::generate(&data, &params).unwrap();
+    let proofs: Vec<_> = (0..k)
+        .map(|index| extended.generate_row_proof(index).unwrap())
+        .collect();
+    let context = VerificationContext::new(extended.rlc_original(), &params).unwrap();
+    let commitment = extended.commitment();
+    rsema1d::codec::verify_proof(&proofs[0], &commitment, &context).unwrap();
+
+    group.throughput(Throughput::Bytes((k * row_size) as u64));
+    group.bench_function("serial_k4096_32KiB", |b| {
+        b.iter(|| {
+            black_box(&proofs)
+                .iter()
+                .try_for_each(|proof| {
+                    rsema1d::codec::verify_proof(proof, &commitment, &context).map(|_| ())
+                })
+                .unwrap()
+        });
+    });
+    group.bench_function("rayon_148_rows_k4096_32KiB", |b| {
+        b.iter(|| {
+            black_box(&proofs)
+                .par_chunks(148)
+                .try_for_each(|proofs| {
+                    proofs.iter().try_for_each(|proof| {
+                        rsema1d::codec::verify_proof(proof, &commitment, &context).map(|_| ())
+                    })
+                })
+                .unwrap()
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_reconstruct(c: &mut Criterion) {
     let mut group = c.benchmark_group("reconstruct");
 
@@ -227,6 +274,7 @@ criterion_group! {
         bench_proof_generation,
         bench_verification,
         bench_verification_context,
+        bench_verification_batch,
         bench_reconstruct
 }
 criterion_main!(benches);

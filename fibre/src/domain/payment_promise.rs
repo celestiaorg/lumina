@@ -13,7 +13,8 @@ use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::blob::Commitment;
-use crate::error::FibreError;
+use crate::config::validate_chain_id;
+use crate::error::{FibreError, PaymentPromiseError};
 
 /// Domain separation prefix prepended to sign bytes.
 /// Ensures payment promise signatures cannot be confused with consensus messages.
@@ -23,10 +24,7 @@ pub const SIGN_BYTES_PREFIX: &[u8] = b"fibre/pp:v0";
 const PUBKEY_SIZE: usize = 33;
 
 /// Size of a secp256k1 signature in compact format (32 bytes r + 32 bytes s).
-const SIGNATURE_SIZE: usize = 64;
-
-/// Maximum allowed chain ID length.
-pub(crate) const MAX_CHAIN_ID_SIZE: usize = 20;
+pub(crate) const SIGNATURE_SIZE: usize = 64;
 
 /// Size of the Go time.Time MarshalBinary output for UTC times.
 const TIMESTAMP_BINARY_SIZE: usize = 15;
@@ -149,63 +147,38 @@ impl PaymentPromise {
     /// Performs stateless validation of all field constraints and verifies
     /// the signature using the signer's public key.
     pub fn validate(&self) -> Result<(), FibreError> {
-        // Chain ID must not be empty
-        if self.chain_id.is_empty() {
-            return Err(FibreError::InvalidPaymentPromise(
-                "chain id must not be empty".into(),
-            ));
-        }
-
-        // Chain ID length limit
-        if self.chain_id.len() > MAX_CHAIN_ID_SIZE {
-            return Err(FibreError::InvalidPaymentPromise(format!(
-                "chain id length {} exceeds maximum {}",
-                self.chain_id.len(),
-                MAX_CHAIN_ID_SIZE
-            )));
-        }
+        validate_chain_id(&self.chain_id)?;
 
         // Upload size must be positive
         if self.upload_size == 0 {
-            return Err(FibreError::InvalidPaymentPromise(
-                "upload size must be positive".into(),
-            ));
+            return Err(PaymentPromiseError::ZeroUploadSize.into());
         }
 
         // Creation timestamp must not be Unix epoch (Go's zero value check)
         if self.creation_timestamp == SystemTime::UNIX_EPOCH {
-            return Err(FibreError::InvalidPaymentPromise(
-                "creation timestamp must not be zero".into(),
-            ));
+            return Err(PaymentPromiseError::ZeroTimestamp.into());
         }
 
         // Signature must be present and correct size
         let signature_bytes = self
             .signature
             .as_ref()
-            .ok_or_else(|| FibreError::InvalidPaymentPromise("signature must be present".into()))?;
+            .ok_or(PaymentPromiseError::MissingSignature)?;
 
         if signature_bytes.len() != SIGNATURE_SIZE {
-            return Err(FibreError::InvalidPaymentPromise(format!(
-                "signature must be {} bytes, got {}",
-                SIGNATURE_SIZE,
-                signature_bytes.len()
-            )));
+            return Err(PaymentPromiseError::SignatureLength(signature_bytes.len()).into());
         }
 
         // Verify signature
         let sign_bytes = self.sign_bytes()?;
 
-        let signature = Signature::from_slice(signature_bytes).map_err(|e| {
-            FibreError::InvalidPaymentPromise(format!("invalid signature format: {}", e))
-        })?;
+        let signature =
+            Signature::from_slice(signature_bytes).map_err(PaymentPromiseError::SignatureFormat)?;
 
         use k256::ecdsa::signature::Verifier;
         self.signer_pubkey
             .verify(&sign_bytes, &signature)
-            .map_err(|_| {
-                FibreError::InvalidPaymentPromise("signature verification failed".into())
-            })?;
+            .map_err(PaymentPromiseError::SignatureVerification)?;
 
         Ok(())
     }
@@ -214,9 +187,10 @@ impl PaymentPromise {
     ///
     /// The signature must be set before calling this method.
     pub fn hash(&self) -> Result<[u8; 32], FibreError> {
-        let signature = self.signature.as_ref().ok_or_else(|| {
-            FibreError::InvalidPaymentPromise("signature must be set before computing hash".into())
-        })?;
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or(PaymentPromiseError::MissingSignature)?;
 
         let sign_bytes = self.sign_bytes()?;
 
@@ -272,7 +246,7 @@ const UNIX_TO_INTERNAL: i64 = (1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400) 
 fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
     let duration = t
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|_| FibreError::InvalidPaymentPromise("timestamp before Unix epoch".into()))?;
+        .map_err(PaymentPromiseError::TimestampBeforeEpoch)?;
 
     // Convert from Unix epoch to Go's internal epoch (year 1)
     let secs = duration.as_secs() as i64 + UNIX_TO_INTERNAL;
@@ -299,21 +273,9 @@ fn marshal_binary_time(t: SystemTime) -> Result<Vec<u8>, FibreError> {
 
 /// Unmarshal a timestamp from Go's `time.Time.MarshalBinary()` format back to `SystemTime`.
 #[cfg(test)]
-fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
-    if data.len() != TIMESTAMP_BINARY_SIZE {
-        return Err(FibreError::Other(format!(
-            "timestamp binary must be {} bytes, got {}",
-            TIMESTAMP_BINARY_SIZE,
-            data.len()
-        )));
-    }
-
-    if data[0] != 1 {
-        return Err(FibreError::Other(format!(
-            "unsupported timestamp version: {}",
-            data[0]
-        )));
-    }
+fn unmarshal_binary_time(data: &[u8]) -> SystemTime {
+    assert_eq!(data.len(), TIMESTAMP_BINARY_SIZE);
+    assert_eq!(data[0], 1);
 
     // Seconds since year 1 (Go's internal epoch)
     let internal_secs = i64::from_be_bytes(data[1..9].try_into().unwrap());
@@ -322,29 +284,21 @@ fn unmarshal_binary_time(data: &[u8]) -> Result<SystemTime, FibreError> {
     // Convert from Go's internal epoch to Unix epoch
     let unix_secs = internal_secs - UNIX_TO_INTERNAL;
 
-    if unix_secs < 0 {
-        return Err(FibreError::Other(
-            "timestamp before Unix epoch not supported".into(),
-        ));
-    }
-    if nsecs < 0 {
-        return Err(FibreError::Other(
-            "negative timestamp nanoseconds not supported".into(),
-        ));
-    }
+    assert!(unix_secs >= 0);
+    assert!(nsecs >= 0);
 
     let duration = std::time::Duration::new(unix_secs as u64, nsecs as u32);
-    Ok(SystemTime::UNIX_EPOCH + duration)
+    SystemTime::UNIX_EPOCH + duration
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MAX_CHAIN_ID_SIZE;
     use k256::ecdsa::SigningKey;
-    use rand::rngs::OsRng;
 
     fn make_test_promise() -> (SigningKey, PaymentPromise) {
-        let signing_key = SigningKey::random(&mut OsRng);
+        let signing_key = SigningKey::from_bytes((&[1u8; 32]).into()).unwrap();
         let verifying_key = *signing_key.verifying_key();
 
         let promise = PaymentPromise {
@@ -354,7 +308,8 @@ mod tests {
             upload_size: 1024,
             blob_version: 0,
             commitment: [1u8; 32],
-            creation_timestamp: SystemTime::now(),
+            creation_timestamp: SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000),
             signer_pubkey: verifying_key,
             signature: None,
         };
@@ -363,138 +318,165 @@ mod tests {
     }
 
     #[test]
-    fn stripped_sign_bytes_format() {
-        let (_, promise) = make_test_promise();
-        let stripped = promise.stripped_sign_bytes().unwrap();
-
-        // stripped_sign_bytes has no prefix or chain_id
-        assert_eq!(stripped.len(), SIGN_BYTES_FIXED_SIZE);
-    }
-
-    #[test]
-    fn sign_bytes_uses_comet_wrapper() {
-        let (_, promise) = make_test_promise();
-        let sign_bytes = promise.sign_bytes().unwrap();
-
-        // sign_bytes starts with "COMET::RAW_BYTES::SIGN"
-        assert_eq!(
-            &sign_bytes[..COMET_RAW_BYTES_PREFIX.len()],
-            COMET_RAW_BYTES_PREFIX
-        );
-    }
-
-    #[test]
-    fn stripped_sign_bytes_field_layout() {
-        let (_, promise) = make_test_promise();
-        let stripped = promise.stripped_sign_bytes().unwrap();
-
-        let mut offset = 0;
-
-        // Signer pubkey (33 bytes)
-        let expected_pubkey = promise.signer_pubkey.to_sec1_bytes();
-        assert_eq!(
-            &stripped[offset..offset + PUBKEY_SIZE],
-            expected_pubkey.as_ref()
-        );
-        offset += PUBKEY_SIZE;
-
-        // Namespace (29 bytes)
-        assert_eq!(
-            &stripped[offset..offset + NS_SIZE],
-            promise.namespace.as_bytes()
-        );
-        offset += NS_SIZE;
-
-        // Upload size (4 bytes BE)
-        assert_eq!(
-            &stripped[offset..offset + 4],
-            &promise.upload_size.to_be_bytes()
-        );
-        offset += 4;
-
-        // Commitment (32 bytes)
-        assert_eq!(&stripped[offset..offset + 32], &promise.commitment);
-        offset += 32;
-
-        // Blob version (4 bytes BE)
-        assert_eq!(
-            &stripped[offset..offset + 4],
-            &promise.blob_version.to_be_bytes()
-        );
-        offset += 4;
-
-        // Height (8 bytes BE)
-        assert_eq!(
-            &stripped[offset..offset + 8],
-            &promise.height.get().to_be_bytes()
-        );
-        offset += 8;
-
-        // Timestamp (15 bytes)
-        assert_eq!(stripped.len() - offset, TIMESTAMP_BINARY_SIZE);
-    }
-
-    #[test]
     fn sign_and_validate() {
         let (signing_key, mut promise) = make_test_promise();
 
-        // Sign
         promise.sign(&signing_key).unwrap();
         assert!(promise.signature.is_some());
         assert_eq!(promise.signature.as_ref().unwrap().len(), SIGNATURE_SIZE);
-
-        // Validate
         promise.validate().unwrap();
     }
 
     #[test]
-    fn validate_fails_without_signature() {
-        let (_, promise) = make_test_promise();
-        assert!(promise.validate().is_err());
-    }
+    fn validation_rejects_invalid_fields_and_signatures() {
+        fn signature_verification_failed(error: &FibreError) -> bool {
+            matches!(
+                error,
+                FibreError::InvalidPaymentPromise(PaymentPromiseError::SignatureVerification(_))
+            )
+        }
 
-    #[test]
-    fn validate_fails_with_wrong_key() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.sign(&signing_key).unwrap();
+        type ErrorCheck = fn(&FibreError) -> bool;
+        type Case = (&'static str, fn(&mut PaymentPromise), ErrorCheck);
+        let cases: &[Case] = &[
+            (
+                "empty chain ID",
+                |p| p.chain_id.clear(),
+                |error| matches!(error, FibreError::InvalidChainId { len: 0 }),
+            ),
+            (
+                "long chain ID",
+                |p| p.chain_id = "x".repeat(MAX_CHAIN_ID_SIZE + 1),
+                |error| matches!(error, FibreError::InvalidChainId { len } if *len == MAX_CHAIN_ID_SIZE + 1),
+            ),
+            (
+                "zero upload size",
+                |p| p.upload_size = 0,
+                |error| {
+                    matches!(
+                        error,
+                        FibreError::InvalidPaymentPromise(PaymentPromiseError::ZeroUploadSize)
+                    )
+                },
+            ),
+            (
+                "zero timestamp",
+                |p| p.creation_timestamp = SystemTime::UNIX_EPOCH,
+                |error| {
+                    matches!(
+                        error,
+                        FibreError::InvalidPaymentPromise(PaymentPromiseError::ZeroTimestamp)
+                    )
+                },
+            ),
+            (
+                "changed chain ID",
+                |p| p.chain_id = "other-chain".into(),
+                signature_verification_failed,
+            ),
+            (
+                "changed height",
+                |p| p.height = NonZeroU64::new(12346).unwrap(),
+                signature_verification_failed,
+            ),
+            (
+                "changed namespace",
+                |p| {
+                    let mut namespace = [0u8; NS_SIZE];
+                    namespace[NS_SIZE - 1] = 1;
+                    p.namespace = Namespace::from_raw(&namespace).unwrap();
+                },
+                signature_verification_failed,
+            ),
+            (
+                "changed upload size",
+                |p| p.upload_size += 1,
+                signature_verification_failed,
+            ),
+            (
+                "changed blob version",
+                |p| p.blob_version = 1,
+                signature_verification_failed,
+            ),
+            (
+                "changed commitment",
+                |p| p.commitment[0] ^= 1,
+                signature_verification_failed,
+            ),
+            (
+                "changed timestamp",
+                |p| p.creation_timestamp += std::time::Duration::from_secs(1),
+                signature_verification_failed,
+            ),
+            (
+                "changed signer public key",
+                |p| {
+                    let key = SigningKey::from_bytes((&[2u8; 32]).into()).unwrap();
+                    p.signer_pubkey = *key.verifying_key();
+                },
+                signature_verification_failed,
+            ),
+            (
+                "missing signature",
+                |p| p.signature = None,
+                |error| {
+                    matches!(
+                        error,
+                        FibreError::InvalidPaymentPromise(PaymentPromiseError::MissingSignature)
+                    )
+                },
+            ),
+            (
+                "short signature",
+                |p| p.signature = Some(vec![0; SIGNATURE_SIZE - 1]),
+                |error| {
+                    matches!(
+                        error,
+                        FibreError::InvalidPaymentPromise(PaymentPromiseError::SignatureLength(63))
+                    )
+                },
+            ),
+            (
+                "malformed signature",
+                |p| p.signature = Some(vec![0; SIGNATURE_SIZE]),
+                |error| {
+                    matches!(
+                        error,
+                        FibreError::InvalidPaymentPromise(PaymentPromiseError::SignatureFormat(_))
+                    )
+                },
+            ),
+            (
+                "long signature",
+                |p| p.signature = Some(vec![0; SIGNATURE_SIZE + 1]),
+                |error| {
+                    matches!(
+                        error,
+                        FibreError::InvalidPaymentPromise(PaymentPromiseError::SignatureLength(65))
+                    )
+                },
+            ),
+        ];
 
-        // Change the public key to a different one
-        let wrong_key = SigningKey::random(&mut OsRng);
-        promise.signer_pubkey = *wrong_key.verifying_key();
+        for (name, mutate, expected) in cases {
+            let (signing_key, mut promise) = make_test_promise();
+            promise.sign(&signing_key).unwrap();
+            mutate(&mut promise);
 
-        assert!(promise.validate().is_err());
-    }
-
-    #[test]
-    fn validate_fails_with_empty_chain_id() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.chain_id = String::new();
-        promise.sign(&signing_key).unwrap();
-        assert!(promise.validate().is_err());
-    }
-
-    #[test]
-    fn validate_fails_with_zero_upload_size() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.upload_size = 0;
-        promise.sign(&signing_key).unwrap();
-        assert!(promise.validate().is_err());
+            let error = promise.validate().unwrap_err();
+            assert!(expected(&error), "{name}: got {error:?}");
+        }
     }
 
     #[test]
     fn hash_requires_signature() {
         let (_, promise) = make_test_promise();
-        assert!(promise.hash().is_err());
-    }
-
-    #[test]
-    fn hash_is_deterministic() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.sign(&signing_key).unwrap();
-
-        let h1 = promise.hash().unwrap();
-        let h2 = promise.hash().unwrap();
-        assert_eq!(h1, h2);
+        assert!(matches!(
+            promise.hash(),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::MissingSignature
+            ))
+        ));
     }
 
     #[test]
@@ -517,7 +499,7 @@ mod tests {
         assert_eq!(bytes.len(), TIMESTAMP_BINARY_SIZE);
         assert_eq!(bytes[0], 1); // version
 
-        let recovered = unmarshal_binary_time(&bytes).unwrap();
+        let recovered = unmarshal_binary_time(&bytes);
 
         // Check precision is maintained (nanosecond-level)
         let diff = now
@@ -547,35 +529,18 @@ mod tests {
     }
 
     #[test]
-    fn sign_bytes_consistency() {
-        let (_, promise) = make_test_promise();
-
-        // sign_bytes should be deterministic
-        let sb1 = promise.sign_bytes().unwrap();
-        let sb2 = promise.sign_bytes().unwrap();
-        assert_eq!(sb1, sb2);
+    fn timestamp_before_epoch_is_rejected() {
+        let timestamp = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert!(matches!(
+            marshal_binary_time(timestamp),
+            Err(FibreError::InvalidPaymentPromise(
+                PaymentPromiseError::TimestampBeforeEpoch(_)
+            ))
+        ));
     }
 
-    #[test]
-    fn signed_payment_promise_construction() {
-        let (signing_key, mut promise) = make_test_promise();
-        promise.sign(&signing_key).unwrap();
-
-        let signed = SignedPaymentPromise {
-            promise: promise.clone(),
-            validator_signatures: vec![None, Some(vec![0u8; 64]), None],
-        };
-
-        assert_eq!(signed.validator_signatures.len(), 3);
-        assert!(signed.validator_signatures[0].is_none());
-        assert!(signed.validator_signatures[1].is_some());
-        assert!(signed.validator_signatures[2].is_none());
-    }
-
-    /// Cross-language compatibility test.
-    ///
-    /// Uses a deterministic private key and fixed field values so the output
-    /// can be reproduced in Go to verify sign_bytes and signature compatibility.
+    /// Golden generated with celestiaorg/celestia-app/fibre/payment_promise.go
+    /// at commit 6f4b596e47f80683adb1a161ca7cb640dcd9d206.
     #[test]
     fn cross_language_sign_bytes_deterministic() {
         // Use a deterministic private key (32 bytes, all 0x01).
@@ -652,40 +617,21 @@ mod tests {
             COMET_RAW_BYTES_PREFIX
         );
 
-        // Print hex values for cross-language comparison
-        let sign_bytes_hex = hex::encode(&sign_bytes);
-        eprintln!("=== Cross-language compatibility test ===");
-        eprintln!("Private key hex: {}", hex::encode(key_bytes));
-        eprintln!(
-            "Public key hex (33 bytes compressed): {}",
-            hex::encode(verifying_key.to_sec1_bytes().as_ref())
-        );
-        eprintln!(
-            "Stripped sign bytes hex ({} bytes): {}",
-            stripped.len(),
-            hex::encode(&stripped)
-        );
-        eprintln!(
-            "Sign bytes hex ({} bytes): {sign_bytes_hex}",
-            sign_bytes.len()
+        assert_eq!(
+            hex::encode(&sign_bytes),
+            "434f4d45543a3a5241575f42595445533a3a5349474e95010a076d6f6368612d34127d031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f000000000000000000000000000000000000000000000000000000000000000400abababababababababababababababababababababababababababababababab000000000000000000000064010000000edce5e80000000000ffff1a0b66696272652f70703a7630"
         );
 
-        // Sign and verify
         promise.sign(&signing_key).unwrap();
-        let signature_hex = hex::encode(promise.signature.as_ref().unwrap());
-        eprintln!("Signature hex (64 bytes): {signature_hex}");
+        assert_eq!(
+            hex::encode(promise.signature.as_ref().unwrap()),
+            "401ccc7575a796b9f6f0196dee7071119a2cb51da84fdeb0f31b41f1a46ca3c37f41c0c8fbde3ff900259632c57019becc17922ea16f64d615b77787b01f54d0"
+        );
         promise.validate().unwrap();
-
-        use sha2::{Digest as _, Sha256};
-        let hash = Sha256::digest(&sign_bytes);
-        eprintln!("SHA-256(sign_bytes) hex: {}", hex::encode(hash));
-        eprintln!("=== End cross-language compatibility test ===");
     }
 
-    /// Proto round-trip test: verify sign_bytes survive serialization.
-    ///
-    /// Converts a PaymentPromise to proto, encodes to bytes with prost,
-    /// decodes back, reconstructs a PaymentPromise, and checks sign_bytes match.
+    /// Golden generated with celestiaorg/celestia-app/x/fibre/types/fibre.pb.go
+    /// at commit 6f4b596e47f80683adb1a161ca7cb640dcd9d206.
     #[test]
     fn proto_roundtrip_preserves_sign_bytes() {
         use prost::Message;
@@ -714,14 +660,10 @@ mod tests {
         let proto_pp = celestia_proto::celestia::fibre::v1::PaymentPromise::from(&promise);
         let proto_bytes = proto_pp.encode_to_vec();
 
-        // Print the raw proto bytes for cross-language decoding
-        eprintln!("=== Proto round-trip test ===");
-        eprintln!(
-            "Proto bytes hex ({} bytes): {}",
-            proto_bytes.len(),
-            hex::encode(&proto_bytes)
+        assert_eq!(
+            hex::encode(&proto_bytes),
+            "0a076d6f6368612d3410641a1d00000000000000000000000000000000000000000000000000000000002080083220abababababababababababababababababababababababababababababababab3a0c0880e2cfaa061080cab5ee0142230a21031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f4a40cb70b2c2258890027a8e2f57dbb6bcf064cd6803a7ea2d77d5ed8cede60f190257f819b76a2f9f362d0eb8cfc3c62bd5de2d06cd8bba2747f84592a935f9a319"
         );
-        eprintln!("=== End proto round-trip test ===");
 
         // Decode back from proto bytes
         use celestia_proto::celestia::fibre::v1::PaymentPromise as ProtoPP;
@@ -762,9 +704,8 @@ mod tests {
         reconstructed.validate().unwrap();
     }
 
-    /// Cross-language test: verifies that `raw_bytes_message_sign_bytes` produces
-    /// the exact same output as Go's `core.RawBytesMessageSignBytes`.
-    /// Go test: celestia-app-fibre/fibre/validator/cross_test.go
+    /// Golden generated with celestiaorg/celestia-app/fibre/payment_promise.go
+    /// at commit 6f4b596e47f80683adb1a161ca7cb640dcd9d206.
     #[test]
     fn cross_language_raw_bytes_message_sign_bytes() {
         let chain_id = "test-chain-1";

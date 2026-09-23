@@ -2,8 +2,6 @@ use std::pin::Pin;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::error::FibreError;
-
 /// A Fibre transport byte stream.
 pub trait FibreIo: AsyncRead + AsyncWrite + Send + Unpin {}
 
@@ -16,7 +14,7 @@ pub type BoxedFibreIo = Pin<Box<dyn FibreIo + 'static>>;
 #[async_trait::async_trait]
 pub trait FibreIoConnector: Send + Sync {
     /// Connect to `host:port` without applying TLS.
-    async fn connect(&self, host: String, port: u16) -> Result<BoxedFibreIo, FibreError>;
+    async fn connect(&self, host: String, port: u16) -> Result<BoxedFibreIo, std::io::Error>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,12 +25,8 @@ pub struct NativeTcpConnector;
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl FibreIoConnector for NativeTcpConnector {
-    async fn connect(&self, host: String, port: u16) -> Result<BoxedFibreIo, FibreError> {
-        let stream = tokio::net::TcpStream::connect((host, port))
-            .await
-            .map_err(|error| {
-                FibreError::Other(format!("failed to connect Fibre socket: {error}"))
-            })?;
+    async fn connect(&self, host: String, port: u16) -> Result<BoxedFibreIo, std::io::Error> {
+        let stream = tokio::net::TcpStream::connect((host, port)).await?;
         Ok(Box::pin(stream))
     }
 }
@@ -151,7 +145,7 @@ impl AsyncWrite for BrowserIo {
 #[cfg(target_arch = "wasm32")]
 #[async_trait::async_trait]
 impl FibreIoConnector for BrowserWebSocketConnector {
-    async fn connect(&self, host: String, port: u16) -> Result<BoxedFibreIo, FibreError> {
+    async fn connect(&self, host: String, port: u16) -> Result<BoxedFibreIo, std::io::Error> {
         use futures::{SinkExt, StreamExt};
         use gloo_net::websocket::{Message, futures::WebSocket};
 
@@ -166,29 +160,27 @@ impl FibreIoConnector for BrowserWebSocketConnector {
         let connect = async move {
             let mut socket =
                 WebSocket::open_with_protocol(&relay_url, PROTOCOL).map_err(|error| {
-                    FibreError::Other(format!("failed to connect Fibre relay: {error}"))
+                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, error)
                 })?;
             socket
                 .send(Message::Text(authority))
                 .await
-                .map_err(|error| {
-                    FibreError::Other(format!("failed to open Fibre tunnel: {error}"))
-                })?;
+                .map_err(std::io::Error::other)?;
             match socket.next().await {
                 Some(Ok(Message::Text(response))) if response == "ok" => {}
                 Some(Ok(_)) => {
-                    return Err(FibreError::Other(
-                        "Fibre relay returned an invalid tunnel acknowledgement".into(),
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Fibre relay returned an invalid tunnel acknowledgement",
                     ));
                 }
                 Some(Err(error)) => {
-                    return Err(FibreError::Other(format!(
-                        "failed to open Fibre tunnel: {error}"
-                    )));
+                    return Err(std::io::Error::other(error));
                 }
                 None => {
-                    return Err(FibreError::Other(
-                        "Fibre relay closed before acknowledging the tunnel".into(),
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "Fibre relay closed before acknowledging the tunnel",
                     ));
                 }
             }

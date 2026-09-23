@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- add `RowMatrix::into_bytes` to take the backing storage as shared `Bytes` without copying
+
+### Changed
+
+- [**breaking**] make `RowProof` own shared `Bytes` row data instead of a lifetime-bound `Cow`, avoiding row copies when proofs outlive encoded data borrows
+- avoid temporary allocations when hashing commitment root pairs
+
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/rsema1d-v1.0.0...rsema1d-v1.1.0-rc.1) - 2026-06-24
 
 ### Added

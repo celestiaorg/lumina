@@ -1,7 +1,8 @@
 use celestia_proto::cosmos::base::abci::v1beta1::GasInfo;
 use celestia_proto::cosmos::tx::v1beta1::{
     BroadcastTxRequest, BroadcastTxResponse, GetTxRequest as RawGetTxRequest,
-    GetTxResponse as RawGetTxResponse, SimulateRequest, SimulateResponse,
+    GetTxResponse as RawGetTxResponse, GetTxsEventRequest, GetTxsEventResponse, SimulateRequest,
+    SimulateResponse,
 };
 use celestia_types::hash::Hash;
 use celestia_types::state::{Tx, TxResponse};
@@ -81,6 +82,18 @@ impl FromGrpcResponse<GetTxResponse> for RawGetTxResponse {
     }
 }
 
+impl IntoGrpcParam<GetTxsEventRequest> for GetTxsEventRequest {
+    fn into_parameter(self) -> GetTxsEventRequest {
+        self
+    }
+}
+
+impl FromGrpcResponse<GetTxsEventResponse> for GetTxsEventResponse {
+    fn try_from_response(self) -> Result<GetTxsEventResponse> {
+        Ok(self)
+    }
+}
+
 impl IntoGrpcParam<SimulateRequest> for Vec<u8> {
     fn into_parameter(self) -> SimulateRequest {
         SimulateRequest {
@@ -93,6 +106,37 @@ impl IntoGrpcParam<SimulateRequest> for Vec<u8> {
 impl FromGrpcResponse<GasInfo> for SimulateResponse {
     fn try_from_response(self) -> Result<GasInfo> {
         self.gas_info.ok_or(Error::FailedToParseResponse)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_txs_event_request_is_forwarded_unchanged() {
+        let request = GetTxsEventRequest {
+            page: 3,
+            limit: 25,
+            query: "tx.height > 10".into(),
+            ..Default::default()
+        };
+
+        let converted = request.clone().into_parameter();
+
+        assert_eq!(converted, request);
+    }
+
+    #[test]
+    fn get_txs_event_response_is_forwarded_unchanged() {
+        let response = GetTxsEventResponse {
+            total: 42,
+            ..Default::default()
+        };
+
+        let converted = response.clone().try_from_response().unwrap();
+
+        assert_eq!(converted, response);
     }
 }
 

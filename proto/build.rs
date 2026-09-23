@@ -299,6 +299,7 @@ fn tonic_build(fds: FileDescriptorSet) {
         .build_transport(false)
         .use_arc_self(true)
         .compile_well_known_types(true)
+        .codec_path("crate::tonic_codec::PreallocProstCodec")
         .skip_protoc_run()
         .bytes([
             ".tendermint_celestia_mods.abci",
