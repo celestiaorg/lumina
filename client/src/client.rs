@@ -531,6 +531,8 @@ mod tests {
     async fn reject_fibre_blob_submission() {
         use crate::tx::TxConfig;
         use crate::types::Blob;
+        use crate::types::blob::RawBlob;
+        use crate::types::nmt::Namespace;
 
         let grpc = GrpcClient::builder()
             .endpoint("http://127.0.0.1:1")
@@ -553,9 +555,15 @@ mod tests {
         });
         let blob_api = BlobApi::new(inner.clone());
         let state_api = StateApi::new(inner);
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../types/test_data/fibre_blob_v2.json")).unwrap();
-        let fibre: Blob = serde_json::from_value(fixture["blob"].clone()).unwrap();
+        let namespace = Namespace::new_v0(b"fibre").unwrap();
+        let fibre = Blob::from_raw(RawBlob {
+            namespace_id: namespace.id().to_vec(),
+            namespace_version: 0,
+            share_version: 2,
+            data: vec![0; 36],
+            signer: vec![0xAA; 20],
+        })
+        .unwrap();
         let unsigned = Blob::new(fibre.namespace, vec![1], None).unwrap();
         let signed = Blob::new(fibre.namespace, vec![2], fibre.signer).unwrap();
 

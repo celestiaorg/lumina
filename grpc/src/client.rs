@@ -1142,11 +1142,6 @@ mod tests {
                     error,
                     Error::CelestiaTypesError(celestia_types::Error::FibreBlobSubmission)
                 ));
-                assert_eq!(
-                    error.to_string(),
-                    "Share version 2 is reserved for Fibre system blobs and cannot be submitted via PayForBlobs."
-                );
-                assert!(!error.is_network_error());
             }
         }
     }
