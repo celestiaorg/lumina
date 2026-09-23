@@ -527,6 +527,66 @@ mod tests {
 
     use crate::test_utils::{TEST_PRIV_KEY, TEST_RPC_URL};
 
+    #[async_test]
+    async fn reject_fibre_blob_submission() {
+        use crate::tx::TxConfig;
+        use crate::types::Blob;
+
+        let grpc = GrpcClient::builder()
+            .endpoint("http://127.0.0.1:1")
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let rpc = FailoverClient::new(
+            vec![RpcEndpoint::new("http://127.0.0.1:1")],
+            None,
+            Some(Duration::from_millis(100)),
+            None,
+            celestia_rpc::DEFAULT_MAX_HEAD_AGE,
+        )
+        .unwrap();
+        let inner = Arc::new(ClientInner {
+            rpc,
+            grpc: Some(grpc),
+            pubkey: None,
+            chain_id: "private".parse().unwrap(),
+        });
+        let blob_api = BlobApi::new(inner.clone());
+        let state_api = StateApi::new(inner);
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../types/test_data/fibre_blob_v2.json")).unwrap();
+        let fibre: Blob = serde_json::from_value(fixture["blob"].clone()).unwrap();
+        let unsigned = Blob::new(fibre.namespace, vec![1], None).unwrap();
+        let signed = Blob::new(fibre.namespace, vec![2], fibre.signer).unwrap();
+
+        for blobs in [
+            vec![fibre.clone()],
+            vec![fibre.clone(), unsigned.clone(), signed.clone()],
+            vec![unsigned, signed, fibre],
+        ] {
+            let blob_error = blob_api
+                .submit(&blobs, TxConfig::default())
+                .await
+                .unwrap_err();
+            let state_error = state_api
+                .submit_pay_for_blob(&blobs, TxConfig::default())
+                .await
+                .unwrap_err();
+            for error in [blob_error, state_error] {
+                assert!(matches!(
+                    error,
+                    Error::Grpc(celestia_grpc::Error::CelestiaTypesError(
+                        celestia_types::Error::FibreBlobSubmission
+                    ))
+                ));
+                assert_eq!(
+                    error.to_string(),
+                    "gRPC error: Share version 2 is reserved for Fibre system blobs and cannot be submitted via PayForBlobs."
+                );
+            }
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn read_blobs_after_blob_and_pay_for_fibre_in_same_namespace() {

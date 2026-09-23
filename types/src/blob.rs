@@ -692,6 +692,7 @@ mod tests {
     use prost::Message;
 
     use super::*;
+    use crate::ExtendedDataSquare;
     use crate::nmt::{NS_ID_SIZE, NS_SIZE};
     use crate::test_utils::random_bytes;
 
@@ -846,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn reconstruct_mixed_blobs_with_padding() {
+    fn reconstruct_mixed_blobs_from_eds() {
         let (fibre, _) = fibre_fixture();
         let blobs = vec![
             Blob::new(fibre.namespace, vec![1; 1024], None).unwrap(),
@@ -855,6 +856,15 @@ mod tests {
             fibre,
         ];
         let mut shares = Vec::new();
+        for namespace in [Namespace::PAY_FOR_BLOB, Namespace::PRIMARY_RESERVED_PADDING] {
+            let mut reserved = [0; appconsts::SHARE_SIZE];
+            reserved[..NS_SIZE].copy_from_slice(namespace.as_bytes());
+            if namespace == Namespace::PAY_FOR_BLOB {
+                reserved[NS_SIZE] = 1;
+                reserved[NS_SIZE + 1..NS_SIZE + 5].copy_from_slice(&1u32.to_be_bytes());
+            }
+            shares.push(Share::from_raw(&reserved).unwrap());
+        }
         for blob in &blobs {
             shares.extend(blob.to_shares().unwrap());
             let mut padding = [0; appconsts::SHARE_SIZE];
@@ -862,7 +872,11 @@ mod tests {
             padding[NS_SIZE] = (blob.share_version << 1) | 1;
             shares.push(Share::from_raw(&padding).unwrap());
         }
-        assert_eq!(Blob::reconstruct_all(&shares).unwrap(), blobs);
+        let mut tail_padding = [0; appconsts::SHARE_SIZE];
+        tail_padding[..NS_SIZE].copy_from_slice(Namespace::TAIL_PADDING.as_bytes());
+        shares.resize(16, Share::from_raw(&tail_padding).unwrap());
+        let eds = ExtendedDataSquare::from_ods(shares.iter().map(Share::to_vec).collect()).unwrap();
+        assert_eq!(Blob::reconstruct_all(eds.data_square()).unwrap(), blobs);
     }
 
     #[test]
