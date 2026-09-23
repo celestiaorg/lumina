@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- add `RowMatrix::into_bytes` to take the backing storage as shared `Bytes` without copying
+
 ### Changed
 
 - [**breaking**] make `RowProof` own shared `Bytes` row data instead of a lifetime-bound `Cow`, avoiding row copies when proofs outlive encoded data borrows
