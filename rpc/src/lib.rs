@@ -22,6 +22,8 @@ mod header;
 pub mod p2p;
 pub mod share;
 mod state;
+#[cfg(test)]
+mod submission_tests;
 mod tx_config;
 
 pub use crate::blob::BlobClient;
