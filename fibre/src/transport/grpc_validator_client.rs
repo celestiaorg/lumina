@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use celestia_grpc::GrpcClient;
 
@@ -26,6 +27,7 @@ pub struct GrpcValidatorConnector {
     host_registry: Arc<dyn HostRegistry>,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
+    request_timeout: Option<Duration>,
     connections: tokio::sync::Mutex<HashMap<[u8; 20], Arc<GrpcValidatorConnection>>>,
 }
 
@@ -50,8 +52,15 @@ impl GrpcValidatorConnector {
             host_registry,
             chain_id: chain_id.into(),
             io_connector,
+            request_timeout: None,
             connections: tokio::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Set the request timeout for connections created by this connector.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
     }
 }
 
@@ -83,6 +92,7 @@ impl ValidatorConnector for GrpcValidatorConnector {
             validator.pubkey,
             self.chain_id.clone(),
             self.io_connector.clone(),
+            self.request_timeout,
         )?;
 
         let conn = Arc::new(GrpcValidatorConnection { client });
@@ -162,6 +172,7 @@ mod tests {
     mod wire {
         use std::num::NonZeroU64;
         use std::sync::Mutex;
+        use std::sync::atomic::AtomicBool;
         use std::time::{Duration, UNIX_EPOCH};
 
         use celestia_proto::celestia::fibre::v1::fibre_server::{Fibre, FibreServer};
@@ -210,6 +221,7 @@ mod tests {
 
         struct WireService {
             upload: Mutex<Option<UploadShardRequest>>,
+            hang_upload: AtomicBool,
             downloads: Mutex<Vec<Vec<u8>>>,
             valid_blob_id: Vec<u8>,
             shard: BlobShard,
@@ -222,6 +234,9 @@ mod tests {
                 request: tonic::Request<UploadShardRequest>,
             ) -> Result<tonic::Response<UploadShardResponse>, tonic::Status> {
                 *self.upload.lock().unwrap() = Some(request.into_inner());
+                if self.hang_upload.load(Ordering::SeqCst) {
+                    std::future::pending().await
+                }
                 Ok(tonic::Response::new(UploadShardResponse {
                     validator_signature: vec![7; 64],
                 }))
@@ -294,7 +309,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn grpc_tls_roundtrip_rejects_malformed_response_and_times_out() {
+        async fn grpc_tls_roundtrip_rejects_malformed_response_and_applies_request_timeout() {
             let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
             let blob = EncodedBlob::new(b"wire payload", cfg).unwrap();
             let valid_id = blob.id().clone();
@@ -320,6 +335,7 @@ mod tests {
 
             let service = Arc::new(WireService {
                 upload: Mutex::new(None),
+                hang_upload: AtomicBool::new(false),
                 downloads: Mutex::new(Vec::new()),
                 valid_blob_id: valid_id.as_bytes().to_vec(),
                 shard,
@@ -344,6 +360,7 @@ mod tests {
                 ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).unwrap(),
                 vector.verifier_chain_id,
                 Arc::new(DuplexConnector(Mutex::new(Some(client_io)))),
+                Some(Duration::from_millis(100)),
                 UnixTime::since_unix_epoch(Duration::from_secs(vector.verify_at)),
             )
             .unwrap();
@@ -355,6 +372,17 @@ mod tests {
                 .unwrap();
             assert_eq!(upload.validator_signature, vec![7; 64]);
             assert_eq!(*service.upload.lock().unwrap(), Some(expected_upload));
+
+            service.hang_upload.store(true, Ordering::SeqCst);
+            let error = connection
+                .upload_shard(&promise, &rows, blob.rlc_coeffs())
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                FibreError::GrpcClient(celestia_grpc::Error::TonicError(status))
+                    if matches!(status.code(), tonic::Code::DeadlineExceeded | tonic::Code::Cancelled)
+            ));
 
             let download = connection.download_shard(&valid_id).await.unwrap();
             assert_eq!(download.rows[0].index, rows[0].index);
@@ -369,15 +397,10 @@ mod tests {
             ));
 
             let timeout_id = BlobID::new(0, TIMEOUT_COMMITMENT);
-            let error = connection
-                .client
-                .download_shard(timeout_id.as_bytes().to_vec())
-                .timeout(Duration::from_millis(100))
-                .await
-                .unwrap_err();
+            let error = connection.download_shard(&timeout_id).await.unwrap_err();
             assert!(matches!(
                 error,
-                celestia_grpc::Error::TonicError(status)
+                FibreError::GrpcClient(celestia_grpc::Error::TonicError(status))
                     if matches!(status.code(), tonic::Code::DeadlineExceeded | tonic::Code::Cancelled)
             ));
 
@@ -408,6 +431,21 @@ mod tests {
                 .cloned()
                 .ok_or(FibreError::HostNotFound(validator.address))
         }
+    }
+
+    #[test]
+    fn connector_request_timeout_is_optional() {
+        let registry = Arc::new(MockHostRegistry {
+            hosts: std::collections::HashMap::new(),
+            call_count: AtomicUsize::new(0),
+        });
+
+        let connector = GrpcValidatorConnector::new(registry, "test-chain");
+        assert_eq!(connector.request_timeout, None);
+
+        let timeout = Duration::from_secs(90);
+        let connector = connector.with_request_timeout(timeout);
+        assert_eq!(connector.request_timeout, Some(timeout));
     }
 
     #[tokio::test]
