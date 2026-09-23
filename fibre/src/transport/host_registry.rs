@@ -46,13 +46,13 @@ impl GrpcHostRegistry {
         }
     }
 
-    /// Fetch all fibre providers from the chain and populate the cache.
+    /// Fetch fibre providers for all currently bonded validators and populate the cache.
     ///
-    /// Queries `AllFibreProviders` on the `x/valaddr` module, decodes each
+    /// Queries `AllBondedFibreProviders` on the `x/valaddr` module, decodes each
     /// provider's bech32 consensus address to a 20-byte key, and stores the
     /// host mapping.
     pub async fn pull_all(&self) -> Result<(), FibreError> {
-        let resp = self.client.get_all_fibre_providers().await?;
+        let resp = self.client.get_all_bonded_fibre_providers().await?;
 
         let providers = resp.providers;
         let mut cache = self.cache.write().await;

@@ -2,8 +2,8 @@ use celestia_proto::celestia::fibre::v1::{
     DownloadShardRequest, DownloadShardResponse, UploadShardRequest, UploadShardResponse,
 };
 use celestia_proto::celestia::valaddr::v1::{
-    QueryAllFibreProvidersRequest, QueryAllFibreProvidersResponse, QueryFibreProviderInfoRequest,
-    QueryFibreProviderInfoResponse,
+    QueryAllBondedFibreProvidersRequest, QueryAllBondedFibreProvidersResponse,
+    QueryFibreProviderInfoRequest, QueryFibreProviderInfoResponse,
 };
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::{
     ValidatorSetRequest, ValidatorSetResponse,
@@ -26,12 +26,14 @@ impl FromGrpcResponse<ValidatorSetResponse> for ValidatorSetResponse {
     }
 }
 
-// Valaddr — all fibre providers
+// Valaddr — all bonded fibre providers
 
-make_empty_params!(QueryAllFibreProvidersRequest);
+make_empty_params!(QueryAllBondedFibreProvidersRequest);
 
-impl FromGrpcResponse<QueryAllFibreProvidersResponse> for QueryAllFibreProvidersResponse {
-    fn try_from_response(self) -> Result<QueryAllFibreProvidersResponse> {
+impl FromGrpcResponse<QueryAllBondedFibreProvidersResponse>
+    for QueryAllBondedFibreProvidersResponse
+{
+    fn try_from_response(self) -> Result<QueryAllBondedFibreProvidersResponse> {
         Ok(self)
     }
 }
