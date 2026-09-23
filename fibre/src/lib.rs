@@ -19,6 +19,8 @@ pub use domain::error;
 pub(crate) use domain::{blob, blob_header, payment_promise};
 pub(crate) use transport::{grpc_validator_client, host_registry, proto_conv, validator_client};
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod e2e_test;
 #[cfg(test)]
 mod roundtrip_test;
 #[cfg(test)]

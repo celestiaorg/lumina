@@ -5,6 +5,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use der::asn1::OctetStringRef;
 use der::{Decode, Sequence};
@@ -207,8 +208,16 @@ pub(crate) fn grpc_client(
     validator_key: VerifyingKey,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
+    request_timeout: Option<Duration>,
 ) -> Result<celestia_grpc::GrpcClient, FibreError> {
-    grpc_client_with_time(url, validator_key, chain_id, io_connector, None)
+    grpc_client_with_time(
+        url,
+        validator_key,
+        chain_id,
+        io_connector,
+        request_timeout,
+        None,
+    )
 }
 
 fn grpc_client_with_time(
@@ -216,6 +225,7 @@ fn grpc_client_with_time(
     validator_key: VerifyingKey,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
+    request_timeout: Option<Duration>,
     time_provider: Option<Arc<dyn tokio_rustls::rustls::time_provider::TimeProvider>>,
 ) -> Result<celestia_grpc::GrpcClient, FibreError> {
     let uri = url
@@ -244,10 +254,11 @@ fn grpc_client_with_time(
         }),
     };
 
-    celestia_grpc::GrpcClient::builder()
-        .transport(transport)
-        .build()
-        .map_err(FibreError::from)
+    let mut builder = celestia_grpc::GrpcClient::builder().transport(transport);
+    if let Some(request_timeout) = request_timeout {
+        builder = builder.timeout(request_timeout);
+    }
+    builder.build().map_err(FibreError::from)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -256,6 +267,7 @@ pub(super) fn grpc_client_at(
     validator_key: VerifyingKey,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
+    request_timeout: Option<Duration>,
     now: UnixTime,
 ) -> Result<celestia_grpc::GrpcClient, FibreError> {
     grpc_client_with_time(
@@ -263,6 +275,7 @@ pub(super) fn grpc_client_at(
         validator_key,
         chain_id,
         io_connector,
+        request_timeout,
         Some(Arc::new(FixedTime(now))),
     )
 }
@@ -786,6 +799,7 @@ mod tests {
             key,
             "chain".to_string(),
             Arc::new(crate::transport::io_connector::NativeTcpConnector),
+            None,
         )
         .expect_err("invalid URI should fail");
         assert!(matches!(
@@ -804,6 +818,7 @@ mod tests {
             key,
             "chain".to_string(),
             Arc::new(crate::transport::io_connector::NativeTcpConnector),
+            None,
         )
         .expect_err("URI without host should fail");
         assert!(matches!(
