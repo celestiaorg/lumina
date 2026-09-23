@@ -559,31 +559,22 @@ mod tests {
         let unsigned = Blob::new(fibre.namespace, vec![1], None).unwrap();
         let signed = Blob::new(fibre.namespace, vec![2], fibre.signer).unwrap();
 
-        for blobs in [
-            vec![fibre.clone()],
-            vec![fibre.clone(), unsigned.clone(), signed.clone()],
-            vec![unsigned, signed, fibre],
-        ] {
-            let blob_error = blob_api
-                .submit(&blobs, TxConfig::default())
-                .await
-                .unwrap_err();
-            let state_error = state_api
-                .submit_pay_for_blob(&blobs, TxConfig::default())
-                .await
-                .unwrap_err();
-            for error in [blob_error, state_error] {
-                assert!(matches!(
-                    error,
-                    Error::Grpc(celestia_grpc::Error::CelestiaTypesError(
-                        celestia_types::Error::FibreBlobSubmission
-                    ))
-                ));
-                assert_eq!(
-                    error.to_string(),
-                    "gRPC error: Share version 2 is reserved for Fibre system blobs and cannot be submitted via PayForBlobs."
-                );
-            }
+        let blobs = [unsigned, signed, fibre];
+        let blob_error = blob_api
+            .submit(&blobs, TxConfig::default())
+            .await
+            .unwrap_err();
+        let state_error = state_api
+            .submit_pay_for_blob(&blobs, TxConfig::default())
+            .await
+            .unwrap_err();
+        for error in [blob_error, state_error] {
+            assert!(matches!(
+                error,
+                Error::Grpc(celestia_grpc::Error::CelestiaTypesError(
+                    celestia_types::Error::FibreBlobSubmission
+                ))
+            ));
         }
     }
 

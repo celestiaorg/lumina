@@ -9,116 +9,122 @@ use celestia_types::state::{
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::core::client::{ClientT, Error};
 use jsonrpsee::proc_macros::rpc;
-use jsonrpsee::rpc_params;
 
 use crate::{TxConfig, custom_client_error};
 
-/// State RPC methods.
-#[rpc(server, namespace = "state", namespace_separator = ".")]
-pub trait State {
-    /// Returns the default account address for the node.
-    #[method(name = "AccountAddress")]
-    async fn state_account_address(&self) -> RpcResult<Address>;
+mod rpc {
+    use super::*;
 
-    /// Returns the balance for the node's default account.
-    #[method(name = "Balance")]
-    async fn state_balance(&self) -> RpcResult<Coin>;
+    /// State RPC methods.
+    #[rpc(client, server, namespace = "state", namespace_separator = ".")]
+    pub trait State {
+        /// See [`crate::StateClient::state_account_address`].
+        #[method(name = "AccountAddress")]
+        async fn state_account_address(&self) -> RpcResult<Address>;
 
-    /// Retrieves the Celestia coin balance for a specific address.
-    /// Verifies the returned balance against the corresponding block's AppHash.
-    #[method(name = "BalanceForAddress")]
-    async fn state_balance_for_address(&self, addr: Address) -> RpcResult<Coin>;
+        /// See [`crate::StateClient::state_balance`].
+        #[method(name = "Balance")]
+        async fn state_balance(&self) -> RpcResult<Coin>;
 
-    /// Begins a redelegation from one validator to another.
-    #[method(name = "BeginRedelegate")]
-    async fn state_begin_redelegate(
-        &self,
-        src: ValAddress,
-        dest: ValAddress,
-        amount: u64,
-        config: TxConfig,
-    ) -> RpcResult<RawTxResponse>;
+        /// See [`crate::StateClient::state_balance_for_address`].
+        #[method(name = "BalanceForAddress")]
+        async fn state_balance_for_address(&self, addr: Address) -> RpcResult<Coin>;
 
-    /// Cancels an unbonding delegation at a specific height.
-    #[method(name = "CancelUnbondingDelegation")]
-    async fn state_cancel_unbonding_delegation(
-        &self,
-        addr: ValAddress,
-        amount: u64,
-        height: u64,
-        config: TxConfig,
-    ) -> RpcResult<RawTxResponse>;
+        /// See [`crate::StateClient::state_begin_redelegate`].
+        #[method(name = "BeginRedelegate")]
+        async fn state_begin_redelegate(
+            &self,
+            src: ValAddress,
+            dest: ValAddress,
+            amount: u64,
+            config: TxConfig,
+        ) -> RpcResult<RawTxResponse>;
 
-    /// Delegates tokens to a validator.
-    #[method(name = "Delegate")]
-    async fn state_delegate(
-        &self,
-        addr: ValAddress,
-        amount: u64,
-        config: TxConfig,
-    ) -> RpcResult<RawTxResponse>;
+        /// See [`crate::StateClient::state_cancel_unbonding_delegation`].
+        #[method(name = "CancelUnbondingDelegation")]
+        async fn state_cancel_unbonding_delegation(
+            &self,
+            addr: ValAddress,
+            amount: u64,
+            height: u64,
+            config: TxConfig,
+        ) -> RpcResult<RawTxResponse>;
 
-    /// Checks whether the state service is stopped.
-    #[method(name = "IsStopped")]
-    async fn state_is_stopped(&self) -> RpcResult<bool>;
+        /// See [`crate::StateClient::state_delegate`].
+        #[method(name = "Delegate")]
+        async fn state_delegate(
+            &self,
+            addr: ValAddress,
+            amount: u64,
+            config: TxConfig,
+        ) -> RpcResult<RawTxResponse>;
 
-    /// Queries delegation details for the given validator address.
-    #[method(name = "QueryDelegation")]
-    async fn state_query_delegation(&self, addr: ValAddress) -> RpcResult<QueryDelegationResponse>;
-    //
+        /// See [`crate::StateClient::state_is_stopped`].
+        #[method(name = "IsStopped")]
+        async fn state_is_stopped(&self) -> RpcResult<bool>;
 
-    /// Queries redelegations between the given validators.
-    #[method(name = "QueryRedelegations")]
-    async fn state_query_redelegations(
-        &self,
-        src: ValAddress,
-        dest: ValAddress,
-    ) -> RpcResult<QueryRedelegationsResponse>;
+        /// See [`crate::StateClient::state_query_delegation`].
+        #[method(name = "QueryDelegation")]
+        async fn state_query_delegation(
+            &self,
+            addr: ValAddress,
+        ) -> RpcResult<QueryDelegationResponse>;
 
-    /// Queries unbonding delegations for the given validator address.
-    #[method(name = "QueryUnbonding")]
-    async fn state_query_unbonding(
-        &self,
-        addr: ValAddress,
-    ) -> RpcResult<QueryUnbondingDelegationResponse>;
+        /// See [`crate::StateClient::state_query_redelegations`].
+        #[method(name = "QueryRedelegations")]
+        async fn state_query_redelegations(
+            &self,
+            src: ValAddress,
+            dest: ValAddress,
+        ) -> RpcResult<QueryRedelegationsResponse>;
 
-    /// Submits a pay-for-blob transaction for the provided blobs.
-    #[method(name = "SubmitPayForBlob")]
-    async fn state_submit_pay_for_blob(
-        &self,
-        blobs: Vec<RawBlob>,
-        config: TxConfig,
-    ) -> RpcResult<RawTxResponse>;
+        /// See [`crate::StateClient::state_query_unbonding`].
+        #[method(name = "QueryUnbonding")]
+        async fn state_query_unbonding(
+            &self,
+            addr: ValAddress,
+        ) -> RpcResult<QueryUnbondingDelegationResponse>;
 
-    /// Transfers tokens to a destination account.
-    #[method(name = "Transfer")]
-    async fn state_transfer(
-        &self,
-        to: AccAddress,
-        amount: u64,
-        config: TxConfig,
-    ) -> RpcResult<RawTxResponse>;
+        /// See [`crate::StateClient::state_submit_pay_for_blob`].
+        #[method(name = "SubmitPayForBlob")]
+        async fn state_submit_pay_for_blob(
+            &self,
+            blobs: Vec<RawBlob>,
+            config: TxConfig,
+        ) -> RpcResult<RawTxResponse>;
 
-    /// Undelegates tokens from a validator.
-    #[method(name = "Undelegate")]
-    async fn state_undelegate(
-        &self,
-        addr: ValAddress,
-        amount: u64,
-        config: TxConfig,
-    ) -> RpcResult<RawTxResponse>;
+        /// See [`crate::StateClient::state_transfer`].
+        #[method(name = "Transfer")]
+        async fn state_transfer(
+            &self,
+            to: AccAddress,
+            amount: u64,
+            config: TxConfig,
+        ) -> RpcResult<RawTxResponse>;
+
+        /// See [`crate::StateClient::state_undelegate`].
+        #[method(name = "Undelegate")]
+        async fn state_undelegate(
+            &self,
+            addr: ValAddress,
+            amount: u64,
+            config: TxConfig,
+        ) -> RpcResult<RawTxResponse>;
+    }
 }
 
+pub use rpc::StateServer;
+
 /// Client implementation for the State RPC API.
-pub trait StateClient: ClientT {
+pub trait StateClient: ClientT + Sized {
     /// Returns the default account address for the node.
     fn state_account_address(&self) -> impl Future<Output = Result<Address, Error>> + Send {
-        self.request("state.AccountAddress", rpc_params![])
+        rpc::StateClient::state_account_address(self)
     }
 
     /// Returns the balance for the node's default account.
     fn state_balance(&self) -> impl Future<Output = Result<Coin, Error>> + Send {
-        self.request("state.Balance", rpc_params![])
+        rpc::StateClient::state_balance(self)
     }
 
     /// Retrieves the Celestia coin balance for a specific address.
@@ -127,7 +133,7 @@ pub trait StateClient: ClientT {
         &self,
         addr: Address,
     ) -> impl Future<Output = Result<Coin, Error>> + Send {
-        self.request("state.BalanceForAddress", rpc_params![addr])
+        rpc::StateClient::state_balance_for_address(self, addr)
     }
 
     /// Begins a redelegation from one validator to another.
@@ -138,10 +144,7 @@ pub trait StateClient: ClientT {
         amount: u64,
         config: TxConfig,
     ) -> impl Future<Output = Result<RawTxResponse, Error>> + Send {
-        self.request(
-            "state.BeginRedelegate",
-            rpc_params![src, dest, amount, config],
-        )
+        rpc::StateClient::state_begin_redelegate(self, src, dest, amount, config)
     }
 
     /// Cancels an unbonding delegation at a specific height.
@@ -152,10 +155,7 @@ pub trait StateClient: ClientT {
         height: u64,
         config: TxConfig,
     ) -> impl Future<Output = Result<RawTxResponse, Error>> + Send {
-        self.request(
-            "state.CancelUnbondingDelegation",
-            rpc_params![addr, amount, height, config],
-        )
+        rpc::StateClient::state_cancel_unbonding_delegation(self, addr, amount, height, config)
     }
 
     /// Delegates tokens to a validator.
@@ -165,12 +165,12 @@ pub trait StateClient: ClientT {
         amount: u64,
         config: TxConfig,
     ) -> impl Future<Output = Result<RawTxResponse, Error>> + Send {
-        self.request("state.Delegate", rpc_params![addr, amount, config])
+        rpc::StateClient::state_delegate(self, addr, amount, config)
     }
 
     /// Checks whether the state service is stopped.
     fn state_is_stopped(&self) -> impl Future<Output = Result<bool, Error>> + Send {
-        self.request("state.IsStopped", rpc_params![])
+        rpc::StateClient::state_is_stopped(self)
     }
 
     /// Queries delegation details for the given validator address.
@@ -178,7 +178,7 @@ pub trait StateClient: ClientT {
         &self,
         addr: ValAddress,
     ) -> impl Future<Output = Result<QueryDelegationResponse, Error>> + Send {
-        self.request("state.QueryDelegation", rpc_params![addr])
+        rpc::StateClient::state_query_delegation(self, addr)
     }
 
     /// Queries redelegations between the given validators.
@@ -187,7 +187,7 @@ pub trait StateClient: ClientT {
         src: ValAddress,
         dest: ValAddress,
     ) -> impl Future<Output = Result<QueryRedelegationsResponse, Error>> + Send {
-        self.request("state.QueryRedelegations", rpc_params![src, dest])
+        rpc::StateClient::state_query_redelegations(self, src, dest)
     }
 
     /// Queries unbonding delegations for the given validator address.
@@ -195,7 +195,7 @@ pub trait StateClient: ClientT {
         &self,
         addr: ValAddress,
     ) -> impl Future<Output = Result<QueryUnbondingDelegationResponse, Error>> + Send {
-        self.request("state.QueryUnbonding", rpc_params![addr])
+        rpc::StateClient::state_query_unbonding(self, addr)
     }
 
     /// Submits a pay-for-blob transaction for the provided blobs.
@@ -213,7 +213,9 @@ pub trait StateClient: ClientT {
                 celestia_types::Error::FibreBlobSubmission,
             ))
         } else {
-            Ok(self.request("state.SubmitPayForBlob", rpc_params![blobs, config]))
+            Ok(rpc::StateClient::state_submit_pay_for_blob(
+                self, blobs, config,
+            ))
         };
         async move { request?.await }
     }
@@ -225,7 +227,7 @@ pub trait StateClient: ClientT {
         amount: u64,
         config: TxConfig,
     ) -> impl Future<Output = Result<RawTxResponse, Error>> + Send {
-        self.request("state.Transfer", rpc_params![to, amount, config])
+        rpc::StateClient::state_transfer(self, to, amount, config)
     }
 
     /// Undelegates tokens from a validator.
@@ -235,7 +237,7 @@ pub trait StateClient: ClientT {
         amount: u64,
         config: TxConfig,
     ) -> impl Future<Output = Result<RawTxResponse, Error>> + Send {
-        self.request("state.Undelegate", rpc_params![addr, amount, config])
+        rpc::StateClient::state_undelegate(self, addr, amount, config)
     }
 }
 
