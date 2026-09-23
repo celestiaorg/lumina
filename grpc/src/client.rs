@@ -20,7 +20,7 @@ use celestia_proto::celestia::fibre::v1::{
 };
 use celestia_proto::celestia::valaddr::v1::query_client::QueryClient as ValaddrQueryClient;
 use celestia_proto::celestia::valaddr::v1::{
-    QueryAllFibreProvidersResponse, QueryFibreProviderInfoResponse,
+    QueryAllBondedFibreProvidersResponse, QueryFibreProviderInfoResponse,
 };
 use celestia_proto::cosmos::auth::v1beta1::query_client::QueryClient as AuthQueryClient;
 use celestia_proto::cosmos::bank::v1beta1::query_client::QueryClient as BankQueryClient;
@@ -303,9 +303,10 @@ impl GrpcClient {
     #[grpc_method(FibreBlockApiClient::validator_set)]
     fn get_fibre_validator_set(&self, height: i64) -> AsyncGrpcCall<ValidatorSetResponse>;
 
-    /// Get all fibre providers registered on-chain.
-    #[grpc_method(ValaddrQueryClient::all_fibre_providers)]
-    fn get_all_fibre_providers(&self) -> AsyncGrpcCall<QueryAllFibreProvidersResponse>;
+    /// Get fibre providers for all currently bonded validators.
+    #[grpc_method(ValaddrQueryClient::all_bonded_fibre_providers)]
+    fn get_all_bonded_fibre_providers(&self)
+    -> AsyncGrpcCall<QueryAllBondedFibreProvidersResponse>;
 
     /// Get fibre provider info for a single validator by bech32 consensus address.
     #[grpc_method(ValaddrQueryClient::fibre_provider_info)]
