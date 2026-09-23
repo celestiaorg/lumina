@@ -162,6 +162,9 @@ pub mod appconsts {
         /// The second share version format.
         pub const SHARE_VERSION_ONE: u8 = 1;
 
+        /// The Fibre system blob share format, carrying a signer, blob version, and commitment.
+        pub const SHARE_VERSION_TWO: u8 = 2;
+
         /// The number of bytes reserved for the location of the first unit (transaction, ISR) in a compact share.
         pub const COMPACT_SHARE_RESERVED_BYTES: usize = 4;
 

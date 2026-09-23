@@ -17,6 +17,8 @@ use crate::state::{AccAddress, AddressTrait};
 use crate::{Error, Result};
 use crate::{InfoByte, Share};
 
+use super::FIBRE_BLOB_DATA_SIZE;
+
 /// A merkle hash used to identify the [`Blob`]s data.
 ///
 /// In Celestia network, the transaction which pays for the blob's inclusion
@@ -76,7 +78,6 @@ impl Commitment {
         share_version: u8,
         signer: Option<&AccAddress>,
     ) -> Result<Commitment> {
-        validate_blob(share_version, signer.is_some())?;
         let shares = split_blob_to_shares(namespace, share_version, blob_data, signer)?;
         Self::from_shares(namespace, &shares)
     }
@@ -171,17 +172,26 @@ impl<'de> Deserialize<'de> for Commitment {
     }
 }
 
-/// Check if the combination of share_version and signer is valid, and return appropriate error
-/// otherwise
-pub(crate) fn validate_blob(share_version: u8, has_signer: bool) -> Result<()> {
-    if ![appconsts::SHARE_VERSION_ZERO, appconsts::SHARE_VERSION_ONE].contains(&share_version) {
+/// Validate the share version, signer, and payload length.
+pub(crate) fn validate_blob(share_version: u8, has_signer: bool, data_len: usize) -> Result<()> {
+    if !matches!(
+        share_version,
+        appconsts::SHARE_VERSION_ZERO | appconsts::SHARE_VERSION_ONE | appconsts::SHARE_VERSION_TWO
+    ) {
         return Err(Error::UnsupportedShareVersion(share_version));
     }
     if share_version == appconsts::SHARE_VERSION_ZERO && has_signer {
         return Err(Error::SignerNotSupported);
     }
-    if share_version == appconsts::SHARE_VERSION_ONE && !has_signer {
+    if matches!(
+        share_version,
+        appconsts::SHARE_VERSION_ONE | appconsts::SHARE_VERSION_TWO
+    ) && !has_signer
+    {
         return Err(Error::MissingSigner);
+    }
+    if share_version == appconsts::SHARE_VERSION_TWO && data_len != FIBRE_BLOB_DATA_SIZE {
+        return Err(Error::InvalidLength(data_len, FIBRE_BLOB_DATA_SIZE));
     }
     Ok(())
 }
@@ -193,6 +203,7 @@ pub(crate) fn split_blob_to_shares(
     blob_data: &[u8],
     signer: Option<&AccAddress>,
 ) -> Result<Vec<Share>> {
+    validate_blob(share_version, signer.is_some(), blob_data.len())?;
     let mut shares = Vec::new();
     let mut cursor = Cursor::new(blob_data);
 
@@ -226,8 +237,10 @@ fn build_sparse_share(
             .try_into()
             .map_err(|_| Error::ShareSequenceLenExceeded(data_len))?;
         bytes.put_u32(data_len);
-        // additionally, if share_version is 1, put the signer after sequence len
-        if share_version == appconsts::SHARE_VERSION_ONE {
+        if matches!(
+            share_version,
+            appconsts::SHARE_VERSION_ONE | appconsts::SHARE_VERSION_TWO
+        ) {
             let signer = signer.as_ref().ok_or(Error::MissingSigner)?;
             bytes.put_slice(signer.as_bytes());
         }
@@ -591,18 +604,18 @@ mod tests {
         let no_signer = false;
 
         // all good - no signer
-        validate_blob(share_signer_forbidden, no_signer).unwrap();
+        validate_blob(share_signer_forbidden, no_signer, 0).unwrap();
 
         // all good - with signer
-        validate_blob(share_signer_required, with_signer).unwrap();
+        validate_blob(share_signer_required, with_signer, 0).unwrap();
 
         // unsupported share version
-        validate_blob(share_version_unsupported, no_signer).unwrap_err();
+        validate_blob(share_version_unsupported, no_signer, 0).unwrap_err();
 
         // no signer when required
-        validate_blob(share_signer_required, no_signer).unwrap_err();
+        validate_blob(share_signer_required, no_signer, 0).unwrap_err();
 
         // with signer when forbidden
-        validate_blob(share_signer_forbidden, with_signer).unwrap_err();
+        validate_blob(share_signer_forbidden, with_signer, 0).unwrap_err();
     }
 }

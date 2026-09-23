@@ -84,6 +84,7 @@ jobs:
           - name: celestia-client
             devnet: true
           - name: celestia-fibre
+            devnet: true
           - name: lumina-node
             devnet: true
           - name: lumina-node-wasm
