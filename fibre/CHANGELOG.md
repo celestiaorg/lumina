@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] add `DownloadOptions::reconstruction_work_budget` to bound Reed-Solomon reconstruction scratch space per download
 - keep reconstructed blob data in shared `Bytes`; call `Blob::into_data` to take the decoded payload without copying
 - [**breaking**] keep downloaded row data in shared `Bytes` from protobuf decoding through reconstruction instead of copying each row into a `Vec`
 - [**breaking**] replace free-form `FibreError` messages with typed error variants and change `FibreIoConnector::connect` to return `std::io::Error`
