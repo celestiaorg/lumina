@@ -24,7 +24,6 @@ Supported features:
 - Backward and forward synchronization of block headers within sampling window
 - Header exchange (`header-ex`) client and server
 - Listening for, verifying and redistributing extended headers on gossip protocol (`header-sub`)
-- Listening for, verifying and redistributing fraud proofs on gossip protocol (`fraud-sub`)
 - Backward and forward Data Availability Sampling
 - Native and browser persistent storage
 - Streaming events happening on the node

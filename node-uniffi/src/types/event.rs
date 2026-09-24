@@ -149,10 +149,8 @@ pub enum NodeEvent {
     },
     /// Network was compromised.
     ///
-    /// This happens when a valid bad encoding fraud proof is received.
-    /// Ideally it would never happen, but protection needs to exist.
-    /// In case of compromised network, syncing and data sampling will
-    /// stop immediately.
+    /// Not emitted anymore, the node doesn't act on bad encoding fraud proofs.
+    /// Kept for API compatibility until the next breaking release.
     NetworkCompromised,
     /// Node stopped.
     NodeStopped,
