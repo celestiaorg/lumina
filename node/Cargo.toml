@@ -36,7 +36,7 @@ libp2p = { workspace = true, features = [
   "request-response",
   "kad",
 ] }
-libp2p-stream = "0.4.0-alpha"
+libp2p-stream = "0.5.0-alpha"
 prost.workspace = true
 tendermint-proto.workspace = true
 tendermint.workspace = true
@@ -66,6 +66,7 @@ uniffi = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 backoff = { version = "0.4.0", features = ["tokio"] }
+hickory-resolver = "0.26"
 blockstore = { workspace = true, features = ["redb"] }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "time"] }
 libp2p = { workspace = true, features = [
@@ -91,7 +92,6 @@ idb = "0.6.2"
 js-sys.workspace = true
 libp2p = { workspace = true, features = [
   "noise",
-  "wasm-bindgen",
   "websocket-websys",
   "webtransport-websys",
   "yamux",
