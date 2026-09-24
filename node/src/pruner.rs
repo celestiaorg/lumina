@@ -1233,10 +1233,15 @@ mod test {
                 2500
             );
 
-            assert_eq!(
-                daser_handle.expect_update_number_of_prunable_blocks().await,
-                10 - batch1_num_of_prunable_blocks
-            );
+            // Pruner sends `UpdateNumberOfPrunableBlocks` only when the number
+            // changed since the last update.
+            let batch2_num_of_prunable_blocks = 10 - batch1_num_of_prunable_blocks;
+            if batch2_num_of_prunable_blocks != batch1_num_of_prunable_blocks {
+                assert_eq!(
+                    daser_handle.expect_update_number_of_prunable_blocks().await,
+                    batch2_num_of_prunable_blocks
+                );
+            }
 
             for expected_height in (batch1_high_height + 1..=2500).rev() {
                 let (height, respond_to) = daser_handle.expect_want_to_prune().await;
@@ -1269,6 +1274,118 @@ mod test {
             store.get_stored_header_ranges().await.unwrap(),
             new_block_ranges([4991..=5000])
         );
+    }
+
+    #[async_test]
+    async fn prune_two_equal_batches() {
+        // Headers are 1ms apart, but Pruner checks for prunable blocks only every
+        // `block_time`. This makes each group of 5 headers reach the pruning window
+        // edge between two checks, so each group gets pruned as one batch. The 2nd
+        // group reaches the edge while Pruner is blocked on `WantToPrune` of the 1st
+        // group, so Pruner sees the same number of prunable blocks in both batches.
+        let header_time = Duration::from_millis(1);
+        let block_time = Duration::from_millis(200);
+        let pruning_window = Duration::from_millis(4000);
+        let sampling_window = Duration::from_millis(500);
+
+        let events = EventChannel::new();
+        let store = Arc::new(InMemoryStore::new());
+        let mut generator = ExtendedHeaderGenerator::new();
+        let blockstore = Arc::new(InMemoryBlockstore::new());
+        let mut event_subscriber = events.subscribe();
+        let (daser, mut daser_handle) = Daser::mocked();
+
+        let first_header_time = (Time::now() - Duration::from_millis(5000)).unwrap();
+        generator.set_time(first_header_time, header_time);
+
+        // 5 headers that reach the pruning window edge ~100ms after Pruner starts
+        generator.skip(1100);
+        store.insert(generator.next_many_verified(5)).await.unwrap();
+        // 5 headers that reach the pruning window edge ~500ms after Pruner starts
+        generator.skip(395);
+        store.insert(generator.next_many_verified(5)).await.unwrap();
+        // 10 headers at the current time
+        generator.skip(3495);
+        store
+            .insert(generator.next_many_verified(10))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.get_stored_header_ranges().await.unwrap(),
+            new_block_ranges([1101..=1105, 1501..=1505, 5001..=5010]),
+        );
+
+        let pruner = Pruner::start(PrunerArgs {
+            daser: Arc::new(daser),
+            store: store.clone(),
+            blockstore,
+            event_pub: events.publisher(),
+            block_time,
+            pruning_window,
+            sampling_window,
+        });
+
+        // Wait until both groups reached the pruning window edge. Pruner detected
+        // the 1st group in the meantime and is blocked on `WantToPrune`.
+        sleep(Duration::from_millis(800)).await;
+
+        // 1st batch
+
+        assert_eq!(
+            daser_handle.expect_update_highest_prunable_block().await,
+            1105
+        );
+        assert_eq!(
+            daser_handle.expect_update_number_of_prunable_blocks().await,
+            5
+        );
+
+        for expected_height in (1101..=1105).rev() {
+            let (height, respond_to) = daser_handle.expect_want_to_prune().await;
+            assert_eq!(height, expected_height);
+            respond_to.send(true).unwrap();
+        }
+
+        assert_pruned_headers_event(&mut event_subscriber, 1101, 1105).await;
+        assert_eq!(
+            store.get_stored_header_ranges().await.unwrap(),
+            new_block_ranges([1501..=1505, 5001..=5010]),
+        );
+
+        // 2nd batch
+        assert_eq!(
+            daser_handle.expect_update_highest_prunable_block().await,
+            1505
+        );
+
+        // Number of prunable blocks didn't change (5 -> 5), so Pruner
+        // doesn't send `UpdateNumberOfPrunableBlocks` again.
+        for expected_height in (1501..=1505).rev() {
+            let (height, respond_to) = daser_handle.expect_want_to_prune().await;
+            assert_eq!(height, expected_height);
+            respond_to.send(true).unwrap();
+        }
+
+        assert_eq!(
+            daser_handle.expect_update_number_of_prunable_blocks().await,
+            0
+        );
+
+        assert_pruned_headers_event(&mut event_subscriber, 1501, 1505).await;
+        assert_eq!(
+            store.get_stored_header_ranges().await.unwrap(),
+            new_block_ranges([5001..=5010]),
+        );
+
+        daser_handle.expect_no_cmd().await;
+        pruner.stop();
+        pruner.join().await;
+
+        assert!(matches!(
+            event_subscriber.try_recv().unwrap_err(),
+            TryRecvError::Empty
+        ));
     }
 
     #[async_test]

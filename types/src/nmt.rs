@@ -115,6 +115,14 @@ impl Namespace {
     /// [`MsgPayForBlobs`]: celestia_proto::celestia::blob::v1::MsgPayForBlobs
     pub const PAY_FOR_BLOB: Namespace = Namespace::const_v0([0, 0, 0, 0, 0, 0, 0, 0, 0, 4]);
 
+    /// Primary reserved [`Namespace`] for the compact [`Share`]s with [`MsgPayForFibre`] transactions.
+    ///
+    /// This value is already covered by the primary reserved range checked by [`Namespace::is_reserved`].
+    ///
+    /// [`Share`]: crate::share::Share
+    /// [`MsgPayForFibre`]: celestia_proto::celestia::fibre::v1::MsgPayForFibre
+    pub const PAY_FOR_FIBRE: Namespace = Namespace::const_v0([0, 0, 0, 0, 0, 0, 0, 0, 0, 5]);
+
     /// Primary reserved [`Namespace`] for the [`Share`]s used for padding.
     ///
     /// [`Share`]s with this namespace are inserted after other shares from primary reserved namespace
@@ -401,6 +409,12 @@ impl Namespace {
     #[wasm_bindgen(js_name = PAY_FOR_BLOB, getter)]
     pub fn js_pay_for_blob() -> Namespace {
         Namespace::PAY_FOR_BLOB
+    }
+
+    /// Primary reserved [`Namespace`] for the compact Shares with MsgPayForFibre transactions.
+    #[wasm_bindgen(js_name = PAY_FOR_FIBRE, getter)]
+    pub fn js_pay_for_fibre() -> Namespace {
+        Namespace::PAY_FOR_FIBRE
     }
 
     /// Primary reserved [`Namespace`] for the `Share`s used for padding.

@@ -3,6 +3,7 @@
 //! Retrieves a blob from validators and reconstructs it using erasure coding
 //! with an adaptive fan-out strategy.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -23,18 +24,29 @@ use crate::validator::ValidatorSet;
 pub struct DownloadOptions {
     /// When set, use the validator set at this height instead of head.
     pub height: Option<u64>,
+    /// Combined Reed-Solomon work-buffer budget for reconstruction.
+    ///
+    /// This is a per-download limit and excludes input and output storage.
+    /// When unset, the codec's default work budget is used.
+    pub reconstruction_work_budget: Option<NonZeroUsize>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn reconstruct_blob(reconstruction: BlobReconstruction) -> Result<Blob, FibreError> {
-    tokio::task::spawn_blocking(move || reconstruction.reconstruct())
+async fn reconstruct_blob(
+    reconstruction: BlobReconstruction,
+    work_budget: Option<NonZeroUsize>,
+) -> Result<Blob, FibreError> {
+    tokio::task::spawn_blocking(move || reconstruction.reconstruct(work_budget))
         .await
         .expect("blob reconstruction task panicked or has been cancelled")
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn reconstruct_blob(reconstruction: BlobReconstruction) -> Result<Blob, FibreError> {
-    reconstruction.reconstruct()
+async fn reconstruct_blob(
+    reconstruction: BlobReconstruction,
+    work_budget: Option<NonZeroUsize>,
+) -> Result<Blob, FibreError> {
+    reconstruction.reconstruct(work_budget)
 }
 
 impl FibreClient {
@@ -70,7 +82,7 @@ impl FibreClient {
         let mut reconstruction = BlobReconstruction::new(id.clone())?;
         self.select_and_download(&val_set, &mut reconstruction)
             .await?;
-        reconstruct_blob(reconstruction).await
+        reconstruct_blob(reconstruction, opts.reconstruction_work_budget).await
     }
 
     /// Internal download with a custom [`BlobConfig`].
@@ -91,7 +103,7 @@ impl FibreClient {
         let mut reconstruction = BlobReconstruction::with_config(id.clone(), blob_cfg);
         self.select_and_download(&val_set, &mut reconstruction)
             .await?;
-        reconstruct_blob(reconstruction).await
+        reconstruct_blob(reconstruction, None).await
     }
 
     async fn select_and_download(
@@ -180,7 +192,7 @@ impl FibreClient {
                                 // Verify here so the heavy crypto runs off the
                                 // select! loop and per-task instead of serially.
                                 verifier
-                                    .verify(shard.rows, &shard.rlcs, &already_stored)
+                                    .verify(shard.rows, shard.rlcs, &already_stored)
                                     .await
                             } => result,
                         }
@@ -410,7 +422,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let result = reconstruction.reconstruct().unwrap();
+        let result = reconstruction.reconstruct(None).unwrap();
 
         assert_eq!(result.data(), &data);
     }
@@ -457,7 +469,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let result = reconstruction.reconstruct().unwrap();
+        let result = reconstruction.reconstruct(None).unwrap();
 
         assert_eq!(result.data(), &data);
     }
@@ -496,7 +508,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let result = reconstruction.reconstruct().unwrap();
+        let result = reconstruction.reconstruct(None).unwrap();
 
         assert_eq!(result.data(), &data);
     }
@@ -514,7 +526,7 @@ mod tests {
                     let proof = blob.row(index).unwrap();
                     rsema1d::RowProof {
                         index: proof.index,
-                        row: std::borrow::Cow::Owned(proof.row.to_vec()),
+                        row: proof.row.clone(),
                         row_proof: proof.row_proof,
                     }
                 })
@@ -635,7 +647,13 @@ mod tests {
             .await
             .unwrap();
         let from_height = client
-            .download(&blob_id, DownloadOptions { height: Some(42) })
+            .download(
+                &blob_id,
+                DownloadOptions {
+                    height: Some(42),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -738,7 +756,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let downloaded = reconstruction.reconstruct().unwrap();
+        let downloaded = reconstruction.reconstruct(None).unwrap();
 
         assert_eq!(downloaded.data(), &data);
     }

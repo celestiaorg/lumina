@@ -527,6 +527,92 @@ mod tests {
 
     use crate::test_utils::{TEST_PRIV_KEY, TEST_RPC_URL};
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn read_blobs_after_blob_and_pay_for_fibre_in_same_namespace() {
+        use celestia_fibre::{FibreClient, FibreClientConfig};
+
+        use crate::test_utils::{new_client, node0_client};
+        use crate::tx::{SigningKey, TxConfig};
+        use crate::types::Blob;
+        use crate::types::nmt::Namespace;
+
+        let blob_client = new_client().await;
+        let (_node0_lock, node0) = node0_client().await;
+        let namespace = Namespace::new_v0(b"same-ns").unwrap();
+        let blob = Blob::new(
+            namespace,
+            b"normal blob".to_vec(),
+            Some(blob_client.address().unwrap()),
+        )
+        .unwrap();
+
+        let signer_key =
+            SigningKey::from_slice(&hex::decode(TEST_PRIV_KEY.trim()).unwrap()).unwrap();
+        let signer_address = node0.address().unwrap();
+        let blob_grpc = blob_client.inner.grpc().unwrap();
+        let fibre_grpc = node0.inner.grpc().unwrap();
+        let fibre_client = FibreClient::from_grpc_client(
+            fibre_grpc.clone(),
+            FibreClientConfig::new(node0.chain_id().as_str()).unwrap(),
+        )
+        .unwrap();
+        let mut common_block = None;
+
+        for _ in 0..5 {
+            // a fresh upload per attempt: the promise embeds the height
+            let msg = fibre_client
+                .upload_and_prepare(&signer_key, namespace, b"fibre blob", &signer_address)
+                .await
+                .unwrap();
+            let promise = msg.payment_promise.clone().unwrap();
+            let (blob_tx, fibre_tx) = tokio::join!(
+                blob_grpc.broadcast_blobs(std::slice::from_ref(&blob), TxConfig::default()),
+                fibre_grpc.broadcast_message(msg, TxConfig::default()),
+            );
+            let (blob_info, fibre_info) =
+                tokio::join!(blob_tx.unwrap().confirm(), fibre_tx.unwrap().confirm());
+            let (blob_height, fibre_height) =
+                (blob_info.unwrap().height, fibre_info.unwrap().height);
+
+            if blob_height == fibre_height {
+                common_block = Some((blob_height, promise));
+                break;
+            }
+        }
+
+        let (height, promise) =
+            common_block.expect("transactions were not included in the same block");
+        let blobs = blob_client
+            .blob()
+            .get_all(height, &[namespace])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blobs.len(), 2);
+
+        let ordinary = blobs
+            .iter()
+            .find(|returned| returned.share_version == blob.share_version)
+            .expect("ordinary blob missing");
+        assert_eq!(ordinary.namespace, blob.namespace);
+        assert_eq!(ordinary.data, blob.data);
+        assert_eq!(ordinary.signer, blob.signer);
+        assert_eq!(ordinary.commitment, blob.commitment);
+
+        let fibre = blobs
+            .iter()
+            .find(|returned| returned.share_version == 2)
+            .expect("Fibre blob missing");
+        assert_eq!(fibre.namespace, namespace);
+        assert_eq!(fibre.signer, Some(signer_address));
+        assert_eq!(fibre.fibre_blob_version(), Some(promise.blob_version));
+        assert_eq!(
+            fibre.fibre_commitment().map(|c| c.to_vec()),
+            Some(promise.commitment)
+        );
+    }
+
     #[async_test]
     async fn builder() {
         let e = Client::builder()
