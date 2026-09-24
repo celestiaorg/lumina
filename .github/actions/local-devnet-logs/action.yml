@@ -11,6 +11,7 @@ runs:
       shell: bash
       run: |
         docker compose -f ci/docker-compose.yml ps --all || true
+        docker compose -f ci/docker-compose.yml logs --no-color --timestamps --tail 50 validator || true
         docker compose -f ci/docker-compose.yml logs --no-color --timestamps > "${{ runner.temp }}/devnet-logs.txt" || true
 
     - name: Upload devnet logs
