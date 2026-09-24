@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.2](https://github.com/celestiaorg/lumina/compare/celestia-grpc-macros-v1.1.0-rc.1...celestia-grpc-macros-v1.1.0-rc.2) - 2026-09-24
+
+### Added
+
+- *(fibre)* Add TLS support ([#996](https://github.com/celestiaorg/lumina/pull/996))
+
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-grpc-macros-v1.0.0...celestia-grpc-macros-v1.1.0-rc.1) - 2026-06-24
 
 ### Added
