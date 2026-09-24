@@ -63,6 +63,12 @@ pub enum Error {
     #[error("Transaction {0} execution failed; code: {1}, error: {2}")]
     TxExecutionFailed(Hash, ErrorCode, String),
 
+    /// The transaction committed, but application state did not catch up.
+    #[error(
+        "Transaction {hash} committed at height {height}, but application state did not reach that height in time"
+    )]
+    TxAppStateTimeout { hash: Hash, height: u64 },
+
     /// Transaction was rejected
     #[error("Transaction {0} was rejected; code: {1}, error: {2}")]
     TxRejected(Hash, ErrorCode, String),
