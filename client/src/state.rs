@@ -508,19 +508,17 @@ mod tests {
     use std::time::Duration;
 
     use celestia_grpc::Error as GrpcError;
-    use celestia_rpc::Error as RpcError;
-    use jsonrpsee::core::ClientError as JrpcError;
     use lumina_utils::test_utils::async_test;
     use tonic::Code;
 
     use celestia_grpc::TxConfig;
     use k256::ecdsa::SigningKey;
 
+    use crate::Error;
     use crate::test_utils::{
-        TEST_GRPC_URL, TEST_RPC_URL, ensure_serializable_deserializable, new_client,
-        new_read_only_client, new_rpc_only_client, node0_address, validator_address,
+        ensure_serializable_deserializable, new_client, new_read_only_client, new_rpc_only_client,
+        node0_address, validator_address,
     };
-    use crate::{Client, Error};
 
     #[async_test]
     async fn transfer() {
@@ -776,20 +774,46 @@ mod tests {
         );
     }
 
-    #[async_test]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn rpc_timeout() {
-        let client_build_error = Client::builder()
-            .rpc_url(TEST_RPC_URL)
-            .grpc_url(TEST_GRPC_URL)
-            .timeout(Duration::from_nanos(1))
-            .build()
-            .await
+        use std::future::pending;
+
+        use celestia_rpc::Error as RpcError;
+        use jsonrpsee::core::ClientError as JrpcError;
+        use jsonrpsee::server::{RpcModule, ServerBuilder};
+
+        use crate::Client;
+
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut module = RpcModule::new(());
+        module
+            .register_async_method("header.NetworkHead", |_, _, _| pending::<()>())
+            .unwrap();
+        let server = server.start(module);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            Client::builder()
+                .rpc_url(&format!("ws://{addr}"))
+                .timeout(Duration::from_millis(100))
+                .build(),
+        )
+        .await;
+        server.stop().unwrap();
+
+        let client_build_error = result
+            .expect("client build did not respect the request timeout")
             .unwrap_err();
 
-        assert!(matches!(
-            client_build_error,
-            Error::Rpc(RpcError::JsonRpc(JrpcError::RequestTimeout))
-        ));
+        assert!(
+            matches!(
+                client_build_error,
+                Error::Rpc(RpcError::JsonRpc(JrpcError::RequestTimeout))
+            ),
+            "expected RPC request timeout, got {client_build_error:?}"
+        );
     }
 
     #[async_test]
