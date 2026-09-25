@@ -56,6 +56,15 @@ impl Storage {
         }
     }
 
+    fn into_bytes(self) -> Bytes {
+        match self {
+            Self::Heap(data) => Bytes::from(data),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(data) => Bytes::from_owner(data),
+            Self::Shared(data) => data,
+        }
+    }
+
     fn freeze(&mut self) {
         let data = std::mem::replace(self, Self::Heap(Vec::new()));
         *self = match data {
@@ -176,6 +185,11 @@ impl RowMatrix {
     /// Heap storage is returned directly. Memory-mapped storage is copied into a new allocation.
     pub fn into_row_major(self) -> Vec<u8> {
         self.data.into_vec()
+    }
+
+    /// Consumes the matrix and returns its backing storage as shared bytes without copying.
+    pub fn into_bytes(self) -> Bytes {
+        self.data.into_bytes()
     }
 
     pub(crate) fn freeze(&mut self) {
@@ -312,6 +326,17 @@ mod tests {
         let clone = matrix.clone();
         assert_eq!(clone, matrix);
         assert_eq!(clone.into_row_major(), matrix.as_row_major());
+    }
+
+    #[test]
+    fn heap_matrix_into_bytes_preserves_allocation() {
+        let matrix = RowMatrix::with_shape(vec![7; 128], 2, 64).unwrap();
+        let ptr = matrix.as_row_major().as_ptr();
+
+        let bytes = matrix.into_bytes();
+
+        assert_eq!(bytes.as_ptr(), ptr);
+        assert_eq!(bytes.as_ref(), &[7; 128]);
     }
 
     #[test]

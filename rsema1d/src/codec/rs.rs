@@ -9,35 +9,35 @@ use reed_solomon_simd::rate::{HighRateEncoder, RateEncoder};
 use std::num::NonZeroUsize;
 
 /// Leopard operates on 64-byte blocks, so stripes stay block-aligned.
-const MIN_STRIPE: usize = 64;
+pub(super) const MIN_STRIPE: usize = 64;
 
 #[derive(Clone, Copy)]
-struct StripePlan {
+pub(super) struct StripePlan {
     stripe_size: NonZeroUsize,
     parallelism: NonZeroUsize,
 }
 
 impl StripePlan {
-    const fn new(stripe_size: NonZeroUsize, parallelism: NonZeroUsize) -> Self {
+    pub(super) const fn new(stripe_size: NonZeroUsize, parallelism: NonZeroUsize) -> Self {
         Self {
             stripe_size,
             parallelism,
         }
     }
 
-    const fn stripe_size(self) -> usize {
+    pub(super) const fn stripe_size(self) -> usize {
         self.stripe_size.get()
     }
 
-    const fn parallelism(self) -> usize {
+    pub(super) const fn parallelism(self) -> usize {
         self.parallelism.get()
     }
 }
 
 #[derive(Clone, Copy)]
-struct Stripe {
-    offset: usize,
-    len: usize,
+pub(super) struct Stripe {
+    pub(super) offset: usize,
+    pub(super) len: usize,
 }
 
 /// Number of shards in the Leopard high-rate work buffer for `(k, n)`.
@@ -46,20 +46,18 @@ fn work_shards(k: usize, n: usize) -> usize {
     k.div_ceil(chunk) * chunk
 }
 
-/// Choose a block-aligned stripe width and bound the number encoded at once.
-fn stripe_plan(
-    k: usize,
-    n: usize,
+/// Choose a block-aligned stripe width and bound concurrent work buffers.
+pub(super) fn stripe_plan(
+    work_shards: usize,
     row_size: usize,
     threads: usize,
     work_budget: NonZeroUsize,
 ) -> Result<StripePlan> {
-    let work_shards = work_shards(k, n);
     let work_budget = work_budget.get();
     let max_parallelism = (work_budget / (work_shards * MIN_STRIPE)).max(1);
     let parallelism = threads.max(1).min(max_parallelism);
-    let per_encoder = work_budget / parallelism / work_shards;
-    let stripe = (per_encoder / MIN_STRIPE) * MIN_STRIPE;
+    let per_worker = work_budget / parallelism / work_shards;
+    let stripe = (per_worker / MIN_STRIPE) * MIN_STRIPE;
     let stripe_size = NonZeroUsize::new(stripe.max(MIN_STRIPE).min(row_size)).ok_or_else(|| {
         Error::InvalidParameters("stripe planner produced a zero stripe size".into())
     })?;
@@ -70,54 +68,22 @@ fn stripe_plan(
     Ok(StripePlan::new(stripe_size, parallelism))
 }
 
-struct StripeEncoder {
-    encoder: HighRateEncoder<DefaultEngine>,
-    recovery: Vec<u8>,
-}
+// Reuse the encoder's work buffer across stripes.
+fn encode_stripe<'a>(
+    encoder: &'a mut HighRateEncoder<DefaultEngine>,
+    original_rows: &[u8],
+    k: usize,
+    n: usize,
+    row_size: usize,
+    stripe: Stripe,
+) -> Result<reed_solomon_simd::EncoderResult<'a>> {
+    encoder.reset(k, n, stripe.len)?;
 
-impl StripeEncoder {
-    fn new(k: usize, n: usize, stripe_size: usize) -> Result<Self> {
-        let encoder = RateEncoder::new(k, n, stripe_size, DefaultEngine::new(), None)
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-
-        Ok(Self {
-            encoder,
-            recovery: Vec::with_capacity(n * stripe_size),
-        })
+    for row in original_rows.chunks_exact(row_size) {
+        encoder.add_original_shard(&row[stripe.offset..stripe.offset + stripe.len])?;
     }
 
-    fn encode_stripe(
-        &mut self,
-        original_rows: &[u8],
-        k: usize,
-        n: usize,
-        row_size: usize,
-        stripe: Stripe,
-    ) -> Result<()> {
-        self.encoder
-            .reset(k, n, stripe.len)
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-
-        for row in original_rows.chunks_exact(row_size) {
-            self.encoder
-                .add_original_shard(&row[stripe.offset..stripe.offset + stripe.len])
-                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-        }
-
-        let result = self
-            .encoder
-            .encode()
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
-
-        self.recovery.clear();
-        self.recovery.reserve(n * stripe.len);
-        for recovery in result.recovery_iter() {
-            self.recovery.extend_from_slice(recovery);
-        }
-        debug_assert_eq!(self.recovery.len(), n * stripe.len);
-
-        Ok(())
-    }
+    Ok(encoder.encode()?)
 }
 
 fn fill_parity(
@@ -173,10 +139,14 @@ fn fill_parity_with_work_budget(
         )));
     }
 
-    HighRateEncoder::<DefaultEngine>::validate(k, n, MIN_STRIPE)
-        .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+    HighRateEncoder::<DefaultEngine>::validate(k, n, MIN_STRIPE)?;
 
-    let plan = stripe_plan(k, n, row_size, rayon::current_num_threads(), work_budget)?;
+    let plan = stripe_plan(
+        work_shards(k, n),
+        row_size,
+        rayon::current_num_threads(),
+        work_budget,
+    )?;
     fill_parity_with_plan(original_rows, parity_rows, k, n, row_size, plan)
 }
 
@@ -193,20 +163,15 @@ fn fill_parity_with_plan(
     assert!(stripe_size.is_multiple_of(MIN_STRIPE));
 
     // A single stripe (always the case for the 64-byte RLC rows in
-    // `extend_rlcs`) gains nothing from the rayon fan-out and staging copy
+    // `extend_rlcs`) gains nothing from the rayon fan-out
     // below; encode whole rows on the calling thread instead.
     if stripe_size >= row_size {
         let mut encoder: HighRateEncoder<DefaultEngine> =
-            RateEncoder::new(k, n, row_size, DefaultEngine::new(), None)
-                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+            RateEncoder::new(k, n, row_size, DefaultEngine::new(), None)?;
         for row in original_rows.chunks_exact(row_size) {
-            encoder
-                .add_original_shard(row)
-                .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+            encoder.add_original_shard(row)?;
         }
-        let result = encoder
-            .encode()
-            .map_err(|e| Error::ReedSolomon(e.to_string()))?;
+        let result = encoder.encode()?;
         for (dst_row, src_row) in parity_rows
             .chunks_exact_mut(row_size)
             .zip(result.recovery_iter())
@@ -226,32 +191,29 @@ fn fill_parity_with_plan(
     let slot_count = parallelism.min(stripes.len());
     let mut encoders = (0..slot_count)
         .into_par_iter()
-        .map(|_| StripeEncoder::new(k, n, stripe_size))
+        .map(|_| {
+            RateEncoder::new(k, n, stripe_size, DefaultEngine::new(), None).map_err(Error::from)
+        })
         .collect::<Result<Vec<_>>>()?;
 
     // Leopard transforms each 64-byte block position independently. Encode a
     // cache-sized batch of column stripes, then scatter it by parity row so all
     // writes use ordinary disjoint mutable slices.
     for batch in stripes.chunks(parallelism) {
-        encoders[..batch.len()]
+        let results = encoders[..batch.len()]
             .par_iter_mut()
             .zip(batch.par_iter())
-            .try_for_each(|(encoder, &stripe)| {
-                encoder.encode_stripe(original_rows, k, n, row_size, stripe)
-            })?;
-
-        let recovery: Vec<_> = encoders[..batch.len()]
-            .iter()
-            .map(|encoder| encoder.recovery.as_slice())
-            .collect();
+            .map(|(encoder, &stripe)| encode_stripe(encoder, original_rows, k, n, row_size, stripe))
+            .collect::<Result<Vec<_>>>()?;
         parity_rows
             .par_chunks_mut(row_size)
             .enumerate()
             .for_each(|(parity_index, row)| {
-                for (&stripe, recovery) in batch.iter().zip(&recovery) {
-                    let recovery_start = parity_index * stripe.len;
-                    row[stripe.offset..stripe.offset + stripe.len]
-                        .copy_from_slice(&recovery[recovery_start..recovery_start + stripe.len]);
+                for (&stripe, result) in batch.iter().zip(&results) {
+                    let recovery = result
+                        .recovery(parity_index)
+                        .expect("recovery shard must exist after successful encoding");
+                    row[stripe.offset..stripe.offset + stripe.len].copy_from_slice(recovery);
                 }
             });
     }
@@ -466,7 +428,7 @@ mod tests {
             (32768, 32768, 32768, 32, 32, 64, 16),
         ] {
             let work_budget = NonZeroUsize::new(budget_mib << 20).unwrap();
-            let plan = stripe_plan(k, n, row_size, threads, work_budget).unwrap();
+            let plan = stripe_plan(work_shards(k, n), row_size, threads, work_budget).unwrap();
 
             assert_eq!(plan.stripe_size(), expected_stripe);
             assert_eq!(plan.parallelism(), expected_parallelism);
@@ -475,7 +437,7 @@ mod tests {
             );
         }
 
-        assert!(stripe_plan(4, 4, 0, 1, NonZeroUsize::MIN).is_err());
+        assert!(stripe_plan(work_shards(4, 4), 0, 1, NonZeroUsize::MIN).is_err());
     }
 
     /// Striped, parallel parity must be byte-identical to a single Leopard

@@ -35,6 +35,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "codec_bench"
 harness = false
 
+[[bench]]
+name = "reconstruct_sweep"
+harness = false
+
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 getrandom = { version = "0.2.10", features = ["js"] }
 wasm-bindgen-test = "0.3"
