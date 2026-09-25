@@ -31,13 +31,6 @@ web-time = { version = "1.1", optional = true }
 # see [features] below for explanation.
 tonic = { workspace = true, default-features = false, optional = true }
 
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros"] }
-web-time = "1.1"
-
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test.workspace = true
-
 [features]
 default = []
 executor = ["token", "dep:tokio-util", "dep:tokio", "tokio/rt", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:send_wrapper"]

@@ -51,19 +51,6 @@ celestia-types = { workspace = true, features = ["wasm-bindgen"] }
 getrandom_02.workspace = true
 tonic-web-wasm-client.workspace = true
 
-[dev-dependencies]
-jsonrpsee.workspace = true
-lumina-utils = { workspace = true, features = ["test-utils"] }
-rand.workspace = true
-serde.workspace = true
-tokio = { workspace = true, features = ["sync"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test.workspace = true
-
 [features]
 default = ['tls-native-roots']
 # Add system trust roots to `rustls` in `tonic`.

@@ -65,24 +65,6 @@ tonic-web-wasm-client.workspace = true
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 
-[dev-dependencies]
-celestia-rpc.workspace = true
-futures.workspace = true
-lumina-utils = { workspace = true, features = ["test-utils"] }
-rand.workspace = true
-tracing-subscriber.workspace = true
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-hyper = { version = "1.8", features = ["http2", "server", "client"] }
-hyper-util = { workspace = true, features = ["client-legacy", "http2", "server-auto", "tokio"] }
-tokio = { workspace = true, features = ["rt", "macros", "net", "test-util"] }
-tokio-stream = { workspace = true }
-
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-celestia-rpc = { workspace = true, features = ["wasm-bindgen"] }
-wasm-bindgen-futures.workspace = true
-wasm-bindgen-test.workspace = true
-
 [features]
 default = ['tls-native-roots']
 wasm-bindgen = ["celestia-types/wasm-bindgen", "dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures"]

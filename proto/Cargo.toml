@@ -33,12 +33,6 @@ prost-types.workspace = true
 protox.workspace = true
 tonic-build = { workspace = true, features = ["prost"], optional = true }
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
-
 [features]
 tonic = ["dep:tonic", "dep:tonic-build"]
 tonic-server = ["tonic"]

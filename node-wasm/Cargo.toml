@@ -74,11 +74,6 @@ web-sys = { workspace = true, features = [
   "WorkerType",
 ] }
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-celestia-rpc = { workspace = true, features = ["wasm-bindgen", "p2p"] }
-rexie.workspace = true
-wasm-bindgen-test.workspace = true
-
 [package.metadata.docs.rs]
 targets = ["wasm32-unknown-unknown"]
 

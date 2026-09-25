@@ -24,13 +24,6 @@ num_cpus = "1.17"
 [target.'cfg(target_os = "linux")'.dependencies]
 memmap2 = "0.9"
 
-[dev-dependencies]
-rand.workspace = true
-rand_chacha = "0.3.1"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-
 [[bench]]
 name = "codec_bench"
 harness = false
@@ -38,7 +31,3 @@ harness = false
 [[bench]]
 name = "reconstruct_sweep"
 harness = false
-
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-getrandom = { version = "0.2.10", features = ["js"] }
-wasm-bindgen-test = "0.3"
