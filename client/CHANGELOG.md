@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-client-v1.1.0-rc.1...celestia-client-v1.2.0-rc.1) - 2026-09-24
+
+### Added
+
+- *(fibre)* Add TLS support ([#996](https://github.com/celestiaorg/lumina/pull/996))
+
+### Other
+
+- *(fibre)* enable fibre local devnet ([#1081](https://github.com/celestiaorg/lumina/pull/1081))
+- *(fibre)* reduce string interpolation on error origination sites ([#1028](https://github.com/celestiaorg/lumina/pull/1028))
+- *(fibre)* [**breaking**] split blob lifecycle states ([#1011](https://github.com/celestiaorg/lumina/pull/1011))
+- *(fibre)* use more existing types instead of bytes and strings ([#985](https://github.com/celestiaorg/lumina/pull/985))
+
 ### Changed
 
 - [**breaking**] change Fibre uploads to accept `EncodedFibreBlob` and make downloaded `FibreBlob` data always present

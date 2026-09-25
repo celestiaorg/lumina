@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/rsema1d-v1.1.0-rc.1...rsema1d-v1.2.0-rc.1) - 2026-09-24
+
+### Fixed
+
+- *(fibre)* fibre-client does proper download ([#992](https://github.com/celestiaorg/lumina/pull/992))
+- *(fiber)* update rsema1d to match celestia app ([#988](https://github.com/celestiaorg/lumina/pull/988))
+
+### Other
+
+- hash commitment roots without allocation ([#1069](https://github.com/celestiaorg/lumina/pull/1069))
+- *(fibre)* return reconstructed blobs as shared bytes ([#1066](https://github.com/celestiaorg/lumina/pull/1066))
+- *(fibre)* preserve shared bytes in downloaded row proofs ([#1065](https://github.com/celestiaorg/lumina/pull/1065))
+- *(rsema1d)* compute Merkle proof depth with integer arithmetic ([#1061](https://github.com/celestiaorg/lumina/pull/1061))
+- *(rsema1d)* scatter parity directly from encoder results ([#1059](https://github.com/celestiaorg/lumina/pull/1059))
+- *(rsema1d)* parallelize reconstruction with bounded work buffers ([#1055](https://github.com/celestiaorg/lumina/pull/1055))
+- *(rsema1d)* add production reconstruction and verification benchmarks ([#1054](https://github.com/celestiaorg/lumina/pull/1054))
+- *(fibre,rsema1d)* hand rows to wire without copying ([#1015](https://github.com/celestiaorg/lumina/pull/1015))
+- *(fibre)* safe hugepage ([#1012](https://github.com/celestiaorg/lumina/pull/1012))
+- *(rsema1d)* (safe) encode parity in cache-resident column stripes in parallel ([#1008](https://github.com/celestiaorg/lumina/pull/1008))
+- *(fibre,rsema1d)* incluse packages in CI ([#1010](https://github.com/celestiaorg/lumina/pull/1010))
+- *(rsema1d)* make codec benches statistically less noisy ([#1007](https://github.com/celestiaorg/lumina/pull/1007))
+- *(rsema1d)* precompute coefficient logarithms for RLC computation ([#1005](https://github.com/celestiaorg/lumina/pull/1005))
+- *(fibre)* adding more benches ([#1002](https://github.com/celestiaorg/lumina/pull/1002))
+- *(rsema1d)* remove generic-array deprecation warning ([#999](https://github.com/celestiaorg/lumina/pull/999))
+- chore(rsema1d) update bench and fuzz. ([#995](https://github.com/celestiaorg/lumina/pull/995))
+- *(fibre)* use more existing types instead of bytes and strings ([#985](https://github.com/celestiaorg/lumina/pull/985))
+
 ### Added
 
 - add `RowMatrix::into_bytes` to take the backing storage as shared `Bytes` without copying
