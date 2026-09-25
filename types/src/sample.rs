@@ -19,7 +19,7 @@ use serde::Serialize;
 use crate::eds::{AxisType, ExtendedDataSquare};
 use crate::nmt::NamespaceProof;
 use crate::row::{ROW_ID_SIZE, RowId};
-use crate::{DataAvailabilityHeader, Error, Result, Share, bail_validation};
+use crate::{DataAvailabilityHeader, Error, Result, Share, bail_validation, bail_verification};
 
 pub use celestia_proto::shwap::Sample as RawSample;
 
@@ -124,16 +124,31 @@ impl Sample {
         })
     }
 
-    /// verify sample with root hash from ExtendedHeader
+    /// Verify the sample against the root of its row or column from the [`DataAvailabilityHeader`],
+    /// checking that the proof is for the share at the sampled coordinates.
     pub fn verify(&self, id: SampleId, dah: &DataAvailabilityHeader) -> Result<()> {
-        let root = match self.proof_type {
-            AxisType::Row => dah
-                .row_root(id.row_index())
-                .ok_or(Error::EdsIndexOutOfRange(id.row_index(), 0))?,
-            AxisType::Col => dah
-                .column_root(id.column_index())
-                .ok_or(Error::EdsIndexOutOfRange(0, id.column_index()))?,
+        let (root, index) = match self.proof_type {
+            AxisType::Row => (
+                dah.row_root(id.row_index())
+                    .ok_or(Error::EdsIndexOutOfRange(id.row_index(), 0))?,
+                id.column_index(),
+            ),
+            AxisType::Col => (
+                dah.column_root(id.column_index())
+                    .ok_or(Error::EdsIndexOutOfRange(0, id.column_index()))?,
+                id.row_index(),
+            ),
         };
+
+        let index = u32::from(index);
+        if self.proof.start_idx() != index || self.proof.end_idx() != index + 1 {
+            bail_verification!(
+                "proof is for range ({}..{}), expected the share at index ({})",
+                self.proof.start_idx(),
+                self.proof.end_idx(),
+                index
+            );
+        }
 
         self.proof
             .verify_range(&root, &[&self.share], *self.share.namespace())
@@ -181,7 +196,7 @@ impl Sample {
             bail_validation!("missing share");
         };
         let Some(square_size) = proof.total_leaves() else {
-            bail_validation!("proof must be for single leaf");
+            bail_validation!("proof must be for a single leaf of a square");
         };
 
         let row_index = id.row_index() as usize;
@@ -453,5 +468,47 @@ mod tests {
 
             decoded.verify(id, &dah).unwrap();
         }
+    }
+
+    #[test]
+    fn verify_rejects_share_from_another_column() {
+        let eds = generate_dummy_eds(8);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+
+        // genuine share and row proof of (1, 3), presented as the sample of (1, 2)
+        let sample = Sample::new(1, 3, AxisType::Row, &eds).unwrap();
+        let id = SampleId::new(1, 2, 1).unwrap();
+
+        sample.verify(id, &dah).unwrap_err();
+    }
+
+    #[test]
+    fn verify_rejects_share_from_another_row() {
+        let eds = generate_dummy_eds(8);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+
+        // genuine share and column proof of (3, 1), presented as the sample of (2, 1)
+        let sample = Sample::new(3, 1, AxisType::Col, &eds).unwrap();
+        let id = SampleId::new(2, 1, 1).unwrap();
+
+        sample.verify(id, &dah).unwrap_err();
+    }
+
+    #[test]
+    fn from_raw_rejects_proof_deeper_than_any_square() {
+        let eds = generate_dummy_eds(8);
+        let id = SampleId::new(0, 0, 1).unwrap();
+        let mut sample = Sample::new(0, 0, AxisType::Row, &eds).unwrap();
+
+        sample.proof = NmtNamespaceProof::PresenceProof {
+            proof: crate::nmt::Proof {
+                siblings: vec![crate::nmt::NamespacedHash::default(); usize::BITS as usize],
+                range: 0..1,
+            },
+            ignore_max_ns: true,
+        }
+        .into();
+
+        Sample::from_raw(id, RawSample::from(sample)).unwrap_err();
     }
 }
