@@ -5,7 +5,7 @@ use ::tendermint::chain::Id;
 use celestia_types::any::IntoProtobufAny;
 use k256::ecdsa::VerifyingKey;
 use lumina_utils::failover::Failover;
-use lumina_utils::time::Interval;
+use lumina_utils::time::{Interval, timeout};
 use prost::Message;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, OnceCell};
@@ -61,6 +61,7 @@ use crate::{Error, Result, TxConfig};
 const BLOB_TX_TYPE_ID: &str = "BLOB";
 /// Message returned on errors related to sequence
 const SEQUENCE_ERROR_PAT: &str = "account sequence mismatch, expected ";
+const APP_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 struct ChainState {
@@ -185,6 +186,10 @@ impl GrpcClient {
     /// Get node configuration
     #[grpc_method(ConfigServiceClient::config)]
     fn get_node_config(&self) -> AsyncGrpcCall<ConfigResponse>;
+
+    /// Get the latest block height committed by the application.
+    #[grpc_method(ConfigServiceClient::status)]
+    fn get_app_height(&self) -> AsyncGrpcCall<u64>;
 
     // cosmos.base.tendermint
 
@@ -926,18 +931,31 @@ impl GrpcClient {
             match tx_status.status {
                 TxStatus::Pending => interval.tick().await,
                 TxStatus::Committed => {
-                    if tx_status.execution_code == ErrorCode::Success {
-                        return Ok(TxInfo {
-                            hash,
-                            height: tx_status.height.value(),
-                        });
-                    } else {
+                    if tx_status.execution_code != ErrorCode::Success {
                         return Err(Error::TxExecutionFailed(
                             hash,
                             tx_status.execution_code,
                             tx_status.error,
                         ));
                     }
+
+                    let height = tx_status.height.value();
+                    let mut app_context = context.clone();
+                    app_context.metadata.remove("x-cosmos-block-height");
+
+                    // TxStatus reads the block store before the application commits the block.
+                    timeout(APP_COMMIT_TIMEOUT, async {
+                        loop {
+                            if self.get_app_height().context(&app_context).await? >= height {
+                                return Ok::<(), Error>(());
+                            }
+                            interval.tick().await;
+                        }
+                    })
+                    .await
+                    .map_err(|_| Error::TxAppStateTimeout { hash, height })??;
+
+                    return Ok(TxInfo { hash, height });
                 }
                 // If some transaction was rejected when creating a block, then it means that its
                 // sequence wasn't used. This will cause all the following transactions in the
@@ -1114,6 +1132,196 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod app_commit_tests {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+
+        use celestia_proto::celestia::core::v1::tx::{
+            TxStatusBatchRequest, TxStatusBatchResponse, TxStatusRequest,
+            TxStatusResponse as RawTxStatusResponse,
+            tx_server::{Tx, TxServer},
+        };
+        use celestia_proto::cosmos::base::node::v1beta1::{
+            ConfigRequest, ConfigResponse, StatusRequest, StatusResponse,
+            service_server::{Service, ServiceServer},
+        };
+        use tokio::sync::mpsc;
+        use tonic::metadata::MetadataMap;
+        use tonic::{Code, Request, Response, Status};
+
+        use super::*;
+        use crate::client::APP_COMMIT_TIMEOUT;
+        use crate::tx::BroadcastedTx;
+
+        const TX_HEIGHT: u64 = 42;
+
+        struct Mock {
+            heights: Mutex<VecDeque<u64>>,
+            fallback_height: u64,
+            status_error: Option<Code>,
+            execution_code: u32,
+            status_calls: mpsc::UnboundedSender<MetadataMap>,
+        }
+
+        #[tonic::async_trait]
+        impl Tx for Mock {
+            async fn tx_status(
+                self: Arc<Self>,
+                _: Request<TxStatusRequest>,
+            ) -> std::result::Result<Response<RawTxStatusResponse>, Status> {
+                Ok(Response::new(RawTxStatusResponse {
+                    height: TX_HEIGHT as i64,
+                    execution_code: self.execution_code,
+                    status: "COMMITTED".into(),
+                    ..Default::default()
+                }))
+            }
+
+            async fn tx_status_batch(
+                self: Arc<Self>,
+                _: Request<TxStatusBatchRequest>,
+            ) -> std::result::Result<Response<TxStatusBatchResponse>, Status> {
+                Err(Status::unimplemented("unused"))
+            }
+        }
+
+        #[tonic::async_trait]
+        impl Service for Mock {
+            async fn config(
+                self: Arc<Self>,
+                _: Request<ConfigRequest>,
+            ) -> std::result::Result<Response<ConfigResponse>, Status> {
+                Err(Status::unimplemented("unused"))
+            }
+
+            async fn status(
+                self: Arc<Self>,
+                request: Request<StatusRequest>,
+            ) -> std::result::Result<Response<StatusResponse>, Status> {
+                let _ = self.status_calls.send(request.metadata().clone());
+                if let Some(code) = self.status_error {
+                    return Err(Status::new(code, "status failed"));
+                }
+                let height = self
+                    .heights
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(self.fallback_height);
+                Ok(Response::new(StatusResponse {
+                    height,
+                    ..Default::default()
+                }))
+            }
+        }
+
+        fn mock_client(
+            heights: impl IntoIterator<Item = u64>,
+            fallback_height: u64,
+            status_error: Option<Code>,
+            execution_code: u32,
+        ) -> (GrpcClient, mpsc::UnboundedReceiver<MetadataMap>) {
+            let (status_calls, calls) = mpsc::unbounded_channel();
+            let server = Arc::new(Mock {
+                heights: Mutex::new(heights.into_iter().collect()),
+                fallback_height,
+                status_error,
+                execution_code,
+                status_calls,
+            });
+            let routes = tonic::service::Routes::new(TxServer::from_arc(server.clone()))
+                .add_service(ServiceServer::from_arc(server));
+            let client = GrpcClient::builder().transport(routes).build().unwrap();
+            (client, calls)
+        }
+
+        fn tx() -> BroadcastedTx {
+            BroadcastedTx {
+                hash: celestia_types::hash::Hash::Sha256([1; 32]),
+                ..Default::default()
+            }
+        }
+
+        #[tokio::test]
+        async fn committed_tx_waits_for_app_height() {
+            let (client, mut calls) = mock_client([TX_HEIGHT - 1, TX_HEIGHT], TX_HEIGHT, None, 0);
+            let mut context = Context::default();
+            context
+                .append_metadata("authorization", "Bearer test")
+                .unwrap();
+            context
+                .append_metadata("x-cosmos-block-height", "1")
+                .unwrap();
+
+            let task = tokio::spawn(async move {
+                client
+                    .confirm_tx(
+                        tx(),
+                        TxConfig::default().with_confirmation_interval_ms(1),
+                        &context,
+                    )
+                    .await
+            });
+
+            for _ in 0..2 {
+                let metadata = tokio::time::timeout(Duration::from_secs(1), calls.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(metadata.get("authorization").unwrap(), "Bearer test");
+                assert!(!metadata.contains_key("x-cosmos-block-height"));
+            }
+
+            let info = task.await.unwrap().unwrap();
+            assert_eq!(info.height, TX_HEIGHT);
+            assert_eq!(info.hash, tx().hash);
+        }
+
+        #[tokio::test]
+        async fn app_height_error_is_returned() {
+            let (client, _) = mock_client([], 0, Some(Code::PermissionDenied), 0);
+            let err = client
+                .confirm_tx(tx(), TxConfig::default(), &Context::default())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::TonicError(status) if status.code() == Code::PermissionDenied)
+            );
+        }
+
+        #[tokio::test]
+        async fn failed_tx_does_not_wait_for_app_height() {
+            let (client, mut calls) = mock_client([], 0, None, 5);
+            let err = client
+                .confirm_tx(tx(), TxConfig::default(), &Context::default())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::TxExecutionFailed(..)));
+            assert!(calls.try_recv().is_err());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn app_height_wait_times_out() {
+            let (client, mut calls) = mock_client([], TX_HEIGHT - 1, None, 0);
+            let task = tokio::spawn(async move {
+                client
+                    .confirm_tx(tx(), TxConfig::default(), &Context::default())
+                    .await
+            });
+            calls.recv().await.unwrap();
+            tokio::time::advance(APP_COMMIT_TIMEOUT + Duration::from_secs(1)).await;
+            let err = task.await.unwrap().unwrap_err();
+            assert!(matches!(
+                err,
+                Error::TxAppStateTimeout {
+                    height: TX_HEIGHT,
+                    ..
+                }
+            ));
+        }
     }
 
     #[async_test]

@@ -175,8 +175,11 @@ impl BlobApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use crate::test_utils::{ensure_serializable_deserializable, new_client};
     use lumina_utils::test_utils::async_test;
+    use lumina_utils::time::timeout;
 
     #[async_test]
     async fn blob_submit_and_retrieve() {
@@ -197,6 +200,14 @@ mod tests {
             .submit(&[blob], TxConfig::default())
             .await
             .unwrap();
+
+        timeout(
+            Duration::from_secs(60),
+            client.header().wait_for_height(tx_info.height),
+        )
+        .await
+        .expect("timed out waiting for the bridge node to sync the submitted block")
+        .unwrap();
 
         let received_blob = client
             .blob()
