@@ -53,18 +53,6 @@ js-sys = { workspace = true, optional = true }
 serde-wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 
-[dev-dependencies]
-ed25519-consensus = "2"
-rand.workspace = true
-serde_json.workspace = true
-postcard = { version = "1", features = ["alloc"] }
-
-# doc-tests
-indoc = "2"
-
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test.workspace = true
-
 [features]
 default = []
 test-utils = ["dep:ed25519-consensus", "dep:rand"]

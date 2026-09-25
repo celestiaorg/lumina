@@ -112,25 +112,6 @@ web-sys = { workspace = true, features = [
   "Headers",
 ] }
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test.workspace = true
-celestia-rpc = { workspace = true, features = ["wasm-bindgen"] }
-
-[dev-dependencies]
-celestia-rpc = { workspace = true, features = ["p2p"] }
-celestia-types = { workspace = true, features = ["test-utils"] }
-# required to have path based dependency here to allow `cargo publish` to work
-# https://github.com/rust-lang/cargo/pull/7333
-lumina-node = { path = ".", features = ["test-utils"] }
-lumina-utils = { workspace = true, features = ["test-utils"] }
-
-bytes.workspace = true
-ctor = "0.2"
-rstest = "0.26"
-serde_json.workspace = true
-tempfile = "3"
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-
 [features]
 test-utils = ["celestia-types/test-utils"]
 uniffi = ["dep:uniffi", "celestia-types/uniffi"]

@@ -61,41 +61,6 @@ web-sys = { workspace = true, features = [
   "AbortSignal",
 ] }
 
-[dev-dependencies]
-anyhow.workspace = true
-lumina-utils = { workspace = true, features = ["test-utils", "time"] }
-nmt-rs.workspace = true
-rand.workspace = true
-tokio = { workspace = true, features = ["sync"] }
-tracing.workspace = true
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-dotenvy.workspace = true
-libp2p = { workspace = true, features = [
-  "tokio",
-  "macros",
-  "tcp",
-  "noise",
-  "yamux",
-] }
-tokio = { workspace = true, features = [
-  "rt",
-  "macros",
-  "net",
-  "io-util",
-  "time",
-] }
-
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-getrandom_02.workspace = true
-getrandom_03.workspace = true
-rust-embed = { workspace = true, features = [
-  "debug-embed",
-  "include-exclude",
-  "interpolate-folder-path",
-] }
-wasm-bindgen-test.workspace = true
-
 [features]
 default = ["p2p"]
 p2p = ["dep:libp2p-identity", "dep:multiaddr"]

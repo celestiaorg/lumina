@@ -7,7 +7,7 @@ description = "Platform abstraction utilities used across lumina project"
 authors = ["Celestia <contact@celestia.org>"]
 homepage = "https://www.celestia.org"
 repository = "https://github.com/celestiaorg/lumina"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [dependencies]
 tokio = { workspace = true, optional = true }
@@ -30,13 +30,6 @@ web-time = { version = "1.1", optional = true }
 # `lumina-utils` is used as an intermidiate crate and does not really use `tonic`,
 # see [features] below for explanation.
 tonic = { workspace = true, default-features = false, optional = true }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros"] }
-web-time = "1.1"
-
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test.workspace = true
 
 [features]
 default = []
