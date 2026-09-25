@@ -68,6 +68,8 @@ impl BlobApi {
     }
 
     /// Retrieves the blob by commitment under the given namespace and height.
+    ///
+    /// The blob's commitment is checked, its inclusion in the block is not.
     pub async fn get(
         &self,
         height: u64,
@@ -103,6 +105,8 @@ impl BlobApi {
     }
 
     /// Retrieves proofs in the given namespaces at the given height by commitment.
+    ///
+    /// The proofs are returned as received from the node and are not verified.
     pub async fn get_proof(
         &self,
         height: u64,
@@ -117,6 +121,13 @@ impl BlobApi {
     }
 
     /// Checks whether a blob's given commitment is included in the namespace at the given height.
+    ///
+    /// The answer comes from the node and is not verified locally. To verify a blob's
+    /// inclusion yourself, fetch its shares with [`ShareApi::get_range_verified`] and
+    /// check them with [`BlobProof`].
+    ///
+    /// [`ShareApi::get_range_verified`]: crate::api::ShareApi::get_range_verified
+    /// [`BlobProof`]: crate::types::BlobProof
     pub async fn included(
         &self,
         height: u64,
