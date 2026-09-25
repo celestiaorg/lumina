@@ -180,6 +180,13 @@ pub trait ShareClient: ClientT {
         async move {
             let raw_samples =
                 rpc::ShareClient::share_get_samples(self, height, coordinates.clone()).await?;
+            if raw_samples.len() != coordinates.len() {
+                return Err(Error::Custom(format!(
+                    "expected {} samples, received {}",
+                    coordinates.len(),
+                    raw_samples.len()
+                )));
+            }
             let mut samples = Vec::with_capacity(raw_samples.len());
 
             for (coords, raw_sample) in coordinates.iter().zip(raw_samples) {
