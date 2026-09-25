@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/lumina-node-v1.1.0-rc.1...lumina-node-v1.2.0-rc.1) - 2026-09-24
+
+### Added
+
+- *(fibre)* Add TLS support ([#996](https://github.com/celestiaorg/lumina/pull/996))
+
+### Fixed
+
+- *(node)* make prune_tail tolerate equal-sized pruning batches ([#1080](https://github.com/celestiaorg/lumina/pull/1080))
+- *(shrex)* fix for flaky `shrex_sampling_backward` test ([#991](https://github.com/celestiaorg/lumina/pull/991))
+
+### Other
+
+- *(node)* unflaky `peer_discovery` test ([#1017](https://github.com/celestiaorg/lumina/pull/1017))
+- *(node)* unflaky head_selection_with_multiple_peers test ([#997](https://github.com/celestiaorg/lumina/pull/997))
+- *(fibre)* use more existing types instead of bytes and strings ([#985](https://github.com/celestiaorg/lumina/pull/985))
+
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/lumina-node-v1.0.0...lumina-node-v1.1.0-rc.1) - 2026-06-24
 
 ### Added

@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "celestia-client"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "async-stream",
  "blockstore",
@@ -745,10 +745,10 @@ dependencies = [
 
 [[package]]
 name = "celestia-fibre"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "async-trait",
- "bech32",
+ "bytes",
  "celestia-grpc",
  "celestia-proto",
  "celestia-types",
@@ -760,6 +760,7 @@ dependencies = [
  "gloo-net",
  "hex",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "k256",
@@ -786,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "celestia-grpc"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -833,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "celestia-grpc-macros"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -842,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "celestia-proto"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "bytes",
  "prost",
@@ -862,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "celestia-rpc"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -898,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "celestia-types"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "bech32",
@@ -3547,7 +3548,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lumina-cli"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3572,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "lumina-node"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "async-trait",
  "backoff",
@@ -3629,7 +3630,7 @@ dependencies = [
 
 [[package]]
 name = "lumina-node-uniffi"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "async-trait",
  "blockstore",
@@ -3652,7 +3653,7 @@ dependencies = [
 
 [[package]]
 name = "lumina-node-wasm"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "anyhow",
  "blockstore",
@@ -3691,7 +3692,7 @@ dependencies = [
 
 [[package]]
 name = "lumina-utils"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "futures",
  "gloo-timers 0.3.0",
@@ -4900,7 +4901,7 @@ dependencies = [
 
 [[package]]
 name = "rsema1d"
-version = "1.1.0-rc.1"
+version = "1.2.0-rc.1"
 dependencies = [
  "bytes",
  "criterion",
