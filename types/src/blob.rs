@@ -17,7 +17,7 @@ use crate::consts::appconsts;
 use crate::error::UniffiResult;
 use crate::nmt::Namespace;
 use crate::state::{AccAddress, AddressTrait};
-use crate::{Error, Result, Share, bail_validation};
+use crate::{Error, Result, Share, bail_validation, validation_error};
 
 pub use self::commitment::Commitment;
 pub use self::msg_pay_for_blobs::MsgPayForBlobs;
@@ -147,10 +147,20 @@ impl Blob {
 
     /// Creates a `Blob` from [`RawBlob`].
     pub fn from_raw(raw: RawBlob) -> Result<Blob> {
-        let namespace = Namespace::new(raw.namespace_version as u8, &raw.namespace_id)?;
+        let namespace_version = u8::try_from(raw.namespace_version)
+            .map_err(|_| validation_error!("namespace version must be single byte"))?;
+        let namespace = Namespace::new(namespace_version, &raw.namespace_id)?;
         let share_version =
             u8::try_from(raw.share_version).map_err(|_| Error::UnsupportedShareVersion(u8::MAX))?;
-        let signer = raw.signer.try_into().map(AccAddress::new).ok();
+        let signer = if raw.signer.is_empty() {
+            None
+        } else {
+            Some(AccAddress::new(
+                raw.signer
+                    .try_into()
+                    .map_err(|_| validation_error!("invalid signer length"))?,
+            ))
+        };
         let commitment =
             Commitment::from_blob(namespace, &raw.data[..], share_version, signer.as_ref())?;
 
@@ -334,8 +344,7 @@ impl Blob {
         commitment::validate_blob(share_version, signer.is_some(), blob_len as usize)?;
 
         let shares_needed = shares_needed_for_blob(blob_len as usize, signer.is_some());
-        let mut data =
-            Vec::with_capacity(shares_needed * appconsts::CONTINUATION_SPARSE_SHARE_CONTENT_SIZE);
+        let mut data = Vec::new();
         data.extend_from_slice(first_share.payload().expect("non parity"));
 
         for _ in 1..shares_needed {
@@ -447,14 +456,7 @@ impl Blob {
     /// assert_eq!(shares_len, blob_shares.len());
     /// ```
     pub fn shares_len(&self) -> usize {
-        let Some(without_first_share) = self
-            .data
-            .len()
-            .checked_sub(appconsts::FIRST_SPARSE_SHARE_CONTENT_SIZE)
-        else {
-            return 1;
-        };
-        1 + without_first_share.div_ceil(appconsts::CONTINUATION_SPARSE_SHARE_CONTENT_SIZE)
+        shares_needed_for_blob(self.data.len(), self.signer.is_some())
     }
 }
 
@@ -694,6 +696,27 @@ mod tests {
     use super::*;
     use crate::nmt::{NS_ID_SIZE, NS_SIZE};
     use crate::test_utils::random_bytes;
+
+    #[test]
+    fn signed_blob_share_count_matches_encoding() {
+        let ns = Namespace::new_v0(&[1, 2, 3]).unwrap();
+        let signer = AccAddress::from([1; 20]);
+        for size in [1, 458, 459, 478, 479, 940, 941, 960, 961] {
+            let blob = Blob::new(ns, vec![7; size], Some(signer)).unwrap();
+            assert_eq!(blob.shares_len(), blob.to_shares().unwrap().len(), "{size}");
+        }
+    }
+
+    #[test]
+    fn raw_blob_rejects_wrapped_namespace_version_and_bad_signer() {
+        let ns = Namespace::new_v0(&[1, 2, 3]).unwrap();
+        let mut raw = RawBlob::from(Blob::new(ns, vec![1], None).unwrap());
+        raw.namespace_version = 256;
+        assert!(Blob::from_raw(raw.clone()).is_err());
+        raw.namespace_version = 0;
+        raw.signer = vec![1];
+        assert!(Blob::from_raw(raw).is_err());
+    }
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test as test;
