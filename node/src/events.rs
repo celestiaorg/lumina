@@ -292,12 +292,6 @@ pub enum NodeEvent {
         error: String,
     },
 
-    /// Network was compromised.
-    ///
-    /// Not emitted anymore, the node doesn't act on bad encoding fraud proofs.
-    /// Kept for API compatibility until the next breaking release.
-    NetworkCompromised,
-
     /// Node stopped.
     NodeStopped,
 }
@@ -309,8 +303,7 @@ impl NodeEvent {
             NodeEvent::FatalDaserError { .. }
             | NodeEvent::FatalSyncerError { .. }
             | NodeEvent::FatalPrunerError { .. }
-            | NodeEvent::FetchingHeadersFailed { .. }
-            | NodeEvent::NetworkCompromised => true,
+            | NodeEvent::FetchingHeadersFailed { .. } => true,
             NodeEvent::ConnectingToBootnodes
             | NodeEvent::PeerConnected { .. }
             | NodeEvent::PeerDisconnected { .. }
@@ -457,13 +450,6 @@ impl fmt::Display for NodeEvent {
             }
             NodeEvent::FatalPrunerError { error } => {
                 write!(f, "Pruner stopped because of a fatal error: {error}")
-            }
-            NodeEvent::NetworkCompromised => {
-                write!(f, "The network is compromised and should not be trusted. ")?;
-                write!(
-                    f,
-                    "Node stopped synchronizing and sampling, but you can still make some queries to the network."
-                )
             }
             NodeEvent::NodeStopped => {
                 write!(f, "Node stopped")
