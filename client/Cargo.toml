@@ -52,6 +52,7 @@ getrandom_02.workspace = true
 tonic-web-wasm-client.workspace = true
 
 [dev-dependencies]
+celestia-types = { workspace = true, features = ["test-utils"] }
 jsonrpsee.workspace = true
 lumina-utils = { workspace = true, features = ["test-utils"] }
 rand.workspace = true
