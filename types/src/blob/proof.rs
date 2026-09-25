@@ -6,7 +6,7 @@ use tendermint_proto::Protobuf;
 
 use crate::blob::shares_needed_for_blob;
 use crate::hash::Hash;
-use crate::{Error, Result, Share, ShareProof, bail_verification};
+use crate::{Blob, Error, Result, Share, ShareProof, bail_verification};
 
 /// A proof of inclusion of a [`Blob`] in a [`DataAvailabilityHeader`].
 ///
@@ -65,13 +65,13 @@ impl BlobProof {
             return Err(Error::UnexpectedReservedNamespace);
         }
 
-        let first_share = self
+        let shares = self
             .0
             .shares()
-            .first()
+            .iter()
             .map(|share| Share::from_raw(share))
-            .transpose()?
-            .ok_or(Error::MissingShares)?;
+            .collect::<Result<Vec<_>>>()?;
+        let first_share = shares.first().ok_or(Error::MissingShares)?;
 
         let blob_len = first_share
             .sequence_length()
@@ -86,13 +86,18 @@ impl BlobProof {
         let shares_needed =
             shares_needed_for_blob(blob_len as usize, first_share.signer().is_some());
 
-        if self.0.shares().len() != shares_needed {
+        if shares.len() != shares_needed {
             bail_verification!(
                 "proof has ({}) shares, blob of ({}) bytes occupies ({})",
-                self.0.shares().len(),
+                shares.len(),
                 blob_len,
                 shares_needed
             );
+        }
+
+        let blob = Blob::reconstruct(&shares)?;
+        if blob.namespace != self.0.namespace_id {
+            bail_verification!("blob namespace differs from proof namespace");
         }
 
         Ok(())
@@ -235,6 +240,21 @@ mod tests {
 
         let err = proof.verify(root).unwrap_err().to_string();
         assert!(err.contains("not continuous"), "{err}");
+    }
+
+    #[test]
+    fn verify_rejects_invalid_continuation_share() {
+        let (eds, _) = generate_eds_with_blob_lengths(4, &[2]);
+        let mut ods: Vec<_> = (0..2)
+            .flat_map(|row| (0..2).map(move |column| (row, column)))
+            .map(|(row, column)| eds.share(row, column).unwrap().to_vec())
+            .collect();
+        ods[1][NS_SIZE] = 1;
+        let eds = ExtendedDataSquare::from_ods(ods).unwrap();
+        let root = DataAvailabilityHeader::from_eds(&eds).hash();
+        let proof = proof_for_range(&eds, 0..2);
+
+        assert!(proof.verify(root).is_err());
     }
 
     #[test]

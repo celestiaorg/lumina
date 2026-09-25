@@ -2,6 +2,8 @@ use std::ops::{Deref, DerefMut};
 
 use celestia_proto::celestia::core::v1::proof::NmtProof as RawNmtProof;
 use celestia_proto::proof::pb::Proof as RawProof;
+use nmt_rs::NamespaceId;
+use nmt_rs::simple_merkle::error::RangeProofError;
 use nmt_rs::simple_merkle::proof::Proof as NmtProof;
 use serde::{Deserialize, Serialize};
 use tendermint_proto::Protobuf;
@@ -106,10 +108,30 @@ impl NamespaceProof {
         // for each tree level. Based on that we can recompute the total amount
         // of leaves in a tree.
         if self.end_idx().saturating_sub(self.start_idx()) == 1 {
-            Some(1 << self.siblings().len())
+            1usize.checked_shl(self.siblings().len().try_into().ok()?)
         } else {
             None
         }
+    }
+
+    /// Verify a complete namespace, rejecting malformed absence proofs before
+    /// passing them to nmt-rs, which otherwise indexes a missing left sibling.
+    pub fn verify_complete_namespace(
+        &self,
+        root: &NamespacedHash,
+        raw_leaves: &[impl AsRef<[u8]>],
+        namespace: NamespaceId<NS_SIZE>,
+    ) -> std::result::Result<(), RangeProofError> {
+        if self.is_of_absence()
+            && root.contains::<NamespacedSha2Hasher>(namespace)
+            && self.start_idx().count_ones() as usize > self.siblings().len()
+        {
+            return Err(RangeProofError::MalformedProof(
+                "absence proof is missing a left sibling",
+            ));
+        }
+        self.0
+            .verify_complete_namespace(root, raw_leaves, namespace)
     }
 }
 
@@ -150,11 +172,19 @@ impl TryFrom<RawProof> for NamespaceProof {
             .iter()
             .map(|bytes| NamespacedHash::from_raw(bytes))
             .collect::<Result<Vec<_>>>()?;
+        let start = value
+            .start
+            .try_into()
+            .map_err(|_| crate::validation_error!("proof start is out of range"))?;
+        let end = value
+            .end
+            .try_into()
+            .map_err(|_| crate::validation_error!("proof end is out of range"))?;
 
         let mut proof = NmtNamespaceProof::PresenceProof {
             proof: NmtProof {
                 siblings,
-                range: value.start as u32..value.end as u32,
+                range: start..end,
             },
             ignore_max_ns: value.is_max_namespace_ignored,
         };
@@ -210,6 +240,9 @@ impl From<NamespaceProof> for RawNmtProof {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eds::AxisType;
+    use crate::sample::Sample;
+    use crate::test_utils::generate_dummy_eds;
 
     #[test]
     fn test_serialize_namespace_proof_binary() {
@@ -224,5 +257,15 @@ mod tests {
         let serialized = postcard::to_allocvec(&proof).unwrap();
         let deserialized: NamespaceProof = postcard::from_bytes(&serialized).unwrap();
         assert_eq!(proof, deserialized);
+    }
+
+    #[test]
+    fn raw_proof_rejects_out_of_range_indices() {
+        let eds = generate_dummy_eds(8);
+        let sample = Sample::new(0, 0, AxisType::Row, &eds).unwrap();
+        let mut raw = RawProof::from(sample.proof);
+        raw.start += 1_i64 << 32;
+        raw.end += 1_i64 << 32;
+        assert!(NamespaceProof::try_from(raw).is_err());
     }
 }

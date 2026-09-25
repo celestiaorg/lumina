@@ -2,7 +2,9 @@
 
 use std::future::Future;
 use std::marker::{Send, Sync};
+use std::ops::Range;
 
+use celestia_types::hash::Hash;
 use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::Namespace;
 use celestia_types::sample::{RawSample, Sample, SampleId};
@@ -21,6 +23,29 @@ pub struct GetRangeResponse {
     pub shares: Vec<Share>,
     /// Proof of inclusion of the shares.
     pub proof: ShareProof,
+}
+
+impl GetRangeResponse {
+    /// Verify that both the returned shares and their proof cover the requested ODS range.
+    /// The root must come from an authenticated header.
+    pub fn verify_range(&self, root: Hash, range: Range<u64>) -> celestia_types::Result<()> {
+        self.proof.verify_range(root, range)?;
+
+        if self.shares.len() != self.proof.shares().len()
+            || self
+                .shares
+                .iter()
+                .zip(self.proof.shares())
+                .any(|(share, proven)| share.as_ref() != proven)
+        {
+            return Err(celestia_types::VerificationError::Other(
+                "response shares differ from proven shares".into(),
+            )
+            .into());
+        }
+
+        Ok(())
+    }
 }
 
 /// Side of a row within the EDS.
@@ -180,6 +205,13 @@ pub trait ShareClient: ClientT {
         async move {
             let raw_samples =
                 rpc::ShareClient::share_get_samples(self, height, coordinates.clone()).await?;
+            if raw_samples.len() != coordinates.len() {
+                return Err(Error::Custom(format!(
+                    "expected {} samples, received {}",
+                    coordinates.len(),
+                    raw_samples.len()
+                )));
+            }
             let mut samples = Vec::with_capacity(raw_samples.len());
 
             for (coords, raw_sample) in coordinates.iter().zip(raw_samples) {

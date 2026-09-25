@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_stream::try_stream;
-use celestia_rpc::BlobClient;
+use celestia_rpc::{BlobClient, ShareClient};
 use futures_util::{Stream, StreamExt};
 
 use crate::Result;
@@ -10,8 +10,9 @@ use crate::api::blob::BlobsAtHeight;
 use crate::client::ClientInner;
 use crate::state::AsyncGrpcCall;
 use crate::tx::{TxConfig, TxInfo};
+use crate::types::namespace_data::NamespaceDataId;
 use crate::types::nmt::{Namespace, NamespaceProof};
-use crate::types::{Blob, Commitment};
+use crate::types::{Blob, BlobProof, Commitment, ExtendedHeader, Share, VerificationError};
 
 /// Blob API for quering bridge nodes.
 pub struct BlobApi {
@@ -68,6 +69,8 @@ impl BlobApi {
     }
 
     /// Retrieves the blob by commitment under the given namespace and height.
+    /// This checks the blob's commitment, but not its inclusion in a header;
+    /// use [`BlobApi::get_verified`] for inclusion verification.
     pub async fn get(
         &self,
         height: u64,
@@ -85,7 +88,53 @@ impl BlobApi {
         Ok(blob)
     }
 
+    /// Retrieve a blob and prove its exact ODS range against an authenticated header.
+    /// The caller must establish trust in the supplied header.
+    pub async fn get_verified(
+        &self,
+        header: &ExtendedHeader,
+        namespace: Namespace,
+        commitment: Commitment,
+    ) -> Result<Blob> {
+        let blob = self.get(header.height(), namespace, commitment).await?;
+        let start = blob.index.ok_or_else(|| {
+            crate::types::Error::from(VerificationError::Other(
+                "blob response has no share index".into(),
+            ))
+        })?;
+        let end = start.checked_add(blob.shares_len() as u64).ok_or_else(|| {
+            crate::types::Error::from(VerificationError::Other(
+                "blob share range overflows".into(),
+            ))
+        })?;
+        let response = self
+            .inner
+            .rpc
+            .share_get_range(header.height(), start, end)
+            .await?;
+        let root = header.dah.hash();
+        response.verify_range(root, start..end)?;
+        BlobProof::from(response.proof).verify_range(root, start..end)?;
+
+        let mut proven = Blob::reconstruct(&response.shares)?;
+        if proven.namespace != namespace
+            || proven.commitment != commitment
+            || proven.data != blob.data
+            || proven.share_version != blob.share_version
+            || proven.signer != blob.signer
+        {
+            return Err(crate::types::Error::from(VerificationError::Other(
+                "blob response differs from the proven blob".into(),
+            ))
+            .into());
+        }
+        proven.index = Some(start);
+        Ok(proven)
+    }
+
     /// Retrieves all blobs from the given namespaces and height.
+    /// This does not prove that the response includes every blob; use
+    /// [`BlobApi::get_all_verified`] for a complete, header-bound result.
     pub async fn get_all(
         &self,
         height: u64,
@@ -102,6 +151,34 @@ impl BlobApi {
         Ok(Some(blobs))
     }
 
+    /// Retrieve all blobs in each requested namespace, verifying namespace
+    /// completeness against an authenticated header supplied by the caller.
+    pub async fn get_all_verified(
+        &self,
+        header: &ExtendedHeader,
+        namespaces: &[Namespace],
+    ) -> Result<Vec<Blob>> {
+        let mut blobs = Vec::new();
+        for &namespace in namespaces {
+            let data = self
+                .inner
+                .rpc
+                .share_get_namespace_data(header.height(), namespace)
+                .await?;
+            data.verify(
+                NamespaceDataId::new(namespace, header.height())?,
+                &header.dah,
+            )?;
+            let shares: Vec<&Share> = data
+                .rows()
+                .iter()
+                .flat_map(|row| row.shares.iter())
+                .collect();
+            blobs.extend(Blob::reconstruct_all(shares)?);
+        }
+        Ok(blobs)
+    }
+
     /// Retrieves proofs in the given namespaces at the given height by commitment.
     pub async fn get_proof(
         &self,
@@ -116,7 +193,8 @@ impl BlobApi {
             .await?)
     }
 
-    /// Checks whether a blob's given commitment is included in the namespace at the given height.
+    /// Asks the RPC node whether a blob's commitment is included.
+    /// The returned boolean is not an independently verified inclusion proof.
     pub async fn included(
         &self,
         height: u64,

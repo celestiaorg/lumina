@@ -16,10 +16,11 @@ use nmt_rs::nmt_proof::NamespaceProof as NmtNamespaceProof;
 use prost::Message;
 use serde::Serialize;
 
+use crate::consts::appconsts;
 use crate::eds::{AxisType, ExtendedDataSquare};
 use crate::nmt::NamespaceProof;
 use crate::row::{ROW_ID_SIZE, RowId};
-use crate::{DataAvailabilityHeader, Error, Result, Share, bail_validation};
+use crate::{DataAvailabilityHeader, Error, Result, Share, bail_validation, bail_verification};
 
 pub use celestia_proto::shwap::Sample as RawSample;
 
@@ -126,6 +127,22 @@ impl Sample {
 
     /// verify sample with root hash from ExtendedHeader
     pub fn verify(&self, id: SampleId, dah: &DataAvailabilityHeader) -> Result<()> {
+        if id.row_index() >= dah.square_width() || id.column_index() >= dah.square_width() {
+            return Err(Error::EdsIndexOutOfRange(id.row_index(), id.column_index()));
+        }
+
+        let expected_index = match self.proof_type {
+            AxisType::Row => u32::from(id.column_index()),
+            AxisType::Col => u32::from(id.row_index()),
+        };
+        if self.proof.is_of_absence()
+            || self.proof.start_idx() != expected_index
+            || self.proof.end_idx() != expected_index + 1
+            || self.proof.total_leaves() != Some(usize::from(dah.square_width()))
+        {
+            bail_verification!("sample proof does not cover the requested coordinate");
+        }
+
         let root = match self.proof_type {
             AxisType::Row => dah
                 .row_root(id.row_index())
@@ -183,6 +200,10 @@ impl Sample {
         let Some(square_size) = proof.total_leaves() else {
             bail_validation!("proof must be for single leaf");
         };
+
+        if square_size > appconsts::v10::SQUARE_SIZE_UPPER_BOUND * 2 {
+            bail_validation!("sample proof exceeds the maximum square width");
+        }
 
         let row_index = id.row_index() as usize;
         let col_index = id.column_index() as usize;
@@ -453,5 +474,35 @@ mod tests {
 
             decoded.verify(id, &dah).unwrap();
         }
+    }
+
+    #[test]
+    fn verify_rejects_wrong_or_out_of_bounds_coordinate() {
+        let eds = generate_dummy_eds(8);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+
+        for (axis, actual, requested) in [
+            (AxisType::Row, (0, 0), (0, 1)),
+            (AxisType::Col, (0, 0), (1, 0)),
+            (AxisType::Row, (0, 0), (0, 8)),
+            (AxisType::Col, (0, 0), (8, 0)),
+        ] {
+            let sample = Sample::new(actual.0, actual.1, axis, &eds).unwrap();
+            let id = SampleId::new(requested.0, requested.1, 1).unwrap();
+            assert!(sample.verify(id, &dah).is_err());
+        }
+    }
+
+    #[test]
+    fn from_raw_rejects_overlong_proof_without_panicking() {
+        let eds = generate_dummy_eds(8);
+        let sample = Sample::new(0, 0, AxisType::Row, &eds).unwrap();
+        let mut raw = RawSample::from(sample);
+        let proof = raw.proof.as_mut().unwrap();
+        proof
+            .nodes
+            .resize(usize::BITS as usize, proof.nodes[0].clone());
+        let id = SampleId::new(0, 0, 1).unwrap();
+        assert!(Sample::from_raw(id, raw).is_err());
     }
 }

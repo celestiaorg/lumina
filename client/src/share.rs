@@ -6,9 +6,10 @@ use crate::Result;
 use crate::api::share::{GetRangeResponse, GetRowResponse, SampleCoordinates};
 use crate::client::ClientInner;
 use crate::types::namespace_data::NamespaceData;
+use crate::types::namespace_data::NamespaceDataId;
 use crate::types::nmt::Namespace;
-use crate::types::sample::Sample;
-use crate::types::{ExtendedDataSquare, Share};
+use crate::types::sample::{Sample, SampleId};
+use crate::types::{ExtendedDataSquare, ExtendedHeader, Share};
 
 /// Share API for quering bridge nodes.
 pub struct ShareApi {
@@ -51,6 +52,7 @@ impl ShareApi {
     ///
     /// This method will first fetch and validate the header at a given height and
     /// then use it to provide necessary data for validation and post-processing.
+    /// It does not prove the returned share belongs to that header.
     ///
     /// If you already have access to the necessary data, it is recommended to use
     /// the equivalent method without the `_with_root` suffix.
@@ -64,7 +66,8 @@ impl ShareApi {
     }
 
     /// Retrieves multiple shares from the [`ExtendedDataSquare`] at the given
-    /// sample coordinates.
+    /// sample coordinates without verifying their proofs. Use
+    /// [`ShareApi::get_samples_verified`] for a header-bound result.
     ///
     /// `coordinates` is a list of `(row, column)`.
     pub async fn get_samples<I, C>(&self, height: u64, coordinates: I) -> Result<Vec<Sample>>
@@ -79,6 +82,27 @@ impl ShareApi {
             .await?)
     }
 
+    /// Retrieve samples and verify each requested coordinate against an authenticated header.
+    pub async fn get_samples_verified<I, C>(
+        &self,
+        header: &ExtendedHeader,
+        coordinates: I,
+    ) -> Result<Vec<Sample>>
+    where
+        I: IntoIterator<Item = C>,
+        C: Into<SampleCoordinates>,
+    {
+        let coordinates: Vec<_> = coordinates.into_iter().map(Into::into).collect();
+        let samples = self
+            .get_samples(header.height(), coordinates.clone())
+            .await?;
+        for (sample, coords) in samples.iter().zip(coordinates) {
+            let id = SampleId::new(coords.row, coords.column, header.height())?;
+            sample.verify(id, &header.dah)?;
+        }
+        Ok(samples)
+    }
+
     /// Retrieves multiple shares from the [`ExtendedDataSquare`] at the given
     /// sample coordinates.
     ///
@@ -88,6 +112,7 @@ impl ShareApi {
     ///
     /// This method will first fetch and validate the header at a given height and
     /// then use it to provide necessary data for validation and post-processing.
+    /// It does not verify the returned samples; use [`ShareApi::get_samples_verified`].
     ///
     /// If you already have access to the necessary data, it is recommended to use
     /// the equivalent method without the `_with_root` suffix.
@@ -119,6 +144,7 @@ impl ShareApi {
     ///
     /// This method will first fetch and validate the header at a given height and
     /// then use it to provide necessary data for validation and post-processing.
+    /// It does not compare the returned square with the header's DAH.
     ///
     /// If you already have access to the necessary data, it is recommended to use
     /// the equivalent method without the `_with_root` suffix.
@@ -149,6 +175,7 @@ impl ShareApi {
     ///
     /// This method will first fetch and validate the header at a given height and
     /// then use it to provide necessary data for validation and post-processing.
+    /// It does not prove the returned row belongs to that header.
     ///
     /// If you already have access to the necessary data, it is recommended to use
     /// the equivalent method without the `_with_root` suffix.
@@ -162,7 +189,7 @@ impl ShareApi {
     }
 
     /// Retrieves all shares that belong to the specified namespace within the
-    /// [`ExtendedDataSquare`] at the given height.
+    /// [`ExtendedDataSquare`] at the given height, without verifying completeness.
     ///
     /// The shares are returned in a row-by-row order, maintaining the original
     /// layout if the namespace spans multiple rows.
@@ -178,6 +205,20 @@ impl ShareApi {
             .await?)
     }
 
+    /// Retrieve all shares in a namespace and prove completeness against an authenticated header.
+    pub async fn get_namespace_data_verified(
+        &self,
+        header: &ExtendedHeader,
+        namespace: Namespace,
+    ) -> Result<NamespaceData> {
+        let data = self.get_namespace_data(header.height(), namespace).await?;
+        data.verify(
+            NamespaceDataId::new(namespace, header.height())?,
+            &header.dah,
+        )?;
+        Ok(data)
+    }
+
     /// Retrieves all shares that belong to the specified namespace within the
     /// [`ExtendedDataSquare`] at the given height.
     ///
@@ -188,6 +229,8 @@ impl ShareApi {
     ///
     /// This method will first fetch and validate the header at a given height and
     /// then use it to provide necessary data for validation and post-processing.
+    /// It does not verify namespace completeness; use
+    /// [`ShareApi::get_namespace_data_verified`].
     ///
     /// If you already have access to the necessary data, it is recommended to use
     /// the equivalent method without the `_with_root` suffix.
@@ -205,14 +248,27 @@ impl ShareApi {
             .await?)
     }
 
-    /// Retrieves a list of shares and their corresponding proof.
+    /// Retrieves a list of shares and their corresponding proof without verifying it.
     ///
     /// The start and end index ignores parity shares and corresponds to ODS.
     pub async fn get_range(&self, height: u64, start: u64, end: u64) -> Result<GetRangeResponse> {
         Ok(self.inner.rpc.share_get_range(height, start, end).await?)
     }
 
-    /// Retrieves a list of shares and their corresponding proof.
+    /// Retrieve an ODS range and verify both returned shares and their positions
+    /// against an authenticated header supplied by the caller.
+    pub async fn get_range_verified(
+        &self,
+        header: &ExtendedHeader,
+        start: u64,
+        end: u64,
+    ) -> Result<GetRangeResponse> {
+        let response = self.get_range(header.height(), start, end).await?;
+        response.verify_range(header.dah.hash(), start..end)?;
+        Ok(response)
+    }
+
+    /// Retrieves a list of shares and their corresponding proof without verifying it.
     ///
     /// The start and end index ignores parity shares and corresponds to ODS.
     ///
@@ -220,6 +276,7 @@ impl ShareApi {
     ///
     /// This method will first fetch and validate the header at a given height and
     /// then use it to provide necessary data for validation and post-processing.
+    /// It does not verify the response; use [`ShareApi::get_range_verified`].
     ///
     /// If you already have access to the necessary data, it is recommended to use
     /// the equivalent method without the `_with_root` suffix.

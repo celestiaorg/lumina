@@ -14,7 +14,7 @@ use wasm_bindgen::prelude::*;
 use crate::consts::appconsts;
 use crate::nmt::{Namespace, NamespacedHashExt, NamespacedSha2Hasher, Nmt, RawNamespacedHash};
 use crate::state::{AccAddress, AddressTrait};
-use crate::{Error, Result};
+use crate::{Error, Result, bail_validation};
 use crate::{InfoByte, Share};
 
 use super::FIBRE_BLOB_DATA_SIZE;
@@ -192,6 +192,9 @@ pub(crate) fn validate_blob(share_version: u8, has_signer: bool, data_len: usize
     }
     if share_version == appconsts::SHARE_VERSION_TWO && data_len != FIBRE_BLOB_DATA_SIZE {
         return Err(Error::InvalidLength(data_len, FIBRE_BLOB_DATA_SIZE));
+    }
+    if data_len == 0 {
+        bail_validation!("blob has no data");
     }
     Ok(())
 }
@@ -604,18 +607,22 @@ mod tests {
         let no_signer = false;
 
         // all good - no signer
-        validate_blob(share_signer_forbidden, no_signer, 0).unwrap();
+        validate_blob(share_signer_forbidden, no_signer, 1).unwrap();
 
         // all good - with signer
-        validate_blob(share_signer_required, with_signer, 0).unwrap();
+        validate_blob(share_signer_required, with_signer, 1).unwrap();
+
+        // empty blobs cannot be represented by shares
+        validate_blob(share_signer_forbidden, no_signer, 0).unwrap_err();
+        validate_blob(share_signer_required, with_signer, 0).unwrap_err();
 
         // unsupported share version
-        validate_blob(share_version_unsupported, no_signer, 0).unwrap_err();
+        validate_blob(share_version_unsupported, no_signer, 1).unwrap_err();
 
         // no signer when required
-        validate_blob(share_signer_required, no_signer, 0).unwrap_err();
+        validate_blob(share_signer_required, no_signer, 1).unwrap_err();
 
         // with signer when forbidden
-        validate_blob(share_signer_forbidden, with_signer, 0).unwrap_err();
+        validate_blob(share_signer_forbidden, with_signer, 1).unwrap_err();
     }
 }

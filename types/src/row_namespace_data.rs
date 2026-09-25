@@ -86,6 +86,16 @@ impl RowNamespaceData {
         }
 
         let namespace = id.namespace();
+        if self
+            .shares
+            .iter()
+            .any(|share| share.namespace() != namespace)
+        {
+            return Err(crate::verification_error!(
+                "namespace data contains a share from another namespace"
+            )
+            .into());
+        }
         let row = id.row_index();
         let root = dah.row_root(row).ok_or(Error::EdsIndexOutOfRange(row, 0))?;
 
@@ -279,7 +289,30 @@ impl From<RowNamespaceDataId> for CidGeneric<ROW_NAMESPACE_DATA_ID_SIZE> {
 mod tests {
     use super::*;
     use crate::Blob;
-    use crate::test_utils::{generate_dummy_eds, generate_eds};
+    use crate::nmt::NamespacedHashExt;
+    use crate::test_utils::{generate_dummy_eds, generate_eds, generate_eds_with_blob_lengths};
+    use celestia_proto::proof::pb::Proof as RawProof;
+
+    #[test]
+    fn malformed_absence_proof_returns_error() {
+        let (eds, _) = generate_eds_with_blob_lengths(8, &[16]);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+        let namespace = eds.share(0, 0).unwrap().namespace();
+        let leaf = eds.row_nmt(4).unwrap().root();
+        let proof = RawProof {
+            start: 1,
+            end: 2,
+            nodes: vec![],
+            leaf_hash: leaf.to_vec(),
+            is_max_namespace_ignored: true,
+        };
+        let row = RowNamespaceData {
+            proof: proof.try_into().unwrap(),
+            shares: vec![],
+        };
+        let id = RowNamespaceDataId::new(namespace, 0, 1).unwrap();
+        assert!(row.verify(id, &dah).is_err());
+    }
 
     #[test]
     fn round_trip() {
