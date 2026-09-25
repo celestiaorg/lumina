@@ -69,6 +69,9 @@ impl MerkleProof {
     ///    or amount of inner nodes
     ///  - the recomputed root hash differs from expected one
     pub fn verify(&self, leaf: impl AsRef<[u8]>, root: Hash) -> Result<()> {
+        if self.total == 0 || self.index >= self.total {
+            bail_verification!("leaf index is outside the proof's tree");
+        }
         let mut hasher = Sha256::default();
         let leaf = hasher.leaf_hash(leaf.as_ref());
 
@@ -180,15 +183,16 @@ impl TryFrom<RawMerkleProof> for MerkleProof {
     type Error = Error;
 
     fn try_from(value: RawMerkleProof) -> Result<Self, Self::Error> {
-        if value.index < 0 {
-            bail_validation!("negative index");
-        }
-        if value.total <= 0 {
-            bail_validation!("total <= 0");
+        let index = usize::try_from(value.index)
+            .map_err(|_| validation_error!("proof index is out of range"))?;
+        let total = usize::try_from(value.total)
+            .map_err(|_| validation_error!("proof total is out of range"))?;
+        if total == 0 || index >= total {
+            bail_validation!("proof index is outside the tree");
         }
         Ok(Self {
-            index: value.index as usize,
-            total: value.total as usize,
+            index,
+            total,
             leaf_hash: value
                 .leaf_hash
                 .try_into()
@@ -222,6 +226,17 @@ mod tests {
     use crate::test_utils::random_bytes;
 
     use super::MerkleProof;
+
+    #[test]
+    fn rejects_out_of_bounds_leaf_index() {
+        let (mut proof, root) = MerkleProof::new(0, &[b"a"]).unwrap();
+        proof.index = 123;
+        assert!(proof.verify(b"a", root).is_err());
+
+        let (mut proof, root) = MerkleProof::new(3, &[b"a", b"b", b"c", b"d"]).unwrap();
+        proof.index = 999;
+        assert!(proof.verify(b"d", root).is_err());
+    }
 
     #[test]
     fn create_and_verify() {
