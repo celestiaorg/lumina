@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.1.0-rc.1...celestia-proto-v1.2.0-rc.1) - 2026-09-24
+
+### Fixed
+
+- *(fibre)* fibre-client does proper download ([#992](https://github.com/celestiaorg/lumina/pull/992))
+
+### Other
+
+- *(proto)* preallocate tonic encoding buffers ([#1030](https://github.com/celestiaorg/lumina/pull/1030))
+- *(proto)* decode Fibre proofs and RLCs as Bytes ([#1027](https://github.com/celestiaorg/lumina/pull/1027))
+- *(fibre,rsema1d)* hand rows to wire without copying ([#1015](https://github.com/celestiaorg/lumina/pull/1015))
+
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.0.0...celestia-proto-v1.1.0-rc.1) - 2026-06-24
 
 ### Added
