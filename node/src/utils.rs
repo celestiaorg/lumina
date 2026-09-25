@@ -42,13 +42,6 @@ pub(crate) fn gossipsub_ident_topic(network: &str, topic: &str) -> IdentTopic {
     IdentTopic::new(s)
 }
 
-pub(crate) fn fraudsub_ident_topic(proof_type: &str, network: &str) -> IdentTopic {
-    let proof_type = proof_type.trim_matches('/');
-    let network = network.trim_matches('/');
-    let s = format!("/{proof_type}/fraud-sub/{network}/v0.0.1");
-    IdentTopic::new(s)
-}
-
 pub(crate) type OneshotResultSender<T, E> = oneshot::Sender<Result<T, E>>;
 
 pub(crate) trait OneshotSenderExt<T>
