@@ -13,8 +13,8 @@ path = "src/lib.rs"
 [dependencies]
 reed-solomon-simd = "3.1.0"
 bytes.workspace = true
-sha2 = { version = "0.10.8", features = ["asm"] }
-thiserror = "1.0.69"
+sha2 = { workspace = true, features = ["asm"] }
+thiserror.workspace = true
 rayon = "1.10"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -29,7 +29,7 @@ rand.workspace = true
 rand_chacha = "0.3.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion.workspace = true
 
 [[bench]]
 name = "codec_bench"
@@ -40,5 +40,5 @@ name = "reconstruct_sweep"
 harness = false
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-getrandom = { version = "0.2.10", features = ["js"] }
-wasm-bindgen-test = "0.3"
+getrandom_02.workspace = true
+wasm-bindgen-test.workspace = true

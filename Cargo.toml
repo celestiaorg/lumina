@@ -41,6 +41,7 @@ async-trait = "0.1.80"
 base64 = "0.22.1"
 bytes = { version = "1.10.1", default-features = false }
 cid = { version = "0.11.2", default-features = false }
+criterion = { version = "0.5", features = ["html_reports"] }
 dotenvy = "0.15"
 futures = "0.3.30"
 futures-util = "0.3"
@@ -53,11 +54,13 @@ getrandom_02 = { package = "getrandom", version = "0.2.10", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3.4", features = [
   "wasm_js",
 ] }
+gloo-net = { version = "0.6", default-features = false }
 gloo-timers = { version = "0.3", features = ["futures"] }
 hex = "0.4.3"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
+hyper = "1.8"
 hyper-util = "0.1.19"
 js-sys = "0.3.77"
 jsonrpsee = "0.26"
@@ -83,6 +86,7 @@ serde = "1.0.194"
 serde_json = "1.0.142"
 serde_repr = "0.1.17"
 serde-wasm-bindgen = "0.6"
+sha2 = "0.10.8"
 tendermint = { version = "0.40.3", default-features = false }
 tendermint-proto = "0.40.3"
 time = { version = "0.3.35", default-features = false }
