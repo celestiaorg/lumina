@@ -691,6 +691,26 @@ mod tests {
         ))
         .await
         .unwrap();
+
+        let namespace = Namespace::new_v0(b"fibre").unwrap();
+        let fibre = Blob::from_raw(celestia_types::blob::RawBlob {
+            namespace_id: namespace.id().to_vec(),
+            namespace_version: 0,
+            share_version: 2,
+            data: vec![0; 36],
+            signer: vec![0xAA; 20],
+        })
+        .unwrap();
+        let error = service
+            .submit(TxRequest::blobs(vec![fibre], TxConfig::default()))
+            .await
+            .err()
+            .expect("Fibre blob submission must fail");
+        assert!(matches!(
+            error,
+            Error::CelestiaTypesError(celestia_types::Error::FibreBlobSubmission)
+        ));
+
         let handle = service
             .submit(TxRequest::blobs(
                 vec![random_blob(10..=1000)],
