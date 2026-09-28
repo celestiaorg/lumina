@@ -101,12 +101,14 @@ impl NamespaceProof {
     ///
     /// This method only works if the proof is created for a single leaf and it
     /// assumes that the tree is perfect, i.e. it's amount of leaves is power of 2.
+    /// Returns `None` also when the proof is deeper than any tree that fits in `usize`.
     pub(crate) fn total_leaves(&self) -> Option<usize> {
         // If the proof is for a single leaf, then it must contain a sibling
         // for each tree level. Based on that we can recompute the total amount
         // of leaves in a tree.
         if self.end_idx().saturating_sub(self.start_idx()) == 1 {
-            Some(1 << self.siblings().len())
+            let depth = u32::try_from(self.siblings().len()).ok()?;
+            1usize.checked_shl(depth)
         } else {
             None
         }
