@@ -676,7 +676,6 @@ fn blob_len(shares: usize) -> usize {
 }
 
 /// Build a [`ShareProof`] from genuine per row proofs, claiming the rows are consecutive.
-#[cfg(test)]
 pub(crate) fn share_proof_for_rows(
     eds: &ExtendedDataSquare,
     rows: &[(u16, std::ops::Range<usize>)],
@@ -732,8 +731,9 @@ pub(crate) fn share_proof_for_rows(
 /// row 1:  S  S  S  S     0..4
 /// row 2:  S  .  .  .     0..1
 /// ```
-#[cfg(test)]
-pub(crate) fn share_proof_for_range(
+///
+/// [`ShareProof`]: crate::ShareProof
+pub fn share_proof_for_range(
     eds: &ExtendedDataSquare,
     range: std::ops::Range<usize>,
 ) -> crate::ShareProof {
