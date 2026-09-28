@@ -1,7 +1,7 @@
 name: Publish Release
 
 permissions:
-  contents: write
+  contents: read
 
 on:
   pull_request:
@@ -22,11 +22,19 @@ jobs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
 
     steps:
+      - name: Generate release automation token
+        id: release-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ github.token }}
+          token: ${{ steps.release-app-token.outputs.token }}
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -37,7 +45,7 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   publish-npm-packages:
@@ -50,11 +58,19 @@ jobs:
     if: success() && needs.publish-rust-crates.outputs.releases_created == 'true'
 
     steps:
+      - name: Generate release automation token
+        id: release-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: read
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ github.token }}
+          token: ${{ steps.release-app-token.outputs.token }}
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1

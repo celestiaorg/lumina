@@ -1,8 +1,7 @@
 name: Prepare Release
 
 permissions:
-  pull-requests: write
-  contents: write
+  contents: read
 
 on:
   workflow_dispatch:
@@ -18,11 +17,20 @@ jobs:
       prs_created: ${{ steps.release-plz.outputs.prs_created }}
 
     steps:
+      - name: Generate release automation token
+        id: release-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ github.token }}
+          token: ${{ steps.release-app-token.outputs.token }}
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -33,7 +41,7 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
 
   update-npm-release-assets:
     name: Update npm Release Assets
@@ -45,11 +53,19 @@ jobs:
     if: success() && needs.prepare-release-pr.outputs.prs_created == 'true'
 
     steps:
+      - name: Generate release automation token
+        id: release-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ github.token }}
+          token: ${{ steps.release-app-token.outputs.token }}
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -65,7 +81,7 @@ jobs:
 
       - name: Bump lumina-node npm version
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
         run: |
           set -xeuo pipefail
 
