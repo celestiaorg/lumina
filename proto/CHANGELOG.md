@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.2.0-rc.1...celestia-proto-v1.2.0) - 2026-09-28
+
+### Other
+
+- *(proto)* update protobuf definitions ([#1085](https://github.com/celestiaorg/lumina/pull/1085))
+
 ## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.1.0-rc.1...celestia-proto-v1.2.0-rc.1) - 2026-09-24
 
 ### Fixed
