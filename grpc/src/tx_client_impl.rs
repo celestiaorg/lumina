@@ -15,6 +15,7 @@ use celestia_types::state::ErrorCode;
 use celestia_types::state::RawTxBody;
 use celestia_types::state::auth::BaseAccount;
 
+use crate::client::reject_fibre_blob_submission;
 use crate::grpc::{BroadcastMode, GasEstimate, TxStatus as GrpcTxStatus, TxStatusResponse};
 use crate::signer::{AccountSigner, sign_tx};
 
@@ -162,6 +163,9 @@ impl TransactionService {
         &self,
         request: TxRequest,
     ) -> Result<ConfirmHandle<TxConfirmInfo, TxStatusResponse>> {
+        if let TxPayload::Blobs(blobs) = &request.tx {
+            reject_fibre_blob_submission(blobs)?;
+        }
         let submitter = self.inner.submitter.read().await.clone();
         let handle = submitter.add_tx(request).await?;
         match handle.signed.await {

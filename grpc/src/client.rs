@@ -636,12 +636,7 @@ impl GrpcClient {
         if blobs.is_empty() {
             return Err(Error::TxEmptyBlobList);
         }
-        if blobs
-            .iter()
-            .any(|blob| blob.share_version == appconsts::SHARE_VERSION_TWO)
-        {
-            return Err(celestia_types::Error::FibreBlobSubmission.into());
-        }
+        reject_fibre_blob_submission(blobs)?;
         for blob in blobs {
             blob.validate()?;
         }
@@ -1045,6 +1040,16 @@ pub(crate) async fn probe_head(transport: Arc<BoxedTransport>) -> Option<i64> {
     Some(fut.await.ok()?.into_inner().timestamp?.seconds)
 }
 
+pub(crate) fn reject_fibre_blob_submission(blobs: &[Blob]) -> Result<()> {
+    if blobs
+        .iter()
+        .any(|blob| blob.share_version == appconsts::SHARE_VERSION_TWO)
+    {
+        return Err(celestia_types::Error::FibreBlobSubmission.into());
+    }
+    Ok(())
+}
+
 fn is_wrong_sequence(code: ErrorCode) -> bool {
     code == ErrorCode::InvalidSequence || code == ErrorCode::WrongSequence
 }
@@ -1123,6 +1128,7 @@ mod tests {
         .unwrap();
         let unsigned = Blob::new(fibre.namespace, vec![1], None).unwrap();
         let signed = Blob::new(fibre.namespace, vec![2], fibre.signer).unwrap();
+        assert!(super::reject_fibre_blob_submission(&[unsigned.clone(), signed.clone()]).is_ok());
 
         for blobs in [
             vec![fibre.clone()],
