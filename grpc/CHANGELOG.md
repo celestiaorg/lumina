@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v1.1.0-rc.1...celestia-grpc-v1.2.0-rc.1) - 2026-09-24
+
+### Added
+
+- *(grpc)* expose transaction event queries ([#1050](https://github.com/celestiaorg/lumina/pull/1050))
+- *(fibre)* Add TLS support ([#996](https://github.com/celestiaorg/lumina/pull/996))
+
+### Fixed
+
+- *(fibre)* coalesce historical validator set queries ([#1063](https://github.com/celestiaorg/lumina/pull/1063))
+
+### Other
+
+- *(grpc)* wait for the node to catch up before querying a confirmed tx ([#1018](https://github.com/celestiaorg/lumina/pull/1018))
+- *(fibre)* use more existing types instead of bytes and strings ([#985](https://github.com/celestiaorg/lumina/pull/985))
+
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v1.0.0...celestia-grpc-v1.1.0-rc.1) - 2026-06-24
 
 ### Added
