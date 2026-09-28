@@ -1,15 +1,14 @@
-name: Release-plz PR
+name: Prepare Release
 
 permissions:
-  pull-requests: write
-  contents: write
+  contents: read
 
 on:
   workflow_dispatch:
 
 jobs:
-  release-plz:
-    name: Release-plz
+  prepare-release-pr:
+    name: Prepare Release Pull Request
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
 
@@ -18,11 +17,20 @@ jobs:
       prs_created: ${{ steps.release-plz.outputs.prs_created }}
 
     steps:
+      - name: Generate release automation token
+        id: release-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          token: ${{ steps.release-app-token.outputs.token }}
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -33,23 +41,31 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
 
-  release-plz-pr-npm-update:
-    name: Update release PR for npm
+  update-npm-release-assets:
+    name: Update npm Release Assets
     runs-on: ubuntu-latest
 
     needs:
-    - release-plz
+    - prepare-release-pr
 
-    if: success() && needs.release-plz.outputs.prs_created == 'true'
+    if: success() && needs.prepare-release-pr.outputs.prs_created == 'true'
 
     steps:
+      - name: Generate release automation token
+        id: release-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          token: ${{ steps.release-app-token.outputs.token }}
 
       - name: Setup toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -65,11 +81,11 @@ jobs:
 
       - name: Bump lumina-node npm version
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.release-app-token.outputs.token }}
         run: |
           set -xeuo pipefail
 
-          pr_branch_name="${{ fromJSON(needs.release-plz.outputs.pr).head_branch }}"
+          pr_branch_name="${{ fromJSON(needs.prepare-release-pr.outputs.pr).head_branch }}"
 
           # switch to the branch created by release-plz
           git fetch
