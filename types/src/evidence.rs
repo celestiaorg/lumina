@@ -139,7 +139,7 @@ mod wbg {
     #[wasm_bindgen(js_name = Evidence)]
     pub struct JsEvidence(Evidence);
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_class = Evidence)]
     impl JsEvidence {
         /// type of the attack for the provided evidence
         pub fn attack_type(&self) -> JsAttackType {

@@ -58,7 +58,6 @@ impl IteratorResultObject {
 #[wasm_bindgen(skip_typescript)]
 #[derive(Clone)]
 pub struct AsyncIteratorImpl {
-    #[wasm_bindgen(skip)]
     next: Rc<Closure<dyn FnMut() -> Promise>>,
 }
 
@@ -78,7 +77,7 @@ impl AsyncIteratorImpl {
 impl AsyncIteratorImpl {
     pub fn next(&self) -> Promise {
         Reflect::apply(
-            JsCast::unchecked_ref(self.next.as_ref().as_ref()),
+            JsCast::unchecked_ref::<js_sys::Function>(self.next.as_ref().as_ref()),
             &JsValue::UNDEFINED,
             &js_sys::Array::new(),
         )
