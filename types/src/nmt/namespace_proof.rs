@@ -2,6 +2,8 @@ use std::ops::{Deref, DerefMut};
 
 use celestia_proto::celestia::core::v1::proof::NmtProof as RawNmtProof;
 use celestia_proto::proof::pb::Proof as RawProof;
+use nmt_rs::NamespaceId;
+use nmt_rs::simple_merkle::error::RangeProofError;
 use nmt_rs::simple_merkle::proof::Proof as NmtProof;
 use serde::{Deserialize, Serialize};
 use tendermint_proto::Protobuf;
@@ -113,6 +115,86 @@ impl NamespaceProof {
             None
         }
     }
+
+    /// Verify that the raw leaves are present in the tree with the given root, as a
+    /// contiguous range of leaves of the given namespace.
+    ///
+    /// Unlike the `nmt_rs` method of the same name, this rejects proofs whose nodes
+    /// are not ordered by namespace instead of panicking on them.
+    pub fn verify_range(
+        &self,
+        root: &NamespacedHash,
+        raw_leaves: &[impl AsRef<[u8]>],
+        leaf_namespace: NamespaceId<NS_SIZE>,
+    ) -> Result<(), RangeProofError> {
+        let leaf = NamespacedHash::with_min_and_max_ns(leaf_namespace, leaf_namespace);
+        self.ensure_nodes_ordered(&leaf)?;
+        self.0.verify_range(root, raw_leaves, leaf_namespace)
+    }
+
+    /// Verify that the raw leaves are all the leaves of the given namespace in the
+    /// tree with the given root. This may be a proof of presence or absence.
+    ///
+    /// Unlike the `nmt_rs` method of the same name, this rejects proofs whose nodes
+    /// are not ordered by namespace instead of panicking on them.
+    pub fn verify_complete_namespace(
+        &self,
+        root: &NamespacedHash,
+        raw_leaves: &[impl AsRef<[u8]>],
+        namespace: NamespaceId<NS_SIZE>,
+    ) -> Result<(), RangeProofError> {
+        let leaf = match &self.0 {
+            NmtNamespaceProof::PresenceProof { .. } => {
+                NamespacedHash::with_min_and_max_ns(namespace, namespace)
+            }
+            NmtNamespaceProof::AbsenceProof {
+                leaf: Some(leaf), ..
+            } => leaf.clone(),
+            // nothing gets hashed for an absence proof without a leaf
+            NmtNamespaceProof::AbsenceProof { leaf: None, .. } => {
+                return self
+                    .0
+                    .verify_complete_namespace(root, raw_leaves, namespace);
+            }
+        };
+        self.ensure_nodes_ordered(&leaf)?;
+        self.0
+            .verify_complete_namespace(root, raw_leaves, namespace)
+    }
+
+    /// Check that the proof has the siblings its range requires and that the nodes
+    /// it spans, in leaf order, have non-decreasing namespace ranges, as the nodes
+    /// of any valid tree do.
+    ///
+    /// `nmt_rs` panics when indexing missing siblings and when hashing two nodes
+    /// which are not ordered like that, so this has to be checked before verifying
+    /// the proof.
+    fn ensure_nodes_ordered(&self, leaf: &NamespacedHash) -> Result<(), RangeProofError> {
+        let siblings = self.siblings();
+        // the first `popcount(start_idx)` siblings are to the left of the proven range
+        let num_left = self.start_idx().count_ones() as usize;
+        if num_left > siblings.len() {
+            return Err(RangeProofError::MissingProofNode);
+        }
+        let (left, right) = siblings.split_at(num_left);
+
+        let mut nodes = left.iter().chain(std::iter::once(leaf)).chain(right);
+        let mut prev = nodes.next().expect("the leaf is always present");
+        if prev.min_namespace() > prev.max_namespace() {
+            return Err(RangeProofError::MalformedTree);
+        }
+
+        for node in nodes {
+            if node.min_namespace() > node.max_namespace()
+                || prev.max_namespace() > node.min_namespace()
+            {
+                return Err(RangeProofError::MalformedTree);
+            }
+            prev = node;
+        }
+
+        Ok(())
+    }
 }
 
 impl Deref for NamespaceProof {
@@ -212,6 +294,7 @@ impl From<NamespaceProof> for RawNmtProof {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nmt::Namespace;
 
     #[test]
     fn test_serialize_namespace_proof_binary() {
@@ -226,5 +309,105 @@ mod tests {
         let serialized = postcard::to_allocvec(&proof).unwrap();
         let deserialized: NamespaceProof = postcard::from_bytes(&serialized).unwrap();
         assert_eq!(proof, deserialized);
+    }
+
+    /// A sibling whose namespace range lies below the namespaces of everything
+    /// to its left. Such a node can never appear in a valid tree.
+    fn unordered_sibling() -> NamespacedHash {
+        let ns = Namespace::new_v0(&[1]).unwrap();
+        NamespacedHash::with_min_and_max_ns(*ns, *ns)
+    }
+
+    #[test]
+    fn verify_range_rejects_unordered_nodes() {
+        let ns = Namespace::new_v0(&[7]).unwrap();
+        let root = NamespacedHash::with_min_and_max_ns(*Namespace::new_v0(&[1]).unwrap(), *ns);
+        let proof: NamespaceProof = NmtNamespaceProof::PresenceProof {
+            proof: NmtProof {
+                siblings: vec![unordered_sibling()],
+                range: 0..1,
+            },
+            ignore_max_ns: true,
+        }
+        .into();
+
+        proof.verify_range(&root, &[b"leaf"], *ns).unwrap_err();
+    }
+
+    #[test]
+    fn verify_complete_namespace_rejects_unordered_nodes() {
+        let ns = Namespace::new_v0(&[7]).unwrap();
+        let root = NamespacedHash::with_min_and_max_ns(*Namespace::new_v0(&[1]).unwrap(), *ns);
+        let proof: NamespaceProof = NmtNamespaceProof::PresenceProof {
+            proof: NmtProof {
+                siblings: vec![unordered_sibling()],
+                range: 0..1,
+            },
+            ignore_max_ns: true,
+        }
+        .into();
+
+        proof
+            .verify_complete_namespace(&root, &[b"leaf"], *ns)
+            .unwrap_err();
+    }
+
+    #[test]
+    fn absence_proof_rejects_unordered_nodes() {
+        let absent = Namespace::new_v0(&[7]).unwrap();
+        let present = Namespace::new_v0(&[9]).unwrap();
+        let root = NamespacedHash::with_min_and_max_ns(*Namespace::new_v0(&[1]).unwrap(), *present);
+        let proof: NamespaceProof = NmtNamespaceProof::AbsenceProof {
+            proof: NmtProof {
+                siblings: vec![unordered_sibling()],
+                range: 0..1,
+            },
+            ignore_max_ns: true,
+            leaf: Some(NamespacedHash::with_min_and_max_ns(*present, *present)),
+        }
+        .into();
+
+        proof
+            .verify_complete_namespace(&root, EMPTY_LEAVES, *absent)
+            .unwrap_err();
+    }
+
+    #[test]
+    fn verify_complete_namespace_rejects_too_few_left_siblings() {
+        let ns = Namespace::new_v0(&[7]).unwrap();
+        let root = NamespacedHash::with_min_and_max_ns(*Namespace::new_v0(&[1]).unwrap(), *ns);
+        // a range starting at index 1 needs a left sibling
+        let proof: NamespaceProof = NmtNamespaceProof::PresenceProof {
+            proof: NmtProof {
+                siblings: vec![],
+                range: 1..3,
+            },
+            ignore_max_ns: true,
+        }
+        .into();
+
+        proof
+            .verify_complete_namespace(&root, &[b"leaf", b"leaf"], *ns)
+            .unwrap_err();
+    }
+
+    #[test]
+    fn absence_proof_rejects_too_few_left_siblings() {
+        let absent = Namespace::new_v0(&[3]).unwrap();
+        let present = Namespace::new_v0(&[4]).unwrap();
+        let root = NamespacedHash::with_min_and_max_ns(*Namespace::new_v0(&[1]).unwrap(), *present);
+        let proof: NamespaceProof = NmtNamespaceProof::AbsenceProof {
+            proof: NmtProof {
+                siblings: vec![],
+                range: 3..4,
+            },
+            ignore_max_ns: true,
+            leaf: Some(NamespacedHash::with_min_and_max_ns(*present, *present)),
+        }
+        .into();
+
+        proof
+            .verify_complete_namespace(&root, EMPTY_LEAVES, *absent)
+            .unwrap_err();
     }
 }
