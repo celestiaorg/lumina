@@ -17,7 +17,7 @@ rsema1d.workspace = true
 
 # Crypto
 k256 = { workspace = true, features = ["ecdsa"] }
-ed25519-dalek = { version = "2.1", features = ["digest"] }
+ed25519-dalek = { version = "3", features = ["digest"] }
 sha2.workspace = true
 rand.workspace = true
 chacha8rand = "0.1.2"
@@ -36,7 +36,7 @@ http.workspace = true
 tokio-rustls = { version = "0.26.1", default-features = false, features = ["logging", "ring"] }
 tonic = { workspace = true, features = ["codegen"] }
 tower = { version = "0.5.2", features = ["util"] }
-x509-parser = "0.17"
+x509-parser = "0.18"
 prost.workspace = true
 tendermint-proto.workspace = true
 
