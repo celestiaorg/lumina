@@ -872,24 +872,33 @@ mod tests {
     #[test]
     fn reconstruct_mixed_blobs_from_eds() {
         let (fibre, _) = fibre_fixture();
+        let mut other_fibre = RawBlob::from(fibre.clone());
+        other_fibre.data[4] ^= 1;
         let blobs = vec![
             Blob::new(fibre.namespace, vec![1; 1024], None).unwrap(),
             fibre.clone(),
+            Blob::from_raw(other_fibre).unwrap(),
             Blob::new(fibre.namespace, vec![2; 1024], fibre.signer).unwrap(),
-            fibre,
         ];
         let mut shares = Vec::new();
-        for namespace in [Namespace::PAY_FOR_BLOB, Namespace::PRIMARY_RESERVED_PADDING] {
+        for namespace in [
+            Namespace::PAY_FOR_BLOB,
+            Namespace::PAY_FOR_FIBRE,
+            Namespace::PRIMARY_RESERVED_PADDING,
+        ] {
             let mut reserved = [0; appconsts::SHARE_SIZE];
             reserved[..NS_SIZE].copy_from_slice(namespace.as_bytes());
-            if namespace == Namespace::PAY_FOR_BLOB {
+            if namespace != Namespace::PRIMARY_RESERVED_PADDING {
                 reserved[NS_SIZE] = 1;
                 reserved[NS_SIZE + 1..NS_SIZE + 5].copy_from_slice(&1u32.to_be_bytes());
             }
             shares.push(Share::from_raw(&reserved).unwrap());
         }
-        for blob in &blobs {
+        for (index, blob) in blobs.iter().enumerate() {
             shares.extend(blob.to_shares().unwrap());
+            if index == 1 {
+                continue;
+            }
             let mut padding = [0; appconsts::SHARE_SIZE];
             padding[..NS_SIZE].copy_from_slice(blob.namespace.as_bytes());
             padding[NS_SIZE] = (blob.share_version << 1) | 1;
