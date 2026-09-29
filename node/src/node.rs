@@ -12,7 +12,6 @@ use libp2p::swarm::NetworkInfo;
 use libp2p::{Multiaddr, PeerId};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use blockstore::Blockstore;
@@ -23,7 +22,7 @@ use celestia_types::nmt::Namespace;
 use celestia_types::row::Row;
 use celestia_types::sample::Sample;
 use celestia_types::{Blob, ExtendedDataSquare, ExtendedHeader, SharesAtHeight};
-use lumina_utils::executor::{JoinHandle, spawn, spawn_cancellable};
+use lumina_utils::executor::spawn;
 
 use crate::blockstore::InMemoryBlockstore;
 use crate::daser::{
@@ -108,8 +107,6 @@ where
     syncer: Option<Arc<Syncer<S>>>,
     daser: Option<Arc<Daser>>,
     pruner: Option<Arc<Pruner>>,
-    tasks_cancellation_token: CancellationToken,
-    network_compromised_task: JoinHandle,
 }
 
 impl Node<InMemoryBlockstore, InMemoryStore> {
@@ -190,31 +187,6 @@ where
             pruning_window: config.pruning_window,
         }));
 
-        let tasks_cancellation_token = CancellationToken::new();
-
-        // spawn the task that will stop the services when the fraud is detected
-        let network_compromised_task = spawn_cancellable(tasks_cancellation_token.child_token(), {
-            let network_compromised_token = p2p.get_network_compromised_token().await?;
-            let syncer = syncer.clone();
-            let daser = daser.clone();
-            let pruner = pruner.clone();
-            let event_pub = event_channel.publisher();
-
-            async move {
-                network_compromised_token.triggered().await;
-
-                // Network compromised! Stop workers.
-                syncer.stop();
-                daser.stop();
-                pruner.stop();
-
-                event_pub.send(NodeEvent::NetworkCompromised);
-                // This is a very important message and we want to log it even
-                // if user consumes our events.
-                warn!("{}", NodeEvent::NetworkCompromised);
-            }
-        });
-
         let node = Node {
             event_channel,
             p2p: Some(p2p),
@@ -223,8 +195,6 @@ where
             syncer: Some(syncer),
             daser: Some(daser),
             pruner: Some(pruner),
-            tasks_cancellation_token,
-            network_compromised_task,
         };
 
         Ok((node, event_sub))
@@ -237,10 +207,6 @@ where
             let syncer = self.syncer.take().expect("Syncer not initialized");
             let pruner = self.pruner.take().expect("Pruner not initialized");
             let p2p = self.p2p.take().expect("P2p not initialized");
-
-            // Cancel Node's tasks
-            self.tasks_cancellation_token.cancel();
-            self.network_compromised_task.join().await;
 
             // Stop all components that use P2p.
             daser.stop();
@@ -566,8 +532,6 @@ where
 {
     fn drop(&mut self) {
         // Stop everything, but don't join them.
-        self.tasks_cancellation_token.cancel();
-
         if let Some(daser) = self.daser.take() {
             daser.stop();
         }

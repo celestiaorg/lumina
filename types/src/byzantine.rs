@@ -50,6 +50,13 @@ impl FraudProof for BadEncodingFraudProof {
         self.block_height
     }
 
+    /// Validate the proof against the header of the accused block.
+    ///
+    /// # Warning
+    ///
+    /// The shares are verified to be included in the axis their proofs point to,
+    /// but not at the positions the proof places them, so this can accept a proof
+    /// built over a correctly encoded block. Do not use it to reject headers.
     fn validate(&self, header: &ExtendedHeader) -> Result<()> {
         if header.height() != self.height() {
             bail_validation!(
