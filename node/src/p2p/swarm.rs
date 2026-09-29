@@ -43,7 +43,7 @@ mod imp {
         // Similarly, if node is started when there's no Internet connection,
         // it won't use the DNS servers offered when Internet connectivity
         // is restored. Instead, we per-define globally-accessible public DNS servers.
-        let dns_config = dns::ResolverConfig::cloudflare();
+        let dns_config = dns::ResolverConfig::udp_and_tcp(&hickory_resolver::config::CLOUDFLARE);
 
         let noise_config =
             noise::Config::new(&keypair).map_err(|e| P2pError::NoiseInit(e.to_string()))?;

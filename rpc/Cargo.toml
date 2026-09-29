@@ -38,7 +38,7 @@ serde_repr.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 libp2p-identity = { workspace = true, optional = true }
-multiaddr = { version = "0.18.1", optional = true }
+multiaddr = { version = "0.19", optional = true }
 tendermint-proto.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

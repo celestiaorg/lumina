@@ -7,7 +7,7 @@ description = "Platform abstraction utilities used across lumina project"
 authors = ["Celestia <contact@celestia.org>"]
 homepage = "https://www.celestia.org"
 repository = "https://github.com/celestiaorg/lumina"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [dependencies]
 tokio = { workspace = true, optional = true }
