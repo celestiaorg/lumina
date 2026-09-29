@@ -37,7 +37,7 @@ directories = "6"
 dotenvy.workspace = true
 libp2p.workspace = true
 mime_guess = "2"
-parse_duration = "2"
+humantime = "2.4"
 redb.workspace = true
 rust-embed = { workspace = true, features = ["interpolate-folder-path"] }
 serde.workspace = true

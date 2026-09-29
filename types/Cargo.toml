@@ -31,7 +31,7 @@ bitvec = "1"
 bytes.workspace = true
 cid = { workspace = true, features = ["std"] }
 const_format = "0.2.32"
-ed25519-consensus = { version = "2", optional = true }
+ed25519-dalek = { version = "3", optional = true }
 enum_dispatch = "0.3.13"
 leopard-codec.workspace = true
 multihash = "0.19.4"
@@ -54,7 +54,7 @@ serde-wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
-ed25519-consensus = "2"
+ed25519-dalek = "3"
 rand.workspace = true
 serde_json.workspace = true
 postcard = { version = "1", features = ["alloc"] }
@@ -67,7 +67,7 @@ wasm-bindgen-test.workspace = true
 
 [features]
 default = []
-test-utils = ["dep:ed25519-consensus", "dep:rand"]
+test-utils = ["dep:ed25519-dalek", "dep:rand"]
 tonic = ["celestia-proto/tonic"]
 wasm-bindgen = ["dep:js-sys", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "nmt-rs/serde", "time/wasm-bindgen", "celestia-proto/wasm-bindgen"]
 uniffi = ["dep:uniffi", "celestia-proto/uniffi"]
