@@ -538,22 +538,84 @@ fn generate_dah(square_width: usize) -> DataAvailabilityHeader {
 }
 
 /// Generate a properly encoded [`ExtendedDataSquare`] with random data.
+///
+/// The square is filled with a single blob.
 pub fn generate_dummy_eds(square_width: usize) -> ExtendedDataSquare {
     let ns = Namespace::const_v0(rand::random());
-    let ods_width = square_width / 2;
+    let ods_shares = (square_width / 2).pow(2);
 
-    let shares: Vec<_> = (0..ods_width * ods_width)
-        .map(|_| {
-            [
-                ns.as_bytes(),
-                &[0; SHARE_INFO_BYTES][..],
-                &random_bytes(SHARE_SIZE - NS_SIZE - SHARE_INFO_BYTES)[..],
-            ]
-            .concat()
-        })
+    generate_eds_with_layout(square_width, &[SquareEntry::Blob(ns, ods_shares)]).0
+}
+
+/// A single entry of a generated square's layout.
+pub enum SquareEntry {
+    /// A blob of a given amount of shares.
+    Blob(Namespace, usize),
+    /// Padding shares of a given namespace.
+    Padding(Namespace, usize),
+    /// Raw shares of a reserved namespace, e.g. pay for blob transactions.
+    Reserved(Namespace, usize),
+}
+
+/// Generate an [`ExtendedDataSquare`] with the given layout.
+///
+/// Entries are laid out one after another and the rest of the square is filled
+/// with tail padding. Returns the square together with the blobs it contains.
+pub fn generate_eds_with_layout(
+    square_width: usize,
+    layout: &[SquareEntry],
+) -> (ExtendedDataSquare, Vec<Blob>) {
+    let ods_shares = (square_width / 2).pow(2);
+    let mut shares = Vec::with_capacity(ods_shares);
+    let mut blobs = Vec::new();
+
+    for entry in layout {
+        match entry {
+            SquareEntry::Blob(ns, len) => {
+                let blob = Blob::new(*ns, random_bytes(blob_len(*len)), None).unwrap();
+                shares.extend(blob.to_shares().unwrap().iter().map(Share::to_vec));
+                blobs.push(blob);
+            }
+            SquareEntry::Padding(ns, len) => shares.extend(
+                (0..*len).map(|_| [ns.as_bytes(), &[0; SHARE_SIZE - NS_SIZE][..]].concat()),
+            ),
+            SquareEntry::Reserved(ns, len) => shares.extend((0..*len).map(|n| {
+                [
+                    ns.as_bytes(),
+                    &[(n == 0) as u8][..],
+                    &random_bytes(SHARE_SIZE - NS_SIZE - SHARE_INFO_BYTES)[..],
+                ]
+                .concat()
+            })),
+        }
+    }
+
+    shares.resize_with(ods_shares, || {
+        [
+            Namespace::TAIL_PADDING.as_bytes(),
+            &[0; SHARE_SIZE - NS_SIZE][..],
+        ]
+        .concat()
+    });
+
+    (ExtendedDataSquare::from_ods(shares).unwrap(), blobs)
+}
+
+/// Generate an [`ExtendedDataSquare`] with blobs of given lengths in shares.
+///
+/// Blobs are in the same namespace and are laid out one after another, starting at
+/// the beginning of the square. The rest of the square is filled with tail padding.
+pub fn generate_eds_with_blob_lengths(
+    square_width: usize,
+    blob_lengths: &[usize],
+) -> (ExtendedDataSquare, Vec<Blob>) {
+    let ns = Namespace::const_v0(rand::random());
+    let layout: Vec<_> = blob_lengths
+        .iter()
+        .map(|shares| SquareEntry::Blob(ns, *shares))
         .collect();
 
-    ExtendedDataSquare::from_ods(shares).unwrap()
+    generate_eds_with_layout(square_width, &layout)
 }
 
 /// Generate a properly encoded [`ExtendedDataSquare`] with random data.
@@ -572,70 +634,120 @@ pub fn generate_eds(square_width: usize) -> ExtendedDataSquare {
     assert!(square_width >= 8);
 
     let ods_width = square_width / 2;
-    let mut shares = Vec::with_capacity(ods_width * ods_width);
-
-    // pay for blob shares, only in first row
-    let pfb_shares = (rand::random::<usize>() % (ods_width - 1)) + 1;
-    shares.extend((0..pfb_shares).map(|n| {
-        let info_byte = (n == 0) as u8; // first has sequence_start
-        [
-            Namespace::PAY_FOR_BLOB.as_bytes(),
-            &[info_byte][..],
-            &random_bytes(SHARE_SIZE - NS_SIZE - SHARE_INFO_BYTES)[..],
-        ]
-        .concat()
-    }));
-    // primary namespace padding
-    shares.extend((pfb_shares..ods_width).map(|_| {
-        [
-            Namespace::PRIMARY_RESERVED_PADDING.as_bytes(),
-            &[0; SHARE_SIZE - NS_SIZE][..],
-        ]
-        .concat()
-    }));
-
-    // fill rest of rows with user blobs
     let mut namespaces: Vec<_> = (3..ods_width)
         .map(|_| Namespace::const_v0(rand::random()))
         .collect();
     namespaces.sort();
 
+    // pay for blob shares, only in first row
+    let pfb_shares = (rand::random::<usize>() % (ods_width - 1)) + 1;
+    let mut layout = vec![
+        SquareEntry::Reserved(Namespace::PAY_FOR_BLOB, pfb_shares),
+        SquareEntry::Padding(Namespace::PRIMARY_RESERVED_PADDING, ods_width - pfb_shares),
+    ];
+
     // first blob is bigger so that it spans over 2 rows
     let blob_shares = (rand::random::<usize>() % (ods_width - 1)) + ods_width + 1;
-    let data = random_bytes(blob_len(blob_shares));
-    let blob = Blob::new(namespaces[0], data, None).unwrap();
-    shares.extend(blob.to_shares().unwrap().iter().map(Share::to_vec));
-
-    // namespace padding
-    shares.extend(
-        (blob_shares - ods_width..ods_width)
-            .map(|_| [namespaces[0].as_bytes(), &[0; SHARE_SIZE - NS_SIZE][..]].concat()),
-    );
+    layout.push(SquareEntry::Blob(namespaces[0], blob_shares));
+    layout.push(SquareEntry::Padding(
+        namespaces[0],
+        2 * ods_width - blob_shares,
+    ));
 
     // rest of the blobs, starting with one in the same namespace as the big one before
     for ns in &namespaces {
         let blob_shares = (rand::random::<usize>() % (ods_width - 1)) + 1;
-        let data = random_bytes(blob_len(blob_shares));
-        let blob = Blob::new(*ns, data, None).unwrap();
-        shares.extend(blob.to_shares().unwrap().iter().map(Share::to_vec));
-
         let padding_ns = if ns != namespaces.last().unwrap() {
             *ns
         } else {
             Namespace::TAIL_PADDING
         };
-        shares.extend(
-            (blob_shares..ods_width)
-                .map(|_| [padding_ns.as_bytes(), &[0; SHARE_SIZE - NS_SIZE][..]].concat()),
-        );
+
+        layout.push(SquareEntry::Blob(*ns, blob_shares));
+        layout.push(SquareEntry::Padding(padding_ns, ods_width - blob_shares));
     }
 
-    ExtendedDataSquare::from_ods(shares).unwrap()
+    generate_eds_with_layout(square_width, &layout).0
 }
 
 fn blob_len(shares: usize) -> usize {
     assert_ne!(shares, 0);
     FIRST_SPARSE_SHARE_CONTENT_SIZE + (shares - 1) * CONTINUATION_SPARSE_SHARE_CONTENT_SIZE
+}
+
+/// Build a [`ShareProof`] from genuine per row proofs, claiming the rows are consecutive.
+#[cfg(test)]
+pub(crate) fn share_proof_for_rows(
+    eds: &ExtendedDataSquare,
+    rows: &[(u16, std::ops::Range<usize>)],
+) -> crate::ShareProof {
+    use celestia_proto::celestia::core::v1::proof::RowProof as RawRowProof;
+    use nmt_rs::NamespaceProof as NmtNamespaceProof;
+
+    let dah = DataAvailabilityHeader::from_eds(eds);
+    let mut data = Vec::new();
+    let mut share_proofs = Vec::new();
+    let mut row_proof = RawRowProof {
+        start_row: rows[0].0.into(),
+        end_row: u32::from(rows[0].0) + rows.len() as u32 - 1,
+        ..Default::default()
+    };
+
+    for (row, columns) in rows {
+        for column in columns.clone() {
+            data.push(*eds.share(*row, column as u16).unwrap().data());
+        }
+        let proof = eds
+            .row_nmt(*row)
+            .unwrap()
+            .build_range_proof(columns.clone());
+        share_proofs.push(
+            NmtNamespaceProof::PresenceProof {
+                proof,
+                ignore_max_ns: true,
+            }
+            .into(),
+        );
+
+        let single = RawRowProof::from(dah.row_proof(*row..=*row).unwrap());
+        row_proof.row_roots.extend(single.row_roots);
+        row_proof.proofs.extend(single.proofs);
+    }
+
+    crate::ShareProof {
+        data,
+        namespace_id: eds.share(0, 0).unwrap().namespace(),
+        share_proofs,
+        row_proof: row_proof.try_into().unwrap(),
+    }
+}
+
+/// Build a [`ShareProof`] for a range of ODS share indexes.
+///
+/// The range is clipped to each row it spans and translated to the columns of that
+/// row, e.g. for `2..9` in a square of 4 shares wide:
+///
+/// ```text
+/// row 0:  .  .  S  S     2..4
+/// row 1:  S  S  S  S     0..4
+/// row 2:  S  .  .  .     0..1
+/// ```
+#[cfg(test)]
+pub(crate) fn share_proof_for_range(
+    eds: &ExtendedDataSquare,
+    range: std::ops::Range<usize>,
+) -> crate::ShareProof {
+    let ods_size = usize::from(eds.square_width() / 2);
+    let rows: Vec<_> = (range.start / ods_size..=(range.end - 1) / ods_size)
+        .map(|row| {
+            let row_start = row * ods_size;
+            let start = range.start.max(row_start) - row_start;
+            let end = range.end.min(row_start + ods_size) - row_start;
+            (row as u16, start..end)
+        })
+        .collect();
+
+    share_proof_for_rows(eds, &rows)
 }
 
 pub(crate) fn random_bytes(len: usize) -> Vec<u8> {

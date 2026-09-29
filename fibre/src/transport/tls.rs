@@ -5,6 +5,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use der::asn1::OctetStringRef;
 use der::{Decode, Sequence};
@@ -207,6 +208,25 @@ pub(crate) fn grpc_client(
     validator_key: VerifyingKey,
     chain_id: String,
     io_connector: Arc<dyn FibreIoConnector>,
+    request_timeout: Option<Duration>,
+) -> Result<celestia_grpc::GrpcClient, FibreError> {
+    grpc_client_with_time(
+        url,
+        validator_key,
+        chain_id,
+        io_connector,
+        request_timeout,
+        None,
+    )
+}
+
+fn grpc_client_with_time(
+    url: String,
+    validator_key: VerifyingKey,
+    chain_id: String,
+    io_connector: Arc<dyn FibreIoConnector>,
+    request_timeout: Option<Duration>,
+    time_provider: Option<Arc<dyn tokio_rustls::rustls::time_provider::TimeProvider>>,
 ) -> Result<celestia_grpc::GrpcClient, FibreError> {
     let uri = url
         .parse::<http::Uri>()
@@ -220,7 +240,7 @@ pub(crate) fn grpc_client(
         .to_string();
     let port = uri.port_u16().unwrap_or(443);
     let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-    let mut tls_config = fibre_tls_config(validator_key, chain_id, provider, None);
+    let mut tls_config = fibre_tls_config(validator_key, chain_id, provider, time_provider);
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
     let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
     let transport = FibreH2Transport {
@@ -234,10 +254,41 @@ pub(crate) fn grpc_client(
         }),
     };
 
-    celestia_grpc::GrpcClient::builder()
-        .transport(transport)
-        .build()
-        .map_err(FibreError::from)
+    let mut builder = celestia_grpc::GrpcClient::builder().transport(transport);
+    if let Some(request_timeout) = request_timeout {
+        builder = builder.timeout(request_timeout);
+    }
+    builder.build().map_err(FibreError::from)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) fn grpc_client_at(
+    url: String,
+    validator_key: VerifyingKey,
+    chain_id: String,
+    io_connector: Arc<dyn FibreIoConnector>,
+    request_timeout: Option<Duration>,
+    now: UnixTime,
+) -> Result<celestia_grpc::GrpcClient, FibreError> {
+    grpc_client_with_time(
+        url,
+        validator_key,
+        chain_id,
+        io_connector,
+        request_timeout,
+        Some(Arc::new(FixedTime(now))),
+    )
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Debug)]
+struct FixedTime(UnixTime);
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl tokio_rustls::rustls::time_provider::TimeProvider for FixedTime {
+    fn current_time(&self) -> Option<UnixTime> {
+        Some(self.0)
+    }
 }
 
 fn fibre_tls_config(
@@ -748,6 +799,7 @@ mod tests {
             key,
             "chain".to_string(),
             Arc::new(crate::transport::io_connector::NativeTcpConnector),
+            None,
         )
         .expect_err("invalid URI should fail");
         assert!(matches!(
@@ -766,6 +818,7 @@ mod tests {
             key,
             "chain".to_string(),
             Arc::new(crate::transport::io_connector::NativeTcpConnector),
+            None,
         )
         .expect_err("URI without host should fail");
         assert!(matches!(
@@ -797,17 +850,6 @@ mod tests {
             raw_bytes_message_sign_bytes(&vector.verifier_chain_id, SIGN_UNIQUE_ID, &sign_input),
             hex::decode(vector.signed_bytes).expect("signed bytes should be hex")
         );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[derive(Debug)]
-    struct FixedTime(UnixTime);
-
-    #[cfg(not(target_arch = "wasm32"))]
-    impl tokio_rustls::rustls::time_provider::TimeProvider for FixedTime {
-        fn current_time(&self) -> Option<UnixTime> {
-            Some(self.0)
-        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

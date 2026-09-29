@@ -10,19 +10,23 @@ use wasm_bindgen::prelude::*;
 
 mod commitment;
 mod msg_pay_for_blobs;
+mod proof;
 
 use crate::consts::appconsts;
 #[cfg(feature = "uniffi")]
 use crate::error::UniffiResult;
 use crate::nmt::Namespace;
 use crate::state::{AccAddress, AddressTrait};
-use crate::{Error, Result, Share, bail_validation};
+use crate::{Error, Result, Share, bail_validation, validation_error};
 
 pub use self::commitment::Commitment;
 pub use self::msg_pay_for_blobs::MsgPayForBlobs;
+pub use self::proof::BlobProof;
 pub use celestia_proto::celestia::blob::v1::MsgPayForBlobs as RawMsgPayForBlobs;
 pub use celestia_proto::proto::blob::v4::BlobProto as RawBlob;
 pub use celestia_proto::proto::blob::v4::BlobTx as RawBlobTx;
+
+const FIBRE_BLOB_DATA_SIZE: usize = 4 + 32;
 
 /// Arbitrary data that can be stored in the network within certain [`Namespace`].
 // NOTE: We don't use the `serde(try_from)` pattern for this type
@@ -39,16 +43,19 @@ pub struct Blob {
     /// A [`Namespace`] the [`Blob`] belongs to.
     pub namespace: Namespace,
     /// Data stored within the [`Blob`].
+    /// For share version 2, contains a big-endian `u32` Fibre blob version followed by its 32-byte commitment.
     pub data: Vec<u8>,
     /// Version indicating the format in which [`Share`]s should be created from this [`Blob`].
     pub share_version: u8,
     /// A [`Commitment`] computed from the [`Blob`]s data.
+    ///
+    /// For share version 2 this is not the Fibre commitment, see [`Blob::fibre_commitment`].
     pub commitment: Commitment,
     /// Index of the blob's first share in the EDS. Only set for blobs retrieved from chain.
     pub index: Option<u64>,
     /// A signer of the blob, i.e. address of the account which submitted the blob.
     ///
-    /// Must be present in `share_version 1` and absent otherwise.
+    /// Must be present in share versions 1 and 2, and absent in version 0.
     pub signer: Option<AccAddress>,
 }
 
@@ -140,10 +147,20 @@ impl Blob {
 
     /// Creates a `Blob` from [`RawBlob`].
     pub fn from_raw(raw: RawBlob) -> Result<Blob> {
-        let namespace = Namespace::new(raw.namespace_version as u8, &raw.namespace_id)?;
+        let namespace_version = u8::try_from(raw.namespace_version)
+            .map_err(|_| validation_error!("namespace version must be single byte"))?;
+        let namespace = Namespace::new(namespace_version, &raw.namespace_id)?;
         let share_version =
             u8::try_from(raw.share_version).map_err(|_| Error::UnsupportedShareVersion(u8::MAX))?;
-        let signer = raw.signer.try_into().map(AccAddress::new).ok();
+        let signer = if raw.signer.is_empty() {
+            None
+        } else {
+            Some(AccAddress::new(
+                raw.signer
+                    .try_into()
+                    .map_err(|_| validation_error!("invalid signer length"))?,
+            ))
+        };
         let commitment =
             Commitment::from_blob(namespace, &raw.data[..], share_version, signer.as_ref())?;
 
@@ -155,6 +172,25 @@ impl Blob {
             index: None,
             signer,
         })
+    }
+
+    /// Returns the embedded Fibre commitment for a v2 blob with a 36-byte payload.
+    pub fn fibre_commitment(&self) -> Option<[u8; 32]> {
+        self.fibre_payload().map(|(_, commitment)| *commitment)
+    }
+
+    /// Returns the embedded Fibre blob version for a v2 blob with a 36-byte payload.
+    pub fn fibre_blob_version(&self) -> Option<u32> {
+        self.fibre_payload()
+            .map(|(version, _)| u32::from_be_bytes(*version))
+    }
+
+    fn fibre_payload(&self) -> Option<(&[u8; 4], &[u8; 32])> {
+        if self.share_version != appconsts::SHARE_VERSION_TWO {
+            return None;
+        }
+        let (version, commitment) = self.data.split_first_chunk::<4>()?;
+        Some((version, commitment.try_into().ok()?))
     }
 
     /// Validate [`Blob`]s data with the [`Commitment`] it has.
@@ -305,10 +341,10 @@ impl Blob {
         }
         let share_version = first_share.info_byte().expect("non parity").version();
         let signer = first_share.signer();
+        commitment::validate_blob(share_version, signer.is_some(), blob_len as usize)?;
 
         let shares_needed = shares_needed_for_blob(blob_len as usize, signer.is_some());
-        let mut data =
-            Vec::with_capacity(shares_needed * appconsts::CONTINUATION_SPARSE_SHARE_CONTENT_SIZE);
+        let mut data = Vec::new();
         data.extend_from_slice(first_share.payload().expect("non parity"));
 
         for _ in 1..shares_needed {
@@ -335,22 +371,22 @@ impl Blob {
         // remove padding
         data.truncate(blob_len as usize);
 
-        if share_version == appconsts::SHARE_VERSION_ZERO {
-            Self::new(namespace, data, None)
-        } else if share_version == appconsts::SHARE_VERSION_ONE {
-            // shouldn't happen as we have user namespace, seq start, and share v1
-            let signer = signer.ok_or(Error::MissingSigner)?;
-            Self::new(namespace, data, Some(signer))
-        } else {
-            Err(Error::UnsupportedShareVersion(share_version))
-        }
+        let commitment = Commitment::from_blob(namespace, &data, share_version, signer.as_ref())?;
+        Ok(Self {
+            namespace,
+            data,
+            share_version,
+            commitment,
+            index: None,
+            signer,
+        })
     }
 
     /// Reconstructs all the blobs from shares.
     ///
     /// This function will seek shares that indicate start of the next blob (with
     /// [`Share::sequence_length`]) and pass them to [`Blob::reconstruct`].
-    /// It will automatically ignore all shares that are within reserved namespaces
+    /// It will automatically ignore namespace padding and all shares within reserved namespaces,
     /// e.g. it is completely fine to pass whole [`ExtendedDataSquare`] to this
     /// function and get all blobs in the block.
     ///
@@ -390,7 +426,9 @@ impl Blob {
         loop {
             let mut blob = {
                 // find next share from blobs namespace that is sequence start
-                let Some(start) = shares.find(|&shr| shr.sequence_length().is_some()) else {
+                let Some(start) =
+                    shares.find(|&shr| shr.sequence_length().is_some_and(|len| len > 0))
+                else {
                     break;
                 };
                 iter::once(start).chain(&mut shares)
@@ -418,14 +456,7 @@ impl Blob {
     /// assert_eq!(shares_len, blob_shares.len());
     /// ```
     pub fn shares_len(&self) -> usize {
-        let Some(without_first_share) = self
-            .data
-            .len()
-            .checked_sub(appconsts::FIRST_SPARSE_SHARE_CONTENT_SIZE)
-        else {
-            return 1;
-        };
-        1 + without_first_share.div_ceil(appconsts::CONTINUATION_SPARSE_SHARE_CONTENT_SIZE)
+        shares_needed_for_blob(self.data.len(), self.signer.is_some())
     }
 }
 
@@ -491,7 +522,7 @@ impl Blob {
 
     /// A signer of the blob, i.e. address of the account which submitted the blob.
     ///
-    /// Must be present in `share_version 1` and absent otherwise.
+    /// Must be present in share versions 1 and 2, and absent in version 0.
     #[uniffi::method(name = "signer")]
     pub fn get_signer(&self) -> Option<AccAddress> {
         self.signer
@@ -639,7 +670,11 @@ mod custom_serde {
         type Error = Error;
 
         fn try_from(value: SerdeBlob) -> Result<Self> {
-            commitment::validate_blob(value.share_version, value.signer.is_some())?;
+            commitment::validate_blob(
+                value.share_version,
+                value.signer.is_some(),
+                value.data.len(),
+            )?;
 
             Ok(Blob {
                 namespace: value.namespace,
@@ -655,9 +690,34 @@ mod custom_serde {
 
 #[cfg(test)]
 mod tests {
+    use base64::prelude::*;
+    use prost::Message;
+
     use super::*;
+    use crate::ExtendedDataSquare;
     use crate::nmt::{NS_ID_SIZE, NS_SIZE};
     use crate::test_utils::random_bytes;
+
+    #[test]
+    fn signed_blob_share_count_matches_encoding() {
+        let ns = Namespace::new_v0(&[1, 2, 3]).unwrap();
+        let signer = AccAddress::from([1; 20]);
+        for size in [1, 458, 459, 478, 479, 940, 941, 960, 961] {
+            let blob = Blob::new(ns, vec![7; size], Some(signer)).unwrap();
+            assert_eq!(blob.shares_len(), blob.to_shares().unwrap().len(), "{size}");
+        }
+    }
+
+    #[test]
+    fn raw_blob_rejects_wrapped_namespace_version_and_bad_signer() {
+        let ns = Namespace::new_v0(&[1, 2, 3]).unwrap();
+        let mut raw = RawBlob::from(Blob::new(ns, vec![1], None).unwrap());
+        raw.namespace_version = 256;
+        assert!(Blob::from_raw(raw.clone()).is_err());
+        raw.namespace_version = 0;
+        raw.signer = vec![1];
+        assert!(Blob::from_raw(raw).is_err());
+    }
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test as test;
@@ -687,6 +747,159 @@ mod tests {
             }"#,
         )
         .unwrap()
+    }
+
+    fn fibre_fixture() -> (Blob, Share) {
+        #[derive(Deserialize)]
+        struct Fixture {
+            blob: Blob,
+            share: String,
+        }
+
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("../test_data/fibre_blob_v2.json")).unwrap();
+        let raw_share = BASE64_STANDARD.decode(fixture.share).unwrap();
+        (fixture.blob, Share::from_raw(&raw_share).unwrap())
+    }
+
+    #[test]
+    fn fibre_blob_roundtrip() {
+        let (blob, share) = fibre_fixture();
+        assert_eq!(blob.share_version, 2);
+        assert_eq!(blob.data.len(), 36);
+        assert_eq!(blob.fibre_blob_version(), Some(0));
+        assert_eq!(blob.fibre_commitment(), Some([0xBB; 32]));
+        let info_byte = share.info_byte().unwrap();
+        assert_eq!(info_byte.version(), appconsts::SHARE_VERSION_TWO);
+        assert!(info_byte.is_sequence_start());
+        assert_eq!(share.sequence_length(), Some(36));
+        assert_eq!(share.signer(), Some([0xAA; 20].into()));
+        assert_eq!(&share.payload().unwrap()[..36], blob.data);
+        assert_eq!(blob.shares_len(), 1);
+        assert_eq!(blob.to_shares().unwrap(), vec![share.clone()]);
+        assert_eq!(Blob::reconstruct([&share]).unwrap(), blob);
+        blob.validate().unwrap();
+
+        let json = serde_json::to_string(&blob).unwrap();
+        assert_eq!(serde_json::from_str::<Blob>(&json).unwrap(), blob);
+        let encoded = RawBlob::from(blob.clone()).encode_to_vec();
+        let raw = RawBlob::decode(encoded.as_slice()).unwrap();
+        assert_eq!(Blob::from_raw(raw).unwrap(), blob);
+
+        let mut tampered = blob;
+        tampered.data[4] ^= 1;
+        assert!(matches!(tampered.validate(), Err(Error::Validation(_))));
+    }
+
+    #[test]
+    fn fibre_blob_accessors() {
+        let (blob, _) = fibre_fixture();
+        for signer in [None, blob.signer] {
+            let ordinary = Blob::new(blob.namespace, blob.data.clone(), signer).unwrap();
+            assert!(ordinary.fibre_commitment().is_none());
+            assert!(ordinary.fibre_blob_version().is_none());
+        }
+
+        let mut raw = RawBlob::from(blob);
+        raw.data[..4].copy_from_slice(&0x01020304u32.to_be_bytes());
+        let future = Blob::from_raw(raw).unwrap();
+        assert_eq!(future.fibre_blob_version(), Some(0x01020304));
+        assert_eq!(future.fibre_commitment(), Some([0xBB; 32]));
+        assert_eq!(
+            Blob::reconstruct(&future.to_shares().unwrap()).unwrap(),
+            future
+        );
+    }
+
+    #[test]
+    fn reject_invalid_fibre_blob_payload() {
+        let (blob, _) = fibre_fixture();
+        for len in [0, 35, 37, 458, 459] {
+            let mut invalid = blob.clone();
+            invalid.data.resize(len, 0);
+            assert!(invalid.fibre_commitment().is_none());
+            assert!(invalid.fibre_blob_version().is_none());
+            assert!(
+                matches!(invalid.validate(), Err(Error::InvalidLength(actual, 36)) if actual == len)
+            );
+            assert!(
+                matches!(invalid.to_shares(), Err(Error::InvalidLength(actual, 36)) if actual == len)
+            );
+            assert!(
+                matches!(Blob::from_raw(invalid.clone().into()), Err(Error::InvalidLength(actual, 36)) if actual == len)
+            );
+            assert!(
+                serde_json::from_str::<Blob>(&serde_json::to_string(&invalid).unwrap()).is_err()
+            );
+        }
+
+        let mut invalid = blob.clone();
+        invalid.signer = None;
+        assert!(matches!(invalid.validate(), Err(Error::MissingSigner)));
+        assert!(matches!(invalid.to_shares(), Err(Error::MissingSigner)));
+        assert!(matches!(
+            Blob::from_raw(invalid.clone().into()),
+            Err(Error::MissingSigner)
+        ));
+        assert!(serde_json::from_str::<Blob>(&serde_json::to_string(&invalid).unwrap()).is_err());
+
+        let mut invalid = blob;
+        invalid.share_version = 3;
+        assert!(invalid.fibre_commitment().is_none());
+        assert!(invalid.fibre_blob_version().is_none());
+        assert!(matches!(
+            invalid.validate(),
+            Err(Error::UnsupportedShareVersion(3))
+        ));
+        assert!(matches!(
+            invalid.to_shares(),
+            Err(Error::UnsupportedShareVersion(3))
+        ));
+    }
+
+    #[test]
+    fn reject_invalid_fibre_sequence_length() {
+        let (_, share) = fibre_fixture();
+        for len in [0u32, 35, 37, u32::MAX] {
+            let mut invalid = share.clone();
+            invalid.as_mut()[NS_SIZE + 1..NS_SIZE + 5].copy_from_slice(&len.to_be_bytes());
+            assert!(
+                matches!(Blob::reconstruct([&invalid]), Err(Error::InvalidLength(actual, 36)) if actual == len as usize)
+            );
+        }
+    }
+
+    #[test]
+    fn reconstruct_mixed_blobs_from_eds() {
+        let (fibre, _) = fibre_fixture();
+        let blobs = vec![
+            Blob::new(fibre.namespace, vec![1; 1024], None).unwrap(),
+            fibre.clone(),
+            Blob::new(fibre.namespace, vec![2; 1024], fibre.signer).unwrap(),
+            fibre,
+        ];
+        let mut shares = Vec::new();
+        for namespace in [Namespace::PAY_FOR_BLOB, Namespace::PRIMARY_RESERVED_PADDING] {
+            let mut reserved = [0; appconsts::SHARE_SIZE];
+            reserved[..NS_SIZE].copy_from_slice(namespace.as_bytes());
+            if namespace == Namespace::PAY_FOR_BLOB {
+                reserved[NS_SIZE] = 1;
+                reserved[NS_SIZE + 1..NS_SIZE + 5].copy_from_slice(&1u32.to_be_bytes());
+            }
+            shares.push(Share::from_raw(&reserved).unwrap());
+        }
+        for blob in &blobs {
+            shares.extend(blob.to_shares().unwrap());
+            let mut padding = [0; appconsts::SHARE_SIZE];
+            padding[..NS_SIZE].copy_from_slice(blob.namespace.as_bytes());
+            padding[NS_SIZE] = (blob.share_version << 1) | 1;
+            shares.push(Share::from_raw(&padding).unwrap());
+        }
+        let mut tail_padding = [0; appconsts::SHARE_SIZE];
+        tail_padding[..NS_SIZE].copy_from_slice(Namespace::TAIL_PADDING.as_bytes());
+        shares.resize(16, Share::from_raw(&tail_padding).unwrap());
+        let eds = ExtendedDataSquare::from_ods(shares.iter().map(Share::to_vec).collect()).unwrap();
+        assert_eq!(Blob::reconstruct_all(eds.data_square()).unwrap(), blobs);
     }
 
     #[test]

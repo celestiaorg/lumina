@@ -146,7 +146,6 @@ mod tests {
     use crate::error::Error;
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha8Rng;
-    use std::borrow::Cow;
 
     #[derive(Clone, Copy)]
     struct Case {
@@ -452,7 +451,7 @@ mod tests {
             row[0] ^= 0x01;
             let corrupted_row = RowProof {
                 index: proof.index,
-                row: Cow::Owned(row),
+                row: row.into(),
                 row_proof: proof.row_proof.clone(),
             };
             assert!(verify_with_context(&corrupted_row, &commitment, &context).is_err());
@@ -461,21 +460,21 @@ mod tests {
             row_proof[0][0] ^= 0x01;
             let corrupted_path = RowProof {
                 index: proof.index,
-                row: Cow::Owned(proof.row.to_vec()),
+                row: proof.row.clone(),
                 row_proof,
             };
             assert!(verify_with_context(&corrupted_path, &commitment, &context).is_err());
 
             let wrong_index = RowProof {
                 index: (proof.index + 1) % params.total_rows(),
-                row: Cow::Owned(proof.row.to_vec()),
+                row: proof.row.clone(),
                 row_proof: proof.row_proof.clone(),
             };
             assert!(verify_with_context(&wrong_index, &commitment, &context).is_err());
 
             let nil_row = RowProof {
                 index: proof.index,
-                row: Cow::Owned(Vec::new()),
+                row: Vec::new().into(),
                 row_proof: proof.row_proof.clone(),
             };
             assert!(verify_with_context(&nil_row, &commitment, &context).is_err());
@@ -551,7 +550,7 @@ mod tests {
             let row_proof = ext_data.generate_row_proof(i).unwrap();
             let manual = RowInclusionProof {
                 index: row_proof.index,
-                row: row_proof.row.into_owned().into(),
+                row: row_proof.row,
                 row_proof: row_proof.row_proof,
                 rlc_root: ext_data.rlc_root(),
             };
@@ -694,7 +693,7 @@ mod tests {
         short.pop();
         let malicious = RowProof {
             index: proof.index,
-            row: Cow::Owned(proof.row.to_vec()),
+            row: proof.row.clone(),
             row_proof: short,
         };
 
@@ -720,7 +719,7 @@ mod tests {
         truncated.truncate(params.row_size / 2);
         let malicious = RowProof {
             index: proof.index,
-            row: Cow::Owned(truncated),
+            row: truncated.into(),
             row_proof: proof.row_proof,
         };
 

@@ -23,7 +23,7 @@ pub(crate) const TEST_GRPC_URL: &str = "http://localhost:18080";
 // We have to sequence the tests which submits transactions.
 // Multiple independent tx clients don't work well in parallel
 // as they break each other's account.sequence
-async fn node0_client() -> (MutexGuard<'static, ()>, Client) {
+pub(crate) async fn node0_client() -> (MutexGuard<'static, ()>, Client) {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let lock = LOCK.get_or_init(|| Mutex::new(())).lock().await;
 

@@ -65,6 +65,9 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
 
     strategy:
       fail-fast: false
@@ -81,6 +84,7 @@ jobs:
           - name: celestia-client
             devnet: true
           - name: celestia-fibre
+            devnet: true
           - name: lumina-node
             devnet: true
           - name: lumina-node-wasm
@@ -97,14 +101,37 @@ jobs:
       with:
         cache-key: ${{ matrix.crate.name }}
 
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-llvm-cov
+
     - name: Celestia devnet
       if: matrix.crate.devnet
       uses: ./.github/actions/local-devnet
 
-    - name: Run tests
+    - name: Run tests with coverage
+      if: matrix.crate.name != 'lumina-node-wasm'
+      env:
+        LUMINA_TEST_LOG: ${{ github.workspace }}/test-${{ matrix.crate.name }}.log
+      run: cargo llvm-cov --all-features -p ${{ matrix.crate.name }} --lcov --output-path lcov.info
+
+    - name: Run tests without coverage
+      if: matrix.crate.name == 'lumina-node-wasm'
       env:
         LUMINA_TEST_LOG: ${{ github.workspace }}/test-${{ matrix.crate.name }}.log
       run: cargo test --all-features -p ${{ matrix.crate.name }}
+
+    - name: Upload coverage
+      if: matrix.crate.name != 'lumina-node-wasm'
+      uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+      with:
+        disable_search: true
+        fail_ci_if_error: true
+        files: ./lcov.info
+        flags: ${{ matrix.crate.name }}
+        name: ${{ matrix.crate.name }}
+        use_oidc: true
 
     - name: Upload test logs
       if: always()

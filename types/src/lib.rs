@@ -41,7 +41,7 @@ pub mod uniffi_types;
 mod validate;
 mod validator_set;
 
-pub use crate::blob::{Blob, Commitment};
+pub use crate::blob::{Blob, BlobProof, Commitment};
 pub use crate::block::Height;
 pub use crate::data_availability_header::*;
 pub use crate::eds::{AxisType, ExtendedDataSquare};

@@ -2,11 +2,9 @@
 //!
 //! Upload path: blob encoding, per-row proof generation, payment promise
 //! signing, validator signature verification, deterministic shard assignment.
-//! Download path: wire decoding. Shard verification and reconstruction are
-//! benchmarked in `rsema1d/benches/codec_bench.rs` (groups
-//! `verification_context`, `verification`, and `reconstruct`), where those
-//! code paths are public API; the fibre layer only adds thin bookkeeping on
-//! top of them.
+//! Download path: raw protobuf decoding and response conversion. Shard
+//! verification and reconstruction are benchmarked in
+//! `rsema1d/benches/codec_bench.rs`.
 //!
 //! These benchmarks use the production v0 protocol parameters (K=4096,
 //! N=12288) and only the crate's public API.
@@ -43,7 +41,7 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group,
     criterion_main,
 };
-use prost::bytes::Bytes;
+use prost::{Message, bytes::Bytes};
 use rand::Rng;
 use rand::rngs::OsRng;
 
@@ -97,6 +95,32 @@ fn proof_hashes_as_bytes(hashes: &[[u8; 32]]) -> Vec<Bytes> {
 
     let mut storage = Bytes::from(storage);
     (0..hashes.len()).map(|_| storage.split_to(32)).collect()
+}
+
+fn make_proto_download_response(data_len: usize) -> proto::DownloadShardResponse {
+    let shard = rows_per_shard();
+    let blob = EncodedBlob::new(&generate_data(data_len), BlobConfig::v0()).unwrap();
+    let rows = (0..shard)
+        .map(|i| {
+            let proof = blob.row(i).unwrap();
+            proto::BlobRow {
+                index: proof.index as u32,
+                data: proof.row,
+                proof: proof_hashes_as_bytes(&proof.row_proof),
+            }
+        })
+        .collect();
+    let rlcs: Vec<u8> = blob
+        .rlc_coeffs()
+        .iter()
+        .flat_map(|rlc| rlc.to_bytes())
+        .collect();
+    proto::DownloadShardResponse {
+        shard: Some(proto::BlobShard {
+            rows,
+            rlcs: rlcs.into(),
+        }),
+    }
 }
 
 fn make_validators(count: usize) -> (Vec<ed25519_dalek::SigningKey>, Vec<ValidatorInfo>) {
@@ -273,39 +297,17 @@ fn bench_validator_assign(c: &mut Criterion) {
     group.finish();
 }
 
-/// Download path: decoding a validator's wire response (proof hash conversion
-/// + RLC vector parse), run once per validator response.
+/// Download path: converting a decoded validator response (proof hash
+/// conversion + RLC vector parse), and prost wire decoding plus conversion at
+/// two blob sizes. Conversion moves row `Bytes` without touching row data, so
+/// only the decode case is swept over blob size.
 fn bench_parse_download_response(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_download_response");
     group.measurement_time(CHEAP_MEASUREMENT);
     group.noise_threshold(0.03);
 
-    let shard = rows_per_shard();
-    let blob = EncodedBlob::new(&generate_data(1 << 20), BlobConfig::v0()).unwrap();
-
-    let rows: Vec<proto::BlobRow> = (0..shard)
-        .map(|i| {
-            let proof = blob.row(i).unwrap();
-            proto::BlobRow {
-                index: proof.index as u32,
-                data: proof.row,
-                proof: proof_hashes_as_bytes(&proof.row_proof),
-            }
-        })
-        .collect();
-    let rlcs: Vec<u8> = blob
-        .rlc_coeffs()
-        .iter()
-        .flat_map(|rlc| rlc.to_bytes())
-        .collect();
-    let response = proto::DownloadShardResponse {
-        shard: Some(proto::BlobShard {
-            rows,
-            rlcs: rlcs.into(),
-        }),
-    };
-
-    group.bench_function(format!("shard_{shard}_rows_1MB"), |b| {
+    let response = make_proto_download_response(1 << 20);
+    group.bench_function(format!("convert_{}_rows", rows_per_shard()), |b| {
         b.iter_batched(
             || response.clone(),
             |response| proto_conv::parse_download_response(response).unwrap(),
@@ -313,14 +315,30 @@ fn bench_parse_download_response(c: &mut Criterion) {
         );
     });
 
+    for (name, data_len) in [("1MB", 1 << 20), ("128MB", BlobConfig::v0().max_data_size)] {
+        let wire = Bytes::from(make_proto_download_response(data_len).encode_to_vec());
+        group.throughput(Throughput::Bytes(wire.len() as u64));
+        group.bench_function(
+            format!("prost_decode_and_convert_{}_rows_{name}", rows_per_shard()),
+            |b| {
+                b.iter_batched(
+                    || wire.clone(),
+                    |wire| {
+                        let response = proto::DownloadShardResponse::decode(wire).unwrap();
+                        proto_conv::parse_download_response(response).unwrap()
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
     group.finish();
 }
 
 /// Upload path from row proof generation through protobuf encoding for one
 /// production-sized validator shard from a maximum-sized blob.
 fn bench_upload_shard_encode(c: &mut Criterion) {
-    use prost::Message;
-
     let mut group = c.benchmark_group("upload_shard_encode");
     group.measurement_time(CHEAP_MEASUREMENT);
     group.noise_threshold(0.03);

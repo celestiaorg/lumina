@@ -24,7 +24,7 @@ pub struct UploadResponse {
 #[derive(Debug, Clone)]
 pub struct DownloadResponse {
     /// Rows and their Merkle proofs.
-    pub rows: Vec<rsema1d::RowProof<'static>>,
+    pub rows: Vec<rsema1d::RowProof>,
     /// RLC vector for the original rows.
     pub rlcs: Vec<rsema1d::GF128>,
 }

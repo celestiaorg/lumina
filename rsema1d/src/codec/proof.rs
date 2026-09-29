@@ -1,13 +1,12 @@
 use bytes::Bytes;
-use std::borrow::Cow;
 
 /// Lightweight row proof (works for both original and extended rows).
 #[derive(Debug, Clone)]
-pub struct RowProof<'a> {
+pub struct RowProof {
     /// Row index within the extended data (0..K+N).
     pub index: usize,
-    /// The row bytes.
-    pub row: Cow<'a, [u8]>,
+    /// The row bytes in reference-counted storage.
+    pub row: Bytes,
     /// Merkle proof siblings from leaf to root.
     pub row_proof: Vec<[u8; 32]>,
 }
@@ -45,8 +44,7 @@ mod tests {
     use crate::codec::RowMatrix;
     use crate::params::Parameters;
 
-    #[test]
-    fn test_proof_generation() {
+    fn ext_data() -> ExtendedData {
         let params = Parameters::new(4, 4, 64).unwrap();
 
         let mut original = vec![0u8; params.k * params.row_size];
@@ -55,12 +53,28 @@ mod tests {
         }
 
         let original = RowMatrix::with_shape(original, params.k, params.row_size).unwrap();
-        let ext_data = ExtendedData::generate(&original, &params).unwrap();
+        ExtendedData::generate(&original, &params).unwrap()
+    }
+
+    #[test]
+    fn test_proof_generation() {
+        let ext_data = ext_data();
 
         let proof = ext_data.generate_row_proof(0).unwrap();
         assert_eq!(proof.index, 0);
 
         let proof = ext_data.generate_row_proof(5).unwrap();
         assert_eq!(proof.index, 5);
+    }
+
+    #[test]
+    fn row_proof_shares_frozen_matrix_storage() {
+        let ext_data = ext_data();
+        let proof = ext_data.generate_row_proof(5).unwrap();
+        assert_eq!(
+            proof.row.as_ptr(),
+            ext_data.row(5).unwrap().as_ptr(),
+            "row proof must reference the encoded matrix instead of copying the row"
+        );
     }
 }

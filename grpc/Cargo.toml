@@ -35,7 +35,7 @@ futures.workspace = true
 hex.workspace = true
 http.workspace = true
 http-body.workspace = true
-http-body-util = "0.1"
+http-body-util.workspace = true
 ics23 = { version = "0.12", default-features = false, features = ["std"] }
 k256.workspace = true
 prost.workspace = true
