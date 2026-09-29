@@ -251,3 +251,33 @@ impl ics23::HostFunctionsProvider for Sha256Provider {
         [0; 32]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verifies_simple_membership_proof() {
+        let key = b"key".to_vec();
+        let value = b"value".to_vec();
+        let spec = ics23::tendermint_spec();
+        let existence_proof = ExistenceProof {
+            key: key.clone(),
+            value: value.clone(),
+            leaf: spec.leaf_spec.clone(),
+            path: Vec::new(),
+        };
+        let root = ics23::calculate_existence_root::<Sha256Provider>(&existence_proof).unwrap();
+        let chain = ProofChain(vec![CommitmentOp {
+            key: key.clone(),
+            spec,
+            proof: CommitmentProof {
+                proof: Some(Proof::Exist(existence_proof)),
+            },
+        }]);
+
+        chain
+            .verify_membership(root, [key.as_slice()], value)
+            .unwrap();
+    }
+}
