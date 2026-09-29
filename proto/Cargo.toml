@@ -21,7 +21,7 @@ prost-types.workspace = true
 serde = { workspace = true, features = ["derive"] }
 subtle-encoding = { version = "0.5", default-features = false, features = ["std", "hex"] }
 tendermint-proto.workspace = true
-tonic = { workspace = true, optional = true, features = ["codegen", "prost"]}
+tonic = { workspace = true, optional = true, features = ["codegen"]}
 uniffi = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
