@@ -47,7 +47,7 @@ jsonrpsee = { workspace = true, features = ["http-client", "ws-client"] }
 tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-gloo-net = { version = "0.6", default-features = false, features = [
+gloo-net = { workspace = true, features = [
   "http",
   "json",
 ] }

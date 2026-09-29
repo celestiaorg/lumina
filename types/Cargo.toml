@@ -39,7 +39,7 @@ rand = { workspace = true, optional = true }
 rust_decimal = { version = "1.35", default-features = false, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_repr.workspace = true
-sha2 = "0.10.8"
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 uniffi = { workspace = true, optional = true }
