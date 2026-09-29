@@ -62,8 +62,15 @@ postcard = { version = "1", features = ["alloc"] }
 # doc-tests
 indoc = "2"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test.workspace = true
+
+[[bench]]
+name = "blob"
+harness = false
 
 [features]
 default = []
