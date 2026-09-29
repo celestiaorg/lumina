@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-types-v1.2.0-rc.1...celestia-types-v1.2.0) - 2026-09-28
+
+### Fixed
+
+- *(types)* count signed blob shares and stop pre-allocating the declared length ([#1100](https://github.com/celestiaorg/lumina/pull/1100))
+- *(types)* reject Merkle proofs whose leaf index is outside the tree ([#1099](https://github.com/celestiaorg/lumina/pull/1099))
+- *(types)* reject NMT proofs with unordered or missing nodes before hashing ([#1098](https://github.com/celestiaorg/lumina/pull/1098))
+- *(types)* verify that a sample proof is for the requested share ([#1097](https://github.com/celestiaorg/lumina/pull/1097))
+
+### Other
+
+- *(types,rpc)* more test cases for share v2 and fibre ([#1086](https://github.com/celestiaorg/lumina/pull/1086))
+
+## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-types-v1.1.0-rc.1...celestia-types-v1.2.0-rc.1) - 2026-09-24
+
+### Fixed
+
+- *(types)* check share proofs cover a continuous range ([#1075](https://github.com/celestiaorg/lumina/pull/1075))
+
+### Other
+
+- *(types)* add `PAY_FOR_FIBRE` namespace constant ([#1084](https://github.com/celestiaorg/lumina/pull/1084))
+- *(types)* add new constants ([#1083](https://github.com/celestiaorg/lumina/pull/1083))
+- *(fibre)* enable fibre local devnet ([#1081](https://github.com/celestiaorg/lumina/pull/1081))
+- *(types)* make the test header generator clock monotonic ([#1031](https://github.com/celestiaorg/lumina/pull/1031))
+- *(fibre)* use more existing types instead of bytes and strings ([#985](https://github.com/celestiaorg/lumina/pull/985))
+
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-types-v1.0.0...celestia-types-v1.1.0-rc.1) - 2026-06-24
 
 ### Added

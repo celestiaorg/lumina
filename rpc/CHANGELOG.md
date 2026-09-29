@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-rpc-v1.2.0-rc.1...celestia-rpc-v1.2.0) - 2026-09-28
+
+### Other
+
+- *(types,rpc)* more test cases for share v2 and fibre ([#1086](https://github.com/celestiaorg/lumina/pull/1086))
+
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-rpc-v1.0.0...celestia-rpc-v1.1.0-rc.1) - 2026-06-24
 
 ### Added
