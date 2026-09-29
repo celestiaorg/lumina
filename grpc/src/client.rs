@@ -188,7 +188,7 @@ impl GrpcClient {
     fn get_node_config(&self) -> AsyncGrpcCall<ConfigResponse>;
 
     /// Get the latest block height committed by the application.
-    #[grpc_method(ConfigServiceClient::status)]
+    #[grpc_method(ConfigServiceClient::status, latest_height)]
     fn get_app_height(&self) -> AsyncGrpcCall<u64>;
 
     // cosmos.base.tendermint
@@ -942,20 +942,23 @@ impl GrpcClient {
                     }
 
                     let height = tx_status.height.value();
-                    let mut app_context = context.clone();
-                    app_context.metadata.remove("x-cosmos-block-height");
 
                     // TxStatus reads the block store before the application commits the block.
                     timeout(APP_COMMIT_TIMEOUT, async {
                         loop {
-                            if self.get_app_height().context(&app_context).await? >= height {
+                            if self.get_app_height().context(context).await? >= height {
                                 return Ok::<(), Error>(());
                             }
                             interval.tick().await;
                         }
                     })
                     .await
-                    .map_err(|_| Error::TxAppStateTimeout { hash, height })??;
+                    .map_err(|_| Error::TxAppStateTimeout { hash, height })?
+                    .map_err(|source| Error::TxAppStateQueryFailed {
+                        hash,
+                        height,
+                        source: Box::new(source),
+                    })?;
 
                     return Ok(TxInfo { hash, height });
                 }
@@ -1202,11 +1205,13 @@ mod tests {
             ConfigRequest, ConfigResponse, StatusRequest, StatusResponse,
             service_server::{Service, ServiceServer},
         };
+        use lumina_utils::failover::{Endpoint, Failover};
         use tokio::sync::mpsc;
         use tonic::metadata::MetadataMap;
         use tonic::{Code, Request, Response, Status};
 
         use super::*;
+        use crate::boxed::{TransportMetadata, boxed};
         use crate::client::APP_COMMIT_TIMEOUT;
         use crate::tx::BroadcastedTx;
 
@@ -1277,6 +1282,7 @@ mod tests {
             fallback_height: u64,
             status_error: Option<Code>,
             execution_code: u32,
+            transport_context: Context,
         ) -> (GrpcClient, mpsc::UnboundedReceiver<MetadataMap>) {
             let (status_calls, calls) = mpsc::unbounded_channel();
             let server = Arc::new(Mock {
@@ -1288,7 +1294,21 @@ mod tests {
             });
             let routes = tonic::service::Routes::new(TxServer::from_arc(server.clone()))
                 .add_service(ServiceServer::from_arc(server));
-            let client = GrpcClient::builder().transport(routes).build().unwrap();
+            let transport = boxed(
+                routes,
+                TransportMetadata {
+                    context: transport_context,
+                    ..Default::default()
+                },
+            );
+            let failover = Failover::new(
+                vec![Endpoint::prebuilt("mock", transport)],
+                Error::is_network_error,
+                Duration::from_secs(1),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+            let client = GrpcClient::new(Arc::new(failover), None);
             (client, calls)
         }
 
@@ -1301,7 +1321,21 @@ mod tests {
 
         #[tokio::test]
         async fn committed_tx_waits_for_app_height() {
-            let (client, mut calls) = mock_client([TX_HEIGHT - 1, TX_HEIGHT], TX_HEIGHT, None, 0);
+            let mut transport_context = Context::default();
+            transport_context
+                .append_metadata("x-cosmos-block-height", "2")
+                .unwrap();
+            transport_context
+                .append_metadata("x-token", "endpoint-token")
+                .unwrap();
+            transport_context.timeout = Some(Duration::from_secs(2));
+            let (client, mut calls) = mock_client(
+                [TX_HEIGHT - 1, TX_HEIGHT],
+                TX_HEIGHT,
+                None,
+                0,
+                transport_context,
+            );
             let mut context = Context::default();
             context
                 .append_metadata("authorization", "Bearer test")
@@ -1326,6 +1360,8 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(metadata.get("authorization").unwrap(), "Bearer test");
+                assert_eq!(metadata.get("x-token").unwrap(), "endpoint-token");
+                assert_eq!(metadata.get("grpc-timeout").unwrap(), "2000000u");
                 assert!(!metadata.contains_key("x-cosmos-block-height"));
             }
 
@@ -1335,20 +1371,39 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn app_height_error_is_returned() {
-            let (client, _) = mock_client([], 0, Some(Code::PermissionDenied), 0);
-            let err = client
-                .confirm_tx(tx(), TxConfig::default(), &Context::default())
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(err, Error::TonicError(status) if status.code() == Code::PermissionDenied)
-            );
+        async fn app_height_error_preserves_committed_tx() {
+            for code in [
+                Code::PermissionDenied,
+                Code::Unavailable,
+                Code::Unimplemented,
+            ] {
+                let (client, _) = mock_client([], 0, Some(code), 0, Context::default());
+                let err = client
+                    .confirm_tx(tx(), TxConfig::default(), &Context::default())
+                    .await
+                    .unwrap_err();
+                assert!(!err.is_network_error());
+                let Error::TxAppStateQueryFailed {
+                    hash,
+                    height,
+                    source,
+                } = err
+                else {
+                    panic!("expected application state query failure, got {err}");
+                };
+                assert_eq!(hash, tx().hash);
+                assert_eq!(height, TX_HEIGHT);
+                assert!(matches!(
+                    *source,
+                    Error::TonicError(status)
+                        if status.code() == code && status.message() == "status failed"
+                ));
+            }
         }
 
         #[tokio::test]
         async fn failed_tx_does_not_wait_for_app_height() {
-            let (client, mut calls) = mock_client([], 0, None, 5);
+            let (client, mut calls) = mock_client([], 0, None, 5, Context::default());
             let err = client
                 .confirm_tx(tx(), TxConfig::default(), &Context::default())
                 .await
@@ -1359,7 +1414,7 @@ mod tests {
 
         #[tokio::test(start_paused = true)]
         async fn app_height_wait_times_out() {
-            let (client, mut calls) = mock_client([], TX_HEIGHT - 1, None, 0);
+            let (client, mut calls) = mock_client([], TX_HEIGHT - 1, None, 0, Context::default());
             let task = tokio::spawn(async move {
                 client
                     .confirm_tx(tx(), TxConfig::default(), &Context::default())
@@ -1371,9 +1426,9 @@ mod tests {
             assert!(matches!(
                 err,
                 Error::TxAppStateTimeout {
+                    hash,
                     height: TX_HEIGHT,
-                    ..
-                }
+                } if hash == tx().hash
             ));
         }
     }
