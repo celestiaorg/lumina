@@ -37,7 +37,7 @@ impl SubmittedTx {
         &self.broadcasted_tx
     }
 
-    /// Confirm the transaction and return [`TxInfo`]
+    /// Confirm the transaction once its application state is queryable and return [`TxInfo`].
     pub async fn confirm(self) -> Result<TxInfo, Error> {
         self.confirm_tx.await
     }
