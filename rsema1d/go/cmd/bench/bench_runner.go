@@ -163,21 +163,14 @@ func main() {
 	fmt.Println("# Go Benchmark Results")
 	fmt.Printf("# WorkerCount = GOMAXPROCS = %d\n", runtime.GOMAXPROCS(0))
 
-	// Encode benchmarks - matching Rust configurations
-	benchmarkEncode("128KB_k1024_n3072", 1024, 3072, 128)
-	benchmarkEncode("1MB_k1024_n3072", 1024, 3072, 1024)
-	benchmarkEncode("1MB_k4096_n12288", 4096, 12288, 256)
-	benchmarkEncode("8MB_k4096_n12288", 4096, 12288, 2048)
+	// 128 MiB encode benchmarks matching Rust configurations.
+	benchmarkEncode("128MB_k1024_n1024", 1024, 1024, 131072)
 	benchmarkEncode("128MB_k4096_n12288", 4096, 12288, 32768)
 	benchmarkEncode("128MB_k8192_n24576", 8192, 24576, 16384)
 
 	// Proof generation benchmarks
-	benchmarkProofGen("1MB_k1024_n3072", 1024, 3072, 1024)
-	benchmarkProofGen("8MB_k4096_n12288", 4096, 12288, 2048)
 	benchmarkProofGen("128MB_k4096_n12288", 4096, 12288, 32768)
 
 	// Verification benchmarks
-	benchmarkVerification("1MB_k1024_n3072", 1024, 3072, 1024)
-	benchmarkVerification("8MB_k4096_n12288", 4096, 12288, 2048)
 	benchmarkVerification("128MB_k4096_n12288", 4096, 12288, 32768)
 }

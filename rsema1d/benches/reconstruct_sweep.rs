@@ -1,3 +1,5 @@
+mod support;
+
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::sync::Barrier;
@@ -110,6 +112,7 @@ fn make_original(seed: u8) -> RowMatrix {
 }
 
 fn main() {
+    support::print_environment(rayon::current_num_threads());
     let selected = std::env::args()
         .skip(1)
         .find(|arg| arg != "--bench")
