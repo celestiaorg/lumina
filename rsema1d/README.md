@@ -31,7 +31,7 @@ RAYON_NUM_THREADS=16 cargo bench -p rsema1d --bench codec_bench -- '^encode_in_p
 (cd rsema1d/go && GOMAXPROCS=16 go run ./cmd/bench/bench_runner.go)
 ```
 
-The shared `rsema1d/scripts/run_benchmarks.sh` wrapper also filters Rust cases to `128MB_` and runs the same Go runner. Running `cargo bench --bench codec_bench` directly without a filter still selects every size.
+The shared `rsema1d/scripts/run_benchmarks.sh` wrapper also filters Rust cases to `128MB_` and runs the same Go runner. It passes Criterion's `--quiet` flag to show time and throughput without change comparisons or outlier summaries; results are still saved. Running `cargo bench --bench codec_bench` directly without a filter still selects every size.
 
 Compare Rust `encode_in_place/<case>` with Go `Encode_<case>`. The Go runner selects only 128 MiB of original data, with (K, N) equal to (1024, 1024), (4096, 12288), or (8192, 24576); the Rust filter above selects the same shapes. Change both worker settings to `1` for a single-worker comparison. The Go runner also measures proof generation and verification for its 128 MiB K=4096 case; its encoder uses 10 warmups and 100 measured calls per case. Remove Rust's `--quick` for longer sampling.
 
