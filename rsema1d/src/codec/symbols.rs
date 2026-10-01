@@ -36,14 +36,14 @@ const fn add_mod(a: u16, b: u16) -> u16 {
 /// `log(coefficient limb)` once turns the per-symbol work into one `log`
 /// lookup for the symbol plus one `exp` lookup per limb.
 #[derive(Debug, Clone)]
-pub(crate) struct RlcCoefficientLogs {
+pub struct RlcCoefficientLogs {
     /// `log(coefficients[i].limbs[l])`, or [`ZERO_LIMB`] when the limb is 0.
     logs: Vec<[u16; 8]>,
 }
 
 impl RlcCoefficientLogs {
     /// Precompute limb logarithms for `coefficients`.
-    pub(crate) fn new(coefficients: Vec<GF128>) -> Self {
+    pub fn new(coefficients: Vec<GF128>) -> Self {
         let log = &get_exp_log().log;
         let logs = coefficients
             .into_iter()
@@ -66,7 +66,7 @@ impl RlcCoefficientLogs {
     /// Only complete 64-byte chunks of `row` are used, matching
     /// [`compute_rlc`]. Panics if `row` has more symbols than there are
     /// coefficients.
-    pub(crate) fn compute_rlc(&self, row: &[u8]) -> GF128 {
+    pub fn compute_rlc(&self, row: &[u8]) -> GF128 {
         let exp_log = get_exp_log();
         let exp = &exp_log.exp;
         let log = &exp_log.log;

@@ -8,7 +8,7 @@ GO_DIR="${REPO_ROOT}/go"
 
 print_help() {
   cat <<'EOF'
-Run rsema1d benchmarks (Rust and/or Go).
+Run 128 MiB rsema1d benchmarks (Rust and/or Go).
 
 Usage:
   ./scripts/run_benchmarks.sh
@@ -87,10 +87,10 @@ fi
 
 step=1
 if [ "${RUN_RUST_BENCH}" = "1" ]; then
-  echo "[${step}] Running Rust Criterion benchmarks..."
+  echo "[${step}] Running Rust Criterion benchmarks (128 MiB cases)..."
   (
     cd "${REPO_ROOT}"
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" cargo bench --bench codec_bench
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" cargo bench --bench codec_bench -- '128MB_'
   )
   step=$((step + 1))
 else

@@ -1,3 +1,5 @@
+mod support;
+
 use std::time::Duration;
 
 use criterion::{
@@ -42,10 +44,10 @@ impl SamplingProfile {
 
     fn apply(self, group: &mut BenchmarkGroup<'_, WallTime>) {
         let (sampling_mode, sample_size, warm_up_secs, measurement_secs) = match self {
-            SamplingProfile::SubMillisecond => (SamplingMode::Linear, 100, 3, 10),
-            SamplingProfile::Milliseconds => (SamplingMode::Linear, 100, 3, 45),
-            SamplingProfile::Subsecond => (SamplingMode::Flat, 60, 3, 45),
-            SamplingProfile::Seconds => (SamplingMode::Flat, 30, 5, 75),
+            SamplingProfile::SubMillisecond => (SamplingMode::Linear, 200, 5, 30),
+            SamplingProfile::Milliseconds => (SamplingMode::Flat, 200, 5, 90),
+            SamplingProfile::Subsecond => (SamplingMode::Flat, 120, 5, 90),
+            SamplingProfile::Seconds => (SamplingMode::Flat, 100, 10, 120),
         };
 
         group
@@ -57,10 +59,15 @@ impl SamplingProfile {
 }
 
 const ENCODE_CONFIGS: &[(&str, usize, usize, usize)] = &[
+    ("256B_k4_n4", 4, 4, 64),
+    ("32KB_k64_n64", 64, 64, 512),
     ("128KB_k1024_n3072", 1024, 3072, 128),
+    ("1MB_k1024_n1024", 1024, 1024, 1024),
     ("1MB_k1024_n3072", 1024, 3072, 1024),
     ("1MB_k4096_n12288", 4096, 12288, 256),
     ("8MB_k4096_n12288", 4096, 12288, 2048),
+    ("32MB_k4096_n12288", 4096, 12288, 8192),
+    ("128MB_k1024_n1024", 1024, 1024, 131072),
     ("128MB_k4096_n12288", 4096, 12288, 32768),
     ("128MB_k8192_n24576", 8192, 24576, 16384),
 ];
@@ -195,11 +202,7 @@ fn bench_verification_context(c: &mut Criterion) {
 
 fn bench_verification_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("verification_batch");
-    group
-        .sampling_mode(SamplingMode::Flat)
-        .sample_size(10)
-        .warm_up_time(Duration::from_secs(3))
-        .measurement_time(Duration::from_secs(20));
+    SamplingProfile::Seconds.apply(&mut group);
 
     let (k, n, row_size) = (4096, 12288, 32768);
     let params = Parameters::new(k, n, row_size).unwrap();
@@ -267,7 +270,10 @@ fn bench_reconstruct(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().noise_threshold(0.03);
+    config = {
+        support::print_environment(rayon::current_num_threads());
+        Criterion::default().noise_threshold(0.03)
+    };
     targets =
         bench_encode,
         bench_encode_in_place,

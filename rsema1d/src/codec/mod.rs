@@ -24,6 +24,9 @@ pub use rs::{
     encode_parity_in_place, encode_parity_in_place_with_work_budget, extend_data,
     extend_data_with_work_budget, extend_rlcs, pack_gf128_to_shard, unpack_shard_to_gf128,
 };
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub use symbols::RlcCoefficientLogs;
 pub use symbols::{compute_rlc, extract_symbols};
 pub use verification::{
     create_verification_context, verify_proof, verify_row_inclusion, verify_row_inclusion_proof,

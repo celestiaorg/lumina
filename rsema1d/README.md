@@ -13,12 +13,61 @@ Rust implementation of the `rsema1d` codec:
 # unit + integration tests
 cargo test
 
-# benchmark runner (Rust and Go)
+# 128 MiB benchmark runner (Rust and Go)
 ./scripts/run_benchmarks.sh
 
 # regenerate Go fuzzy vectors and run Rust Go-compat test
 ./scripts/run_go_compat.sh
 ```
+
+## Encoder and RLC benchmarks
+
+Each Rust benchmark executable prints the OS, architecture, package version, CPU model, and Rayon worker count before its results. The RLC benchmark reports its per-case worker counts. CPU model detection supports Linux and macOS and falls back to `unknown` when unavailable.
+
+Run the encoder comparisons sequentially from the workspace root:
+
+```bash
+RAYON_NUM_THREADS=16 cargo bench -p rsema1d --bench codec_bench -- '^encode_in_place/128MB_' --quick --noplot
+(cd rsema1d/go && GOMAXPROCS=16 go run ./cmd/bench/bench_runner.go)
+```
+
+The shared `rsema1d/scripts/run_benchmarks.sh` wrapper also filters Rust cases to `128MB_` and runs the same Go runner. Running `cargo bench --bench codec_bench` directly without a filter still selects every size.
+
+Compare Rust `encode_in_place/<case>` with Go `Encode_<case>`. The Go runner selects only 128 MiB of original data, with (K, N) equal to (1024, 1024), (4096, 12288), or (8192, 24576); the Rust filter above selects the same shapes. Change both worker settings to `1` for a single-worker comparison. The Go runner also measures proof generation and verification for its 128 MiB K=4096 case; its encoder uses 10 warmups and 100 measured calls per case. Remove Rust's `--quick` for longer sampling.
+
+`encode` includes allocation of the extended matrix and copying original rows; `encode_in_place` and the Go runner reuse their row buffers. Go clears parity inside timing and reuses its coder. Rust also extends the original RLC vector to K+N and returns a copy of the original RLCs. These are API throughput comparisons, not identical amounts of work. Rust uses deterministic pseudorandom input; the Go runner uses a repeating byte pattern.
+
+The standalone RLC benchmark matches the dimensions of celestia-app's `rlc.BenchmarkCompute`: 128 MiB of original data, K=1024, N=1024 or 3072, and 128 KiB rows. It uses explicit 1- and 16-worker pools, independent of `RAYON_NUM_THREADS`:
+
+```bash
+cargo bench -p rsema1d --features bench-internals --bench rlc_bench -- --quick --noplot
+# Select one case:
+cargo bench -p rsema1d --features bench-internals --bench rlc_bench -- \
+  '^rlc_compute/128MB_k1024_n3072/workers=16$' --quick --noplot
+```
+
+Run the corresponding Go RLC case from a celestia-app checkout:
+
+```bash
+GOMAXPROCS=16 go test ./pkg/rsema1d/rlc -run '^$' \
+  -bench '^BenchmarkCompute$/^size=128MB$/^k=1024$/^n=3072$/^workers=16$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+Input generation, coefficient derivation, and restoring the owned coefficient input happen outside timing. Each timed call prepares coefficient lookup tables using the encoder's implementation, computes the K original RLCs, and allocates the output vector. RS extension, Merkle trees, and commitment construction are excluded. Both N cases process the same number of rows; N changes the derived coefficients. A small scalar-reference check runs in each worker pool before measurement.
+
+Throughput uses original input bytes. Criterion uses binary units and the bundled Go runner reports MiB/s; Go's standard `go test -bench` reports decimal MB/s. Record the commit, CPU, toolchain, CPU compilation settings, and worker counts when comparing results. `bench-internals` only exposes the internal RLC helper for benchmarking and is disabled by default.
+
+Without `--quick`, the Rust benchmarks use these sampling profiles:
+
+| Cases | Sampling | Samples | Warmup | Measurement target |
+|---|---|---:|---:|---:|
+| Proof generation and individual verification | Linear | 200 | 5 s | 30 s |
+| Encode/reconstruct below 4 MiB; verification context | Flat | 200 | 5 s | 90 s |
+| Encode/reconstruct from 4 MiB to below 64 MiB | Flat | 120 | 5 s | 90 s |
+| Encode/reconstruct at least 64 MiB; batch verification; RLC | Flat | 100 | 10 s | 120 s |
+
+Flat sampling gives every sample the same iteration count, avoiding the quadratic minimum iteration count of linear sampling for slower cases. Measurement times are targets, not hard limits. Longer runs and more samples can improve estimate precision, but need not reduce the percentage classified as outliers. Assess confidence-interval width and repeatability on an otherwise idle machine with fixed worker counts. Criterion retains outliers in its analysis; these profiles keep its default 95% confidence level and existing outlier rules. `--quick` bypasses the full sampling schedule and is only for rough estimates.
 
 ## Production benchmarks
 
