@@ -90,7 +90,7 @@ if [ "${RUN_RUST_BENCH}" = "1" ]; then
   echo "[${step}] Running Rust Criterion benchmarks (128 MiB cases)..."
   (
     cd "${REPO_ROOT}"
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" cargo bench --bench codec_bench -- '128MB_'
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" cargo bench --bench codec_bench -- '128MB_' --quiet
   )
   step=$((step + 1))
 else
