@@ -1,6 +1,6 @@
 mod support;
 
-use std::time::Duration;
+use std::{sync::Once, time::Duration};
 
 use criterion::{
     black_box, criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId,
@@ -89,7 +89,17 @@ fn bench_encode(c: &mut Criterion) {
 
         SamplingProfile::for_bytes(total_bytes).apply(&mut group);
         group.throughput(Throughput::Bytes(total_bytes as u64));
+        let metadata = Once::new();
         group.bench_with_input(BenchmarkId::from_parameter(name), &data, |b, data| {
+            metadata.call_once(|| {
+                support::print_case(
+                    format_args!("encode/{name}"),
+                    k,
+                    n,
+                    row_size,
+                    rayon::current_num_threads(),
+                );
+            });
             b.iter(|| encode(black_box(data), black_box(&params)).unwrap());
         });
     }
@@ -110,7 +120,17 @@ fn bench_encode_in_place(c: &mut Criterion) {
 
         SamplingProfile::for_bytes(total_bytes).apply(&mut group);
         group.throughput(Throughput::Bytes(total_bytes as u64));
+        let metadata = Once::new();
         group.bench_with_input(BenchmarkId::from_parameter(name), &params, |b, params| {
+            metadata.call_once(|| {
+                support::print_case(
+                    format_args!("encode_in_place/{name}"),
+                    k,
+                    n,
+                    row_size,
+                    rayon::current_num_threads(),
+                );
+            });
             b.iter(|| {
                 let buffer = extended.take().expect("buffer must be available");
                 let ext_data = encode_in_place(black_box(buffer), black_box(params)).unwrap();
@@ -132,10 +152,20 @@ fn bench_proof_generation(c: &mut Criterion) {
         let data = RowMatrix::with_shape(generate_test_data(k, row_size), k, row_size).unwrap();
         let commitment = ExtendedData::generate(&data, &params).unwrap();
 
+        let metadata = Once::new();
         group.bench_with_input(
             BenchmarkId::from_parameter(name),
             &commitment,
             |b, commitment| {
+                metadata.call_once(|| {
+                    support::print_case(
+                        format_args!("proof_generation/{name}"),
+                        k,
+                        n,
+                        row_size,
+                        rayon::current_num_threads(),
+                    );
+                });
                 b.iter(|| commitment.generate_row_proof(black_box(0)).unwrap());
             },
         );
@@ -155,21 +185,55 @@ fn bench_verification(c: &mut Criterion) {
         let proof = commitment.generate_row_proof(0).unwrap();
         let context = VerificationContext::new(commitment.rlc_original(), &params).unwrap();
         let commitment_bytes = commitment.commitment();
+        assert!(rsema1d::codec::verify_proof(&proof, &commitment_bytes, &context).unwrap());
 
+        let metadata = Once::new();
         group.bench_with_input(
-            BenchmarkId::from_parameter(name),
+            BenchmarkId::new("cached", name),
             &(&proof, &commitment_bytes, &context),
             |b, (proof, commitment_bytes, context)| {
+                metadata.call_once(|| {
+                    support::print_case(
+                        format_args!("verification/cached/{name}"),
+                        k,
+                        n,
+                        row_size,
+                        rayon::current_num_threads(),
+                    );
+                });
                 b.iter(|| {
-                    rsema1d::codec::verify_proof(
+                    assert!(rsema1d::codec::verify_proof(
                         black_box(proof),
                         black_box(commitment_bytes),
                         black_box(context),
                     )
-                    .unwrap()
+                    .unwrap())
                 });
             },
         );
+
+        let proof = commitment.generate_standalone_proof(0).unwrap();
+        assert!(rsema1d::verify_standalone(&proof, &commitment_bytes, &params).unwrap());
+        let metadata = Once::new();
+        group.bench_function(BenchmarkId::new("standalone", name), |b| {
+            metadata.call_once(|| {
+                support::print_case(
+                    format_args!("verification/standalone/{name}"),
+                    k,
+                    n,
+                    row_size,
+                    rayon::current_num_threads(),
+                );
+            });
+            b.iter(|| {
+                assert!(rsema1d::verify_standalone(
+                    black_box(&proof),
+                    black_box(&commitment_bytes),
+                    black_box(&params),
+                )
+                .unwrap());
+            });
+        });
     }
 
     group.finish();
@@ -192,7 +256,17 @@ fn bench_verification_context(c: &mut Criterion) {
         let commitment = ExtendedData::generate(&data, &params).unwrap();
         let rlcs = commitment.rlc_original().to_vec();
 
+        let metadata = Once::new();
         group.bench_with_input(BenchmarkId::from_parameter(name), &rlcs, |b, rlcs| {
+            metadata.call_once(|| {
+                support::print_case(
+                    format_args!("verification_context/{name}"),
+                    k,
+                    n,
+                    row_size,
+                    rayon::current_num_threads(),
+                );
+            });
             b.iter(|| VerificationContext::new(black_box(rlcs), black_box(&params)).unwrap());
         });
     }
@@ -216,7 +290,17 @@ fn bench_verification_batch(c: &mut Criterion) {
     rsema1d::codec::verify_proof(&proofs[0], &commitment, &context).unwrap();
 
     group.throughput(Throughput::Bytes((k * row_size) as u64));
+    let metadata = Once::new();
     group.bench_function("serial_k4096_32KiB", |b| {
+        metadata.call_once(|| {
+            support::print_case(
+                "verification_batch/serial_k4096_32KiB",
+                k,
+                n,
+                row_size,
+                rayon::current_num_threads(),
+            );
+        });
         b.iter(|| {
             black_box(&proofs)
                 .iter()
@@ -226,7 +310,17 @@ fn bench_verification_batch(c: &mut Criterion) {
                 .unwrap()
         });
     });
+    let metadata = Once::new();
     group.bench_function("rayon_148_rows_k4096_32KiB", |b| {
+        metadata.call_once(|| {
+            support::print_case(
+                "verification_batch/rayon_148_rows_k4096_32KiB",
+                k,
+                n,
+                row_size,
+                rayon::current_num_threads(),
+            );
+        });
         b.iter(|| {
             black_box(&proofs)
                 .par_chunks(148)
@@ -258,7 +352,17 @@ fn bench_reconstruct(c: &mut Criterion) {
 
         SamplingProfile::for_bytes(total_bytes).apply(&mut group);
         group.throughput(Throughput::Bytes(total_bytes as u64));
+        let metadata = Once::new();
         group.bench_function(BenchmarkId::from_parameter(name), |b| {
+            metadata.call_once(|| {
+                support::print_case(
+                    format_args!("reconstruct/{name}"),
+                    k,
+                    n,
+                    row_size,
+                    rayon::current_num_threads(),
+                );
+            });
             b.iter(|| {
                 reconstruct(black_box(&rows), black_box(&indices), black_box(&params)).unwrap()
             });
