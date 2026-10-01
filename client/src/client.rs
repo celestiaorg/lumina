@@ -333,7 +333,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the connection establishment timeout for RPC (WebSocket) and gRPC endpoints.
+    /// Set the connection establishment timeout for RPC and gRPC endpoints.
     ///
     /// This is independent of [`ClientBuilder::timeout`] (the request timeout): a low
     /// connect timeout lets a down/unreachable host be detected faster than a merely
@@ -341,8 +341,11 @@ impl ClientBuilder {
     ///
     /// # Note
     ///
-    /// Not supported for HTTP(S) RPC, WASM RPC, or WASM (gRPC-Web) gRPC transports,
-    /// where it is ignored.
+    /// For HTTP(S) RPC this bounds only the TCP connection establishment, not DNS
+    /// resolution or the TLS handshake.
+    ///
+    /// Not supported for WASM RPC or WASM (gRPC-Web) gRPC transports, where it is
+    /// ignored.
     pub fn connect_timeout(mut self, connect_timeout: Duration) -> ClientBuilder {
         self.connect_timeout = Some(connect_timeout);
         self
