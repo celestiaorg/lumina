@@ -16,6 +16,9 @@ cargo test
 # 128 MiB benchmark runner (Rust and Go)
 ./scripts/run_benchmarks.sh
 
+# Same suite with one worker in both implementations
+./scripts/run_benchmarks_single_threaded.sh
+
 # regenerate Go fuzzy vectors and run Rust Go-compat test
 ./scripts/run_go_compat.sh
 ```
@@ -23,6 +26,8 @@ cargo test
 ## Encoder and RLC benchmarks
 
 Each Rust benchmark executable prints the OS, architecture, package version, CPU model, and Rayon worker count before its results. The RLC benchmark reports its per-case worker counts. CPU model detection supports Linux and macOS and falls back to `unknown` when unavailable.
+
+Rust and the bundled Go runner print `K`, `N`, `row_size` (bytes), and `workers` once per selected case, outside timing. Workers means the configured Rayon pool size or Go `Config.WorkerCount`, not the number of workers used by every stage. Go also prints GOMAXPROCS. The reconstruction sweep prints its selected configuration before running.
 
 Run the encoder comparisons sequentially from the workspace root:
 
@@ -33,7 +38,25 @@ RAYON_NUM_THREADS=16 cargo bench -p rsema1d --bench codec_bench -- '^encode_in_p
 
 The shared `rsema1d/scripts/run_benchmarks.sh` wrapper also filters Rust cases to `128MB_` and runs the same Go runner. It passes Criterion's `--quiet` flag to show time and throughput without change comparisons or outlier summaries; results are still saved. Running `cargo bench --bench codec_bench` directly without a filter still selects every size.
 
+From the workspace root, run `./rsema1d/scripts/run_benchmarks_single_threaded.sh` for the same suite with `RAYON_NUM_THREADS=1` and `GOMAXPROCS=1`. This overrides inherited worker settings and retains the existing `RUN_RUST_BENCH` / `RUN_GO_BENCH` switches. It limits codec workers and Go execution parallelism; it does not pin CPU affinity or prevent runtime helper threads. The separate `rlc_bench` executable is not part of this suite and has its own explicit worker pools.
+
+The pinned Go Reed-Solomon library's Leopard GF16 encoding runs in one goroutine, regardless of `GOMAXPROCS` or the codec's `WorkerCount`. That worker count controls RLC and Merkle work. Rust also parallelizes RS encoding across independent column stripes, so equal worker settings above one do not imply equal parallelism in every stage.
+
 Compare Rust `encode_in_place/<case>` with Go `Encode_<case>`. The Go runner selects only 128 MiB of original data, with (K, N) equal to (1024, 1024), (4096, 12288), or (8192, 24576); the Rust filter above selects the same shapes. Change both worker settings to `1` for a single-worker comparison. The Go runner also measures proof generation and verification for its 128 MiB K=4096 case; its encoder uses 10 warmups and 100 measured calls per case. Remove Rust's `--quick` for longer sampling.
+
+Both harnesses name single-row verification cases `verification/cached/<case>` and `verification/standalone/<case>`, and run both modes by default. Cached verification prepares and primes the context outside timing, then measures Rust `verify_proof` or Go `VerifyShared` for original row 0. Standalone verification prepares the proof outside timing, then measures Rust `verify_standalone` or Go `VerifyStandaloneProof`, including coefficient derivation on every call. The Rust cached cases were previously named `verification/<case>`; the new names create separate Criterion baselines.
+
+Select a targeted mode and case using the benchmark name:
+
+```bash
+# From the workspace root; replace cached with standalone for the other mode.
+RAYON_NUM_THREADS=16 cargo bench -p rsema1d --bench codec_bench -- \
+  '^verification/cached/128MB_k4096_n12288$' --quick --noplot
+(cd rsema1d/go && GOMAXPROCS=16 go run ./cmd/bench/bench_runner.go \
+  -bench '^verification/cached/128MB_k4096_n12288$')
+```
+
+The Go `-bench` regular expression defaults to `.` (all cases) and filters before input setup. It also selects the existing `Encode_<case>` and `ProofGen_<case>` names. Native celestia-app benchmark shapes must be matched separately: its `4096x12288x8192` case corresponds to Rust `encode_in_place/32MB_k4096_n12288`, rather than the bundled runner's 128 MiB case.
 
 `encode` includes allocation of the extended matrix and copying original rows; `encode_in_place` and the Go runner reuse their row buffers. Go clears parity inside timing and reuses its coder. Rust also extends the original RLC vector to K+N and returns a copy of the original RLCs. These are API throughput comparisons, not identical amounts of work. Rust uses deterministic pseudorandom input; the Go runner uses a repeating byte pattern.
 

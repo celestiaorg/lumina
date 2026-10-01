@@ -1,6 +1,6 @@
 mod support;
 
-use std::time::Duration;
+use std::{sync::Once, time::Duration};
 
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput,
@@ -64,7 +64,17 @@ fn bench_rlc_compute(c: &mut Criterion) {
         for n in [1024, 3072] {
             let coefficients = derive_coefficients(&row_root, K, n, ROW_SIZE);
             let name = format!("128MB_k{K}_n{n}/workers={workers}");
-            group.bench_function(name, |b| {
+            let metadata = Once::new();
+            group.bench_function(&name, |b| {
+                metadata.call_once(|| {
+                    support::print_case(
+                        format_args!("rlc_compute/{name}"),
+                        K,
+                        n,
+                        ROW_SIZE,
+                        workers,
+                    );
+                });
                 pool.install(|| {
                     b.iter_batched(
                         // Encoding consumes the coefficients; restore them outside timing.

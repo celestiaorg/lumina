@@ -1,3 +1,13 @@
+pub fn print_case(
+    name: impl std::fmt::Display,
+    k: usize,
+    n: usize,
+    row_size: usize,
+    workers: usize,
+) {
+    println!("{name}: K={k} N={n} row_size={row_size} workers={workers}");
+}
+
 pub fn print_environment(workers: impl std::fmt::Display) {
     println!("os: {}", std::env::consts::OS);
     println!("arch: {}", std::env::consts::ARCH);
