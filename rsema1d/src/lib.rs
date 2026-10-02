@@ -20,7 +20,7 @@ pub use codec::{
     StandaloneProof, VerificationContext,
 };
 
-pub use codec::Commitment;
+pub use codec::{commitment_from_original_rows, Commitment};
 
 pub use codec::{
     create_verification_context, default_work_budget, encode, encode_in_place,
