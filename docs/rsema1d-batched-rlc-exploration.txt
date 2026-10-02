@@ -1,0 +1,132 @@
+Batched SIMD RLC exploration — 2026-10-02
+
+Outcome: both requested approaches are implemented as runnable commits. Batched existing Engine::mul already demonstrates a large SIMD speedup; a fused primitive is not necessary to get that gain. The fork adds about 20% further isolated-RLC reduction versus the prototype in this final run. Private and dependency-backed fusion are comparable; these measurements do not justify preferring the private kernel on speed. Production selection remains deferred.
+
+Revisions and checkout
+Lumina branch: nikolai/rsema1d-batched-rlc-exploration
+Requested base origin/nikolai/reduce-work-for-encoder: fddd0bd5c7642cee537a941d02fd62d9cacc75e3
+Shared scalar benchmark baseline: 9bda7ce5ec0eb67213a57055dbc1aa817b2dd113
+Batched existing primitive: 60e6a10b3cbab601dc1b981e683f87c2b485d6d2
+Private fused AVX2: c816f1a665cdc4d830f640b91460086b0554710a
+Dependency-backed fused AVX2: 7054e01659c50bf3b7f3efa1c19472622551689b
+Local dependency: /home/nikolai/workspace/reed-solomon-simd, branch nikolai/rlc-mul-add8
+Dependency base (reed-solomon-simd 3.1.0): df1b4fee7f28e2ea9b02e05169b7b93150fdf932
+Dependency implementation commit: ca28c8c7f4b053e02a4924ff9e69f6e18d888089 (followed only by test lint cleanup)
+Dependency measured/tested HEAD: 65530b6b7eccbd1a122a7bd8734f1da6088372f2
+Production reference: e0f13dcd912cc3eb98527f0a5e3484ee48cae619
+Historical benchmark checkout: 0623e14cbf87099cfb56584f262c94307bfab72c in /tmp/lumina-rlc-historical-0623e14; relevant scalar RLC implementation matches e0f13dc. Its only local edit adds the missing 128 MiB/K1024/N3072 full-encoding fixture; patch is archived.
+Go reference: 2b910e9c1e50b731362dd56ea5fde53ab14e2955 in /tmp/rlc-go-reference-2b910e9. Original celestia-app checkout was not changed.
+
+Implementation and tradeoffs
+The common private batch helper is /home/nikolai/workspace/lumina-main/rsema1d/src/codec/symbols.rs:6. It transposes a bounded 32-row tile, broadcasts coefficients across rows, partitions 64-byte chunk positions among workers, accumulates eight components in worker-local buffers, XOR-reduces partials, and returns exactly K results. Encoding calls it at /home/nikolai/workspace/lumina-main/rsema1d/src/codec/commitment.rs:122; the feature-gated benchmark wrapper is /home/nikolai/workspace/lumina-main/rsema1d/src/codec/mod.rs:31. Single-row scalar computation remains at /home/nikolai/workspace/lumina-main/rsema1d/src/codec/symbols.rs:188.
+The prototype copies each transposed column to reused scratch for each nonzero component, calls Engine::mul, then XORs separately. The fused variants reuse input loads and nibble decomposition across eight outputs. Zero coefficients are skipped before logarithm lookup, rather than treating the zero logarithm sentinel as a multiplier.
+Private variant source is preserved in commit c816f1a and target/rlc-exploration/private/source/rsema1d/src/codec/rlc_simd.rs:12. It still uses reed-solomon-simd tables and the existing RS implementation, but owns a 74-line module containing the unsafe AVX2 kernel in Lumina. Its checkpoint changes the crate policy from forbid(unsafe_code) to deny(unsafe_code) with a narrow module exception.
+The dependency variant adds a provided object-safe Engine::mul_add8 method, a portable default using existing Engine::mul, DefaultEngine forwarding, and an AVX2 override. API: /home/nikolai/workspace/reed-solomon-simd/src/engine.rs:154. Runtime CPU guard: /home/nikolai/workspace/reed-solomon-simd/src/engine/engine_avx2.rs:77. Fused kernel: /home/nikolai/workspace/reed-solomon-simd/src/engine/engine_avx2.rs:523. Coefficients are raw field elements; empty slices are accepted; zero is a no-op; every output must match the input length; input stays immutable. Lumina retains forbid(unsafe_code): /home/nikolai/workspace/lumina-main/rsema1d/src/lib.rs:3.
+Fork delta: 227 inserted lines in three existing source files, including tests. It applies directly to the 3.1.0 dependency base already in use. The production API was compiled and exercised on Rust 1.82 with default features and without default features. Backporting to other dependency revisions was not tested. The current integration is intentionally a local path patch at /home/nikolai/workspace/lumina-main/Cargo.toml:109; a remote fork was not created or published. A proper solution must replace that path with a pinned distributable dependency.
+Fused worker scratch is 80*K_padded bytes plus a 2 KiB tile (80 KiB per worker and 1.25 MiB across 16 workers at K1024), excluding coefficients, returned values and scheduler bookkeeping. The prototype additionally uses a 2*K_padded-byte scratch column. Source allocation evidence: /home/nikolai/workspace/lumina-main/rsema1d/src/codec/symbols.rs:39 and :79.
+
+Measurement setup
+AMD EPYC 9454P, 48 physical cores / 96 logical CPUs, SMT enabled, performance governor. rustc 1.98.0 (88d9e12ae 2026-08-18), LLVM 22.1.8, cargo 1.98.0. Stock bench profile, no RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS, no target-cpu=native. Go 1.26.6. Full CPU topology and toolchain output: target/rlc-exploration/environment.json.
+All reported final timings ran sequentially, without competing builds/tests/benchmarks. Rust final matrix uses three separate processes per variant/case, interleaved by repetition and case. CPU affinity: one worker CPU24; sixteen workers CPUs16-31; thirty-two workers CPUs0-31 (distinct physical cores). Explicit RLC pools are 1/16; full encoding uses RAYON_NUM_THREADS=1/16/32. Table entries are medians of the three Criterion mean point estimates, milliseconds.
+Fixture: 128 MiB original data, K=1024, N=3072 parity rows, row_size=131072. Rust input is fixed ChaCha8 seed 0x5eed5eed5eed5eed. Isolated RLC excludes coefficient derivation and cloning, includes helper setup/allocation/transpose/multiplication/reduction/output creation; see /home/nikolai/workspace/lumina-main/rsema1d/benches/rlc_bench.rs:70. Full encoding includes the complete encode call and result destruction; input creation is outside timing (/home/nikolai/workspace/lumina-main/rsema1d/benches/codec_bench.rs:77).
+
+                         RLC 1     RLC 16    Encode 1   Encode 16  Encode 32
+baseline                  412.350     28.197    916.908    105.630     81.467
+prototype                 137.121      9.159    668.608     89.931     67.577
+private                   113.318      7.225    644.629     84.966     68.379
+dependency                109.496      7.257    639.552     85.703     65.432
+historical                411.684     27.927    923.743    104.539     82.445
+
+Fork vs scalar: 3.77x/3.89x isolated RLC speedup at 1/16 workers; full-encoding time reductions of 30.2%/18.9%/19.7% at 1/16/32 workers. Fork vs existing-primitive prototype: 20.1%/20.8% isolated reduction, and 4.35%/4.70%/3.18% full-encoding reduction. The latter multithreaded differences are within observed noise and are not established wins.
+Private fusion vs prototype: 17.4%/21.1% isolated reduction. Full encoding: 3.59%/5.52% reduction at 1/16, but 1.19% slower at 32; the small multithreaded differences are unresolved. Nothing is silently dropped: all three candidate checkpoints are retained.
+Noise control: six separate pinned scalar baseline processes before final comparisons. Peak-to-peak ranges divided by median: RLC1 0.58%, RLC16 12.36%, encode1 0.49%, encode16 12.42%, encode32 33.90%. Half-group median differences: 0.30%, 1.68%, -0.06%, 5.02%, 0.10%. A small half-group delta is not evidence of low spread. Final quick runs are useful for the large RLC gain; they do not establish small full-encoding or private-vs-fork differences.
+The first-rlc exploratory series was slower/noisier, particularly at sixteen workers (prototype median 14.13 ms, private 11.54 ms, scalar 27.42 ms). Final values above use one preselected complete matrix; all earlier samples remain in measurements.jsonl. The initial scalar cargo-bench smoke run overlapped a Go toolchain build and is excluded from conclusions.
+
+Final raw process samples, milliseconds (all three, in execution order)
+baseline/rlc1: 412.349504, 411.956106, 412.459669
+baseline/rlc16: 27.991525, 28.197368, 29.858930
+baseline/encode1: 916.907588, 918.620264, 915.441665
+baseline/encode16: 103.949390, 112.278172, 105.630112
+baseline/encode32: 81.466950, 80.805579, 82.509831
+prototype/rlc1: 135.338348, 138.556678, 137.121193
+prototype/rlc16: 14.407569, 9.116313, 9.158623
+prototype/encode1: 664.488238, 672.192338, 668.608043
+prototype/encode16: 89.931025, 88.539707, 93.517736
+prototype/encode32: 67.577443, 69.518616, 66.669928
+private/rlc1: 113.082769, 115.583338, 113.317796
+private/rlc16: 7.223147, 7.465956, 7.224662
+private/encode1: 645.484429, 644.629379, 642.853222
+private/encode16: 87.353690, 84.965785, 83.303960
+private/encode32: 68.379397, 68.093932, 76.474020
+dependency/rlc1: 109.495827, 106.879906, 109.840727
+dependency/rlc16: 7.277033, 7.257357, 7.158265
+dependency/encode1: 639.344066, 643.641772, 639.551557
+dependency/encode16: 83.848444, 85.703389, 94.818681
+dependency/encode32: 66.677295, 65.431522, 63.903779
+historical/rlc1: 411.445742, 412.741412, 411.683561
+historical/rlc16: 27.926962, 27.997851, 26.851705
+historical/encode1: 923.743173, 927.815653, 923.161377
+historical/encode16: 104.138322, 104.829374, 104.539283
+historical/encode32: 80.915449, 93.253853, 82.444889
+
+Go reference results
+Go Compute: 1 worker median 81.350384 ms, samples [81.563184, 81.350384, 81.00645]; 16 workers median 5.611580 ms, samples [5.61158, 6.167749, 5.60492]. Three separate processes, 1-second benchmark duration per case, GOMAXPROCS=16, CPUs16-31 for both explicit worker counts. Go uses its PCG fixture; Rust and Go input byte streams are not identical. This is context, not a controlled comparison of identical instructions or allocation policies.
+perf confirms Go executes mulgf16Xor8_avx512gfni (16.42% of cycles samples) and its transpose takes 62.50%; /home/nikolai/workspace/lumina-main/target/rlc-exploration/go-perf-report.txt:12. Rust executes mul_add8_avx2. No GFNI implementation was added in Rust. Supplied historical timings (Rust 482/36.5 ms, Go 174/15.7 ms) were not reproduced on this run; do not mix them with this table.
+
+Profiling and assembly
+Stock baseline profile: 98.90% of samples in RlcCoefficientLogs::compute_rlc. Final fork: 40.42% in mul_add8_avx2, 56.49% in the surrounding batched accumulation closure (which contains transpose work), 1.57% in memset. Profiles include process initialization and are separate from accepted timing runs. Do not equate the entire accumulation closure percentage with transpose alone.
+Disassembly confirms the prototype retains a scratch copy, indirect mul call, and separate XOR pass; fusion loads each source block and decomposes nibbles once before the eight-component loop. Private kernel has no vector spills or instructions above AVX2. Assembly evidence: target/rlc-exploration/prototype/disassembly.txt:56900, :56907, :56954; private/disassembly.txt:59045, :59065, :59085. Final dependency disassembly is also archived. The kernel still broadcasts tables per component/block and copies the LUT-pointer array in the loop; changing zip(luts) to zip(&luts) is an unmeasured follow-up, not part of these results.
+
+Validation
+Passed: scalar baseline 81 unit tests; prototype 83; private and dependency variants 84 each. Scalar comparisons cover every returned RLC at K=1,31,32,33,63,64,65,1023,1024,1025, row sizes 64/128/320/1088, pools 1/2/3/16/32, random/sparse/zero input, zero coefficient limbs and whole coefficients, exponent wraparound, uneven partitions and padded tails. Direct fused API tests cover repeated XOR accumulation into nonzero destinations, empty input, input preservation, zero/mixed coefficients including raw 65535, and forced NoSimd. Tests: /home/nikolai/workspace/lumina-main/rsema1d/src/codec/symbols.rs:289.
+Passed: all four Lumina checkpoints against 254 Go-generated compatibility cases from the exact Go revision above. The generator requested 250 randomized cases plus four built-in cases. Uncompressed vector SHA-256: 0907e5ea06b53db6ed95a0cf57e3c88b562d903e4f8cb529ac4b68afccd79f86. Compressed immutable copy: target/rlc-exploration/go-vectors.json.gz. The compatibility harness compares original RLCs, commitments, row/proof data and verification/reconstruction behavior; see /home/nikolai/workspace/lumina-main/rsema1d/tests/go_fuzzy_compat.rs:154. The usual test command ignores this fixture-dependent test; it was explicitly run with --ignored.
+Passed: dependency full default-feature and no-default-feature suites: 110 unit tests, 5 integration tests, 4 doctests; 6 unit and 2 integration tests remain ignored. Its three new API tests also passed after the final test-only lint cleanup. Go TestCompute tests passed with -test.count=3.
+Passed: Lumina crate native all-target/all-feature Clippy; final workspace all-target/all-feature Clippy with -D warnings; workspace docs lint with -D missing-docs; wasm32-unknown-unknown library Clippy; Lumina library check on Rust 1.88.0; cargo fmt --all -- --check. .agents/agent-check.sh succeeded on the clean committed Rust tree (no-op); explicit workspace checks above did the actual checking.
+Passed: dependency production API consumer on Rust 1.82.0, default and no-default features. This is not a claim that the complete dependency dev-dependency test suite was run with 1.82. Dependency strict Clippy fails on existing tables.rs needless_range_loop and rate/* manual_assert_eq diagnostics. The final cap-lints=warn audit completes with no warnings in the three changed source files; this is not a strict dependency lint pass.
+Not run: complete Lumina workspace test suites requiring devnets, wasm runtime tests, aarch64/NEON runtime tests, sanitizer/Miri runs, non-AVX2 fallback performance measurements, or dependency backports to other versions.
+
+Commands (cwd is /home/nikolai/workspace/lumina-main unless stated)
+Build each checkpoint before switching, then copy its two bench executables to target/rlc-exploration/<variant>/:
+cargo bench --locked --offline -p rsema1d --features bench-internals --bench rlc_bench --bench codec_bench --no-run
+Final interleaved matrix:
+python3 /home/nikolai/workspace/lumina-main/target/rlc-exploration/run.py baseline prototype private dependency historical --runs 3 --label final
+The runner executes RLC as:
+RAYON_NUM_THREADS=1 taskset -c 24 /home/nikolai/workspace/lumina-main/target/rlc-exploration/dependency/rlc_bench --bench '^rlc_compute/128MB_k1024_n3072/workers=1$' --quick --noplot
+and full encoding as:
+RAYON_NUM_THREADS=16 taskset -c 16-31 /home/nikolai/workspace/lumina-main/target/rlc-exploration/dependency/codec_bench --bench '^encode/128MB_k1024_n3072$' --quick --noplot
+Use the CPU/pool substitutions stated above for the other cases. CRITERION_HOME is set to a distinct artifact directory per process. Every exact argv, affinity and result log path is in measurements.jsonl.
+Exact requested command was also run on the final fork integration without taskset:
+cargo bench --locked --offline -p rsema1d --features bench-internals --bench rlc_bench -- '^rlc_compute/128MB_k1024_n3072/' --quick --noplot
+Output central estimates: 107.46 ms / 7.2812 ms; log: target/rlc-exploration/dependency/requested-command.log. Its Criterion comparison uses a previous local run and is not the interleaved table above.
+
+Validation commands:
+cargo test --locked --offline -p rsema1d --all-features
+cargo test --locked --offline -p rsema1d --test go_fuzzy_compat -- --ignored
+cargo clippy --locked --offline --all-targets --all-features -p rsema1d -- -D warnings --no-deps
+cargo clippy --locked --offline --workspace --all-targets --all-features -- -D warnings --no-deps
+cargo clippy --locked --offline --workspace --all-features -- -D missing-docs
+cargo clippy --locked --offline --lib --all-features --target=wasm32-unknown-unknown -p rsema1d -- -D warnings --no-deps
+cargo +1.88.0 check --locked --offline -p rsema1d --lib --all-features --target-dir /home/nikolai/workspace/lumina-main/target/rlc-exploration/msrv-lumina
+cargo fmt --all -- --check
+/home/nikolai/workspace/lumina-main/.agents/agent-check.sh
+cargo test --locked --offline --manifest-path /home/nikolai/workspace/reed-solomon-simd/Cargo.toml --target-dir /home/nikolai/workspace/lumina-main/target/rlc-exploration/dependency-build
+Repeat the dependency test with --no-default-features.
+cargo +1.82.0 test --locked --offline --manifest-path /tmp/rlc-msrv-smoke/Cargo.toml
+Repeat the MSRV consumer test with --no-default-features. Consumer source and manifest are archived in target/rlc-exploration/msrv-consumer/.
+
+Go vector command (cwd /home/nikolai/workspace/lumina-main/rsema1d/go):
+env GOTOOLCHAIN=go1.26.6 go run -mod=mod -modfile=/tmp/rlc-go.mod /home/nikolai/workspace/lumina-main/rsema1d/go/cmd/generate_fuzzy_vectors/main.go 250 4096
+/tmp/rlc-go.mod uses the local exact-revision checkout as a replace for github.com/celestiaorg/celestia-app/v10; its Go version is 1.26.6. A copy is in the artifacts.
+Go build (cwd /tmp/rlc-go-reference-2b910e9):
+env GOTOOLCHAIN=go1.26.6 GOCACHE=/tmp/rlc-go-build-cache go test -mod=readonly -c -o /home/nikolai/workspace/lumina-main/target/rlc-exploration/go-rlc.test ./pkg/rsema1d/rlc
+/home/nikolai/workspace/lumina-main/target/rlc-exploration/go-rlc.test -test.run '^TestCompute' -test.count=3
+Go timing (three separate invocations):
+env GOMAXPROCS=16 taskset -c 16-31 /home/nikolai/workspace/lumina-main/target/rlc-exploration/go-rlc.test -test.run '^$' -test.bench '^BenchmarkCompute$/^size=128MB$/^k=1024$/^n=3072$' -test.benchtime=1s -test.count=1
+
+Profile commands (separate from timing):
+perf record -e cycles:u -F 499 -o /home/nikolai/workspace/lumina-main/target/rlc-exploration/dependency/perf-rlc1.data -- taskset -c 24 /home/nikolai/workspace/lumina-main/target/rlc-exploration/dependency/rlc_bench --bench '^rlc_compute/128MB_k1024_n3072/workers=1$' --profile-time 5 --noplot
+Repeat with baseline paths for the scalar profile. perf report --stdio --no-children --sort symbol produces the archived reports.
+perf record -e cycles:u -F 499 -o /home/nikolai/workspace/lumina-main/target/rlc-exploration/go-perf.data -- env GOMAXPROCS=16 taskset -c 16-31 /home/nikolai/workspace/lumina-main/target/rlc-exploration/go-rlc.test -test.run '^$' -test.bench '^BenchmarkCompute$/^size=128MB$/^k=1024$/^n=3072$' -test.benchtime=3s -test.count=1
+
+Artifacts
+All local raw measurements, Criterion estimates/samples, standalone checkpoint binaries, source patches, disassembly, profiles, binary checksums, noise results, vector archive and environment metadata are in /home/nikolai/workspace/lumina-main/target/rlc-exploration/. That directory is ignored by Git; preserve it if cleaning target/. This report and the source commits retain the essential results and implementation independently of the scratch artifacts.

@@ -10,6 +10,9 @@ rust-version = "1.88"
 name = "rsema1d"
 path = "src/lib.rs"
 
+[features]
+bench-internals = []
+
 [dependencies]
 reed-solomon-simd = "3.1.0"
 bytes.workspace = true
@@ -34,6 +37,11 @@ criterion.workspace = true
 [[bench]]
 name = "codec_bench"
 harness = false
+
+[[bench]]
+name = "rlc_bench"
+harness = false
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "reconstruct_sweep"

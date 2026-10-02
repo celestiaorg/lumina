@@ -2,7 +2,7 @@ use crate::codec::extend_rlcs;
 use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::rows::RowMatrix;
-use crate::codec::symbols::RlcCoefficientLogs;
+use crate::codec::symbols::compute_rlcs;
 use crate::crypto::{derive_coefficients, hash_leaf, sha256_pair, MerkleTree};
 use crate::error::{Error, Result};
 use crate::field::GF128;
@@ -121,16 +121,12 @@ impl ExtendedData {
         let row_tree = build_row_tree(&extended_rows, params);
         let row_root = row_tree.root();
 
-        let coefficient_logs = RlcCoefficientLogs::new(derive_coefficients(
-            &row_root,
-            params.k,
-            params.n,
+        let coefficients = derive_coefficients(&row_root, params.k, params.n, params.row_size);
+        let rlc_orig = compute_rlcs(
+            &extended_rows.as_row_major()[..params.k * params.row_size],
             params.row_size,
-        ));
-        let rlc_orig: Vec<GF128> = (0..params.k)
-            .into_par_iter()
-            .map(|i| coefficient_logs.compute_rlc(row_slice(&extended_rows, i)))
-            .collect();
+            coefficients,
+        );
         let rlc_extended = extend_rlcs(&rlc_orig, params.k, params.n)?;
 
         let rlc_tree = build_rlc_tree(&rlc_orig, params);

@@ -1,0 +1,86 @@
+Reed-solomon-simd fused eight-output multiplication: upstream handoff
+
+Purpose
+Add a reusable GF(2^16) multiply/XOR primitive to the existing Engine abstraction. Lumina RLC computes eight field components from the same input column. Its existing-primitive prototype copies each column eight times, invokes Engine::mul eight times, and performs eight separate XOR passes. The candidate loads each source block and decomposes its nibbles once, then accumulates eight products directly into the eight destinations. This is an additive low-level engine operation; RS encoding/decoding algorithms and public codec APIs are unchanged by the dependency patch.
+
+Source and exact revisions
+Upstream repository: https://github.com/AndersTrier/reed-solomon-simd
+Base: df1b4fee7f28e2ea9b02e05169b7b93150fdf932 (3.1.0, declared MSRV 1.82).
+Local checkout: /home/nikolai/workspace/reed-solomon-simd
+Local branch: nikolai/rlc-mul-add8
+Implementation: ca28c8c7f4b053e02a4924ff9e69f6e18d888089
+Test-only lint cleanup / final HEAD: 65530b6b7eccbd1a122a7bd8734f1da6088372f2
+Portable patch included beside this document: docs/reed-solomon-simd-mul-add8.patch. It contains the combined diff of both dependency commits: 227 insertions across three source files. No remote fork or upstream PR has been created.
+Go algorithm reference: https://github.com/celestiaorg/celestia-app/blob/2b910e9c1e50b731362dd56ea5fde53ab14e2955/pkg/rsema1d/rlc/compute.go (bounded transpose, component broadcasting, worker-local partial accumulation). The library primitive itself has no Rayon dependency or internal workers.
+
+Reproducing the dependency from the included patch
+The following commands assume the Lumina fork-comparison branch is checked out at /home/nikolai/workspace/lumina-main. Choose a fresh clone path if the sibling checkout already exists; do not reset an existing checkout with uncommitted work.
+git clone https://github.com/AndersTrier/reed-solomon-simd /home/nikolai/workspace/reed-solomon-simd
+git -C /home/nikolai/workspace/reed-solomon-simd switch -c upstream/mul-add8 df1b4fee7f28e2ea9b02e05169b7b93150fdf932
+git -C /home/nikolai/workspace/reed-solomon-simd apply --check /home/nikolai/workspace/lumina-main/docs/reed-solomon-simd-mul-add8.patch
+git -C /home/nikolai/workspace/reed-solomon-simd apply /home/nikolai/workspace/lumina-main/docs/reed-solomon-simd-mul-add8.patch
+The Lumina branch has a [patch.crates-io] path override to ../reed-solomon-simd. A fresh checkout needs this sibling dependency before Cargo can resolve it. The patch makes the branch reproducible before a fork URL exists; it is not a publishable dependency configuration. Replace the path with a pinned fork revision or released version in a production integration.
+
+Proposed API
+    fn mul_add8(
+        &self,
+        input: &[[u8; 64]],
+        outputs: &mut [&mut [[u8; 64]]; 8],
+        coefficients: &[GfElement; 8],
+    )
+For each component c, block b and GF16 position j: outputs[c][b][j] ^= input[b][j] * coefficients[c]. The notation describes field elements; actual blocks use the existing Leopard layout: 32 low bytes followed by 32 high bytes.
+Coefficients are raw field values, not logarithms. Zero must leave its destination unchanged. Never pass the log-table zero sentinel to Engine::mul as though it represented a zero multiplier. The API accepts empty input and preserves its input. Every output must have the same block count as input, including outputs with a zero coefficient; mismatches panic. No atomicity on a failing length check is promised. Rust mutable references enforce disjoint output ownership. The provided method remains object-safe and adds no required method to third-party Engine implementations.
+API and portable fallback: src/engine.rs:154. The default implementation skips zero coefficients, uses a stack 64-byte temporary, calls the selected engine's existing mul, and XORs the result. This maintains support for all current engines without implementing every SIMD backend at once. It is a correctness fallback; its performance has not been measured on non-AVX2 machines.
+Dispatch: src/engine/engine_default.rs:93 (locate mul_add8 if rebasing changes line numbers). DefaultEngine must forward the new method to its boxed engine; relying on the trait default here would bypass the AVX2 override.
+AVX2 entry: src/engine/engine_avx2.rs:77. It explicitly checks AVX2 before entering target_feature code; do not assume every caller obtained Avx2 through DefaultEngine. The existing Avx2::new constructor alone does not enforce CPU support.
+AVX2 kernel: src/engine/engine_avx2.rs:523. Each block loads two unaligned 256-bit halves, derives four nibble vectors, then uses the existing multiply128 lookup tables for each nonzero coefficient. Broadcast/shuffle/XOR operations update both destination halves directly. Length checks precede accesses, each vector access stays within a 64-byte block, and no alignment beyond u8 is assumed. No instructions above AVX2 are required by this kernel.
+
+Lumina comparison branches
+All three comparison branches start directly at main 5f77cdf9ffc3431a5c45ad7617b3b4d13a735b21. They preserve main's encoding API and extended RLC behavior. They do not include the unrelated API/removal changes from reduce-work-for-encoder.
+Existing primitive: https://github.com/celestiaorg/lumina/compare/main...nikolai/rlc-batched-existing
+Private fused: https://github.com/celestiaorg/lumina/compare/main...nikolai/rlc-private-fused
+Fork fused: https://github.com/celestiaorg/lumina/compare/main...nikolai/rlc-fork-fused
+The fork branch changes Lumina's batching call to Engine::mul_add8 and retains forbid(unsafe_code). The private branch owns an AVX2 kernel in Lumina and needs a narrow unsafe-code exception. The existing-primitive branch needs neither a dependency change nor new unsafe code, making it the smallest implementation.
+
+Measured evidence, with scope
+These numbers were measured before the comparison branches were transplanted onto main. Measured Lumina base: fddd0bd5c7642cee537a941d02fd62d9cacc75e3 (reduce-work-for-encoder). Scalar harness: 9bda7ce5ec0eb67213a57055dbc1aa817b2dd113; existing primitive: 60e6a10b3cbab601dc1b981e683f87c2b485d6d2; private fused: c816f1a665cdc4d830f640b91460086b0554710a; fork integration: 7054e01659c50bf3b7f3efa1c19472622551689b, using dependency 65530b6b7eccbd1a122a7bd8734f1da6088372f2. No timing claim is made for the new main-based branches.
+Workload: 128 MiB original data, K=1024, N=3072 parity rows, row_size=131072. AMD EPYC 9454P, rustc 1.98.0 / LLVM 22.1.8, stock release flags, no target-cpu=native. Three sequential, interleaved processes per case; medians of Criterion mean estimates. CPU affinity: CPU24 for one worker, CPUs16-31 for sixteen, CPUs0-31 for thirty-two. Explicit RLC pools: 1/16. Full encoding: RAYON_NUM_THREADS=1/16/32.
+                          RLC 1/16 workers (ms)    Full encoding 1/16/32 (ms)
+Scalar                    412.350 / 28.197        916.908 / 105.630 / 81.467
+Existing primitive        137.121 /  9.159        668.608 /  89.931 / 67.577
+Private fused             113.318 /  7.225        644.629 /  84.966 / 68.379
+Fork fused                109.496 /  7.257        639.552 /  85.703 / 65.432
+The fork reduces isolated RLC time by about 20% relative to existing Engine::mul batching, and by about 74% relative to the scalar baseline. The ~3.8x scalar comparison is not the incremental benefit of adding this primitive: most of that improvement comes from batching with existing SIMD support. Full encoding improves about 4.35% at one worker relative to existing-primitive batching. Small multithreaded differences between fused and existing-primitive variants are within observed noise. Private and fork fusion are comparable; no convincing speed argument favors owning the kernel in Lumina.
+Baseline peak-to-peak noise divided by median was 0.58% / 12.36% for isolated RLC at 1/16 workers and 0.49% / 12.42% / 33.90% for full encoding at 1/16/32. Quick-mode samples do not establish small differences. The final prototype's 16-worker process samples were 14.408, 9.116 and 9.159 ms; all samples must remain visible when interpreting its median.
+RLC timing excludes coefficient derivation/cloning but includes batching setup, transpose, allocation, multiplication, reduction and output creation. This is a caller workload benchmark, not a primitive-only microbenchmark. Stock assembly confirms the fused path removes per-component source copies and separate XOR passes. Rust perf samples: 40.42% fused AVX2 kernel, 56.49% surrounding batch closure, including transpose. Go executes AVX-512/GFNI on this CPU and measures about 81.35/5.61 ms; that is not an AVX2-to-AVX2 comparison.
+Full historical report and raw samples: docs/rsema1d-batched-rlc-exploration.txt in Lumina commit 7dea06fe9107b68d4fa323c5d4e2387b908277b5, also copied beside this handoff. Local binaries, Criterion samples, profiles and disassembly: /home/nikolai/workspace/lumina-main/target/rlc-exploration/. These ignored artifacts are not shipped by Git.
+
+Benchmark commands (run from the chosen Lumina checkout)
+cargo bench --locked --offline -p rsema1d --features bench-internals --bench rlc_bench -- '^rlc_compute/128MB_k1024_n3072/' --quick --noplot
+RAYON_NUM_THREADS=1 cargo bench --locked --offline -p rsema1d --bench codec_bench -- '^encode/128MB_k1024_n3072$' --quick --noplot
+Repeat full encoding with RAYON_NUM_THREADS=16 and 32. For controlled comparisons, give separate worktrees distinct CARGO_TARGET_DIR values (a shared directory reused an older test executable during this handoff), compile first, pin the resulting binaries to the CPU sets above, run at least three separate processes per variant in interleaved order, and run no competing builds or benchmarks. Do not compare historical reduced-work full-encoding numbers directly with main-based runs.
+
+Correctness and compatibility already checked
+Dependency default and no-default-feature suites passed: 110 unit tests, five integration tests, four doctests; six unit and two integration tests remained ignored. The new API tests exercise independent scalar log/exp multiplication, random and zero input, zero/mixed coefficients including raw 65535, nonzero destinations, repeated XOR accumulation, empty slices, input preservation and length mismatch (including zero coefficients). Available x86 engines tested: Naive, NoSimd, DefaultEngine, AVX2 and SSSE3. Tests are in src/engine.rs:198.
+The measured Lumina variants passed scalar comparisons for all output rows at K around multiples of 32, random/sparse/zero input, zero coefficient limbs, exponent wraparound, uneven worker partitions, and forced portable fallback. All four measured Lumina checkpoints passed 254 Go compatibility cases from celestia-app 2b910e9c1e50b731362dd56ea5fde53ab14e2955. Vector SHA-256: 0907e5ea06b53db6ed95a0cf57e3c88b562d903e4f8cb529ac4b68afccd79f86. These compare RLC values, commitments, row/proof data and verification/reconstruction behavior.
+Lumina native/workspace Clippy, formatting, wasm library Clippy and Rust 1.88 library check passed for the measured final integration. Dependency production API smoke tests passed on its declared Rust 1.82 MSRV with and without default features; the complete dependency dev-dependency suite was not run on 1.82. Dependency strict Clippy on Rust 1.98 fails on existing tables.rs needless_range_loop and rate/* manual_assert_eq diagnostics. An audit with cap-lints=warn found no warnings in the three modified files. This is not a strict lint pass.
+Not checked: aarch64/NEON runtime, wasm runtime, non-AVX2 performance, sanitizer/Miri, or backports onto other dependency versions. No claims about those should accompany an upstream PR.
+
+Dependency validation commands
+cargo test --manifest-path /home/nikolai/workspace/reed-solomon-simd/Cargo.toml --locked --offline
+cargo test --manifest-path /home/nikolai/workspace/reed-solomon-simd/Cargo.toml --locked --offline --no-default-features
+cargo fmt --manifest-path /home/nikolai/workspace/reed-solomon-simd/Cargo.toml -- --check
+The dependency does not track Cargo.lock; a fresh clone must first resolve its development dependencies and create the lockfile, using cargo test without --locked/--offline if the cache is not populated. Record that resolved lockfile and toolchain when reproducing results.
+
+Before submitting upstream
+Recheck the upstream base and Engine API; these observations concern 3.1.0. Apply the included patch on a branch based on the intended upstream revision and rerun the dependency suite. Keep the library PR limited to the engine primitive, dispatch, tests and benchmark evidence; the Lumina transpose and worker scheduler belong in the caller.
+Audit existing engine benchmarks and add the smallest benchmark needed to compare eight copy/mul/XOR passes with mul_add8 at equal input/output sizes. Include tiny and larger block counts, nonzero prefilled outputs, mixed/zero coefficients, allocation boundaries and the portable fallback. The current ~20% figure measures the complete RLC helper, not primitive-only throughput. Recheck full RLC integration after any kernel or dispatch change.
+Review whether the fixed eight-output name/signature fits the library API. Eight corresponds to Lumina's GF128 components; do not introduce a generic abstraction or extra optimized backends without a measured need. Preserve raw-zero semantics, object safety, default forwarding, non-AVX2 fallback, bounds and CPU-feature checks.
+Move the new AVX2 impl above the existing TESTS divider if preparing a polished upstream patch; its current location below that divider is cosmetic. Disassembly also shows per-block LUT pointer copying from zip(luts) and repeated broadcasts. Optimizing those is unmeasured follow-up work; do not silently claim extra gains from changing them.
+Rust 1.82 compatibility must be preserved unless maintainers choose otherwise. Keep intrinsics inside explicit unsafe blocks with documented CPU, bounds and alignment invariants. A backport to the currently used 3.1.0 base is already demonstrated; backports to other revisions need their own compile/tests.
+Suggested upstream title: Add an eight-output GF16 multiply-accumulate engine operation.
+Suggested summary: Add Engine::mul_add8 with a portable provided implementation, DefaultEngine forwarding and an AVX2 override. Reuse each source load and nibble decomposition across eight independently weighted XOR destinations. Lumina's batched RLC workload measures about 20% lower isolated latency than composing the existing in-place multiplication primitive; correctness tests cover zeros, accumulation, layout and available engines.
+
+Main-based comparison branch validation (2026-10-02)
+Re-ran cargo test --locked --offline -p rsema1d --all-features: existing primitive 83 tests, private fused 84, fork fused 84, all passing. Explicit go_fuzzy_compat --ignored passed all 254 vector cases on each branch. All three passed cargo fmt, crate all-target/all-feature Clippy with -D warnings, .agents/agent-check.sh (formatting and workspace all-target/all-feature Clippy on dirty Rust files), and workspace Clippy with -D missing-docs. The private branch was rerun with an isolated CARGO_TARGET_DIR after detecting stale test-executable reuse in a shared directory; only its isolated results count. Logs: /home/nikolai/workspace/lumina-main/target/rlc-comparison/. No new timings, wasm/MSRV checks, dependency suite, or full workspace tests were run during this main-based transplant. The unchanged dependency's earlier checks are recorded above.
+The bundled dependency patch was applied to clean base source files and verified to reproduce all three tested source files byte-for-byte. Blank context lines are stored without a trailing space; git apply --check and git apply both accept it.

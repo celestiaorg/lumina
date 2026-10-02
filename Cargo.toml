@@ -106,6 +106,10 @@ wasm-bindgen-test = "0.3"
 web-sys = "0.3.85"
 
 
+[patch.crates-io]
+# Exploratory checkout; replace with a pinned fork revision before merging.
+reed-solomon-simd = { path = "../reed-solomon-simd" }
+
 # Uncomment to apply local changes
 # blockstore = { path = "../blockstore" }
 # nmt-rs = { path = "../nmt-rs" }
