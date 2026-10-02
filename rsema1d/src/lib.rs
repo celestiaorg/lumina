@@ -44,8 +44,10 @@ mod tests {
         }
         let original = RowMatrix::with_shape(original, params.k, params.row_size).unwrap();
 
-        let (ext_data, commitment, rlc_orig) = encode(&original, &params).unwrap();
-        let context = VerificationContext::new(&rlc_orig, &params).unwrap();
+        let ext_data = encode(&original, &params).unwrap();
+        let commitment = ext_data.commitment();
+        let rlc_orig = ext_data.rlc_original();
+        let context = VerificationContext::new(rlc_orig, &params).unwrap();
 
         for i in 0..params.total_rows() {
             let proof = ext_data.generate_row_proof(i).unwrap();
@@ -118,7 +120,9 @@ mod tests {
         }
         let original = RowMatrix::with_shape(original, params.k, params.row_size).unwrap();
 
-        let (ext_a, commitment_a, rlc_a) = encode(&original, &params).unwrap();
+        let ext_a = encode(&original, &params).unwrap();
+        let commitment_a = ext_a.commitment();
+        let rlc_a = ext_a.rlc_original();
 
         let mut extended = RowMatrix::with_shape(
             vec![0u8; params.total_rows() * params.row_size],
@@ -128,7 +132,9 @@ mod tests {
         .unwrap();
         let split_at = params.k * params.row_size;
         extended.as_row_major_mut()[..split_at].copy_from_slice(original.as_row_major());
-        let (ext_b, commitment_b, rlc_b) = encode_in_place(extended, &params).unwrap();
+        let ext_b = encode_in_place(extended, &params).unwrap();
+        let commitment_b = ext_b.commitment();
+        let rlc_b = ext_b.rlc_original();
 
         assert_eq!(commitment_a, commitment_b);
         assert_eq!(rlc_a, rlc_b);

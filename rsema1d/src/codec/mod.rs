@@ -10,7 +10,6 @@ mod symbols;
 mod verification;
 
 use crate::error::Result;
-use crate::field::GF128;
 use crate::params::Parameters;
 use std::num::NonZeroUsize;
 use std::sync::OnceLock;
@@ -62,11 +61,8 @@ pub fn default_work_budget() -> NonZeroUsize {
     work_budget_for_parallelism(threads, physical_cores)
 }
 
-/// Encode original rows and return extended data, commitment, and original RLCs.
-pub fn encode(
-    data: &RowMatrix,
-    params: &Parameters,
-) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
+/// Encode original rows and return extended data containing the commitment and original RLCs.
+pub fn encode(data: &RowMatrix, params: &Parameters) -> Result<ExtendedData> {
     encode_with_work_budget(data, params, default_work_budget())
 }
 
@@ -75,11 +71,8 @@ pub fn encode_with_work_budget(
     data: &RowMatrix,
     params: &Parameters,
     work_budget: NonZeroUsize,
-) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
-    let ext_data = ExtendedData::generate_with_work_budget(data, params, work_budget)?;
-    let commitment = ext_data.commitment();
-    let rlc_orig = ext_data.rlc_original().to_vec();
-    Ok((ext_data, commitment, rlc_orig))
+) -> Result<ExtendedData> {
+    ExtendedData::generate_with_work_budget(data, params, work_budget)
 }
 
 /// Encode from a caller-provided extended row buffer.
@@ -88,10 +81,7 @@ pub fn encode_with_work_budget(
 /// 1. assumes the first K rows of `extended_rows` already contain original data
 /// 2. computes parity rows in place
 /// 3. builds commitment, trees, and RLCs from the extended rows
-pub fn encode_in_place(
-    extended_rows: RowMatrix,
-    params: &Parameters,
-) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
+pub fn encode_in_place(extended_rows: RowMatrix, params: &Parameters) -> Result<ExtendedData> {
     encode_in_place_with_work_budget(extended_rows, params, default_work_budget())
 }
 
@@ -100,25 +90,16 @@ pub fn encode_in_place_with_work_budget(
     mut extended_rows: RowMatrix,
     params: &Parameters,
     work_budget: NonZeroUsize,
-) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
+) -> Result<ExtendedData> {
     extended_rows.extended_view(params)?;
     encode_parity_in_place_with_work_budget(&mut extended_rows, params, work_budget)?;
 
-    let ext_data = ExtendedData::generate_from_extended_rows(extended_rows, params)?;
-    let commitment = ext_data.commitment();
-    let rlc_orig = ext_data.rlc_original().to_vec();
-    Ok((ext_data, commitment, rlc_orig))
+    ExtendedData::generate_from_extended_rows(extended_rows, params)
 }
 
 /// Compute commitment/proofs from already-extended rows.
-pub fn encode_parity(
-    extended_rows: RowMatrix,
-    params: &Parameters,
-) -> Result<(ExtendedData, Commitment, Vec<GF128>)> {
-    let ext_data = ExtendedData::generate_from_extended_rows(extended_rows, params)?;
-    let commitment = ext_data.commitment();
-    let rlc_orig = ext_data.rlc_original().to_vec();
-    Ok((ext_data, commitment, rlc_orig))
+pub fn encode_parity(extended_rows: RowMatrix, params: &Parameters) -> Result<ExtendedData> {
+    ExtendedData::generate_from_extended_rows(extended_rows, params)
 }
 
 /// Reconstruct original rows from any K sampled rows.
@@ -144,6 +125,7 @@ mod tests {
     use super::*;
     use crate::crypto::{derive_coefficients, sha256};
     use crate::error::Error;
+    use crate::field::GF128;
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -275,10 +257,12 @@ mod tests {
         let small_budget = NonZeroUsize::new(64 << 10).unwrap();
         let large_budget = NonZeroUsize::new(8 << 20).unwrap();
 
-        let (small, small_commitment, small_rlcs) =
-            encode_with_work_budget(&rows, &params, small_budget).unwrap();
-        let (large, large_commitment, large_rlcs) =
-            encode_with_work_budget(&rows, &params, large_budget).unwrap();
+        let small = encode_with_work_budget(&rows, &params, small_budget).unwrap();
+        let small_commitment = small.commitment();
+        let small_rlcs = small.rlc_original();
+        let large = encode_with_work_budget(&rows, &params, large_budget).unwrap();
+        let large_commitment = large.commitment();
+        let large_rlcs = large.rlc_original();
 
         assert_eq!(small.rows().as_row_major(), large.rows().as_row_major());
         assert_eq!(small_commitment, large_commitment);
@@ -358,8 +342,10 @@ mod tests {
     fn encode_and_verify_with_context_matrix() {
         for case in CASES {
             let (params, original) = make_original_rows(*case);
-            let (ext_data, commitment, rlc_orig) = encode(&original, &params).unwrap();
-            let (context, rlc_root) = create_verification_context(&rlc_orig, &params).unwrap();
+            let ext_data = encode(&original, &params).unwrap();
+            let commitment = ext_data.commitment();
+            let rlc_orig = ext_data.rlc_original();
+            let (context, rlc_root) = create_verification_context(rlc_orig, &params).unwrap();
             assert_eq!(rlc_root, ext_data.rlc_root());
 
             for idx in strategic_indices(&params) {
@@ -380,7 +366,7 @@ mod tests {
     fn reconstruction_matrix() {
         for case in CASES {
             let (params, original) = make_original_rows(*case);
-            let (ext_data, _, _) = encode(&original, &params).unwrap();
+            let ext_data = encode(&original, &params).unwrap();
 
             let original_indices: Vec<usize> = (0..params.k).collect();
             let original_rows: Vec<&[u8]> = original_indices
@@ -414,18 +400,17 @@ mod tests {
     fn rlc_commutation_property() {
         for case in CASES {
             let (params, original) = make_original_rows(*case);
-            let (ext_data, _, _) = encode(&original, &params).unwrap();
+            let ext_data = encode(&original, &params).unwrap();
             let coeffs =
                 derive_coefficients(&ext_data.row_root(), params.k, params.n, params.row_size);
 
             let extended_from_orig =
                 extend_rlcs(ext_data.rlc_original(), params.k, params.n).unwrap();
-            assert_eq!(extended_from_orig, ext_data.rlc_extended());
 
-            for i in 0..params.total_rows() {
+            for (i, expected_rlc) in extended_from_orig.iter().enumerate() {
                 let row = ext_data.row(i).unwrap();
                 let computed = compute_rlc(row, &coeffs);
-                assert_eq!(computed, ext_data.rlc_extended()[i]);
+                assert_eq!(computed, *expected_rlc);
             }
         }
     }
@@ -440,8 +425,10 @@ mod tests {
             seed: 42,
         });
 
-        let (ext_data, commitment, rlc_orig) = encode(&original, &params).unwrap();
-        let context = VerificationContext::new(&rlc_orig, &params).unwrap();
+        let ext_data = encode(&original, &params).unwrap();
+        let commitment = ext_data.commitment();
+        let rlc_orig = ext_data.rlc_original();
+        let context = VerificationContext::new(rlc_orig, &params).unwrap();
 
         for idx in [0usize, params.k] {
             let proof = ext_data.generate_row_proof(idx).unwrap();
@@ -516,17 +503,19 @@ mod tests {
             row_size: 64,
             seed: 99,
         });
-        let (ext_data, commitment, rlc_orig) = encode(&original, &params).unwrap();
+        let ext_data = encode(&original, &params).unwrap();
+        let commitment = ext_data.commitment();
+        let rlc_orig = ext_data.rlc_original();
 
         let proof = ext_data.generate_row_proof(0).unwrap();
         assert!(verify_with_context(
             &proof,
             &commitment,
-            &VerificationContext::new(&rlc_orig, &params).unwrap()
+            &VerificationContext::new(rlc_orig, &params).unwrap()
         )
         .unwrap());
 
-        let mut corrupted = rlc_orig.clone();
+        let mut corrupted = rlc_orig.to_vec();
         corrupted[0].limbs[0] ^= 0x01;
         let corrupted_context = VerificationContext::new(&corrupted, &params).unwrap();
         assert!(verify_with_context(&proof, &commitment, &corrupted_context).is_err());
@@ -540,7 +529,8 @@ mod tests {
             row_size: 64,
             seed: 77,
         });
-        let (ext_data, commitment, _) = encode(&original, &params).unwrap();
+        let ext_data = encode(&original, &params).unwrap();
+        let commitment = ext_data.commitment();
 
         for i in 0..params.total_rows() {
             let proof = ext_data.generate_row_inclusion_proof(i).unwrap();
@@ -579,15 +569,18 @@ mod tests {
     fn encode_parity_matches_encode() {
         for case in CASES {
             let (params, original) = make_original_rows(*case);
-            let (ext_a, commitment_a, rlc_a) = encode(&original, &params).unwrap();
-            let (ext_b, commitment_b, rlc_b) =
-                encode_parity(ext_a.rows().clone(), &params).unwrap();
+            let ext_a = encode(&original, &params).unwrap();
+            let commitment_a = ext_a.commitment();
+            let rlc_a = ext_a.rlc_original();
+            let ext_b = encode_parity(ext_a.rows().clone(), &params).unwrap();
+            let commitment_b = ext_b.commitment();
+            let rlc_b = ext_b.rlc_original();
 
             assert_eq!(commitment_a, commitment_b);
             assert_eq!(rlc_a, rlc_b);
             assert_eq!(ext_a.rows().as_row_major(), ext_b.rows().as_row_major());
 
-            let context = VerificationContext::new(&rlc_b, &params).unwrap();
+            let context = VerificationContext::new(rlc_b, &params).unwrap();
             for idx in strategic_indices(&params) {
                 let proof = ext_b.generate_row_proof(idx).unwrap();
                 assert!(verify_with_context(&proof, &commitment_b, &context).unwrap());
@@ -603,12 +596,14 @@ mod tests {
             row_size: 64,
             seed: 123,
         });
-        let (honest, _, _) = encode(&original, &params).unwrap();
+        let honest = encode(&original, &params).unwrap();
 
         let mut tampered_rows = honest.rows().clone();
         tampered_rows.row_mut(params.k).unwrap()[0] ^= 0x01;
-        let (tampered, commitment, rlc_orig) = encode_parity(tampered_rows, &params).unwrap();
-        let context = VerificationContext::new(&rlc_orig, &params).unwrap();
+        let tampered = encode_parity(tampered_rows, &params).unwrap();
+        let commitment = tampered.commitment();
+        let rlc_orig = tampered.rlc_original();
+        let context = VerificationContext::new(rlc_orig, &params).unwrap();
 
         let parity_proof = tampered.generate_row_proof(params.k).unwrap();
         assert!(verify_with_context(&parity_proof, &commitment, &context).is_err());
@@ -625,13 +620,15 @@ mod tests {
             row_size: 64,
             seed: 321,
         });
-        let (ext_data, commitment, rlc_orig) = encode(&original, &params).unwrap();
+        let ext_data = encode(&original, &params).unwrap();
+        let commitment = ext_data.commitment();
+        let rlc_orig = ext_data.rlc_original();
 
-        let honest_context = VerificationContext::new(&rlc_orig, &params).unwrap();
+        let honest_context = VerificationContext::new(rlc_orig, &params).unwrap();
         let proof0 = ext_data.generate_row_proof(0).unwrap();
         assert!(verify_with_context(&proof0, &commitment, &honest_context).unwrap());
 
-        let mut tampered_rlc = rlc_orig.clone();
+        let mut tampered_rlc = rlc_orig.to_vec();
         tampered_rlc[0].limbs[0] ^= 0x01;
         let tampered_context = VerificationContext::new(&tampered_rlc, &params).unwrap();
 
@@ -654,7 +651,7 @@ mod tests {
             row_size: 64,
             seed: 555,
         });
-        let (honest, _, _) = encode(&original, &params).unwrap();
+        let honest = encode(&original, &params).unwrap();
         let mut tampered_rows = honest.rows().clone();
 
         let tampered_indices: Vec<usize> =
@@ -665,8 +662,10 @@ mod tests {
             row[7] ^= 0xA5;
         }
 
-        let (tampered, commitment, rlc_orig) = encode_parity(tampered_rows, &params).unwrap();
-        let context = VerificationContext::new(&rlc_orig, &params).unwrap();
+        let tampered = encode_parity(tampered_rows, &params).unwrap();
+        let commitment = tampered.commitment();
+        let rlc_orig = tampered.rlc_original();
+        let context = VerificationContext::new(rlc_orig, &params).unwrap();
 
         for &idx in &tampered_indices {
             let proof = tampered.generate_row_proof(idx).unwrap();
@@ -685,8 +684,10 @@ mod tests {
             row_size: 64,
             seed: 777,
         });
-        let (ext_data, commitment, rlc_orig) = encode(&original, &params).unwrap();
-        let context = VerificationContext::new(&rlc_orig, &params).unwrap();
+        let ext_data = encode(&original, &params).unwrap();
+        let commitment = ext_data.commitment();
+        let rlc_orig = ext_data.rlc_original();
+        let context = VerificationContext::new(rlc_orig, &params).unwrap();
 
         let proof = ext_data.generate_row_proof(0).unwrap();
         let mut short = proof.row_proof.clone();
@@ -711,8 +712,10 @@ mod tests {
             row_size: 64,
             seed: 888,
         });
-        let (ext_data, commitment, rlc_orig) = encode(&original, &params).unwrap();
-        let context = VerificationContext::new(&rlc_orig, &params).unwrap();
+        let ext_data = encode(&original, &params).unwrap();
+        let commitment = ext_data.commitment();
+        let rlc_orig = ext_data.rlc_original();
+        let context = VerificationContext::new(rlc_orig, &params).unwrap();
 
         let proof = ext_data.generate_row_proof(3).unwrap();
         let mut truncated = proof.row.to_vec();
@@ -800,14 +803,17 @@ mod tests {
             row_size: 128,
             seed: 404,
         });
-        let (ext_a, commitment_a, _) = encode(&original, &params).unwrap();
-        let (ext_b, commitment_b, _) = encode(&original, &params).unwrap();
+        let ext_a = encode(&original, &params).unwrap();
+        let commitment_a = ext_a.commitment();
+        let ext_b = encode(&original, &params).unwrap();
+        let commitment_b = ext_b.commitment();
         assert_eq!(commitment_a, commitment_b);
         assert_eq!(ext_a.row_root(), ext_b.row_root());
 
         let mut mutated = original.clone();
         mutated.row_mut(0).unwrap()[0] ^= 0x01;
-        let (_, commitment_c, _) = encode(&mutated, &params).unwrap();
+        let encoded = encode(&mutated, &params).unwrap();
+        let commitment_c = encoded.commitment();
         assert_ne!(commitment_a, commitment_c);
 
         let root = ext_a.row_root();
@@ -840,7 +846,7 @@ mod tests {
             row_size: 64,
             seed: 8080,
         });
-        let (ext_data, _, _) = encode(&original, &params).unwrap();
+        let ext_data = encode(&original, &params).unwrap();
         let coeffs = derive_coefficients(&ext_data.row_root(), params.k, params.n, params.row_size);
 
         let a = ext_data.row(0).unwrap().to_vec();
@@ -854,42 +860,48 @@ mod tests {
     }
 
     #[test]
-    fn encode_in_place_and_parity_in_place_match_encode() {
-        let (params, original) = make_original_rows(Case {
-            k: 8,
-            n: 8,
-            row_size: 64,
-            seed: 5151,
-        });
-        let (expected, commitment, rlc_orig) = encode(&original, &params).unwrap();
-        let context = VerificationContext::new(&rlc_orig, &params).unwrap();
+    fn encoding_entrypoints_match() {
+        for case in CASES {
+            let (params, original) = make_original_rows(*case);
+            let expected = encode(&original, &params).unwrap();
+            let context = VerificationContext::new(expected.rlc_original(), &params).unwrap();
+            let mut prefilled = RowMatrix::zeroed(params.total_rows(), params.row_size).unwrap();
+            prefilled.as_row_major_mut()[..params.k * params.row_size]
+                .copy_from_slice(original.as_row_major());
+            let in_place = encode_in_place(prefilled.clone(), &params).unwrap();
+            let budget = NonZeroUsize::new(64 << 10).unwrap();
+            let budgeted = encode_with_work_budget(&original, &params, budget).unwrap();
+            let budgeted_in_place =
+                encode_in_place_with_work_budget(prefilled.clone(), &params, budget).unwrap();
+            encode_parity_in_place(&mut prefilled, &params).unwrap();
+            let from_parity = encode_parity(prefilled, &params).unwrap();
 
-        let mut prefilled = RowMatrix::with_shape(
-            vec![0u8; params.total_rows() * params.row_size],
-            params.total_rows(),
-            params.row_size,
-        )
-        .unwrap();
-        let split_at = params.k * params.row_size;
-        prefilled.as_row_major_mut()[..split_at].copy_from_slice(original.as_row_major());
-
-        let (actual, commitment_b, rlc_b) = encode_in_place(prefilled.clone(), &params).unwrap();
-        assert_eq!(commitment, commitment_b);
-        assert_eq!(rlc_orig, rlc_b);
-        assert_eq!(expected.rows().as_row_major(), actual.rows().as_row_major());
-
-        encode_parity_in_place(&mut prefilled, &params).unwrap();
-        let (from_parity, commitment_c, rlc_c) = encode_parity(prefilled, &params).unwrap();
-        assert_eq!(commitment, commitment_c);
-        assert_eq!(rlc_orig, rlc_c);
-        assert_eq!(
-            expected.rows().as_row_major(),
-            from_parity.rows().as_row_major()
-        );
-
-        for idx in strategic_indices(&params) {
-            let proof = from_parity.generate_row_proof(idx).unwrap();
-            assert!(verify_with_context(&proof, &commitment_c, &context).unwrap());
+            for actual in [in_place, budgeted, budgeted_in_place, from_parity] {
+                assert_eq!(expected.commitment(), actual.commitment());
+                assert_eq!(expected.row_root(), actual.row_root());
+                assert_eq!(expected.rlc_root(), actual.rlc_root());
+                assert_eq!(expected.rlc_original(), actual.rlc_original());
+                assert_eq!(expected.rows().as_row_major(), actual.rows().as_row_major());
+                for index in 0..params.total_rows() {
+                    let proof = actual.generate_row_proof(index).unwrap();
+                    let expected_proof = expected.generate_row_proof(index).unwrap();
+                    assert_eq!(proof.row, expected_proof.row);
+                    assert_eq!(proof.row_proof, expected_proof.row_proof);
+                    verify_row_with_context(&proof, &actual.commitment(), &context).unwrap();
+                    let inclusion = actual.generate_row_inclusion_proof(index).unwrap();
+                    assert_eq!(inclusion.row, proof.row);
+                    assert_eq!(inclusion.row_proof, proof.row_proof);
+                    assert_eq!(inclusion.rlc_root, expected.rlc_root());
+                    if index < params.k {
+                        let standalone = actual.generate_standalone_proof(index).unwrap();
+                        let expected_standalone =
+                            expected.generate_standalone_proof(index).unwrap();
+                        assert_eq!(standalone.row, expected_standalone.row);
+                        assert_eq!(standalone.row_proof, expected_standalone.row_proof);
+                        assert_eq!(standalone.rlc_proof, expected_standalone.rlc_proof);
+                    }
+                }
+            }
         }
     }
 }

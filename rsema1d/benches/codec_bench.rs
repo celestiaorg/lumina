@@ -105,8 +105,7 @@ fn bench_encode_in_place(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(name), &params, |b, params| {
             b.iter(|| {
                 let buffer = extended.take().expect("buffer must be available");
-                let (ext_data, _commitment, _rlc_orig) =
-                    encode_in_place(black_box(buffer), black_box(params)).unwrap();
+                let ext_data = encode_in_place(black_box(buffer), black_box(params)).unwrap();
                 let rsema1d::ExtendedData { all_rows, .. } = ext_data;
                 extended = Some(all_rows);
             });
