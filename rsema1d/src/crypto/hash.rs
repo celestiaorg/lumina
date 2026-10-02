@@ -1,4 +1,5 @@
 use crate::field::GF128;
+use alloc::vec::Vec;
 use sha2::{Digest, Sha256};
 
 /// Hash data with SHA-256

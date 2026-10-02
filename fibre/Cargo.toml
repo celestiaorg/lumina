@@ -18,7 +18,7 @@ rsema1d.workspace = true
 # Crypto
 k256 = { workspace = true, features = ["ecdsa"] }
 ed25519-dalek = { version = "3", features = ["digest"] }
-sha2.workspace = true
+sha2 = { workspace = true, features = ["std"] }
 rand.workspace = true
 chacha8rand = "0.1.2"
 
@@ -41,7 +41,7 @@ prost.workspace = true
 tendermint-proto.workspace = true
 
 # Error handling and utilities
-thiserror.workspace = true
+thiserror = { workspace = true, features = ["std"] }
 tracing.workspace = true
 hex.workspace = true
 async-trait.workspace = true

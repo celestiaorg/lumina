@@ -35,7 +35,7 @@ lumina-utils = { workspace = true, features = ["executor", "time", "failover"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_repr.workspace = true
-thiserror.workspace = true
+thiserror = { workspace = true, features = ["std"] }
 tracing.workspace = true
 libp2p-identity = { workspace = true, optional = true }
 multiaddr = { version = "0.19", optional = true }

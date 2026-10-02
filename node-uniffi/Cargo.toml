@@ -31,7 +31,7 @@ libp2p.workspace = true
 redb.workspace = true
 serde_json.workspace = true
 tendermint.workspace = true
-thiserror.workspace = true
+thiserror = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "sync"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 tonic.workspace = true

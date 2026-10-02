@@ -7,6 +7,13 @@ Rust implementation of the `rsema1d` codec:
 - RLC-based row verification
 - Reconstruction of original rows from any `k` available rows
 
+## Features
+
+- `std` (default): encoding, reconstruction, row proofs and multithreading.
+  Without it the crate is `no_std` + `alloc` and keeps the hashing, field and
+  RLC primitives, plus `commitment_from_original_rows` to recompute a
+  commitment from the original rows.
+
 ## Quick Start
 
 ```bash

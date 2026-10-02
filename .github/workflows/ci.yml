@@ -278,6 +278,27 @@ jobs:
         artifact-name: devnet-logs-test-js
 
 
+  rsema1d-no-std:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        components: clippy
+        target: thumbv7em-none-eabihf
+        # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
+        rustflags: ""
+
+    - name: Run clippy for a no_std target
+      run: cargo clippy --lib --no-default-features --target=thumbv7em-none-eabihf -p rsema1d -- -D warnings --no-deps
+
+    - name: Run tests without default features
+      run: cargo test --no-default-features -p rsema1d
+
+
   test-rsema1d-go-compat:
     runs-on: ubuntu-latest
 
@@ -459,6 +480,7 @@ jobs:
     - test-wasm
     - test-js
     - test-rsema1d-go-compat
+    - rsema1d-no-std
     - build-wasm
     - fmt
     - docs

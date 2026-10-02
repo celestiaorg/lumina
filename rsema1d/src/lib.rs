@@ -1,6 +1,13 @@
 //! Reed-Solomon erasure coding with Merkle commitments and Random Linear Combinations.
+//!
+//! The default `std` feature enables encoding, reconstruction and row proofs.
+//! Without it the crate is `no_std` + `alloc` and keeps the hashing, field and
+//! RLC primitives needed to compute a commitment from the original rows.
 
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![forbid(unsafe_code)]
+
+extern crate alloc;
 
 pub mod codec;
 /// Cryptographic primitives: hashing, Merkle trees, and RLC coefficient derivation.
@@ -15,13 +22,15 @@ pub use error::{Error, Result};
 pub use field::GF128;
 pub use params::Parameters;
 
+#[cfg(feature = "std")]
 pub use codec::{
     ExtendedData, ExtendedRowsView, OriginalRowsView, RowInclusionProof, RowMatrix, RowProof,
     StandaloneProof, VerificationContext,
 };
 
-pub use codec::Commitment;
+pub use codec::{commitment_from_original_rows, Commitment};
 
+#[cfg(feature = "std")]
 pub use codec::{
     create_verification_context, default_work_budget, encode, encode_in_place,
     encode_in_place_with_work_budget, encode_parity, encode_with_work_budget, reconstruct,
@@ -29,9 +38,10 @@ pub use codec::{
     verify_row_with_context, verify_standalone, verify_standalone_proof, verify_with_context,
 };
 
+#[cfg(feature = "std")]
 pub use codec::verify_proof;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 
