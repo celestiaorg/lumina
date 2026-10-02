@@ -11,22 +11,36 @@ name = "rsema1d"
 path = "src/lib.rs"
 
 [dependencies]
-reed-solomon-simd = "3.1.0"
-bytes.workspace = true
+reed-solomon-simd = { version = "3.1.0", default-features = false }
+bytes = { workspace = true, optional = true }
 sha2 = { workspace = true, features = ["asm"] }
 thiserror.workspace = true
-rayon = "1.10"
-serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
-hex.workspace = true
-num_cpus = "1.17"
+rayon = { version = "1.10", optional = true }
+num_cpus = { version = "1.17", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-memmap2 = "0.9"
+memmap2 = { version = "0.9", optional = true }
+
+[features]
+default = ["std"]
+# Encoding, reconstruction, row proofs and multithreading. Without it, only
+# commitment computation from original rows is available (`no_std` + `alloc`).
+std = [
+  "dep:bytes",
+  "dep:rayon",
+  "dep:num_cpus",
+  "dep:memmap2",
+  "reed-solomon-simd/std",
+  "sha2/std",
+  "thiserror/std",
+]
 
 [dev-dependencies]
 rand.workspace = true
 rand_chacha = "0.3.1"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+hex.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion.workspace = true
@@ -34,10 +48,16 @@ criterion.workspace = true
 [[bench]]
 name = "codec_bench"
 harness = false
+required-features = ["std"]
 
 [[bench]]
 name = "reconstruct_sweep"
 harness = false
+required-features = ["std"]
+
+[[test]]
+name = "go_fuzzy_compat"
+required-features = ["std"]
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 getrandom_02.workspace = true

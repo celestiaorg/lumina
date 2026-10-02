@@ -1,4 +1,5 @@
 use crate::field::GF128;
+use alloc::vec::Vec;
 use reed_solomon_simd::engine::tables::get_exp_log;
 
 /// GF(2^16) has 65535 non-zero elements, so logarithms are `0..=65534`.

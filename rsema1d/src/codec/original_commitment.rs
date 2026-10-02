@@ -4,6 +4,8 @@ use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256_pair, 
 use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
+use alloc::{format, vec, vec::Vec};
+#[cfg(feature = "std")]
 use rayon::prelude::*;
 
 /// Build the RLC tree over the original rows' RLCs, zero-padded to `k.next_power_of_two()`.
@@ -62,8 +64,13 @@ pub fn commitment_from_original_rows(
         )));
     }
 
+    #[cfg(feature = "std")]
+    let iter_rows = || rows.par_iter();
+    #[cfg(not(feature = "std"))]
+    let iter_rows = || rows.iter();
+
     let zero_hash = hash_leaf(&vec![0u8; params.row_size]);
-    let mut leaves: Vec<[u8; 32]> = rows.par_iter().map(|row| hash_leaf(row)).collect();
+    let mut leaves: Vec<[u8; 32]> = iter_rows().map(|row| hash_leaf(row)).collect();
     leaves.resize(params.k_padded(), zero_hash);
     // The original rows' subtree is the left-most one, so every sibling is a right child.
     let row_root = row_root_siblings.iter().fold(
@@ -77,8 +84,7 @@ pub fn commitment_from_original_rows(
         params.n,
         params.row_size,
     ));
-    let rlc_orig: Vec<GF128> = rows
-        .par_iter()
+    let rlc_orig: Vec<GF128> = iter_rows()
         .map(|row| coefficient_logs.compute_rlc(row))
         .collect();
     let rlc_root = build_rlc_tree(&rlc_orig, params).root();
@@ -86,7 +92,7 @@ pub fn commitment_from_original_rows(
     Ok(sha256_pair(&row_root, &rlc_root))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use crate::codec::{ExtendedData, RowMatrix};

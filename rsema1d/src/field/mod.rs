@@ -74,14 +74,14 @@ fn gf16_mul(a: u16, b: u16) -> u16 {
     mul(a, log_b, &exp_log.exp, &exp_log.log)
 }
 
-impl std::ops::Add for GF128 {
+impl core::ops::Add for GF128 {
     type Output = Self;
     fn add(self, other: Self) -> Self {
         self.add(other)
     }
 }
 
-impl std::ops::AddAssign for GF128 {
+impl core::ops::AddAssign for GF128 {
     fn add_assign(&mut self, other: Self) {
         *self = self.add(other);
     }
