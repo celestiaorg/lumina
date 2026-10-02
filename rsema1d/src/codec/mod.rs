@@ -4,6 +4,9 @@ mod commitment;
 mod padding;
 mod proof;
 mod reconstruct;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[allow(unsafe_code)]
+mod rlc_simd;
 mod rows;
 mod rs;
 mod symbols;
@@ -25,6 +28,17 @@ pub use rs::{
     extend_data_with_work_budget, extend_rlcs, pack_gf128_to_shard, unpack_shard_to_gf128,
 };
 pub use symbols::{compute_rlc, extract_symbols};
+
+/// Computes original-row RLCs through the encoding path for benchmarks.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub fn bench_compute_rlcs(
+    data: &[u8],
+    row_size: usize,
+    coefficients: Vec<crate::field::GF128>,
+) -> Vec<crate::field::GF128> {
+    symbols::compute_rlcs(data, row_size, coefficients)
+}
 pub use verification::{
     create_verification_context, verify_proof, verify_row_inclusion, verify_row_inclusion_proof,
     verify_row_with_context, verify_standalone, verify_standalone_proof, verify_with_context,
