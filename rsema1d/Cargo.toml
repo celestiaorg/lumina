@@ -41,7 +41,6 @@ harness = false
 [[bench]]
 name = "derive_bench"
 harness = false
-required-features = ["bench-internals"]
 
 [[bench]]
 name = "rlc_bench"
