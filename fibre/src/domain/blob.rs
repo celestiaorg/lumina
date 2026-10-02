@@ -180,9 +180,9 @@ impl EncodedBlob {
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
         let data_size = data.len();
         Ok(move || {
-            let (extended_data, commitment, _) =
+            let extended_data =
                 rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
-            let id = BlobID::new(cfg.blob_version, commitment);
+            let id = BlobID::new(cfg.blob_version, extended_data.commitment());
 
             Ok(Self {
                 cfg,

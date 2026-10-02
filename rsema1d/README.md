@@ -39,13 +39,12 @@ Set `RSEMA1D_RECONSTRUCT_WORK_BUDGET_MIB` to a positive integer to override the 
 
 1. Build `Parameters(k, n, row_size)`.
 2. Put original data into a contiguous `RowMatrix` (`k * row_size` bytes).
-3. Call `encode` to produce:
-   - `ExtendedData` (all `k+n` rows)
-   - `Commitment` (`[u8; 32]`)
-   - original `RLC` values
+3. Call `encode` to produce `ExtendedData`, containing all `k+n` rows, the commitment, and the `k` original RLC values.
 4. Build a `VerificationContext` from original RLC values.
 5. Generate and verify row proofs.
 6. Sample any `k` rows and call `reconstruct` to recover original rows.
+
+All encoding entrypoints return `ExtendedData`. Use `commitment()` and `rlc_original()` instead of destructuring the former tuple. Extended RLCs are no longer stored on `ExtendedData`; verification extends the originals in `VerificationContext::new`. For an explicit extended vector, call `rsema1d::codec::extend_rlcs(extended.rlc_original(), params.k, params.n)`.
 
 ## Example
 
@@ -66,10 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let original = RowMatrix::with_shape(bytes, params.k, params.row_size)?;
 
     // 2) Encode.
-    let (extended, commitment, rlc_orig) = encode(&original, &params)?;
+    let extended = encode(&original, &params)?;
+    let commitment = extended.commitment();
 
     // 3) Create verification context and verify a row proof.
-    let (ctx, _rlc_root) = create_verification_context(&rlc_orig, &params)?;
+    let (ctx, _rlc_root) = create_verification_context(extended.rlc_original(), &params)?;
     let proof = extended.generate_row_proof(0)?;
     verify_row_with_context(&proof, &commitment, &ctx)?;
 

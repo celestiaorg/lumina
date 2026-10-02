@@ -194,8 +194,10 @@ fn go_fuzzy_vectors_match_rust() {
         let original_rows = RowMatrix::with_shape(original.clone(), params.k, params.row_size)
             .unwrap_or_else(|e| panic!("{}: original rows shape failed: {}", case.name, e));
 
-        let (ext_data, commitment, rust_rlc_orig) = encode(&original_rows, &params)
+        let ext_data = encode(&original_rows, &params)
             .unwrap_or_else(|e| panic!("{}: encode failed: {}", case.name, e));
+        let commitment = ext_data.commitment();
+        let rust_rlc_orig = ext_data.rlc_original();
 
         assert_eq!(
             hex::encode(commitment),
