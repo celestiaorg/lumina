@@ -3,9 +3,6 @@
 mod hash;
 mod merkle;
 
-#[cfg(feature = "bench-internals")]
-#[doc(hidden)]
-pub use hash::derive_coefficients_with_parallelism;
 pub(crate) use hash::sha256_pair;
 pub use hash::{derive_coefficients, hash_to_gf128, sha256};
 pub use merkle::{hash_internal, hash_leaf, verify_proof, MerkleTree};

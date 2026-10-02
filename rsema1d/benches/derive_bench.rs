@@ -4,7 +4,7 @@ use std::{sync::Once, time::Duration};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use rayon::ThreadPoolBuilder;
-use rsema1d::crypto::derive_coefficients_with_parallelism;
+use rsema1d::crypto::derive_coefficients;
 
 fn bench_derive(c: &mut Criterion) {
     let mut group = c.benchmark_group("derive_coefficients");
@@ -23,27 +23,23 @@ fn bench_derive(c: &mut Criterion) {
             let symbols = 1 << exponent;
             let row_size = symbols * 2;
             group.throughput(Throughput::Elements(symbols as u64));
-            for parallel in [false, true] {
-                let mode = if parallel { "parallel" } else { "serial" };
-                let name = format!("symbols={symbols}/workers={workers}/{mode}");
-                let metadata = Once::new();
-                group.bench_function(&name, |b| {
-                    metadata.call_once(|| {
-                        support::print_case(&name, 1024, 1024, row_size, workers);
-                    });
-                    pool.install(|| {
-                        b.iter(|| {
-                            derive_coefficients_with_parallelism(
-                                black_box(&[0xa5; 32]),
-                                black_box(1024),
-                                black_box(1024),
-                                black_box(row_size),
-                                parallel,
-                            )
-                        });
+            let name = format!("symbols={symbols}/workers={workers}");
+            let metadata = Once::new();
+            group.bench_function(&name, |b| {
+                metadata.call_once(|| {
+                    support::print_case(&name, 1024, 1024, row_size, workers);
+                });
+                pool.install(|| {
+                    b.iter(|| {
+                        derive_coefficients(
+                            black_box(&[0xa5; 32]),
+                            black_box(1024),
+                            black_box(1024),
+                            black_box(row_size),
+                        )
                     });
                 });
-            }
+            });
         }
     }
     group.finish();
