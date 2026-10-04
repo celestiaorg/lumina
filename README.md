@@ -3,7 +3,6 @@
 # Lumina
 
 <a href="https://github.com/celestiaorg/lumina/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/celestiaorg/lumina/actions/workflows/ci.yml/badge.svg?branch=main" alt="Build Status" /></a>
-<a href="https://lumina.rs"><img src="https://img.shields.io/website?url=https%3A%2F%2Flumina.rs&label=lumina.rs" alt="lumina.rs"></a>
 <a href="https://crates.io/crates/lumina-cli"><img src="https://img.shields.io/crates/v/lumina-cli?label=lumina-cli" alt="crates.io lumina-cli"></a>
 <a href="https://crates.io/crates/lumina-node"><img src="https://img.shields.io/crates/v/lumina-node?label=lumina-node" alt="crates.io lumina-node"></a>
 <a href="https://crates.io/crates/lumina-node-uniffi"><img src="https://img.shields.io/crates/v/lumina-node-uniffi?label=lumina-node-uniffi" alt="crates.io lumina-node-uniffi"></a>
@@ -17,8 +16,6 @@
 
 
 Rust implementation of Celestia's [data availability node](https://github.com/celestiaorg/celestia-node) able to run natively and in browser-based environments.
-
-Run Lumina now at [lumina.rs](https://lumina.rs/) and directly verify Celestia.
 
 Supported features:
 - Backward and forward synchronization of block headers within sampling window
