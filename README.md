@@ -84,12 +84,6 @@ cd -
 cargo install --path cli --features browser-node
 ```
 
-> [!WARNING]
-> Since `getrandom v0.3` it is required to configure the randomness source via `RUSTFLAGS`.
-> If you depend on any of the crates and build for `wasm32-unknown-unknown`, it may be required to set
-> `'--cfg getrandom_backend="wasm_js"'` either through an environment variable or through `.cargo/config.toml`.
-> [See `getrandom` docs for more info](https://docs.rs/getrandom/0.3.3/getrandom/#webassembly-support).
-
 ## Running the node
 
 ### Running the node natively
@@ -125,7 +119,7 @@ docker compose -f ci/docker-compose.yml up --build --force-recreate -d --wait --
 docker compose -f ci/docker-compose.yml down
 ```
 > **Note:**
-> You can run more DA nodes by uncommenting/copying the node service definition in `ci/docker-compose.yml`.
+> You can run more DA nodes by uncommenting/copying the node service definition in `ci/docker-compose.yml` and increasing the validator's `NODE_COUNT` to match the total number of DA nodes.
 
 Fibre is registered on-chain as `localhost:7980` on chain `private` and serves TLS on that address from your host; use `http://localhost:19090` for app gRPC. The validator signing port listens only on container loopback.
 
@@ -147,13 +141,13 @@ export CELESTIA_NODE_AUTH_TOKEN=$(docker compose -f ci/docker-compose.yml exec n
 Accessing json RPC api with Go `celestia` cli:
 ```bash
 docker compose -f ci/docker-compose.yml exec node-1 \
-    celestia blob submit 0x0c204d39600fddd3 '"Hello world"' --token "$CELESTIA_NODE_AUTH_TOKEN"
+    celestia blob submit 0x0c204d39600fddd3 '"Hello world"' --token "$CELESTIA_NODE_AUTH_TOKEN" --url http://localhost:26658
 ```
 
 Extracting blocks for test cases:
 ```bash
 docker compose -f ci/docker-compose.yml exec node-1 \
-    celestia header get-by-height 27 --token "$CELESTIA_NODE_AUTH_TOKEN" | jq .result
+    celestia header get-by-height 27 --token "$CELESTIA_NODE_AUTH_TOKEN" --url http://localhost:26658 | jq .result
 ```
 
 ## Running integration tests with Celestia node
@@ -170,11 +164,13 @@ Run tests
 cargo test
 ```
 
-Run tests for javascript bindings. Those test are written in typescript, import wasm packages,
-and are executed in all major browsers (chrome, firefox, safari) using vitest and playwright.
+The JavaScript binding tests are written in TypeScript, import Wasm packages, and run in Chromium, Firefox, and WebKit using Vitest and Playwright.
+
+Install npm and wasm-pack as described in [Building wasm-node](#building-wasm-node), then run:
 
 ```bash
 npm ci
+npx playwright install --with-deps
 npm test
 ```
 
