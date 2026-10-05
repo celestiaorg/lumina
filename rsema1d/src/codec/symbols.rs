@@ -1,5 +1,92 @@
 use crate::field::GF128;
+use rayon::prelude::*;
 use reed_solomon_simd::engine::tables::get_exp_log;
+use reed_solomon_simd::engine::{utils::xor, DefaultEngine, Engine};
+
+pub(crate) fn compute_rlcs(data: &[u8], row_size: usize, coefficients: Vec<GF128>) -> Vec<GF128> {
+    compute_rlcs_with_engine(data, row_size, coefficients, &DefaultEngine::new())
+}
+
+fn compute_rlcs_with_engine(
+    data: &[u8],
+    row_size: usize,
+    coefficients: Vec<GF128>,
+    engine: &(impl Engine + Sync),
+) -> Vec<GF128> {
+    let k = data.len() / row_size;
+    if k == 0 {
+        return Vec::new();
+    }
+    let blocks = k.div_ceil(32);
+    let chunks = row_size / 64;
+    let workers = rayon::current_num_threads().min(chunks);
+    let logs = RlcCoefficientLogs::new(coefficients);
+    let accumulate = |worker: usize| {
+        let span = chunks / workers;
+        let extra = chunks % workers;
+        let start = worker * span + worker.min(extra);
+        let end = start + span + usize::from(worker < extra);
+        let mut acc = vec![[0u8; 64]; 8 * blocks];
+        let mut columns = vec![[0u8; 64]; 32 * blocks];
+        // Reuse the multiplication buffer because Engine::mul overwrites its input.
+        let mut scratch = vec![[0u8; 64]; blocks];
+        for c in start..end {
+            transpose_chunk(data, row_size, c, &mut columns);
+            for (j, limb_logs) in logs.logs[c * 32..(c + 1) * 32].iter().enumerate() {
+                let column = &columns[j * blocks..(j + 1) * blocks];
+                for (comp, &log) in limb_logs.iter().enumerate() {
+                    if log == ZERO_LIMB {
+                        continue;
+                    }
+                    scratch.copy_from_slice(column);
+                    engine.mul(&mut scratch, log);
+                    xor(&mut acc[comp * blocks..(comp + 1) * blocks], &scratch);
+                }
+            }
+        }
+        acc
+    };
+    let total = if workers == 1 {
+        accumulate(0)
+    } else {
+        let mut partials = (0..workers)
+            .into_par_iter()
+            .map(accumulate)
+            .collect::<Vec<_>>();
+        let (total, rest) = partials.split_first_mut().unwrap();
+        for partial in rest {
+            xor(total, partial);
+        }
+        std::mem::take(total)
+    };
+    (0..k)
+        .map(|r| GF128 {
+            limbs: std::array::from_fn(|comp| {
+                let block = &total[comp * blocks + r / 32];
+                u16::from_le_bytes([block[r % 32], block[32 + r % 32]])
+            }),
+        })
+        .collect()
+}
+
+fn transpose_chunk(data: &[u8], row_size: usize, chunk: usize, columns: &mut [[u8; 64]]) {
+    let k = data.len() / row_size;
+    let blocks = k.div_ceil(32);
+    for rb in 0..blocks {
+        let mut tile = [[0u8; 64]; 32];
+        for (r, row) in tile.iter_mut().enumerate().take((k - rb * 32).min(32)) {
+            let start = (rb * 32 + r) * row_size + chunk * 64;
+            row.copy_from_slice(&data[start..start + 64]);
+        }
+        for j in 0..32 {
+            let window = &mut columns[j * blocks + rb];
+            for (r, row) in tile.iter().enumerate() {
+                window[r] = row[j];
+                window[32 + r] = row[32 + j];
+            }
+        }
+    }
+}
 
 /// GF(2^16) has 65535 non-zero elements, so logarithms are `0..=65534`.
 const GF_MODULUS: u32 = 65535;
@@ -194,5 +281,109 @@ mod tests {
 
         let table = RlcCoefficientLogs::new(coeffs.clone());
         assert_eq!(table.compute_rlc(&row), compute_rlc(&row, &coeffs));
+    }
+
+    #[test]
+    fn batched_rlcs_match_scalar() {
+        let engine = DefaultEngine::new();
+        for workers in [1, 2, 3, 16, 32] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                for k in [1, 31, 32, 33, 63, 64, 65, 1023, 1024, 1025] {
+                    for row_size in [64, 128, 320, 1088] {
+                        let mut rng = ChaCha8Rng::seed_from_u64((k * row_size) as u64);
+                        let mut data = vec![0; k * row_size];
+                        rng.fill_bytes(&mut data);
+                        let mut coefficients: Vec<_> = (0..row_size / 2)
+                            .map(|i| GF128 {
+                                limbs: std::array::from_fn(|comp| {
+                                    if (i + comp) % 7 == 0 {
+                                        0
+                                    } else {
+                                        rng.gen()
+                                    }
+                                }),
+                            })
+                            .collect();
+                        coefficients[0] = GF128::zero();
+                        for pattern in 0..3 {
+                            if pattern == 1 {
+                                for (i, byte) in data.iter_mut().enumerate() {
+                                    if i % 37 != 0 {
+                                        *byte = 0;
+                                    }
+                                }
+                            } else if pattern == 2 {
+                                data.fill(0);
+                            }
+                            let expected: Vec<_> = data
+                                .chunks_exact(row_size)
+                                .map(|row| compute_rlc(row, &coefficients))
+                                .collect();
+                            assert_eq!(
+                                compute_rlcs_with_engine(
+                                    &data,
+                                    row_size,
+                                    coefficients.clone(),
+                                    &engine
+                                ),
+                                expected,
+                                "k={k}, row_size={row_size}, workers={workers}, pattern={pattern}"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn batched_rlcs_wrap_exponents_and_support_portable_engine() {
+        let exp = &get_exp_log().exp;
+        let k = 33;
+        let row_size = 320;
+        let mut data = vec![0; k * row_size];
+        let coefficients: Vec<_> = (0..row_size / 2)
+            .map(|i| GF128 {
+                limbs: std::array::from_fn(|comp| {
+                    if comp == 0 {
+                        0
+                    } else {
+                        exp[[0, 1, 32767, 32768, 65533, 65534][(i + comp) % 6]]
+                    }
+                }),
+            })
+            .collect();
+        for (r, row) in data.chunks_exact_mut(row_size).enumerate() {
+            for i in 0..row_size / 2 {
+                let bytes = exp[[0, 1, 32767, 32768, 65533, 65534][(i + r) % 6]].to_le_bytes();
+                row[i / 32 * 64 + i % 32] = bytes[0];
+                row[i / 32 * 64 + 32 + i % 32] = bytes[1];
+            }
+        }
+        let expected: Vec<_> = data
+            .chunks_exact(row_size)
+            .map(|row| compute_rlc(row, &coefficients))
+            .collect();
+        assert_eq!(
+            compute_rlcs_with_engine(
+                &data,
+                row_size,
+                coefficients.clone(),
+                &reed_solomon_simd::engine::NoSimd::new()
+            ),
+            expected
+        );
+        assert_eq!(
+            compute_rlcs(&data, row_size, coefficients.clone()),
+            expected
+        );
+        assert_eq!(
+            compute_rlcs(&[], row_size, coefficients),
+            Vec::<GF128>::new()
+        );
     }
 }
