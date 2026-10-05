@@ -266,6 +266,65 @@ mod tests {
     }
 
     #[test]
+    fn encoded_upload_shards_match_golden() {
+        use crate::{EncodedBlob, config::BlobConfig};
+        use prost::Message;
+        use sha2::{Digest, Sha256};
+
+        let cfg = BlobConfig::new_test(0, 4, 12, 1024, 4, 64);
+        let data: Vec<u8> = (0..200).collect();
+        let blob = EncodedBlob::new(&data, cfg.clone()).unwrap();
+        assert_eq!(blob.row_size(), 64);
+        let commitment = blob.id().commitment();
+        assert_eq!(
+            hex::encode(commitment),
+            "20e5493a38f87f4a6702f5a0fd6dba78d709825c4e1a193d1144eb771fe74fc1"
+        );
+        let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, 64).unwrap();
+        for (indices, expected_hash) in [
+            (
+                0..cfg.original_rows,
+                "f5fef593c57934aac582784f5c15101a949d86a8df80c27a034b7216a86236a2",
+            ),
+            (
+                cfg.original_rows..cfg.total_rows(),
+                "0e8bf86b2725b380386c85199c1fd4a1eeba415df0d10077fafc61b2a4e494b1",
+            ),
+        ] {
+            let proofs: Vec<_> = indices.map(|i| blob.row(i).unwrap()).collect();
+            let shard = build_upload_shard(&proofs, blob.rlc_coeffs());
+            assert_eq!(shard.rlcs.len(), cfg.original_rows * 16);
+            assert_eq!(
+                hex::encode(&shard.rlcs),
+                concat!(
+                    "43d7eaee3df814eca6c0f5b77062d1729baeb8fc294cbec7b1a51caa9667465d",
+                    "7f1bbcc732cbef157b2fe49a58d6eb1179eefa4d2ba8dbd2f226daa7e95a3464"
+                )
+            );
+            let wire = shard.encode_to_vec();
+            assert_eq!(hex::encode(Sha256::digest(&wire)), expected_hash);
+            let shard = proto::BlobShard::decode(wire.as_slice()).unwrap();
+            let received =
+                parse_download_response(proto::DownloadShardResponse { shard: Some(shard) })
+                    .unwrap();
+            let context = rsema1d::VerificationContext::new(&received.rlcs, &params).unwrap();
+            let mut bad_rlcs = received.rlcs.clone();
+            bad_rlcs[0].limbs[0] ^= 1;
+            let bad_context = rsema1d::VerificationContext::new(&bad_rlcs, &params).unwrap();
+            for mut proof in received.rows {
+                rsema1d::verify_row_with_context(&proof, &commitment, &context).unwrap();
+                assert!(
+                    rsema1d::verify_row_with_context(&proof, &commitment, &bad_context).is_err()
+                );
+                let mut row = proof.row.to_vec();
+                row[0] ^= 1;
+                proof.row = row.into();
+                assert!(rsema1d::verify_row_with_context(&proof, &commitment, &context).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn build_upload_shard_includes_rlc_vector() {
         let proofs = vec![rsema1d::RowInclusionProof {
             index: 0,

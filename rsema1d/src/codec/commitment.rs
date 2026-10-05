@@ -1,4 +1,3 @@
-use crate::codec::extend_rlcs;
 use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::rows::RowMatrix;
@@ -85,8 +84,6 @@ pub struct ExtendedData {
     pub all_rows: RowMatrix,
     /// RLC values for the original K rows.
     pub rlc_orig: Vec<GF128>,
-    /// RLC values for all K+N rows (original + extended).
-    pub rlc_extended: Vec<GF128>,
     params: Parameters,
     row_tree: MerkleTree,
     rlc_tree: MerkleTree,
@@ -127,7 +124,6 @@ impl ExtendedData {
             params.row_size,
             coefficients,
         );
-        let rlc_extended = extend_rlcs(&rlc_orig, params.k, params.n)?;
 
         let rlc_tree = build_rlc_tree(&rlc_orig, params);
         let rlc_root = rlc_tree.root();
@@ -140,7 +136,6 @@ impl ExtendedData {
             rlc_root,
             all_rows: extended_rows,
             rlc_orig,
-            rlc_extended,
             params: *params,
             row_tree,
             rlc_tree,
@@ -178,11 +173,6 @@ impl ExtendedData {
     /// Returns the RLC values for the original K rows.
     pub fn rlc_original(&self) -> &[GF128] {
         &self.rlc_orig
-    }
-
-    /// Returns the RLC values for all K+N rows.
-    pub fn rlc_extended(&self) -> &[GF128] {
-        &self.rlc_extended
     }
 
     /// Returns the parameters used to generate this data.
@@ -262,7 +252,6 @@ mod tests {
             (params.k + params.n) * params.row_size
         );
         assert_eq!(ext_data.rlc_orig.len(), params.k);
-        assert_eq!(ext_data.rlc_extended.len(), params.k + params.n);
     }
 
     #[test]

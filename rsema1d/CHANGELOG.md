@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `encode`, `encode_with_work_budget`, `encode_in_place`, `encode_in_place_with_work_budget`, and `encode_parity` now return `Result<ExtendedData>`. Read the commitment with `commitment()` and borrow original RLCs with `rlc_original()`; call `.to_vec()` only when an owned copy is needed.
+- **Breaking:** Removed the `ExtendedData::rlc_extended` field and accessor. Encoding no longer extends original RLCs; callers needing that vector can explicitly call `rsema1d::codec::extend_rlcs(data.rlc_original(), params.k, params.n)`. `VerificationContext::new` continues extending original RLCs for verification.
+
 ## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/rsema1d-v1.1.0-rc.1...rsema1d-v1.2.0-rc.1) - 2026-09-24
 
 ### Fixed
