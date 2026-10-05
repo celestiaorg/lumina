@@ -48,9 +48,10 @@ pub fn commitment_from_original_rows(
         )));
     }
 
-    let zero_hash = hash_leaf(&vec![0u8; params.row_size]);
     let mut leaves: Vec<[u8; 32]> = rows.par_iter().map(|row| hash_leaf(row)).collect();
-    leaves.resize(params.k_padded(), zero_hash);
+    if leaves.len() < params.k_padded() {
+        leaves.resize(params.k_padded(), hash_leaf(&vec![0u8; params.row_size]));
+    }
     // The original rows' subtree is the left-most one, so every sibling is a right child.
     let row_root = row_root_siblings.iter().fold(
         MerkleTree::from_leaf_hashes(leaves).root(),
