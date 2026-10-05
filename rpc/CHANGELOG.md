@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/celestiaorg/lumina/compare/celestia-rpc-v1.2.0...celestia-rpc-v2.0.0) - 2026-10-05
+
+### Added
+
+- *(client)* Add connection timeout support for gRPC client ([#1116](https://github.com/celestiaorg/lumina/pull/1116))
+
+### Other
+
+- update libp2p ([#1091](https://github.com/celestiaorg/lumina/pull/1091))
+- more `workspace = true` to avoid accindetal duplicates ([#1109](https://github.com/celestiaorg/lumina/pull/1109))
+
 ## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-rpc-v1.2.0-rc.1...celestia-rpc-v1.2.0) - 2026-09-28
 
 ### Other

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v1.2.0...celestia-grpc-v2.0.0) - 2026-10-05
+
+### Other
+
+- further reduce dependency duplicates ([#1113](https://github.com/celestiaorg/lumina/pull/1113))
+- update libp2p ([#1091](https://github.com/celestiaorg/lumina/pull/1091))
+- more `workspace = true` to avoid accindetal duplicates ([#1109](https://github.com/celestiaorg/lumina/pull/1109))
+
 ## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-grpc-v1.2.0-rc.1...celestia-grpc-v1.2.0) - 2026-09-28
 
 ### Other
