@@ -181,6 +181,7 @@ const PROTO_FILES: &[&str] = &[
     "vendor/go-square/blob/v4/blob.proto",
     "vendor/celestia/fibre/v1/service.proto",
     "vendor/celestia/fibre/v1/fibre.proto",
+    "vendor/celestia/fibre/v1/query.proto",
     "vendor/celestia/fibre/v1/tx.proto",
     "vendor/celestia/valaddr/v1/query.proto",
     "vendor/header/pb/extended_header.proto",

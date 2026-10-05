@@ -57,6 +57,7 @@ impl SamplingProfile {
 }
 
 const ENCODE_CONFIGS: &[(&str, usize, usize, usize)] = &[
+    ("128MB_k1024_n3072", 1024, 3072, 131072),
     ("128KB_k1024_n3072", 1024, 3072, 128),
     ("1MB_k1024_n3072", 1024, 3072, 1024),
     ("1MB_k4096_n12288", 4096, 12288, 256),
