@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/celestiaorg/lumina/compare/rsema1d-v1.2.0...rsema1d-v1.3.0) - 2026-10-05
+
+### Added
+
+- *(rsema1d)* compute commitment from original rows ([#1123](https://github.com/celestiaorg/lumina/pull/1123))
+
+### Other
+
+- *(rsema1d)* parallel coefficient calculation ([#1119](https://github.com/celestiaorg/lumina/pull/1119))
+- *(rsema1d)* align benches for easier comparison with golang implementation ([#1118](https://github.com/celestiaorg/lumina/pull/1118))
+- *(rsema1d)* stop doing unnecessary RLC extending ([#1117](https://github.com/celestiaorg/lumina/pull/1117))
+- *(rsema1d)* batch RLC using existing SIMD multiplication ([#1122](https://github.com/celestiaorg/lumina/pull/1122))
+- more `workspace = true` to avoid accindetal duplicates ([#1109](https://github.com/celestiaorg/lumina/pull/1109))
+
 ### Changed
 
 - **Breaking:** `encode`, `encode_with_work_budget`, `encode_in_place`, `encode_in_place_with_work_budget`, and `encode_parity` now return `Result<ExtendedData>`. Read the commitment with `commitment()` and borrow original RLCs with `rlc_original()`; call `.to_vec()` only when an owned copy is needed.

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/celestiaorg/lumina/compare/celestia-fibre-v1.2.0...celestia-fibre-v1.3.0) - 2026-10-05
+
+### Other
+
+- *(rsema1d)* stop doing unnecessary RLC extending ([#1117](https://github.com/celestiaorg/lumina/pull/1117))
+- *(fibre)* test: reconstruct downloaded blobs from parity rows ([#1064](https://github.com/celestiaorg/lumina/pull/1064))
+- reducing ed25519-dalek and x509 parser duplicate version ([#1110](https://github.com/celestiaorg/lumina/pull/1110))
+- more `workspace = true` to avoid accindetal duplicates ([#1109](https://github.com/celestiaorg/lumina/pull/1109))
+
 ## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-fibre-v1.2.0-rc.1...celestia-fibre-v1.2.0) - 2026-09-28
 
 ### Other

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/celestiaorg/lumina/compare/celestia-client-v1.2.0...celestia-client-v1.3.0) - 2026-10-05
+
+### Added
+
+- *(client)* Add connection timeout support for gRPC client ([#1116](https://github.com/celestiaorg/lumina/pull/1116))
+
+### Other
+
+- *(client)* unflaky rpc-timeout test ([#1104](https://github.com/celestiaorg/lumina/pull/1104))
+
 ## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-client-v1.2.0-rc.1...celestia-client-v1.2.0) - 2026-09-28
 
 ### Other

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/celestiaorg/lumina/compare/celestia-types-v1.2.0...celestia-types-v1.3.0) - 2026-10-05
+
+### Fixed
+
+- *(node)* stop acting on bad encoding fraud proofs ([#1094](https://github.com/celestiaorg/lumina/pull/1094))
+
+### Other
+
+- further reduce dependency duplicates ([#1113](https://github.com/celestiaorg/lumina/pull/1113))
+- more `workspace = true` to avoid accindetal duplicates ([#1109](https://github.com/celestiaorg/lumina/pull/1109))
+- update mixed eds test ([#1115](https://github.com/celestiaorg/lumina/pull/1115))
+
 ## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-types-v1.2.0-rc.1...celestia-types-v1.2.0) - 2026-09-28
 
 ### Fixed
