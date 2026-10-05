@@ -1,28 +1,13 @@
+use crate::codec::commitment::build_rlc_tree;
 use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::symbols::RlcCoefficientLogs;
 use crate::codec::{compute_rlc, extend_rlcs};
-use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256_pair, MerkleTree};
+use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256_pair};
 use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
 use std::sync::OnceLock;
-
-fn build_rlc_root(rlc_orig: &[GF128], params: &Parameters) -> [u8; 32] {
-    let k_padded = params.k_padded();
-    let zero_rlc = [0u8; 16];
-    let zero_hash = hash_leaf(&zero_rlc);
-    let leaf_hashes: Vec<[u8; 32]> = (0..k_padded)
-        .map(|i| {
-            if i < params.k {
-                hash_leaf(&rlc_orig[i].to_bytes())
-            } else {
-                zero_hash
-            }
-        })
-        .collect();
-    MerkleTree::from_leaf_hashes(leaf_hashes).root()
-}
 
 /// Pre-computed context for efficient batch verification.
 #[derive(Debug, Clone)]
@@ -45,7 +30,7 @@ impl VerificationContext {
         }
 
         let rlc_extended = extend_rlcs(rlc_orig, params.k, params.n)?;
-        let rlc_root = build_rlc_root(rlc_orig, params);
+        let rlc_root = build_rlc_tree(rlc_orig, params).root();
 
         Ok(Self {
             params: *params,

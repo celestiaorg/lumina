@@ -1,6 +1,7 @@
 //! Reed-Solomon encoding/decoding with RLC integration.
 
 mod commitment;
+mod original_commitment;
 mod padding;
 mod proof;
 mod reconstruct;
@@ -15,6 +16,7 @@ use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 
 pub use commitment::ExtendedData;
+pub use original_commitment::commitment_from_original_rows;
 pub use padding::map_index_to_tree_position;
 pub use proof::{RowInclusionProof, RowProof, StandaloneProof};
 pub use reconstruct::reconstruct_data;

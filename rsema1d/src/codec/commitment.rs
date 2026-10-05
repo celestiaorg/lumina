@@ -54,7 +54,7 @@ fn build_row_tree(rows: &RowMatrix, params: &Parameters) -> MerkleTree {
     MerkleTree::from_leaf_hashes(leaf_hashes)
 }
 
-fn build_rlc_tree(rlc_orig: &[GF128], params: &Parameters) -> MerkleTree {
+pub(crate) fn build_rlc_tree(rlc_orig: &[GF128], params: &Parameters) -> MerkleTree {
     let k_padded = params.k_padded();
     let zero_rlc = [0u8; 16];
     let zero_hash = hash_leaf(&zero_rlc);
