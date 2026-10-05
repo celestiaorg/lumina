@@ -44,7 +44,7 @@ serde_json.workspace = true
 serde-wasm-bindgen.workspace = true
 serde_repr.workspace = true
 send_wrapper.workspace = true
-thiserror = { workspace = true, features = ["std"] }
+thiserror.workspace = true
 time = { workspace = true, features = ["wasm-bindgen"] }
 tokio = { workspace = true, features = ["sync"] }
 tokio-stream = { workspace = true, features = ["sync"] }

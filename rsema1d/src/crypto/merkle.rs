@@ -1,5 +1,3 @@
-use alloc::{vec, vec::Vec};
-#[cfg(feature = "std")]
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
@@ -42,8 +40,27 @@ impl MerkleTree {
             let next_level_start = level_start + level_size;
             let parent_count = level_size / 2;
 
-            let (children, parents) = nodes.split_at_mut(next_level_start);
-            hash_level(&children[level_start..], &mut parents[..parent_count]);
+            // Parallelize internal node hashing for large levels
+            if parent_count >= 64 {
+                // Compute hashes in parallel, then write back
+                let parent_hashes: Vec<[u8; 32]> = (0..parent_count)
+                    .into_par_iter()
+                    .map(|i| {
+                        let left = &nodes[level_start + i * 2];
+                        let right = &nodes[level_start + i * 2 + 1];
+                        hash_internal(left, right)
+                    })
+                    .collect();
+
+                nodes[next_level_start..next_level_start + parent_count]
+                    .copy_from_slice(&parent_hashes);
+            } else {
+                for i in 0..parent_count {
+                    let left = &nodes[level_start + i * 2];
+                    let right = &nodes[level_start + i * 2 + 1];
+                    nodes[next_level_start + i] = hash_internal(left, right);
+                }
+            }
 
             level_start = next_level_start;
             level_size /= 2;
@@ -85,22 +102,6 @@ impl MerkleTree {
         }
 
         proof
-    }
-}
-
-/// Hash each pair of `children` into `parents`, in parallel for large levels.
-fn hash_level(children: &[[u8; 32]], parents: &mut [[u8; 32]]) {
-    let (pairs, _) = children.as_chunks::<2>();
-    #[cfg(feature = "std")]
-    if parents.len() >= 64 {
-        parents
-            .par_iter_mut()
-            .zip(pairs.par_iter())
-            .for_each(|(parent, [left, right])| *parent = hash_internal(left, right));
-        return;
-    }
-    for (parent, [left, right]) in parents.iter_mut().zip(pairs) {
-        *parent = hash_internal(left, right);
     }
 }
 

@@ -39,8 +39,8 @@ rand = { workspace = true, optional = true }
 rust_decimal = { version = "1.35", default-features = false, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_repr.workspace = true
-sha2 = { workspace = true, features = ["std"] }
-thiserror = { workspace = true, features = ["std"] }
+sha2.workspace = true
+thiserror.workspace = true
 time.workspace = true
 uniffi = { workspace = true, optional = true }
 k256.workspace = true

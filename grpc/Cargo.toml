@@ -44,7 +44,7 @@ serde_json = { workspace = true, optional = true }
 signature = "2"
 tendermint.workspace = true
 tendermint-proto.workspace = true
-thiserror = { workspace = true, features = ["std"] }
+thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 tonic = { workspace = true, features = ["codegen"] }

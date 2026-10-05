@@ -1,4 +1,3 @@
-use alloc::string::String;
 use thiserror::Error;
 
 /// Errors produced by rsema1d operations.
@@ -46,5 +45,5 @@ pub enum Error {
     VerificationFailed(String),
 }
 
-/// Convenience alias for `core::result::Result<T, Error>`.
-pub type Result<T> = core::result::Result<T, Error>;
+/// Convenience alias for `std::result::Result<T, Error>`.
+pub type Result<T> = std::result::Result<T, Error>;

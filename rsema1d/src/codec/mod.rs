@@ -1,49 +1,32 @@
 //! Reed-Solomon encoding/decoding with RLC integration.
 
-#[cfg(feature = "std")]
 mod commitment;
 mod original_commitment;
 mod padding;
-#[cfg(feature = "std")]
 mod proof;
-#[cfg(feature = "std")]
 mod reconstruct;
-#[cfg(feature = "std")]
 mod rows;
-#[cfg(feature = "std")]
 mod rs;
 mod symbols;
-#[cfg(feature = "std")]
 mod verification;
 
-#[cfg(feature = "std")]
 use crate::error::Result;
-#[cfg(feature = "std")]
 use crate::field::GF128;
-#[cfg(feature = "std")]
 use crate::params::Parameters;
-#[cfg(feature = "std")]
 use std::num::NonZeroUsize;
-#[cfg(feature = "std")]
 use std::sync::OnceLock;
 
-#[cfg(feature = "std")]
 pub use commitment::ExtendedData;
 pub use original_commitment::commitment_from_original_rows;
 pub use padding::map_index_to_tree_position;
-#[cfg(feature = "std")]
 pub use proof::{RowInclusionProof, RowProof, StandaloneProof};
-#[cfg(feature = "std")]
 pub use reconstruct::reconstruct_data;
-#[cfg(feature = "std")]
 pub use rows::{ExtendedRowsView, OriginalRowsView, RowMatrix};
-#[cfg(feature = "std")]
 pub use rs::{
     encode_parity_in_place, encode_parity_in_place_with_work_budget, extend_data,
     extend_data_with_work_budget, extend_rlcs, pack_gf128_to_shard, unpack_shard_to_gf128,
 };
 pub use symbols::{compute_rlc, extract_symbols, RlcCoefficientLogs};
-#[cfg(feature = "std")]
 pub use verification::{
     create_verification_context, verify_proof, verify_row_inclusion, verify_row_inclusion_proof,
     verify_row_with_context, verify_standalone, verify_standalone_proof, verify_with_context,
@@ -53,12 +36,9 @@ pub use verification::{
 /// A 32-byte SHA-256 commitment hash.
 pub type Commitment = [u8; 32];
 
-#[cfg(feature = "std")]
 const DEFAULT_WORK_BUDGET_PER_PHYSICAL_CORE: NonZeroUsize = NonZeroUsize::new(2 << 20).unwrap();
-#[cfg(feature = "std")]
 const MIN_DEFAULT_WORK_BUDGET: NonZeroUsize = NonZeroUsize::new(8 << 20).unwrap();
 
-#[cfg(feature = "std")]
 fn work_budget_for_parallelism(
     threads: NonZeroUsize,
     physical_cores: NonZeroUsize,
@@ -68,7 +48,6 @@ fn work_budget_for_parallelism(
         .max(MIN_DEFAULT_WORK_BUDGET)
 }
 
-#[cfg(feature = "std")]
 /// Return the default combined Leopard work-buffer budget for the current pool.
 ///
 /// The default has an 8 MiB floor to avoid excessively narrow serial stripes,
@@ -85,7 +64,6 @@ pub fn default_work_budget() -> NonZeroUsize {
     work_budget_for_parallelism(threads, physical_cores)
 }
 
-#[cfg(feature = "std")]
 /// Encode original rows and return extended data, commitment, and original RLCs.
 pub fn encode(
     data: &RowMatrix,
@@ -94,7 +72,6 @@ pub fn encode(
     encode_with_work_budget(data, params, default_work_budget())
 }
 
-#[cfg(feature = "std")]
 /// Encode original rows with an explicit combined Leopard work-buffer budget.
 pub fn encode_with_work_budget(
     data: &RowMatrix,
@@ -107,7 +84,6 @@ pub fn encode_with_work_budget(
     Ok((ext_data, commitment, rlc_orig))
 }
 
-#[cfg(feature = "std")]
 /// Encode from a caller-provided extended row buffer.
 ///
 /// This performs the same pipeline as [`encode`]:
@@ -121,7 +97,6 @@ pub fn encode_in_place(
     encode_in_place_with_work_budget(extended_rows, params, default_work_budget())
 }
 
-#[cfg(feature = "std")]
 /// Encode from a caller-provided buffer with an explicit Leopard work-buffer budget.
 pub fn encode_in_place_with_work_budget(
     mut extended_rows: RowMatrix,
@@ -137,7 +112,6 @@ pub fn encode_in_place_with_work_budget(
     Ok((ext_data, commitment, rlc_orig))
 }
 
-#[cfg(feature = "std")]
 /// Compute commitment/proofs from already-extended rows.
 pub fn encode_parity(
     extended_rows: RowMatrix,
@@ -149,13 +123,11 @@ pub fn encode_parity(
     Ok((ext_data, commitment, rlc_orig))
 }
 
-#[cfg(feature = "std")]
 /// Reconstruct original rows from any K sampled rows.
 pub fn reconstruct(rows: &[&[u8]], indices: &[usize], params: &Parameters) -> Result<RowMatrix> {
     reconstruct_data(rows, indices, params)
 }
 
-#[cfg(feature = "std")]
 /// Reconstruct original rows with an explicit combined Reed-Solomon work-buffer budget.
 ///
 /// The budget is in bytes and excludes output buffers. Budgets smaller
@@ -169,7 +141,7 @@ pub fn reconstruct_with_work_budget(
     reconstruct::reconstruct_data_with_work_budget(rows, indices, params, work_budget)
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::{derive_coefficients, sha256};
