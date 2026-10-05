@@ -1,3 +1,4 @@
+use crate::codec::commitment::build_rlc_tree;
 use crate::codec::symbols::RlcCoefficientLogs;
 use crate::codec::Commitment;
 use crate::crypto::{derive_coefficients, hash_internal, hash_leaf, sha256_pair, MerkleTree};
@@ -5,24 +6,6 @@ use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
 use rayon::prelude::*;
-
-/// Build the RLC tree over the original rows' RLCs, zero-padded to `k.next_power_of_two()`.
-pub(crate) fn build_rlc_tree(rlc_orig: &[GF128], params: &Parameters) -> MerkleTree {
-    let k_padded = params.k_padded();
-    let zero_rlc = [0u8; 16];
-    let zero_hash = hash_leaf(&zero_rlc);
-
-    let leaf_hashes: Vec<[u8; 32]> = (0..k_padded)
-        .map(|i| {
-            if i < params.k {
-                hash_leaf(&rlc_orig[i].to_bytes())
-            } else {
-                zero_hash
-            }
-        })
-        .collect();
-    MerkleTree::from_leaf_hashes(leaf_hashes)
-}
 
 /// Compute the commitment from the K original rows, without encoding parity.
 ///
@@ -35,6 +18,9 @@ pub(crate) fn build_rlc_tree(rlc_orig: &[GF128], params: &Parameters) -> MerkleT
 /// Gives the same commitment as `ExtendedData::commitment` for the same rows.
 /// The RLCs are computed from `rows`, so a wrong row or sibling gives a
 /// different commitment.
+///
+/// A match proves the commitment binds `rows`. It does not prove the siblings
+/// come from a valid encoding of them.
 pub fn commitment_from_original_rows(
     rows: &[&[u8]],
     params: &Parameters,

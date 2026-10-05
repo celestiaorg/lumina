@@ -1,5 +1,4 @@
 use crate::codec::extend_rlcs;
-use crate::codec::original_commitment::build_rlc_tree;
 use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::rows::RowMatrix;
@@ -53,6 +52,23 @@ fn build_row_tree(rows: &RowMatrix, params: &Parameters) -> MerkleTree {
             .collect()
     };
 
+    MerkleTree::from_leaf_hashes(leaf_hashes)
+}
+
+pub(crate) fn build_rlc_tree(rlc_orig: &[GF128], params: &Parameters) -> MerkleTree {
+    let k_padded = params.k_padded();
+    let zero_rlc = [0u8; 16];
+    let zero_hash = hash_leaf(&zero_rlc);
+
+    let leaf_hashes: Vec<[u8; 32]> = (0..k_padded)
+        .map(|i| {
+            if i < params.k {
+                hash_leaf(&rlc_orig[i].to_bytes())
+            } else {
+                zero_hash
+            }
+        })
+        .collect();
     MerkleTree::from_leaf_hashes(leaf_hashes)
 }
 
