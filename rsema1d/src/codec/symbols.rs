@@ -35,28 +35,15 @@ const fn add_mod(a: u16, b: u16) -> u16 {
 /// while RLC computation runs over every symbol of every row. Precomputing
 /// `log(coefficient limb)` once turns the per-symbol work into one `log`
 /// lookup for the symbol plus one `exp` lookup per limb.
-///
-/// Gives the same result as [`compute_rlc`], but is faster when
-/// many rows share the same coefficients.
-///
-/// ```
-/// use rsema1d::codec::{compute_rlc, RlcCoefficientLogs};
-/// use rsema1d::crypto::derive_coefficients;
-///
-/// let coeffs = derive_coefficients(&[7u8; 32], 4, 4, 64);
-/// let logs = RlcCoefficientLogs::new(coeffs.clone());
-/// let row = [3u8; 64];
-/// assert_eq!(logs.compute_rlc(&row), compute_rlc(&row, &coeffs));
-/// ```
 #[derive(Debug, Clone)]
-pub struct RlcCoefficientLogs {
+pub(crate) struct RlcCoefficientLogs {
     /// `log(coefficients[i].limbs[l])`, or [`ZERO_LIMB`] when the limb is 0.
     logs: Vec<[u16; 8]>,
 }
 
 impl RlcCoefficientLogs {
     /// Precompute limb logarithms for `coefficients`.
-    pub fn new(coefficients: Vec<GF128>) -> Self {
+    pub(crate) fn new(coefficients: Vec<GF128>) -> Self {
         let log = &get_exp_log().log;
         let logs = coefficients
             .into_iter()
@@ -79,7 +66,7 @@ impl RlcCoefficientLogs {
     /// Only complete 64-byte chunks of `row` are used, matching
     /// [`compute_rlc`]. Panics if `row` has more symbols than there are
     /// coefficients.
-    pub fn compute_rlc(&self, row: &[u8]) -> GF128 {
+    pub(crate) fn compute_rlc(&self, row: &[u8]) -> GF128 {
         let exp_log = get_exp_log();
         let exp = &exp_log.exp;
         let log = &exp_log.log;
@@ -108,8 +95,6 @@ impl RlcCoefficientLogs {
 }
 
 /// Compute RLC for a single row
-///
-/// Use [`RlcCoefficientLogs`] when many rows share the same coefficients.
 pub fn compute_rlc(row: &[u8], coeffs: &[GF128]) -> GF128 {
     let num_chunks = row.len() / 64;
     let mut rlc = GF128::zero();
