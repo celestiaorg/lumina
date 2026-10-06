@@ -16,6 +16,13 @@ use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 
 pub use commitment::ExtendedData;
+
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub fn bench_build_row_tree(rows: &RowMatrix, params: &Parameters) -> crate::crypto::MerkleTree {
+    commitment::build_row_tree(rows, params)
+}
+
 pub use original_commitment::commitment_from_original_rows;
 pub use padding::map_index_to_tree_position;
 pub use proof::{RowInclusionProof, RowProof, StandaloneProof};

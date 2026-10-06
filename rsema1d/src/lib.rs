@@ -1,6 +1,6 @@
 //! Reed-Solomon erasure coding with Merkle commitments and Random Linear Combinations.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod codec;
 /// Cryptographic primitives: hashing, Merkle trees, and RLC coefficient derivation.

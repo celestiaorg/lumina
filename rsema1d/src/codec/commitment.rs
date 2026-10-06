@@ -2,7 +2,7 @@ use crate::codec::padding::map_index_to_tree_position;
 use crate::codec::proof::{RowInclusionProof, RowProof, StandaloneProof};
 use crate::codec::rows::RowMatrix;
 use crate::codec::symbols::compute_rlcs;
-use crate::crypto::{derive_coefficients, hash_leaf, sha256_pair, MerkleTree};
+use crate::crypto::{derive_coefficients, hash_leaf, hash_leaf_pair, sha256_pair, MerkleTree};
 use crate::error::{Error, Result};
 use crate::field::GF128;
 use crate::params::Parameters;
@@ -12,46 +12,38 @@ fn row_slice(rows: &RowMatrix, index: usize) -> &[u8] {
     rows.row_unchecked(index)
 }
 
-fn build_row_tree(rows: &RowMatrix, params: &Parameters) -> MerkleTree {
+pub(crate) fn build_row_tree(rows: &RowMatrix, params: &Parameters) -> MerkleTree {
     let k_padded = params.k_padded();
     let total_padded = params.total_padded();
     let zero_row = vec![0u8; params.row_size];
     let zero_hash = hash_leaf(&zero_row);
 
-    let leaf_hashes: Vec<[u8; 32]> = if total_padded >= 64 {
-        (0..total_padded)
+    let row_at = |pos| {
+        if pos < params.k {
+            Some(row_slice(rows, pos))
+        } else if (k_padded..k_padded + params.n).contains(&pos) {
+            Some(row_slice(rows, params.k + pos - k_padded))
+        } else {
+            None
+        }
+    };
+    let hash_pair = |pair| match (row_at(2 * pair), row_at(2 * pair + 1)) {
+        (Some(a), Some(b)) => hash_leaf_pair(a, b),
+        (a, b) => [
+            a.map_or(zero_hash, hash_leaf),
+            b.map_or(zero_hash, hash_leaf),
+        ],
+    };
+    let pairs: Vec<[[u8; 32]; 2]> = if total_padded >= 64 {
+        (0..total_padded / 2)
             .into_par_iter()
-            .map(|pos| {
-                if pos < params.k {
-                    hash_leaf(row_slice(rows, pos))
-                } else if pos < k_padded {
-                    zero_hash
-                } else if pos < k_padded + params.n {
-                    let row_index = params.k + (pos - k_padded);
-                    hash_leaf(row_slice(rows, row_index))
-                } else {
-                    zero_hash
-                }
-            })
+            .map(hash_pair)
             .collect()
     } else {
-        (0..total_padded)
-            .map(|pos| {
-                if pos < params.k {
-                    hash_leaf(row_slice(rows, pos))
-                } else if pos < k_padded {
-                    zero_hash
-                } else if pos < k_padded + params.n {
-                    let row_index = params.k + (pos - k_padded);
-                    hash_leaf(row_slice(rows, row_index))
-                } else {
-                    zero_hash
-                }
-            })
-            .collect()
+        (0..total_padded / 2).map(hash_pair).collect()
     };
 
-    MerkleTree::from_leaf_hashes(leaf_hashes)
+    MerkleTree::from_leaf_hashes(pairs.into_flattened())
 }
 
 pub(crate) fn build_rlc_tree(rlc_orig: &[GF128], params: &Parameters) -> MerkleTree {
@@ -234,6 +226,45 @@ impl ExtendedData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paired_row_tree_matches_independent_leaves() {
+        for workers in [1, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                for (k, n) in [(1, 1), (3, 5), (5, 7), (32, 32), (33, 31)] {
+                    for row_size in [64, 128, 256] {
+                        let params = Parameters::new(k, n, row_size).unwrap();
+                        let data: Vec<_> = (0..(k + n) * row_size)
+                            .map(|i| ((i * 17 + i / row_size) % 251) as u8)
+                            .collect();
+                        let rows = RowMatrix::with_shape(data, k + n, row_size).unwrap();
+                        let zero_hash = hash_leaf(&vec![0; row_size]);
+                        let mut leaves: Vec<_> =
+                            (0..k).map(|i| hash_leaf(row_slice(&rows, i))).collect();
+                        leaves.resize(params.k_padded(), zero_hash);
+                        leaves.extend((k..k + n).map(|i| hash_leaf(row_slice(&rows, i))));
+                        leaves.resize(params.total_padded(), zero_hash);
+                        let expected = MerkleTree::from_leaf_hashes(leaves.clone());
+                        let actual = build_row_tree(&rows, &params);
+                        assert_eq!(
+                            actual.root(),
+                            expected.root(),
+                            "K={k} N={n} workers={workers}"
+                        );
+                        for (i, leaf) in leaves.iter().enumerate() {
+                            let proof = actual.generate_proof(i);
+                            assert_eq!(proof, expected.generate_proof(i));
+                            assert!(crate::crypto::verify_proof(leaf, i, &proof, &actual.root()));
+                        }
+                    }
+                }
+            });
+        }
+    }
 
     #[test]
     fn test_commitment_generation() {
