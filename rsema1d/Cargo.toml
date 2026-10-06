@@ -48,6 +48,11 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
+name = "merkle_bench"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
 name = "reconstruct_sweep"
 harness = false
 

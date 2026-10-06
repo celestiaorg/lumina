@@ -113,6 +113,18 @@ pub fn hash_leaf(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+pub(crate) fn hash_leaf_pair(a: &[u8], b: &[u8]) -> [[u8; 32]; 2] {
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    if let Some(hashes) = super::sha256_arm64::hash_leaf_pair(a, b) {
+        return hashes;
+    }
+    hash_leaf_pair_fallback(a, b)
+}
+
+fn hash_leaf_pair_fallback(a: &[u8], b: &[u8]) -> [[u8; 32]; 2] {
+    [hash_leaf(a), hash_leaf(b)]
+}
+
 /// Hash internal node (RFC 6962 format)
 pub fn hash_internal(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -142,6 +154,59 @@ pub fn verify_proof(leaf: &[u8; 32], index: usize, proof: &[[u8; 32]], root: &[u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn paired_leaves_match_independent_hashes() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x5eed);
+        let lengths = (0..=300).chain(
+            [16384, 32768, 131072]
+                .into_iter()
+                .flat_map(|len| [len - 1, len, len + 1]),
+        );
+        for len in lengths {
+            for pattern in 0..3 {
+                let mut a = vec![0; len + 16];
+                let mut b = vec![0; len + 16];
+                match pattern {
+                    1 => {
+                        a.fill(0xa5);
+                        b.fill(0x5a);
+                    }
+                    2 => {
+                        rng.fill_bytes(&mut a);
+                        rng.fill_bytes(&mut b);
+                    }
+                    _ => {}
+                }
+                for offset in 0..16 {
+                    let a = &a[offset..offset + len];
+                    let b = &b[15 - offset..15 - offset + len];
+                    let expected = [hash_leaf(a), hash_leaf(b)];
+                    assert_eq!(hash_leaf_pair(a, b), expected, "len={len} offset={offset}");
+                    assert_eq!(hash_leaf_pair_fallback(a, b), expected);
+                    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+                    if len >= 63 && std::arch::is_aarch64_feature_detected!("sha2") {
+                        assert_eq!(
+                            super::super::sha256_arm64::hash_leaf_pair(a, b),
+                            Some(expected)
+                        );
+                    }
+                    if len > 0 {
+                        assert_eq!(
+                            hash_leaf_pair(a, &b[1..]),
+                            [expected[0], hash_leaf(&b[1..])]
+                        );
+                        assert_eq!(
+                            hash_leaf_pair(&a[1..], b),
+                            [hash_leaf(&a[1..]), expected[1]]
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn make_leaves(count: usize, leaf_size: usize) -> Vec<Vec<u8>> {
         (0..count)
