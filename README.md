@@ -3,22 +3,10 @@
 # Lumina
 
 <a href="https://github.com/celestiaorg/lumina/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/celestiaorg/lumina/actions/workflows/ci.yml/badge.svg?branch=main" alt="Build Status" /></a>
-<a href="https://lumina.rs"><img src="https://img.shields.io/website?url=https%3A%2F%2Flumina.rs&label=lumina.rs" alt="lumina.rs"></a>
-<a href="https://crates.io/crates/lumina-cli"><img src="https://img.shields.io/crates/v/lumina-cli?label=lumina-cli" alt="crates.io lumina-cli"></a>
-<a href="https://crates.io/crates/lumina-node"><img src="https://img.shields.io/crates/v/lumina-node?label=lumina-node" alt="crates.io lumina-node"></a>
-<a href="https://crates.io/crates/lumina-node-uniffi"><img src="https://img.shields.io/crates/v/lumina-node-uniffi?label=lumina-node-uniffi" alt="crates.io lumina-node-uniffi"></a>
-<a href="https://crates.io/crates/lumina-node-wasm"><img src="https://img.shields.io/crates/v/lumina-node-wasm?label=lumina-node-wasm" alt="crates.io lumina-node-wasm"></a>
-<a href="https://crates.io/crates/celestia-types"><img src="https://img.shields.io/crates/v/celestia-types?label=celestia-types" alt="crates.io celestia-types"></a>
-<a href="https://crates.io/crates/celestia-proto"><img src="https://img.shields.io/crates/v/celestia-proto?label=celestia-proto" alt="crates.io celestia-proto"></a>
-<a href="https://crates.io/crates/celestia-rpc"><img src="https://img.shields.io/crates/v/celestia-rpc?label=celestia-rpc" alt="crates.io celestia-rpc"></a>
-<a href="https://crates.io/crates/celestia-grpc"><img src="https://img.shields.io/crates/v/celestia-grpc?label=celestia-grpc" alt="crates.io celestia-grpc"></a>
 
 </div>
 
-
 Rust implementation of Celestia's [data availability node](https://github.com/celestiaorg/celestia-node) able to run natively and in browser-based environments.
-
-Run Lumina now at [lumina.rs](https://lumina.rs/) and directly verify Celestia.
 
 Supported features:
 - Backward and forward synchronization of block headers within sampling window
@@ -29,6 +17,19 @@ Supported features:
 - Streaming events happening on the node
 - Native and Wasm libraries (UniFFI/mobile bindings are deprecated)
 - Integration tests with Go implementation
+
+## Crates
+
+| Crate | Version |
+| --- | --- |
+| [`lumina-cli`](https://crates.io/crates/lumina-cli) | [![crates.io lumina-cli](https://img.shields.io/crates/v/lumina-cli)](https://crates.io/crates/lumina-cli) |
+| [`lumina-node`](https://crates.io/crates/lumina-node) | [![crates.io lumina-node](https://img.shields.io/crates/v/lumina-node)](https://crates.io/crates/lumina-node) |
+| [`lumina-node-uniffi`](https://crates.io/crates/lumina-node-uniffi) | [![crates.io lumina-node-uniffi](https://img.shields.io/crates/v/lumina-node-uniffi)](https://crates.io/crates/lumina-node-uniffi) |
+| [`lumina-node-wasm`](https://crates.io/crates/lumina-node-wasm) | [![crates.io lumina-node-wasm](https://img.shields.io/crates/v/lumina-node-wasm)](https://crates.io/crates/lumina-node-wasm) |
+| [`celestia-types`](https://crates.io/crates/celestia-types) | [![crates.io celestia-types](https://img.shields.io/crates/v/celestia-types)](https://crates.io/crates/celestia-types) |
+| [`celestia-proto`](https://crates.io/crates/celestia-proto) | [![crates.io celestia-proto](https://img.shields.io/crates/v/celestia-proto)](https://crates.io/crates/celestia-proto) |
+| [`celestia-rpc`](https://crates.io/crates/celestia-rpc) | [![crates.io celestia-rpc](https://img.shields.io/crates/v/celestia-rpc)](https://crates.io/crates/celestia-rpc) |
+| [`celestia-grpc`](https://crates.io/crates/celestia-grpc) | [![crates.io celestia-grpc](https://img.shields.io/crates/v/celestia-grpc)](https://crates.io/crates/celestia-grpc) |
 
 ## Installing the node
 
