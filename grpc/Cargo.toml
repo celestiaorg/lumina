@@ -66,10 +66,12 @@ wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 
 [dev-dependencies]
+celestia-proto = { workspace = true, features = ["tonic-server"] }
 celestia-rpc.workspace = true
 futures.workspace = true
 lumina-utils = { workspace = true, features = ["test-utils"] }
 rand.workspace = true
+tonic = { workspace = true, features = ["router"] }
 tracing-subscriber.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

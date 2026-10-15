@@ -63,6 +63,30 @@ pub enum Error {
     #[error("Transaction {0} execution failed; code: {1}, error: {2}")]
     TxExecutionFailed(Hash, ErrorCode, String),
 
+    /// The transaction executed successfully, but application state did not catch up.
+    #[error(
+        "Transaction {hash} executed successfully at height {height}, but application state did not reach that height in time"
+    )]
+    TxAppStateTimeout {
+        /// Hash of the successfully executed transaction.
+        hash: Hash,
+        /// Block height containing the transaction.
+        height: u64,
+    },
+
+    /// The transaction executed successfully, but application state visibility could not be checked.
+    #[error(
+        "Transaction {hash} executed successfully at height {height}, but application state visibility could not be checked: {source}"
+    )]
+    TxAppStateQueryFailed {
+        /// Hash of the successfully executed transaction.
+        hash: Hash,
+        /// Block height containing the transaction.
+        height: u64,
+        /// Error returned by the application height query.
+        source: Box<Error>,
+    },
+
     /// Transaction was rejected
     #[error("Transaction {0} was rejected; code: {1}, error: {2}")]
     TxRejected(Hash, ErrorCode, String),
