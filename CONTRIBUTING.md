@@ -18,6 +18,23 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
 specification when writing commits messages. Consistency helps with readability
 of git history, additionally we use it to generate our changelog.
 
+## Pull Request Titles
+
+PR titles are squashed into commit messages, so they must follow Conventional Commits and start the
+subject with exactly one review level tag: `[high]`, `[medium]`, or `[low]`, e.g.
+`fix(node)!: [high] reject invalid sample proofs` or `docs: [low] clarify setup`.
+Include the same tag in the PR description with a brief reason, e.g. `Review level: [low] — documentation only.`
+
+- `[high]`: Deep review for consensus, state transitions, security, or other changes with significant risk,
+  e.g. header or sample verification, DAS, p2p/shwap protocol, `lumina-node-wasm` public API,
+  cryptography or proof verification, and breaking changes.
+- `[medium]`: Standard review for code changes with limited impact and well-understood behavior.
+- `[low]`: Focused review for straightforward docs, tests, or tooling changes with low risk.
+
+Choose the higher level when unsure. A small diff can still need deep review. CI checks the title format;
+reviewers should confirm the chosen level. Release PRs opened by release-plz use `[medium]`. The tag is
+stripped from changelog entries.
+
 ## Semantic versioning
 
 When making a change, please make sure to check if it is SemVer compatible. Pull requests

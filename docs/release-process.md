@@ -10,7 +10,7 @@ Releases are managed by [release-plz](https://release-plz.dev/), split into two 
 ### How it works
 
 1. A maintainer manually dispatches the **Prepare Release** workflow from `main`, which runs `release-plz release-pr`.
-2. release-plz compares the workspace version in `Cargo.toml` against what's published on crates.io. If they differ, it creates (or updates) a PR with changelog entries.
+2. release-plz compares the workspace version in `Cargo.toml` against what's published on crates.io. If they differ, it creates (or updates) a PR titled `chore: [medium] release v<version>` (configured via `pr_name` in `release-plz.toml`) with changelog entries.
 3. A follow-up job builds the WASM package, bumps the npm version in `package.json`, and pushes a commit to the release PR.
 4. When the release PR is merged, the release workflow runs `release-plz release`, which publishes all crates to crates.io and npm packages to the npm registry.
 

@@ -178,6 +178,12 @@ npx playwright install --with-deps
 npm test
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+and start the subject with a review level tag (`[high]`, `[medium]`, or `[low]`), e.g. `fix(node): [high] reject invalid headers`.
+See [Pull Request Titles](CONTRIBUTING.md#pull-request-titles) for what each level means.
+
 ## Frontend
 
 Check out the frontend at [celestiaorg/lumina-front](https://github.com/celestiaorg/lumina-front)
