@@ -187,17 +187,23 @@ mod tests {
     use crate::test_utils::async_test;
     use std::time::Duration;
 
-    #[async_test]
+    #[cfg_attr(not(target_arch = "wasm32"), async_test(start_paused = true))]
+    #[cfg_attr(target_arch = "wasm32", async_test)]
     async fn interval() {
+        // Use Tokio's clock when it is paused, so scheduling delays on loaded
+        // hosts do not affect the native timer assertions.
+        #[cfg(not(target_arch = "wasm32"))]
+        use tokio::time::Instant;
+
         let now = Instant::now();
         let mut interval = Interval::new(Duration::from_millis(100));
 
         interval.tick().await;
         let elapsed = now.elapsed();
-        assert!(elapsed > Duration::from_millis(100) && elapsed < Duration::from_millis(105));
+        assert!(elapsed >= Duration::from_millis(100) && elapsed < Duration::from_millis(105));
 
         interval.tick().await;
         let elapsed = now.elapsed();
-        assert!(elapsed > Duration::from_millis(200) && elapsed < Duration::from_millis(205));
+        assert!(elapsed >= Duration::from_millis(200) && elapsed < Duration::from_millis(205));
     }
 }

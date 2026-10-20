@@ -554,16 +554,27 @@ mod tests {
 
     #[async_test]
     async fn delegation() {
+        async fn wait_for_state(client: &crate::Client, tx_height: u64) {
+            // Tx status can advance before SDK queries expose the new state.
+            // Header H+1 commits the application state produced at height H.
+            client
+                .header()
+                .wait_for_height(tx_height + 1)
+                .await
+                .unwrap();
+        }
+
         let client = new_client().await;
         let validator_addr = validator_address();
         let client_addr = client.address().unwrap();
 
         // Test delegation
-        client
+        let delegate_tx = client
             .state()
             .delegate(&validator_addr, 100, TxConfig::default())
             .await
             .unwrap();
+        wait_for_state(&client, delegate_tx.height).await;
 
         let del = client
             .state()
@@ -583,6 +594,7 @@ mod tests {
             .await
             .unwrap()
             .height;
+        wait_for_state(&client, unbond_tx_height).await;
 
         let unbond = client
             .state()
@@ -612,11 +624,12 @@ mod tests {
         assert_eq!(del.response.delegation.shares, 90.into());
 
         // Test partial cancel unbonding
-        client
+        let cancel_tx = client
             .state()
             .cancel_unbonding_delegation(&validator_addr, 3, unbond_tx_height, TxConfig::default())
             .await
             .unwrap();
+        wait_for_state(&client, cancel_tx.height).await;
 
         let unbond = client
             .state()
@@ -646,11 +659,12 @@ mod tests {
         assert_eq!(del.response.delegation.shares, 93.into());
 
         // Test fully cancel unbonding
-        client
+        let cancel_tx = client
             .state()
             .cancel_unbonding_delegation(&validator_addr, 7, unbond_tx_height, TxConfig::default())
             .await
             .unwrap();
+        wait_for_state(&client, cancel_tx.height).await;
 
         let err = client
             .state()
