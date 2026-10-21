@@ -24,14 +24,25 @@ The Celestia services in this image are dependencies for exercising Lumina. Dist
 
 ## Prepared environment
 
-`.oss-scanner/Dockerfile` prepares only a private Celestia devnet runtime in `/src`, using mainnet release binaries on a fresh local chain. It contains celestia-app, celestia-node, Fibre, the launcher and disposable credentials. It has no Rust toolchain, Lumina source, cached Cargo dependencies or compiled tests. A separately prepared checkout is required to compile and test Lumina offline.
+The default `audit` stage of `.oss-scanner/Dockerfile` includes the complete Lumina checkout at `/src`, the native Rust toolchain, build dependencies, cached Cargo dependencies, the compiled CLI and selected native test binaries. It also includes celestia-app, celestia-node, Fibre, the launchers and disposable credentials, using mainnet release binaries on a fresh private chain. Dependencies are fetched during the online build; Cargo runs offline afterward, including when compiling new native reproductions.
 
 The audit scope is native Rust. Wasm/browser builds and tests, deprecated UniFFI/mobile bindings and the separate Go compatibility suite are not prepared. State any resulting validation limits in reports.
 
-Build and start the devnet runtime from the Lumina repository root:
+Build the audit image from the Lumina repository root and open an offline shell:
 
 ```sh
-docker build --platform linux/amd64 -f .oss-scanner/Dockerfile -t lumina-devnet .
+docker build --platform linux/amd64 -f .oss-scanner/Dockerfile -t lumina-audit .
+docker run --rm -it --init --platform linux/amd64 --network none --cpus 2 \
+  --memory 8g --memory-swap 8g lumina-audit
+```
+
+The audit image starts a shell, matching the OSS Scanner harness. Run the commands below from `/src` inside that shell. Source, scripts, toolchain and caches are already inside the image; host mounts and an external network are unnecessary.
+
+For just the standalone devnet runtime, build the optional `devnet` stage. This smaller image starts the network automatically and has no Rust toolchain or complete checkout:
+
+```sh
+docker build --platform linux/amd64 --target devnet \
+  -f .oss-scanner/Dockerfile -t lumina-devnet .
 docker run --rm --init --platform linux/amd64 --network none --cpus 2 \
   --memory 8g --memory-swap 8g lumina-devnet
 ```
@@ -48,7 +59,7 @@ The devnet runs one private celestia-app validator, Fibre, two bridge nodes and 
 | Bridge 1, authentication enabled | RPC 36658, P2P 3121 |
 | Light node, no authentication | RPC 46658, P2P 4121 |
 
-The container's default command starts the private devnet and keeps it running. The OSS Scanner harness overrides that command with a shell, so services must be started explicitly in that context. From `/src`, use:
+In the audit shell, start services explicitly or let the test runner manage them. To run just the network, use:
 
 ```sh
 # Keep the local network running until Ctrl-C.
@@ -58,11 +69,14 @@ bash .oss-scanner/devnet.sh
 bash .oss-scanner/devnet.sh --smoke
 ```
 
-From a local Lumina checkout with Rust dependencies cached and matching Celestia binaries on PATH, use `test.sh` below. It starts and cleans up its own fresh host-native devnet for integration tests, independent of the Docker container, and passes the matching authentication tokens to the test process. With no arguments it runs all eleven native suites; `test.sh check` runs the launcher's lifecycle checks without Celestia binaries. The devnet-only Docker image does not run Cargo tests.
+Use `test.sh` below inside the audit image. It calls `devnet.sh` to start and clean up a fresh devnet for integration tests and passes the matching authentication tokens to the test process. Do not leave another devnet running before invoking it. With no arguments it runs all eleven selected native package suites; `test.sh check` runs the launcher's lifecycle checks without starting Celestia. These scripts also work from a host checkout with the same toolchain, cached dependencies and Celestia binaries on PATH.
 
 The runner explicitly skips `client::tests::retransmit_evicted` in the gRPC suite because it requires a separate chain with special mempool and block-size settings. The test remains in the repository for the existing CI setup; this devnet runs only the normal private chain.
 
 ```sh
+# Inspect the prepared native CLI.
+target/debug/lumina --help
+
 # All eleven selected native package suites, with a fresh devnet.
 bash .oss-scanner/test.sh
 
