@@ -35,9 +35,6 @@ tonic = { workspace = true, default-features = false, optional = true }
 tokio = { workspace = true, features = ["macros"] }
 web-time = "1.1"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
-
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test.workspace = true
 
