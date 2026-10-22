@@ -1,0 +1,29 @@
+# Dependabot configuration.
+#
+# Version-update PRs are disabled everywhere (`open-pull-requests-limit: 0`);
+# these entries exist to configure Dependabot *security* updates, which read
+# this file for the matching directory.
+version: 2
+updates:
+  # Root: the vitest browser test suite for the wasm crates.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+
+  # `cli/js` and `node-wasm/js` depend on `lumina-node-wasm` through a `file:`
+  # path to the wasm-pack output directory, which is not committed. Dependabot
+  # cannot resolve that dependency, so every update job for these directories
+  # aborts with `path_dependencies_not_reachable` (and, when batched with the
+  # root, blocks the root's security updates too). Ignore them until the
+  # packages can be resolved without a local build.
+  - package-ecosystem: npm
+    directories:
+      - /cli/js
+      - /node-wasm/js
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "*"
