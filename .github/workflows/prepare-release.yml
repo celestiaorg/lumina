@@ -77,7 +77,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24.22.1
+          node-version: "lts/*"
+          check-latest: true
 
       - name: Install dependencies
         uses: taiki-e/install-action@v2

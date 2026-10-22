@@ -29,13 +29,12 @@
         "browser"
     ],
     "devDependencies": {
-        "concat-md": "^0.5.1",
         "typedoc": "^0.27.4",
         "typedoc-plugin-markdown": "^4.3.2",
         "typescript": "^5.6.3"
     },
     "scripts": {
         "tsc": "tsc",
-        "update-readme": "typedoc --plugin typedoc-plugin-markdown --out ./docs --readme ../README.md ../pkg/lumina_node_wasm.d.ts && concat-md  --decrease-title-levels --dir-name-as-title docs > README.md"
+        "update-readme": "typedoc --plugin typedoc-plugin-markdown --outputFileStrategy modules --mergeReadme --out ./docs --readme ../README.md ../pkg/lumina_node_wasm.d.ts && cp docs/README.md README.md"
     }
 }

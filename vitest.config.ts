@@ -1,5 +1,6 @@
 // https://vitest.dev/guide/browser/
 
+import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
 
@@ -20,7 +21,7 @@ export default defineConfig({
             headless: true,
             screenshotFailures: false,
             ui: false,
-            provider: "playwright",
+            provider: playwright(),
             instances: [
               { browser: "chromium" },
               { browser: "firefox" },
