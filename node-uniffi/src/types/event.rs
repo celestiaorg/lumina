@@ -147,13 +147,6 @@ pub enum NodeEvent {
         /// A human readable error.
         error: String,
     },
-    /// Network was compromised.
-    ///
-    /// This happens when a valid bad encoding fraud proof is received.
-    /// Ideally it would never happen, but protection needs to exist.
-    /// In case of compromised network, syncing and data sampling will
-    /// stop immediately.
-    NetworkCompromised,
     /// Node stopped.
     NodeStopped,
 }
@@ -251,7 +244,6 @@ impl From<LuminaNodeEvent> for NodeEvent {
                 to_height,
             },
             LuminaNodeEvent::FatalPrunerError { error } => NodeEvent::FatalPrunerError { error },
-            LuminaNodeEvent::NetworkCompromised => NodeEvent::NetworkCompromised,
             LuminaNodeEvent::NodeStopped => NodeEvent::NodeStopped,
             _ => panic!("Unknown event: {event:?}"),
         }

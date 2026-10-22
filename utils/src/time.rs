@@ -98,10 +98,10 @@ mod imp {
             let mut this = self.project();
 
             loop {
-                if let Some(fut) = this.fut.as_mut().as_pin_mut() {
-                    if fut.poll(cx).is_pending() {
-                        return Poll::Pending;
-                    }
+                if let Some(fut) = this.fut.as_mut().as_pin_mut()
+                    && fut.poll(cx).is_pending()
+                {
+                    return Poll::Pending;
                 }
 
                 let now = Instant::now();

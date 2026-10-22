@@ -150,6 +150,15 @@ impl EncodedBlob {
         cfg: BlobConfig,
         work_budget: NonZeroUsize,
     ) -> Result<Self, FibreError> {
+        let encode = Self::prepare_encoding(data, cfg, work_budget)?;
+        encode()
+    }
+
+    pub(crate) fn prepare_encoding(
+        data: &[u8],
+        cfg: BlobConfig,
+        work_budget: NonZeroUsize,
+    ) -> Result<impl FnOnce() -> Result<Self, FibreError> + Send + 'static, FibreError> {
         if data.is_empty() {
             return Err(FibreError::EmptyBlobData);
         }
@@ -169,16 +178,18 @@ impl EncodedBlob {
         let mut extended = rsema1d::RowMatrix::zeroed(total_rows, row_size)?;
         blob_header::encode(data, extended.as_row_major_mut());
         let params = rsema1d::Parameters::new(cfg.original_rows, cfg.parity_rows, row_size)?;
-        let (extended_data, commitment, _) =
-            rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
+        let data_size = data.len();
+        Ok(move || {
+            let extended_data =
+                rsema1d::encode_in_place_with_work_budget(extended, &params, work_budget)?;
+            let id = BlobID::new(cfg.blob_version, extended_data.commitment());
 
-        let id = BlobID::new(cfg.blob_version, commitment);
-
-        Ok(Self {
-            cfg,
-            extended_data,
-            id,
-            data_size: data.len(),
+            Ok(Self {
+                cfg,
+                extended_data,
+                id,
+                data_size,
+            })
         })
     }
 
@@ -326,6 +337,7 @@ impl BlobReconstruction {
 #[derive(Debug)]
 pub(crate) struct VerifiedRows(Vec<rsema1d::RowProof>);
 
+#[cfg(target_arch = "wasm32")]
 const ROWS_PER_YIELD: usize = 16;
 
 /// Verifies downloaded shards against a blob's commitment.
@@ -358,12 +370,12 @@ impl ShardVerifier {
     ///
     /// Rows already stored (per `already_stored`) or repeated within the
     /// response are skipped before any cryptography runs, bounding the work
-    /// to the number of still-missing rows. Yields periodically so verification
-    /// does not monopolize the executor.
+    /// to the number of still-missing rows. Native verification runs on the
+    /// blocking pool; WASM yields periodically.
     pub(crate) async fn verify(
         &self,
         rows: Vec<rsema1d::RowProof>,
-        rlcs: &[rsema1d::GF128],
+        rlcs: Vec<rsema1d::GF128>,
         already_stored: &[bool],
     ) -> Result<VerifiedRows, FibreError> {
         if rows.is_empty() {
@@ -403,7 +415,7 @@ impl ShardVerifier {
             let mut cache = self.cache.lock().await;
             match cache.as_ref() {
                 Some((cached_rlcs, context)) => {
-                    if cached_rlcs != rlcs {
+                    if cached_rlcs != &rlcs {
                         return Err(ShardError::RlcVectorMismatch.into());
                     }
                     (Arc::clone(context), 0)
@@ -414,23 +426,51 @@ impl ShardVerifier {
                         self.cfg.parity_rows,
                         row_size,
                     )?;
-                    let context = Arc::new(rsema1d::VerificationContext::new(rlcs, &params)?);
-                    rsema1d::verify_row_with_context(&needed[0], &self.commitment, &context)?;
-                    *cache = Some((rlcs.to_vec(), Arc::clone(&context)));
+                    let commitment = self.commitment;
+                    let create_context = move || {
+                        let context = Arc::new(rsema1d::VerificationContext::new(&rlcs, &params)?);
+                        rsema1d::verify_row_with_context(&needed[0], &commitment, &context)?;
+                        Ok::<_, FibreError>((context, needed, rlcs))
+                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let (context, rows, rlcs) =
+                        tokio::task::spawn_blocking(create_context)
+                            .await
+                            .expect("verification context task panicked or has been cancelled")?;
+                    #[cfg(target_arch = "wasm32")]
+                    let (context, rows, rlcs) = create_context()?;
+
+                    needed = rows;
+                    *cache = Some((rlcs, Arc::clone(&context)));
                     (context, 1)
                 }
             }
         };
 
-        let remaining = &needed[verified..];
-        for (index, proof) in remaining.iter().enumerate() {
-            rsema1d::verify_row_with_context(proof, &self.commitment, &context)?;
-            if (index + 1).is_multiple_of(ROWS_PER_YIELD) && index + 1 < remaining.len() {
-                lumina_utils::executor::yield_now().await;
-            }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let commitment = self.commitment;
+            tokio::task::spawn_blocking(move || {
+                for proof in &needed[verified..] {
+                    rsema1d::verify_row_with_context(proof, &commitment, &context)?;
+                }
+                Ok(VerifiedRows(needed))
+            })
+            .await
+            .expect("shard verification task panicked or has been cancelled")
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let remaining = &needed[verified..];
+            for (index, proof) in remaining.iter().enumerate() {
+                rsema1d::verify_row_with_context(proof, &self.commitment, &context)?;
+                if (index + 1).is_multiple_of(ROWS_PER_YIELD) && index + 1 < remaining.len() {
+                    lumina_utils::executor::yield_now().await;
+                }
+            }
 
-        Ok(VerifiedRows(needed))
+            Ok(VerifiedRows(needed))
+        }
     }
 }
 
@@ -607,7 +647,7 @@ mod tests {
     ) -> Result<usize, FibreError> {
         let verifier = ShardVerifier::new(blob);
         let verified = verifier
-            .verify(shard.rows, &shard.rlcs, &blob.stored_rows_bitmap())
+            .verify(shard.rows, shard.rlcs, &blob.stored_rows_bitmap())
             .await?;
         Ok(blob.store_rows(verified))
     }
@@ -701,11 +741,7 @@ mod tests {
 
         let verifier = ShardVerifier::new(&reconstruction);
         let err = verifier
-            .verify(
-                shard.rows,
-                &shard.rlcs,
-                &reconstruction.stored_rows_bitmap(),
-            )
+            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -722,11 +758,7 @@ mod tests {
 
         let verifier = ShardVerifier::new(&reconstruction);
         let err = verifier
-            .verify(
-                shard.rows,
-                &shard.rlcs,
-                &reconstruction.stored_rows_bitmap(),
-            )
+            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -759,11 +791,7 @@ mod tests {
 
         let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
-            .verify(
-                shard.rows,
-                &shard.rlcs,
-                &reconstruction.stored_rows_bitmap(),
-            )
+            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
             .await
             .unwrap();
         assert_eq!(reconstruction.store_rows(verified), 0);
@@ -781,11 +809,7 @@ mod tests {
 
         let verifier = ShardVerifier::new(&reconstruction);
         let verified = verifier
-            .verify(
-                shard.rows,
-                &shard.rlcs,
-                &reconstruction.stored_rows_bitmap(),
-            )
+            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
             .await
             .unwrap();
 
@@ -801,35 +825,28 @@ mod tests {
         flip_first_byte(&mut shard.rows[0].row);
         assert!(
             verifier
-                .verify(
-                    shard.rows,
-                    &shard.rlcs,
-                    &reconstruction.stored_rows_bitmap(),
-                )
+                .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
                 .await
                 .is_err()
         );
 
         // First shard authenticates the RLC vector and fills the cache.
         let shard = shard_of(&blob, &[0, 1]);
+        let rlcs_ptr = shard.rlcs.as_ptr();
         let verified = verifier
-            .verify(
-                shard.rows,
-                &shard.rlcs,
-                &reconstruction.stored_rows_bitmap(),
-            )
+            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
             .await
             .unwrap();
+        assert_eq!(
+            verifier.cache.lock().await.as_ref().unwrap().0.as_ptr(),
+            rlcs_ptr
+        );
         reconstruction.store_rows(verified);
 
         // Same vector: verifies against the cached context.
         let shard = shard_of(&blob, &[2, 3]);
         let verified = verifier
-            .verify(
-                shard.rows,
-                &shard.rlcs,
-                &reconstruction.stored_rows_bitmap(),
-            )
+            .verify(shard.rows, shard.rlcs, &reconstruction.stored_rows_bitmap())
             .await
             .unwrap();
         assert_eq!(reconstruction.store_rows(verified), 2);
@@ -844,7 +861,7 @@ mod tests {
         let err = verifier
             .verify(
                 shard.rows,
-                &shard.rlcs,
+                shard.rlcs,
                 &fresh_reconstruction.stored_rows_bitmap(),
             )
             .await

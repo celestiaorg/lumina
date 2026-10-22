@@ -20,7 +20,7 @@ use celestia_proto::celestia::fibre::v1::{
 };
 use celestia_proto::celestia::valaddr::v1::query_client::QueryClient as ValaddrQueryClient;
 use celestia_proto::celestia::valaddr::v1::{
-    QueryAllFibreProvidersResponse, QueryFibreProviderInfoResponse,
+    QueryAllBondedFibreProvidersResponse, QueryFibreProviderInfoResponse,
 };
 use celestia_proto::cosmos::auth::v1beta1::query_client::QueryClient as AuthQueryClient;
 use celestia_proto::cosmos::bank::v1beta1::query_client::QueryClient as BankQueryClient;
@@ -29,6 +29,7 @@ use celestia_proto::cosmos::base::node::v1beta1::service_client::ServiceClient a
 use celestia_proto::cosmos::base::tendermint::v1beta1::service_client::ServiceClient as TendermintServiceClient;
 use celestia_proto::cosmos::staking::v1beta1::query_client::QueryClient as StakingQueryClient;
 use celestia_proto::cosmos::tx::v1beta1::service_client::ServiceClient as TxServiceClient;
+use celestia_proto::cosmos::tx::v1beta1::{BroadcastTxRequest, BroadcastTxResponse};
 use celestia_proto::cosmos::tx::v1beta1::{GetTxsEventRequest, GetTxsEventResponse};
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::ValidatorSetResponse;
 use celestia_proto::tendermint_celestia_mods::rpc::grpc::block_api_client::BlockApiClient as FibreBlockApiClient;
@@ -79,6 +80,49 @@ struct AccountGuard<'a> {
     base: MutexGuard<'a, BaseAccount>,
     pubkey: &'a VerifyingKey,
     signer: &'a BoxedDocSigner,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BroadcastTxCodec {
+    buffer_settings: tonic::codec::BufferSettings,
+}
+
+impl BroadcastTxCodec {
+    fn new(request: &BroadcastTxRequest) -> Self {
+        let frame_size = request
+            .encoded_len()
+            .checked_add(5)
+            .expect("protobuf request is limited to 256 MiB");
+
+        Self {
+            buffer_settings: tonic::codec::BufferSettings::new(frame_size, frame_size),
+        }
+    }
+}
+
+impl tonic::codec::Codec for BroadcastTxCodec {
+    type Encode = BroadcastTxRequest;
+    type Decode = BroadcastTxResponse;
+    type Encoder = <tonic::codec::ProstCodec<
+        BroadcastTxRequest,
+        BroadcastTxResponse,
+    > as tonic::codec::Codec>::Encoder;
+    type Decoder = <tonic::codec::ProstCodec<
+        BroadcastTxRequest,
+        BroadcastTxResponse,
+    > as tonic::codec::Codec>::Decoder;
+
+    fn encoder(&mut self) -> Self::Encoder {
+        tonic::codec::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_encoder(
+            self.buffer_settings,
+        )
+    }
+
+    fn decoder(&mut self) -> Self::Decoder {
+        tonic::codec::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_decoder(
+            tonic::codec::BufferSettings::default(),
+        )
+    }
 }
 
 impl AccountState {
@@ -209,8 +253,83 @@ impl GrpcClient {
     // cosmos.tx
 
     /// Broadcast prepared and serialised transaction
-    #[grpc_method(TxServiceClient::broadcast_tx)]
-    fn broadcast_tx(&self, tx_bytes: Vec<u8>, mode: BroadcastMode) -> AsyncGrpcCall<TxResponse>;
+    pub fn broadcast_tx(
+        &self,
+        tx_bytes: Vec<u8>,
+        mode: BroadcastMode,
+    ) -> AsyncGrpcCall<TxResponse> {
+        let failover = self.inner.failover.clone();
+        let param = BroadcastTxRequest {
+            tx_bytes,
+            mode: mode.into(),
+        };
+
+        AsyncGrpcCall::new(move |call_context: Context| async move {
+            // 256 MiB, future proof as Celestia blocks grow.
+            const MAX_MSG_SIZE: usize = 256 * 1024 * 1024;
+
+            failover
+                .run(move |transport: Arc<BoxedTransport>| {
+                    let param = param.clone();
+                    let call_context = call_context.clone();
+
+                    async move {
+                        let transport_context = &transport.metadata.context;
+                        let mut merged_context = transport_context.clone();
+                        merged_context.extend(&call_context);
+
+                        let mut request = tonic::Request::from_parts(
+                            merged_context.metadata.clone(),
+                            tonic::Extensions::new(),
+                            param,
+                        );
+                        request.extensions_mut().insert(tonic::GrpcMethod::new(
+                            "cosmos.tx.v1beta1.Service",
+                            "BroadcastTx",
+                        ));
+
+                        // Same defaults as `grpc_method`: the timeout is sent
+                        // to the server and also enforced locally below.
+                        let request_timeout = merged_context
+                            .timeout
+                            .unwrap_or_else(|| Duration::from_secs(30));
+                        request.set_timeout(request_timeout);
+
+                        let codec = BroadcastTxCodec::new(request.get_ref());
+                        let path = http::uri::PathAndQuery::from_static(
+                            "/cosmos.tx.v1beta1.Service/BroadcastTx",
+                        );
+                        let mut client = tonic::client::Grpc::new((*transport).clone())
+                            .max_decoding_message_size(MAX_MSG_SIZE)
+                            .max_encoding_message_size(MAX_MSG_SIZE);
+
+                        let future = async move {
+                            client.ready().await.map_err(|error| {
+                                tonic::Status::unknown(format!(
+                                    "Service was not ready: {}",
+                                    Into::<tonic::codegen::StdError>::into(error)
+                                ))
+                            })?;
+                            client.unary(request, path, codec).await
+                        };
+
+                        #[cfg(target_arch = "wasm32")]
+                        let future = send_wrapper::SendWrapper::new(future);
+
+                        match lumina_utils::time::timeout(request_timeout, future).await {
+                            Ok(Ok(response)) => crate::grpc::FromGrpcResponse::try_from_response(
+                                response.into_inner(),
+                            ),
+                            Ok(Err(error)) => Err(Error::from(error)),
+                            Err(_) => Err(Error::from(tonic::Status::deadline_exceeded(
+                                "request timed out",
+                            ))),
+                        }
+                    }
+                })
+                .await
+        })
+    }
 
     /// Get Tx
     #[grpc_method(TxServiceClient::get_tx)]
@@ -303,9 +422,10 @@ impl GrpcClient {
     #[grpc_method(FibreBlockApiClient::validator_set)]
     fn get_fibre_validator_set(&self, height: i64) -> AsyncGrpcCall<ValidatorSetResponse>;
 
-    /// Get all fibre providers registered on-chain.
-    #[grpc_method(ValaddrQueryClient::all_fibre_providers)]
-    fn get_all_fibre_providers(&self) -> AsyncGrpcCall<QueryAllFibreProvidersResponse>;
+    /// Get fibre providers for all currently bonded validators.
+    #[grpc_method(ValaddrQueryClient::all_bonded_fibre_providers)]
+    fn get_all_bonded_fibre_providers(&self)
+    -> AsyncGrpcCall<QueryAllBondedFibreProvidersResponse>;
 
     /// Get fibre provider info for a single validator by bech32 consensus address.
     #[grpc_method(ValaddrQueryClient::fibre_provider_info)]
@@ -635,6 +755,7 @@ impl GrpcClient {
         if blobs.is_empty() {
             return Err(Error::TxEmptyBlobList);
         }
+        reject_fibre_blob_submission(blobs)?;
         for blob in blobs {
             blob.validate()?;
         }
@@ -1038,6 +1159,16 @@ pub(crate) async fn probe_head(transport: Arc<BoxedTransport>) -> Option<i64> {
     Some(fut.await.ok()?.into_inner().timestamp?.seconds)
 }
 
+pub(crate) fn reject_fibre_blob_submission(blobs: &[Blob]) -> Result<()> {
+    if blobs
+        .iter()
+        .any(|blob| blob.share_version == appconsts::SHARE_VERSION_TWO)
+    {
+        return Err(celestia_types::Error::FibreBlobSubmission.into());
+    }
+    Ok(())
+}
+
 fn is_wrong_sequence(code: ErrorCode) -> bool {
     code == ErrorCode::InvalidSequence || code == ErrorCode::WrongSequence
 }
@@ -1097,6 +1228,48 @@ mod tests {
         new_tx_client, spawn,
     };
     use crate::{Error, TxConfig};
+
+    #[async_test]
+    async fn reject_fibre_blob_submission() {
+        let client = GrpcClient::builder()
+            .endpoint("http://127.0.0.1:1")
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let namespace = Namespace::new_v0(b"fibre").unwrap();
+        let fibre = Blob::from_raw(celestia_types::blob::RawBlob {
+            namespace_id: namespace.id().to_vec(),
+            namespace_version: 0,
+            share_version: 2,
+            data: vec![0; 36],
+            signer: vec![0xAA; 20],
+        })
+        .unwrap();
+        let unsigned = Blob::new(fibre.namespace, vec![1], None).unwrap();
+        let signed = Blob::new(fibre.namespace, vec![2], fibre.signer).unwrap();
+        assert!(super::reject_fibre_blob_submission(&[unsigned.clone(), signed.clone()]).is_ok());
+
+        for blobs in [
+            vec![fibre.clone()],
+            vec![fibre.clone(), unsigned.clone(), signed.clone()],
+            vec![unsigned, signed, fibre],
+        ] {
+            let submitted = client
+                .submit_blobs(&blobs, TxConfig::default())
+                .await
+                .unwrap_err();
+            let broadcast = client
+                .broadcast_blobs(&blobs, TxConfig::default())
+                .await
+                .unwrap_err();
+            for error in [submitted, broadcast] {
+                assert!(matches!(
+                    error,
+                    Error::CelestiaTypesError(celestia_types::Error::FibreBlobSubmission)
+                ));
+            }
+        }
+    }
 
     // Confirmation can precede the transaction index and latest app state.
     async fn wait_until<T, F, Fut>(what: &str, mut f: F) -> T

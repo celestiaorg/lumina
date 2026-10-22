@@ -5,6 +5,7 @@ use std::marker::{Send, Sync};
 use std::pin::Pin;
 
 use async_stream::try_stream;
+use celestia_types::consts::appconsts;
 use celestia_types::nmt::{Namespace, NamespaceProof};
 use celestia_types::{Blob, Commitment};
 use futures_util::{Stream, StreamExt};
@@ -142,6 +143,7 @@ pub trait BlobClient: ClientT {
     }
 
     /// Submit sends Blobs and reports the height in which they were included. Allows sending multiple Blobs atomically synchronously. Uses default wallet registered on the Node.
+    /// Share version 2 is reserved for Fibre system blobs and is rejected locally.
     fn blob_submit<'a, 'b, 'fut>(
         &'a self,
         blobs: &'b [Blob],
@@ -152,7 +154,17 @@ pub trait BlobClient: ClientT {
         'b: 'fut,
         Self: Sized + Sync + 'fut,
     {
-        rpc::BlobClient::blob_submit(self, blobs.to_vec(), opts)
+        async move {
+            if blobs
+                .iter()
+                .any(|blob| blob.share_version == appconsts::SHARE_VERSION_TWO)
+            {
+                return Err(custom_client_error(
+                    celestia_types::Error::FibreBlobSubmission,
+                ));
+            }
+            rpc::BlobClient::blob_submit(self, blobs.to_vec(), opts).await
+        }
     }
 
     /// Subscribe to published blobs from the given namespace as they are included.

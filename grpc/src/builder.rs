@@ -555,7 +555,7 @@ mod tests {
             &mut self,
             _cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Ready(Ok(()))
+            std::task::Poll::Pending
         }
 
         fn call(&mut self, _request: http::Request<TonicBody>) -> Self::Future {
@@ -710,6 +710,25 @@ mod tests {
 
         let Error::TonicError(error) = client
             .get_node_config()
+            .timeout(Duration::from_millis(10))
+            .await
+            .unwrap_err()
+        else {
+            panic!("expected a tonic timeout error");
+        };
+
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+    }
+
+    #[async_test]
+    async fn broadcast_tx_timeout_includes_transport_readiness() {
+        let client = GrpcClientBuilder::new()
+            .transport(PendingTransport)
+            .build()
+            .unwrap();
+
+        let Error::TonicError(error) = client
+            .broadcast_tx(vec![], crate::grpc::BroadcastMode::Sync)
             .timeout(Duration::from_millis(10))
             .await
             .unwrap_err()

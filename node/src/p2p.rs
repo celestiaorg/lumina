@@ -7,7 +7,6 @@
 //! - libp2p-autonat
 //! - libp2p-ping
 //! - header-sub topic on libp2p-gossipsub
-//! - fraud-sub topic on libp2p-gossipsub
 //! - header-ex client
 //! - header-ex server
 //! - shrex - celestia's share exchange protocol for samples, rows, EDS and namespace data
@@ -17,21 +16,18 @@ use std::time::Duration;
 
 use blockstore::block::CidError;
 use celestia_proto::p2p::pb::{HeaderRequest, header_request};
-use celestia_types::fraud_proof::BadEncodingFraudProof;
 use celestia_types::hash::Hash;
 use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::Namespace;
 use celestia_types::row::Row;
 use celestia_types::sample::Sample;
-use celestia_types::{Blob, ExtendedDataSquare, ExtendedHeader, FraudProof};
+use celestia_types::{Blob, ExtendedDataSquare, ExtendedHeader};
 use libp2p::gossipsub::TopicHash;
 use libp2p::identity::Keypair;
 use libp2p::swarm::{NetworkBehaviour, NetworkInfo};
 use libp2p::{Multiaddr, PeerId, gossipsub};
 use lumina_utils::executor::{JoinHandle, spawn};
 use lumina_utils::time::{self, Interval};
-use lumina_utils::token::Token;
-use tendermint_proto::Protobuf;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -52,20 +48,13 @@ use crate::p2p::swarm_manager::SwarmManager;
 use crate::peer_tracker::PeerTracker;
 use crate::peer_tracker::PeerTrackerInfo;
 use crate::store::{Store, StoreError};
-use crate::utils::{
-    MultiaddrExt, OneshotResultSender, OneshotSenderExt, fraudsub_ident_topic,
-    gossipsub_ident_topic,
-};
+use crate::utils::{MultiaddrExt, OneshotResultSender, OneshotSenderExt, gossipsub_ident_topic};
 
 pub use crate::p2p::header_ex::HeaderExError;
 pub use crate::p2p::shrex::ShrExError;
 
 // Maximum size of a [`Multihash`].
 pub(crate) const MAX_MH_SIZE: usize = 64;
-
-// all fraud proofs for height bigger than head height by this threshold
-// will be ignored
-const FRAUD_PROOF_HEAD_HEIGHT_THRESHOLD: u64 = 20;
 
 pub(crate) type Result<T, E = P2pError> = std::result::Result<T, E>;
 
@@ -237,9 +226,6 @@ pub(crate) enum P2pCmd {
     #[cfg(any(test, feature = "test-utils"))]
     MarkAsArchival {
         peer_id: PeerId,
-    },
-    GetNetworkCompromisedToken {
-        respond_to: oneshot::Sender<Token>,
     },
     GetNetworkHead {
         respond_to: oneshot::Sender<Option<ExtendedHeader>>,
@@ -644,19 +630,6 @@ impl P2p {
         self.send_command(P2pCmd::MarkAsArchival { peer_id }).await
     }
 
-    /// Get the cancellation token which will be cancelled when the network gets compromised.
-    ///
-    /// After this token is cancelled, the network should be treated as insincere
-    /// and should not be trusted.
-    pub(crate) async fn get_network_compromised_token(&self) -> Result<Token> {
-        let (tx, rx) = oneshot::channel();
-
-        self.send_command(P2pCmd::GetNetworkCompromisedToken { respond_to: tx })
-            .await?;
-
-        Ok(rx.await?)
-    }
-
     /// Get the latest header announced on the network.
     pub async fn get_network_head(&self) -> Result<Option<ExtendedHeader>> {
         let (tx, rx) = oneshot::channel();
@@ -691,11 +664,8 @@ where
     cancellation_token: CancellationToken,
     swarm: SwarmManager<Behaviour<S>>,
     header_sub_topic_hash: TopicHash,
-    bad_encoding_fraud_sub_topic: TopicHash,
     cmd_rx: mpsc::Receiver<P2pCmd>,
     header_sub_state: Option<HeaderSubState>,
-    network_compromised_token: Token,
-    store: Arc<S>,
 }
 
 struct HeaderSubState {
@@ -724,9 +694,7 @@ where
         .await?;
 
         let header_sub_topic = gossipsub_ident_topic(&args.network_id, "/header-sub/v0.0.1");
-        let bad_encoding_fraud_sub_topic =
-            fraudsub_ident_topic(BadEncodingFraudProof::TYPE, &args.network_id);
-        let gossipsub = init_gossipsub(&args, [&header_sub_topic, &bad_encoding_fraud_sub_topic])?;
+        let gossipsub = init_gossipsub(&args, [&header_sub_topic])?;
 
         let header_ex = header_ex::Behaviour::new(header_ex::Config {
             network_id: &args.network_id,
@@ -750,11 +718,8 @@ where
             cancellation_token,
             swarm,
             cmd_rx,
-            bad_encoding_fraud_sub_topic: bad_encoding_fraud_sub_topic.hash(),
             header_sub_topic_hash: header_sub_topic.hash(),
             header_sub_state: None,
-            network_compromised_token: Token::new(),
-            store: args.store,
         })
     }
 
@@ -847,9 +812,6 @@ where
             P2pCmd::MarkAsArchival { peer_id } => {
                 self.swarm.mark_as_archival(&peer_id);
             }
-            P2pCmd::GetNetworkCompromisedToken { respond_to } => {
-                respond_to.maybe_send(self.network_compromised_token.clone())
-            }
             P2pCmd::GetNetworkHead { respond_to } => {
                 let head = self
                     .header_sub_state
@@ -935,9 +897,6 @@ where
 
                 let acceptance = if message.topic == self.header_sub_topic_hash {
                     self.on_header_sub_message(&message.data[..])
-                } else if message.topic == self.bad_encoding_fraud_sub_topic {
-                    self.on_bad_encoding_fraud_sub_message(&message.data[..], &peer)
-                        .await
                 } else {
                     trace!("Unhandled gossipsub message");
                     gossipsub::MessageAcceptance::Ignore
@@ -1043,63 +1002,6 @@ where
         // We intentionally do not `send().await` to avoid blocking `P2p`
         // in case `Syncer` enters some weird state.
         let _ = state.channel.try_send(header);
-
-        gossipsub::MessageAcceptance::Accept
-    }
-
-    #[instrument(skip_all)]
-    async fn on_bad_encoding_fraud_sub_message(
-        &mut self,
-        data: &[u8],
-        peer: &PeerId,
-    ) -> gossipsub::MessageAcceptance {
-        let Ok(befp) = BadEncodingFraudProof::decode(data) else {
-            trace!("Malformed bad encoding fraud proof from {peer}");
-            self.swarm
-                .context()
-                .behaviour
-                .gossipsub
-                .blacklist_peer(peer);
-            return gossipsub::MessageAcceptance::Reject;
-        };
-
-        let height = befp.height();
-
-        let current_height = if let Some(ref header_sub_state) = self.header_sub_state {
-            header_sub_state.known_head.height()
-        } else if let Ok(local_head) = self.store.get_head().await {
-            local_head.height()
-        } else {
-            // we aren't tracking the network and have uninitialized store
-            return gossipsub::MessageAcceptance::Ignore;
-        };
-
-        if height > current_height + FRAUD_PROOF_HEAD_HEIGHT_THRESHOLD {
-            // does this threshold make any sense if we're gonna ignore it anyway
-            // since we won't have the header
-            return gossipsub::MessageAcceptance::Ignore;
-        }
-
-        let hash = befp.header_hash();
-        let Ok(header) = self.store.get_by_hash(&hash).await else {
-            // we can't verify the proof without a header
-            // TODO: should we then store it and wait for the height? celestia doesn't
-            return gossipsub::MessageAcceptance::Ignore;
-        };
-
-        if let Err(e) = befp.validate(&header) {
-            trace!("Received invalid bad encoding fraud proof from {peer}: {e}");
-            self.swarm
-                .context()
-                .behaviour
-                .gossipsub
-                .blacklist_peer(peer);
-            return gossipsub::MessageAcceptance::Reject;
-        }
-
-        warn!("Received a valid bad encoding fraud proof");
-        // trigger cancellation for all services
-        self.network_compromised_token.trigger();
 
         gossipsub::MessageAcceptance::Accept
     }

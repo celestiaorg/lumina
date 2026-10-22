@@ -3,20 +3,12 @@
 use std::time::Duration;
 
 use celestia_types::consts::HASH_SIZE;
-use celestia_types::fraud_proof::BadEncodingFraudProof;
 use celestia_types::hash::Hash;
-use celestia_types::test_utils::{ExtendedHeaderGenerator, corrupt_eds, generate_dummy_eds};
-use futures::StreamExt;
-use libp2p::swarm::NetworkBehaviour;
-use libp2p::{Multiaddr, SwarmBuilder, gossipsub, noise, ping, tcp, yamux};
-use lumina_node::store::{InMemoryStore, Store};
 use lumina_node::test_utils::{
-    ExtendedHeaderGeneratorExt, gen_filled_store, listening_test_node_builder, test_node_builder,
-    wait_for_listeners,
+    gen_filled_store, listening_test_node_builder, test_node_builder, wait_for_listeners,
 };
 use rand::Rng;
-use tendermint_proto::Protobuf;
-use tokio::{select, spawn, sync::mpsc, time::sleep, time::timeout};
+use tokio::time::{sleep, timeout};
 
 use crate::utils::{fetch_bridge_info, new_connected_node};
 
@@ -200,105 +192,4 @@ async fn peer_discovery() {
     assert!(connected_peers.contains(&node2_peer_id));
     assert!(tracker_info.num_connected_peers >= 3);
     assert_eq!(tracker_info.num_connected_trusted_peers, 1);
-}
-
-#[tokio::test]
-async fn stops_services_when_network_is_compromised() {
-    let mut generator = ExtendedHeaderGenerator::new();
-    let store = InMemoryStore::new();
-
-    // add some initial headers
-    store
-        .insert(generator.next_many_verified(64))
-        .await
-        .unwrap();
-
-    // create a corrupted block and insert it
-    let mut eds = generate_dummy_eds(8);
-    let (header, befp) = corrupt_eds(&mut generator, &mut eds);
-
-    store.insert(header).await.unwrap();
-
-    // spawn node
-    let node = listening_test_node_builder()
-        .store(store)
-        .start()
-        .await
-        .unwrap();
-
-    // get the address to dial
-    let listener_addr = wait_for_listeners(&node).await[0].clone();
-
-    // spawn a proof broadcaster
-    let befp_announce_tx = spawn_befp_announcer(listener_addr);
-    sleep(Duration::from_millis(300)).await;
-
-    // node services are running
-    // TODO: also check the daser and blob submit
-    assert!(node.syncer_info().await.is_ok());
-
-    // announce befp
-    befp_announce_tx.send(befp).await.unwrap();
-    sleep(Duration::from_millis(300)).await;
-
-    // node services are stopped
-    // TODO: also check the daser and blob submit
-    assert!(node.syncer_info().await.is_err());
-}
-
-fn spawn_befp_announcer(connect_to: Multiaddr) -> mpsc::Sender<BadEncodingFraudProof> {
-    #[derive(NetworkBehaviour)]
-    struct Behaviour {
-        ping: ping::Behaviour,
-        gossipsub: gossipsub::Behaviour,
-    }
-
-    // create a new libp2p node with gossipsub
-    let mut announcer = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .unwrap()
-        .with_behaviour(|key| {
-            let ping = ping::Behaviour::new(ping::Config::default());
-
-            let config = gossipsub::ConfigBuilder::default().build().unwrap();
-            let message_authenticity = gossipsub::MessageAuthenticity::Signed(key.clone());
-            let gossipsub: gossipsub::Behaviour =
-                gossipsub::Behaviour::new(message_authenticity, config).unwrap();
-
-            Ok(Behaviour { ping, gossipsub })
-        })
-        .unwrap()
-        .build();
-
-    announcer.dial(connect_to).unwrap();
-
-    // subscribe to the fraud-sub topic
-    let topic = gossipsub::IdentTopic::new("/badencoding/fraud-sub/private/v0.0.1");
-    announcer
-        .behaviour_mut()
-        .gossipsub
-        .subscribe(&topic)
-        .unwrap();
-
-    // a channel for proof announcment
-    let (tx, mut rx) = mpsc::channel::<BadEncodingFraudProof>(8);
-
-    spawn(async move {
-        loop {
-            select! {
-                _ = announcer.select_next_some() => (),
-                Some(proof) = rx.recv() => {
-                    let proof = proof.encode_vec();
-                    announcer.behaviour_mut().gossipsub.publish(topic.hash(), proof).unwrap();
-                }
-            }
-        }
-    });
-
-    tx
 }

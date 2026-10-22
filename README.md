@@ -3,33 +3,33 @@
 # Lumina
 
 <a href="https://github.com/celestiaorg/lumina/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/celestiaorg/lumina/actions/workflows/ci.yml/badge.svg?branch=main" alt="Build Status" /></a>
-<a href="https://lumina.rs"><img src="https://img.shields.io/website?url=https%3A%2F%2Flumina.rs&label=lumina.rs" alt="lumina.rs"></a>
-<a href="https://crates.io/crates/lumina-cli"><img src="https://img.shields.io/crates/v/lumina-cli?label=lumina-cli" alt="crates.io lumina-cli"></a>
-<a href="https://crates.io/crates/lumina-node"><img src="https://img.shields.io/crates/v/lumina-node?label=lumina-node" alt="crates.io lumina-node"></a>
-<a href="https://crates.io/crates/lumina-node-uniffi"><img src="https://img.shields.io/crates/v/lumina-node-uniffi?label=lumina-node-uniffi" alt="crates.io lumina-node-uniffi"></a>
-<a href="https://crates.io/crates/lumina-node-wasm"><img src="https://img.shields.io/crates/v/lumina-node-wasm?label=lumina-node-wasm" alt="crates.io lumina-node-wasm"></a>
-<a href="https://crates.io/crates/celestia-types"><img src="https://img.shields.io/crates/v/celestia-types?label=celestia-types" alt="crates.io celestia-types"></a>
-<a href="https://crates.io/crates/celestia-proto"><img src="https://img.shields.io/crates/v/celestia-proto?label=celestia-proto" alt="crates.io celestia-proto"></a>
-<a href="https://crates.io/crates/celestia-rpc"><img src="https://img.shields.io/crates/v/celestia-rpc?label=celestia-rpc" alt="crates.io celestia-rpc"></a>
-<a href="https://crates.io/crates/celestia-grpc"><img src="https://img.shields.io/crates/v/celestia-grpc?label=celestia-grpc" alt="crates.io celestia-grpc"></a>
 
 </div>
 
-
 Rust implementation of Celestia's [data availability node](https://github.com/celestiaorg/celestia-node) able to run natively and in browser-based environments.
-
-Run Lumina now at [lumina.rs](https://lumina.rs/) and directly verify Celestia.
 
 Supported features:
 - Backward and forward synchronization of block headers within sampling window
 - Header exchange (`header-ex`) client and server
 - Listening for, verifying and redistributing extended headers on gossip protocol (`header-sub`)
-- Listening for, verifying and redistributing fraud proofs on gossip protocol (`fraud-sub`)
 - Backward and forward Data Availability Sampling
 - Native and browser persistent storage
 - Streaming events happening on the node
 - Native and Wasm libraries (UniFFI/mobile bindings are deprecated)
 - Integration tests with Go implementation
+
+## Crates
+
+| Crate | Version |
+| --- | --- |
+| [`lumina-cli`](https://crates.io/crates/lumina-cli) | [![crates.io lumina-cli](https://img.shields.io/crates/v/lumina-cli)](https://crates.io/crates/lumina-cli) |
+| [`lumina-node`](https://crates.io/crates/lumina-node) | [![crates.io lumina-node](https://img.shields.io/crates/v/lumina-node)](https://crates.io/crates/lumina-node) |
+| [`lumina-node-uniffi`](https://crates.io/crates/lumina-node-uniffi) | [![crates.io lumina-node-uniffi](https://img.shields.io/crates/v/lumina-node-uniffi)](https://crates.io/crates/lumina-node-uniffi) |
+| [`lumina-node-wasm`](https://crates.io/crates/lumina-node-wasm) | [![crates.io lumina-node-wasm](https://img.shields.io/crates/v/lumina-node-wasm)](https://crates.io/crates/lumina-node-wasm) |
+| [`celestia-types`](https://crates.io/crates/celestia-types) | [![crates.io celestia-types](https://img.shields.io/crates/v/celestia-types)](https://crates.io/crates/celestia-types) |
+| [`celestia-proto`](https://crates.io/crates/celestia-proto) | [![crates.io celestia-proto](https://img.shields.io/crates/v/celestia-proto)](https://crates.io/crates/celestia-proto) |
+| [`celestia-rpc`](https://crates.io/crates/celestia-rpc) | [![crates.io celestia-rpc](https://img.shields.io/crates/v/celestia-rpc)](https://crates.io/crates/celestia-rpc) |
+| [`celestia-grpc`](https://crates.io/crates/celestia-grpc) | [![crates.io celestia-grpc](https://img.shields.io/crates/v/celestia-grpc)](https://crates.io/crates/celestia-grpc) |
 
 ## Installing the node
 
@@ -88,12 +88,6 @@ cd -
 cargo install --path cli --features browser-node
 ```
 
-> [!WARNING]
-> Since `getrandom v0.3` it is required to configure the randomness source via `RUSTFLAGS`.
-> If you depend on any of the crates and build for `wasm32-unknown-unknown`, it may be required to set
-> `'--cfg getrandom_backend="wasm_js"'` either through an environment variable or through `.cargo/config.toml`.
-> [See `getrandom` docs for more info](https://docs.rs/getrandom/0.3.3/getrandom/#webassembly-support).
-
 ## Running the node
 
 ### Running the node natively
@@ -129,7 +123,7 @@ docker compose -f ci/docker-compose.yml up --build --force-recreate -d --wait --
 docker compose -f ci/docker-compose.yml down
 ```
 > **Note:**
-> You can run more DA nodes by uncommenting/copying the node service definition in `ci/docker-compose.yml`.
+> You can run more DA nodes by uncommenting/copying the node service definition in `ci/docker-compose.yml` and increasing the validator's `NODE_COUNT` to match the total number of DA nodes.
 
 Fibre is registered on-chain as `localhost:7980` on chain `private` and serves TLS on that address from your host; use `http://localhost:19090` for app gRPC. The validator signing port listens only on container loopback.
 
@@ -151,13 +145,13 @@ export CELESTIA_NODE_AUTH_TOKEN=$(docker compose -f ci/docker-compose.yml exec n
 Accessing json RPC api with Go `celestia` cli:
 ```bash
 docker compose -f ci/docker-compose.yml exec node-1 \
-    celestia blob submit 0x0c204d39600fddd3 '"Hello world"' --token "$CELESTIA_NODE_AUTH_TOKEN"
+    celestia blob submit 0x0c204d39600fddd3 '"Hello world"' --token "$CELESTIA_NODE_AUTH_TOKEN" --url http://localhost:26658
 ```
 
 Extracting blocks for test cases:
 ```bash
 docker compose -f ci/docker-compose.yml exec node-1 \
-    celestia header get-by-height 27 --token "$CELESTIA_NODE_AUTH_TOKEN" | jq .result
+    celestia header get-by-height 27 --token "$CELESTIA_NODE_AUTH_TOKEN" --url http://localhost:26658 | jq .result
 ```
 
 ## Running integration tests with Celestia node
@@ -174,13 +168,21 @@ Run tests
 cargo test
 ```
 
-Run tests for javascript bindings. Those test are written in typescript, import wasm packages,
-and are executed in all major browsers (chrome, firefox, safari) using vitest and playwright.
+The JavaScript binding tests are written in TypeScript, import Wasm packages, and run in Chromium, Firefox, and WebKit using Vitest and Playwright.
+
+Install npm and wasm-pack as described in [Building wasm-node](#building-wasm-node), then run:
 
 ```bash
 npm ci
+npx playwright install --with-deps
 npm test
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+and start the subject with a review level tag (`[high]`, `[medium]`, or `[low]`), e.g. `fix(node): [high] reject invalid headers`.
+See [Pull Request Titles](CONTRIBUTING.md#pull-request-titles) for what each level means.
 
 ## Frontend
 

@@ -180,7 +180,16 @@ impl FibreClient {
         }
 
         // 1. Encode data into an EncodedBlob.
-        let blob = EncodedBlob::new(data, BlobConfig::for_version(0)?)?;
+        let cfg = BlobConfig::for_version(0)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let blob = {
+            let encode = EncodedBlob::prepare_encoding(data, cfg, rsema1d::default_work_budget())?;
+            tokio::task::spawn_blocking(encode)
+                .await
+                .expect("blob encoding task panicked or has been cancelled")?
+        };
+        #[cfg(target_arch = "wasm32")]
+        let blob = EncodedBlob::new(data, cfg)?;
 
         // 2. Upload to validators and collect signatures.
         let signed_promise = self.upload(signing_key, namespace, blob).await?;

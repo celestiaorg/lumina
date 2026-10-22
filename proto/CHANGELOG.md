@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.2.0...celestia-proto-v1.3.0) - 2026-10-05
+
+### Other
+
+- *(proto)* generate `celestia/fibre/v1/query.proto` ([#1121](https://github.com/celestiaorg/lumina/pull/1121))
+
+## [1.2.0](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.2.0-rc.1...celestia-proto-v1.2.0) - 2026-09-28
+
+### Other
+
+- *(proto)* update protobuf definitions ([#1085](https://github.com/celestiaorg/lumina/pull/1085))
+
+## [1.2.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.1.0-rc.1...celestia-proto-v1.2.0-rc.1) - 2026-09-24
+
+### Fixed
+
+- *(fibre)* fibre-client does proper download ([#992](https://github.com/celestiaorg/lumina/pull/992))
+
+### Other
+
+- *(proto)* preallocate tonic encoding buffers ([#1030](https://github.com/celestiaorg/lumina/pull/1030))
+- *(proto)* decode Fibre proofs and RLCs as Bytes ([#1027](https://github.com/celestiaorg/lumina/pull/1027))
+- *(fibre,rsema1d)* hand rows to wire without copying ([#1015](https://github.com/celestiaorg/lumina/pull/1015))
+
 ## [1.1.0-rc.1](https://github.com/celestiaorg/lumina/compare/celestia-proto-v1.0.0...celestia-proto-v1.1.0-rc.1) - 2026-06-24
 
 ### Added

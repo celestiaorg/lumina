@@ -48,7 +48,7 @@ pub(crate) struct Params {
 
     /// Pruning window defines maximum age of a block for it to be retained in store.
     #[arg(long)]
-    #[clap(value_parser = parse_duration::parse)]
+    #[clap(value_parser = humantime::parse_duration)]
     pub(crate) pruning_window: Option<Duration>,
 }
 
@@ -203,4 +203,36 @@ async fn fetch_bridge_multiaddrs(ws_url: &str) -> Result<Vec<Multiaddr>> {
     }
 
     Ok(addrs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pruning_window() {
+        let params = Params::try_parse_from([
+            "lumina",
+            "--network",
+            "mainnet",
+            "--pruning-window",
+            "1h 30m",
+        ])
+        .unwrap();
+
+        assert_eq!(params.pruning_window, Some(Duration::from_secs(90 * 60)));
+    }
+
+    #[test]
+    fn rejects_invalid_pruning_window() {
+        let result = Params::try_parse_from([
+            "lumina",
+            "--network",
+            "mainnet",
+            "--pruning-window",
+            "invalid",
+        ]);
+
+        assert!(result.is_err());
+    }
 }

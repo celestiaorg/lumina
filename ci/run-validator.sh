@@ -59,6 +59,13 @@ wait_for_block() {
   echo "$block_hash"
 }
 
+# CometBFT serves block 1 before the application commits it.
+wait_for_app() {
+  until celestia-appd query staking params >/dev/null 2>&1; do
+    sleep 0.1
+  done
+}
+
 # Creates or imports key for node
 create_or_import_key() {
   local node_name="$1"
@@ -205,10 +212,11 @@ main() {
   (
     announce_genesis_hash
     if [ -n "${FIBRE_HOST:-}" ]; then
+      wait_for_app
       register_fibre_host
     fi
   ) &
-  local provision_pid=$!
+  provision_pid=$!
 
   # celestia-appd overrides quite a few settings if they
   # are not within a sane range for regular deployment.
@@ -226,13 +234,13 @@ main() {
     --force-no-bbr \
     --delayed-precommit-timeout 500ms \
     "${extra_flags[@]}" &
-  local service_pids=("$!")
+  service_pids=("$!")
   trap 'kill "${service_pids[@]}" "$provision_pid" 2>/dev/null || true; wait' EXIT
   trap 'exit 0' INT TERM
 
   if [ -n "${FIBRE_HOST:-}" ]; then
     (
-      wait_for_block 1 >/dev/null
+      wait_for_app
       exec fibre start \
         --app-grpc-address localhost:9090 \
         --signer-grpc-address localhost:26669 \

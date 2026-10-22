@@ -6,10 +6,11 @@ use std::time::Duration;
 use celestia_rpc::TxConfig;
 use celestia_rpc::p2p::PeerId;
 use celestia_rpc::prelude::*;
-use celestia_types::Blob;
 use celestia_types::nmt::Namespace;
+use celestia_types::{Blob, ExtendedHeader};
 use futures::FutureExt;
 use gloo_timers::future::sleep;
+use lumina_node_wasm::client::NodeClient;
 use lumina_node_wasm::utils::setup_logging;
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -71,8 +72,8 @@ async fn get_blob() {
     let bridge_ma = fetch_bridge_webtransport_multiaddr(&rpc_client).await;
     let client = spawn_connected_node(vec![bridge_ma.to_string()]).await;
 
-    // Wait for the `client` node to sync until the `submitted_height`.
-    sleep(Duration::from_secs(2)).await;
+    // Blobs can only be requested for heights the node has already synced.
+    wait_for_header(&client, submitted_height).await;
 
     let mut blobs = client
         .request_all_blobs(&namespace, submitted_height, None)
@@ -83,4 +84,17 @@ async fn get_blob() {
     let blob = blobs.pop().unwrap();
     assert_eq!(blob.data, data);
     assert_eq!(blob.namespace, namespace);
+}
+
+/// Waits until the node has synced the header at `height` and returns it.
+async fn wait_for_header(client: &NodeClient, height: u64) -> ExtendedHeader {
+    // 30 s, the node syncs the head first and then backfills
+    for _ in 0..120 {
+        if let Ok(header) = client.get_header_by_height(height).await {
+            return header;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    panic!("node did not sync header {height} within 30s");
 }

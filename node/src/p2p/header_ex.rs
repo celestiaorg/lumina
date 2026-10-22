@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use celestia_proto::p2p::pb::{HeaderRequest, HeaderResponse};
 use celestia_types::ExtendedHeader;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -379,7 +378,6 @@ impl ConnectionHandler for ConnHandler {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct HeaderCodec;
 
-#[async_trait]
 impl Codec for HeaderCodec {
     type Protocol = StreamProtocol;
     type Request = HeaderRequest;

@@ -26,7 +26,6 @@ mod native {
     use jsonrpsee::ws_client::{PingConfig, WsClient, WsClientBuilder};
     use serde::de::DeserializeOwned;
     use tokio::sync::RwLock;
-    use tracing::warn;
 
     use crate::Error;
 
@@ -65,8 +64,8 @@ mod native {
                     if let Some(timeout) = request_timeout {
                         builder = builder.request_timeout(timeout);
                     }
-                    if connect_timeout.is_some() {
-                        warn!("ignored connect_timeout: not supported with http(s)");
+                    if let Some(timeout) = connect_timeout {
+                        builder = builder.connect_timeout(timeout);
                     }
                     Client::Http(builder.build(url)?)
                 }
@@ -359,15 +358,17 @@ mod native {
     mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
 
         use jsonrpsee::core::ClientError;
+        use jsonrpsee::core::client::ClientT;
         use jsonrpsee::core::params::BatchRequestBuilder;
         use serde::de::DeserializeOwned;
         use serde_json::Value as JsonValue;
         use tokio::join;
         use tokio::sync::Barrier;
 
-        use super::{BuildFn, WsReconnectClient};
+        use super::{BuildFn, Client, WsReconnectClient};
 
         struct FakeWsClient {
             remaining_failures: AtomicUsize,
@@ -581,6 +582,33 @@ mod native {
             let value: u64 = client.request("test", Vec::<u8>::new()).await.unwrap();
             assert_eq!(value, 9);
             assert_eq!(build_count.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn http_connect_timeout_fires_before_request_timeout() {
+            // 192.0.2.1 is TEST-NET-1 (RFC 5737): not routable, so the TCP
+            // handshake never completes.
+            let client = Client::new(
+                "http://192.0.2.1:9",
+                None,
+                Some(Duration::from_millis(100)),
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+
+            let res = tokio::time::timeout(
+                Duration::from_secs(10),
+                client.request::<u64, _>("test", Vec::<u8>::new()),
+            )
+            .await
+            .expect("connect should fail well before the request timeout");
+
+            match res {
+                Ok(_) => panic!("expected a connect error"),
+                Err(ClientError::RequestTimeout) => panic!("failed via request timeout"),
+                Err(_) => {}
+            }
         }
     }
 }

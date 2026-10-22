@@ -2,7 +2,7 @@
 use std::iter;
 use std::time::Duration;
 
-use ed25519_consensus::SigningKey;
+use ed25519_dalek::{Signer as _, SigningKey};
 use rand::RngCore;
 use tendermint::block::header::{Header, Version};
 use tendermint::block::{Commit, CommitSig, parts};
@@ -40,7 +40,7 @@ impl ExtendedHeaderGenerator {
     /// Creates new `ExtendedHeaderGenerator`.
     pub fn new() -> ExtendedHeaderGenerator {
         let chain_id: chain::Id = "private".try_into().unwrap();
-        let key = SigningKey::new(rand::thread_rng());
+        let key = random_signing_key();
 
         ExtendedHeaderGenerator {
             chain_id,
@@ -410,8 +410,8 @@ pub fn unverify(header: &mut ExtendedHeader) {
 
     // One way to unverify `ExtendedHeader` but still passes the
     // validation check, is to sign it with a new key.
-    let key = SigningKey::new(rand::thread_rng());
-    let pub_key_bytes = key.verification_key().to_bytes();
+    let key = random_signing_key();
+    let pub_key_bytes = key.verifying_key().to_bytes();
     let pub_key = PublicKey::from_raw_ed25519(&pub_key_bytes).unwrap();
     let validator_address = tendermint::account::Id::from(pub_key);
 
@@ -765,7 +765,7 @@ fn generate_new(
 ) -> ExtendedHeader {
     assert!(height >= GENESIS_HEIGHT);
 
-    let pub_key_bytes = signing_key.verification_key().to_bytes();
+    let pub_key_bytes = signing_key.verifying_key().to_bytes();
     let pub_key = PublicKey::from_raw_ed25519(&pub_key_bytes).unwrap();
     let validator_address = tendermint::account::Id::from(pub_key);
 
@@ -936,6 +936,12 @@ fn hash_and_sign(header: &mut ExtendedHeader, signing_key: &SigningKey) {
             *signature = Some(Signature::new(sig).unwrap().unwrap());
         }
     }
+}
+
+fn random_signing_key() -> SigningKey {
+    let mut bytes = [0; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    SigningKey::from_bytes(&bytes)
 }
 
 #[cfg(test)]

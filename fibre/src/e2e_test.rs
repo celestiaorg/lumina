@@ -1,13 +1,44 @@
 use celestia_grpc::{GrpcClient, TxConfig};
 use celestia_types::nmt::Namespace;
-use celestia_types::state::AccAddress;
+use celestia_types::state::{AccAddress, ConsAddress};
 use k256::ecdsa::SigningKey;
 
-use crate::{BlobID, DownloadOptions, FibreClient, FibreClientConfig};
+use crate::{
+    BlobID, DownloadOptions, FibreClient, FibreClientConfig, GrpcHostRegistry, GrpcSetGetter, Host,
+    SetGetter,
+};
 
 const APP_GRPC_URL: &str = "http://localhost:19090";
 const CHAIN_ID: &str = "private";
 const TEST_PRIVATE_KEY: &str = include_str!("../../ci/credentials/node-0.plaintext-key");
+
+#[tokio::test]
+async fn pull_all_bonded_fibre_providers() {
+    let client = GrpcClient::builder().url(APP_GRPC_URL).build().unwrap();
+    let validator_set = GrpcSetGetter::new(client.clone()).head().await.unwrap();
+    assert_eq!(validator_set.validators().len(), 1);
+    let validator = &validator_set.validators()[0];
+    let expected_host = Host("localhost:7980".to_owned());
+
+    let providers = client
+        .get_all_bonded_fibre_providers()
+        .await
+        .unwrap()
+        .providers;
+    assert_eq!(providers.len(), 1);
+    assert_eq!(
+        providers[0].validator_consensus_address,
+        ConsAddress::from(*validator.address()).to_string()
+    );
+    assert_eq!(providers[0].info.as_ref().unwrap().host, expected_host.0);
+
+    let registry = GrpcHostRegistry::new(client);
+    registry.pull_all().await.unwrap();
+
+    let cache = registry.cache.read().await;
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.get(validator.address()), Some(&expected_host));
+}
 
 #[tokio::test]
 async fn put_then_download() {

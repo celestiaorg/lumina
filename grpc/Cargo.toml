@@ -36,7 +36,7 @@ hex.workspace = true
 http.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
-ics23 = { version = "0.12", default-features = false, features = ["std"] }
+ics23 = { version = "0.12", default-features = false }
 k256.workspace = true
 prost.workspace = true
 serde.workspace = true
@@ -73,7 +73,7 @@ rand.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-hyper = { version = "1.8", features = ["http2", "server", "client"] }
+hyper = { workspace = true, features = ["http2", "server", "client"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http2", "server-auto", "tokio"] }
 tokio = { workspace = true, features = ["rt", "macros", "net", "test-util"] }
 tokio-stream = { workspace = true }
