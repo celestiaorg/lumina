@@ -230,6 +230,11 @@ jobs:
         # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
         rustflags: ""
 
+    - name: Setup Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: 24.22.1
+
     - name: Install wasm-pack
       uses: taiki-e/install-action@v2
       with:
@@ -254,6 +259,11 @@ jobs:
         target: wasm32-unknown-unknown
         # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
         rustflags: ""
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: 24.22.1
 
     - name: Install wasm-pack
       uses: taiki-e/install-action@v2
