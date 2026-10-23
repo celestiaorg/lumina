@@ -839,6 +839,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_commit_not_enough_voting_power() {
+        let mut eh = sample_eh_chain_1_block_27();
+        eh.commit
+            .signatures
+            .fill(tendermint::block::CommitSig::BlockIdFlagAbsent);
+
+        assert!(matches!(
+            eh.validate(),
+            Err(Error::Verification(
+                crate::VerificationError::NotEnoughVotingPower(0, _)
+            ))
+        ));
+    }
+
+    #[test]
     fn verify() {
         let eh_block_1 = sample_eh_chain_1_block_1();
         let eh_block_27 = sample_eh_chain_1_block_27();
@@ -857,6 +872,16 @@ mod tests {
         let eh_block_28 = sample_eh_chain_2_block_28();
 
         eh_block_27.verify(&eh_block_28).unwrap();
+        eh_block_27.verify_adjacent(&eh_block_28).unwrap();
+    }
+
+    #[test]
+    fn verify_adjacent_not_adjacent() {
+        let eh_block_1 = sample_eh_chain_2_block_1();
+        let eh_block_27 = sample_eh_chain_2_block_27();
+
+        eh_block_1.verify(&eh_block_27).unwrap();
+        eh_block_1.verify_adjacent(&eh_block_27).unwrap_err();
     }
 
     #[test]

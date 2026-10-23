@@ -147,6 +147,39 @@ impl NamespaceDataId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::generate_dummy_eds;
+
+    #[test]
+    fn id_encode_decode() {
+        let id = NamespaceDataId::new(Namespace::new_v0(&[1]).unwrap(), 64).unwrap();
+        let mut bytes = BytesMut::new();
+        id.encode(&mut bytes);
+
+        // Size MUST be 37 by the spec.
+        assert_eq!(bytes.len(), 37);
+        assert_eq!(NamespaceDataId::decode(&bytes).unwrap(), id);
+        NamespaceDataId::decode(&bytes[1..]).unwrap_err();
+    }
+
+    #[test]
+    fn verify() {
+        let eds = generate_dummy_eds(8);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+        let namespace = eds.share(1, 1).unwrap().namespace();
+        let id = NamespaceDataId::new(namespace, 1).unwrap();
+        let rows = eds
+            .get_namespace_data(namespace, &dah, 1)
+            .unwrap()
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect();
+        let mut data = NamespaceData::new(rows);
+
+        data.verify(id, &dah).unwrap();
+
+        data.rows.pop();
+        data.verify(id, &dah).unwrap_err();
+    }
 
     #[test]
     fn decode_namespaced_shares() {

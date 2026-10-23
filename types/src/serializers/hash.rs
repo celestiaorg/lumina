@@ -22,3 +22,37 @@ where
 {
     serializer.serialize_some(&value.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::{Deserialize, Serialize};
+    use tendermint::hash::Hash;
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Wrapper(#[serde(with = "super")] Hash);
+
+    #[test]
+    fn round_trip() {
+        let hash = Wrapper(Hash::Sha256([0xab; 32]));
+        let json = serde_json::to_string(&hash).unwrap();
+
+        assert_eq!(json, format!("\"{}\"", "AB".repeat(32)));
+        assert_eq!(serde_json::from_str::<Wrapper>(&json).unwrap(), hash);
+    }
+
+    #[test]
+    fn empty_and_null_are_none() {
+        assert_eq!(serde_json::to_string(&Wrapper(Hash::None)).unwrap(), "\"\"");
+        assert_eq!(
+            serde_json::from_str::<Wrapper>("\"\"").unwrap().0,
+            Hash::None
+        );
+        assert_eq!(
+            serde_json::from_str::<Wrapper>("null").unwrap().0,
+            Hash::None
+        );
+    }
+}
