@@ -246,6 +246,7 @@ name = "celestia-types-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "base64",
  "bytes",
  "celestia-proto",
  "celestia-types",

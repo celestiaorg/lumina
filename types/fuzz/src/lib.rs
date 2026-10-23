@@ -1,17 +1,21 @@
 //! Shared fixtures for the `celestia-types` fuzz targets.
 
 use std::iter;
+use std::ops::Range;
 use std::sync::LazyLock;
 
+use celestia_proto::celestia::core::v1::proof::{
+    NmtProof as RawNmtProof, ShareProof as RawShareProof,
+};
 use celestia_proto::shwap::{
     Row as RawRow, RowNamespaceData as RawRowNamespaceData, Sample as RawSample,
 };
 use celestia_types::consts::appconsts::SHARE_SIZE;
 use celestia_types::namespace_data::{NamespaceData, NamespaceDataId};
-use celestia_types::nmt::{NS_SIZE, Namespace};
+use celestia_types::nmt::{NS_SIZE, Namespace, NamespacedHashExt};
 use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
-use celestia_types::{DataAvailabilityHeader, ExtendedDataSquare};
+use celestia_types::{DataAvailabilityHeader, ExtendedDataSquare, Share, ShareProof};
 
 pub mod header;
 pub mod mutate;
@@ -128,5 +132,83 @@ impl Square {
             let shares = data.rows().iter().map(|row| &row.shares);
             assert!(shares.eq(expected.iter().map(|(_, row)| &row.shares)));
         }
+    }
+
+    fn ods_width(&self) -> usize {
+        usize::from(self.eds.square_width() / 2)
+    }
+
+    /// Original data share at `index`, in row-major order.
+    pub fn ods_share(&self, index: usize) -> &Share {
+        let width = self.ods_width();
+        self.eds
+            .share((index / width) as u16, (index % width) as u16)
+            .unwrap()
+    }
+
+    /// Range of original data shares, in row-major order, that are in `namespace`.
+    pub fn namespace_range(&self, namespace: Namespace) -> Range<usize> {
+        let total = self.ods_width().pow(2);
+        let in_namespace = |&i: &usize| self.ods_share(i).namespace() == namespace;
+        let start = (0..total).find(in_namespace).unwrap_or(total);
+        let end = (start..total).find(|i| !in_namespace(i)).unwrap_or(total);
+        start..end
+    }
+
+    /// Share proof of the original data shares in `range`, all in `namespace`.
+    pub fn share_proof(&self, namespace: Namespace, range: Range<usize>) -> RawShareProof {
+        let width = self.ods_width();
+        let rows = range.start / width..=(range.end - 1) / width;
+
+        RawShareProof {
+            data: range.clone().map(|i| self.ods_share(i).to_vec()).collect(),
+            share_proofs: rows
+                .clone()
+                .map(|row| {
+                    let start = range.start.max(row * width) - row * width;
+                    let end = range.end.min((row + 1) * width) - row * width;
+                    let proof = self
+                        .eds
+                        .row_nmt(row as u16)
+                        .unwrap()
+                        .build_range_proof(start..end);
+                    RawNmtProof {
+                        start: start as i32,
+                        end: end as i32,
+                        nodes: proof.siblings().iter().map(|node| node.to_vec()).collect(),
+                        leaf_hash: Vec::new(),
+                    }
+                })
+                .collect(),
+            namespace_id: namespace.id().to_vec(),
+            namespace_version: namespace.version().into(),
+            row_proof: Some(
+                self.dah
+                    .row_proof(*rows.start() as u16..=*rows.end() as u16)
+                    .unwrap()
+                    .into(),
+            ),
+        }
+    }
+
+    /// Decodes and verifies a share proof against the data root, the way a client of
+    /// a bridge node does.
+    ///
+    /// Panics if verification accepts anything but shares of this square in the
+    /// proven namespace and range.
+    pub fn check_share_proof(&self, raw: RawShareProof) {
+        let Ok(proof) = ShareProof::try_from(raw) else {
+            return;
+        };
+        let Ok(range) = proof.covered_range(self.dah.hash()) else {
+            return;
+        };
+        let range = range.start as usize..range.end as usize;
+        assert!(range.end <= self.ods_width().pow(2));
+        for (share, i) in proof.data.iter().zip(range.clone()) {
+            assert_eq!(share, self.ods_share(i).data());
+            assert_eq!(self.ods_share(i).namespace(), proof.namespace_id);
+        }
+        assert_eq!(proof.data.len(), range.len());
     }
 }
