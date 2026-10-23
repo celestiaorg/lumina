@@ -5,7 +5,7 @@ use tendermint_proto::Protobuf;
 
 use crate::bail_validation;
 use crate::consts::appconsts;
-use crate::eds::AxisType;
+use crate::eds::{AxisType, is_ods_square};
 use crate::fraud_proof::FraudProof;
 use crate::hash::Hash;
 use crate::nmt::{NS_SIZE, Namespace, NamespaceProof, Nmt, NmtExt};
@@ -156,9 +156,14 @@ impl FraudProof for BadEncodingFraudProof {
         let mut nmt = Nmt::default();
 
         for (n, share) in rebuilt_shares.iter().enumerate() {
-            let ns = if n < ods_width {
-                // safety: length must be correct
-                Namespace::from_raw(&share[..NS_SIZE]).unwrap()
+            // it doesn't matter which is row and which is column as ods is first quadrant
+            let ns = if is_ods_square(self.index, n as u16, square_width as u16) {
+                let Ok(ns) = Namespace::from_raw(&share[..NS_SIZE]) else {
+                    // reconstructed original share has invalid namespace
+                    // befp is legit
+                    return Ok(());
+                };
+                ns
             } else {
                 Namespace::PARITY_SHARE
             };
@@ -309,7 +314,6 @@ pub(crate) mod test_utils {
     use rand::seq::index;
 
     use crate::consts::appconsts::{FIRST_SPARSE_SHARE_CONTENT_SIZE, SHARE_SIZE};
-    use crate::eds::is_ods_square;
     use crate::test_utils::{ExtendedHeaderGenerator, random_bytes};
     use crate::{DataAvailabilityHeader, ExtendedDataSquare};
 
@@ -422,8 +426,8 @@ pub(crate) mod test_utils {
 mod tests {
     use self::test_utils::befp_from_header_and_eds;
     use super::*;
-    use crate::DataAvailabilityHeader;
     use crate::test_utils::{ExtendedHeaderGenerator, corrupt_eds, generate_dummy_eds};
+    use crate::{DataAvailabilityHeader, ExtendedDataSquare};
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test as test;
@@ -472,11 +476,41 @@ mod tests {
         let dah = DataAvailabilityHeader::from_eds(&eds);
         let eh = generator.next_with_dah(dah);
 
-        let proof = befp_from_header_and_eds(&eh, &eds, 2, AxisType::Row);
-        proof.validate(&eh).unwrap_err();
+        for axis_idx in 0..eds.square_width() {
+            let proof = befp_from_header_and_eds(&eh, &eds, axis_idx, AxisType::Row);
+            proof.validate(&eh).unwrap_err();
 
-        let proof = befp_from_header_and_eds(&eh, &eds, 3, AxisType::Col);
-        proof.validate(&eh).unwrap_err();
+            let proof = befp_from_header_and_eds(&eh, &eds, axis_idx, AxisType::Col);
+            proof.validate(&eh).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn validate_befp_over_correct_data_with_mixed_namespace_versions() {
+        let mut generator = ExtendedHeaderGenerator::new();
+        let share = |ns: Namespace| {
+            let mut share = vec![0; appconsts::SHARE_SIZE];
+            share[..NS_SIZE].copy_from_slice(ns.as_bytes());
+            share
+        };
+        let ns = Namespace::new_v0(&[1, 2, 3]).unwrap();
+        let eds = ExtendedDataSquare::from_ods(vec![
+            share(ns),
+            share(ns),
+            share(ns),
+            share(Namespace::TAIL_PADDING),
+        ])
+        .unwrap();
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+        let eh = generator.next_with_dah(dah);
+
+        for axis_idx in 0..eds.square_width() {
+            let proof = befp_from_header_and_eds(&eh, &eds, axis_idx, AxisType::Row);
+            proof.validate(&eh).unwrap_err();
+
+            let proof = befp_from_header_and_eds(&eh, &eds, axis_idx, AxisType::Col);
+            proof.validate(&eh).unwrap_err();
+        }
     }
 
     #[test]
