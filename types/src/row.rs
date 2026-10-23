@@ -100,6 +100,10 @@ impl Row {
     pub fn from_raw(id: RowId, row: RawRow) -> Result<Self> {
         let data_shares = row.shares_half.len();
 
+        if data_shares == 0 {
+            return Err(Error::MissingShares);
+        }
+
         let shares = match row.half_side() {
             RawHalfSide::Left => {
                 // We have original data, recompute parity shares
@@ -374,6 +378,23 @@ mod tests {
                 Blob::reconstruct_all(rows.iter().flat_map(|row| row.shares.iter())).unwrap();
 
             assert_eq!(blobs.len(), 2);
+        }
+    }
+
+    #[test]
+    fn from_raw_rejects_empty_row() {
+        let id = RowId::new(0, 1).unwrap();
+
+        for half_side in [RawHalfSide::Left, RawHalfSide::Right] {
+            let raw = RawRow {
+                shares_half: vec![],
+                half_side: half_side.into(),
+            };
+
+            assert!(matches!(
+                Row::from_raw(id, raw).unwrap_err(),
+                Error::MissingShares
+            ));
         }
     }
 }
