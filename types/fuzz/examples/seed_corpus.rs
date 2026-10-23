@@ -72,6 +72,14 @@ fn main() {
         );
     }
 
+    for (name, ns) in [
+        ("v0", namespace(1)),
+        ("tail_padding", Namespace::TAIL_PADDING),
+        ("parity", Namespace::PARITY_SHARE),
+    ] {
+        write("namespace", name, ns.as_bytes());
+    }
+
     for (selector, square) in SQUARES.iter().enumerate() {
         let eds = &square.eds;
         let width = eds.square_width();
@@ -135,6 +143,24 @@ fn main() {
                 &format!("w{width}_{name}"),
                 &[&prefix[..], &data].concat(),
             );
+        }
+
+        for id in [1, 3, 5] {
+            let ns = namespace(id);
+            let range = square.namespace_range(ns);
+            if range.is_empty() {
+                continue;
+            }
+            for (name, range) in [
+                ("all", range.clone()),
+                ("first", range.start..range.start + 1),
+            ] {
+                write(
+                    "share_proof",
+                    &format!("w{width}_ns{id}_{name}"),
+                    &[&prefix[..], &square.share_proof(ns, range).encode_to_vec()].concat(),
+                );
+            }
         }
 
         let ods_width = width / 2;

@@ -4,7 +4,12 @@
 //! and apply arbitrary mutations to it, so that fuzzing spends its time in proof
 //! verification rather than in the protobuf decoder.
 
+use std::mem;
+
 use arbitrary::Arbitrary;
+use celestia_proto::celestia::core::v1::proof::{
+    NmtProof as RawNmtProof, Proof as RawMerkleProof, RowProof as RawRowProof,
+};
 use celestia_proto::proof::pb::Proof as RawProof;
 use celestia_types::AxisType;
 use celestia_types::nmt::{NS_SIZE, Namespace, NamespacedHashExt};
@@ -157,6 +162,68 @@ impl ProofMutation {
                     .unwrap_or_default();
             }
             ProofMutation::IgnoreMaxNs(ignore) => proof.is_max_namespace_ignored = *ignore,
+        }
+    }
+}
+
+impl ProofMutation {
+    /// Applies the mutation to the proof format used by share proofs, which always
+    /// ignores the maximum namespace.
+    pub fn apply_nmt(&self, proof: &mut RawNmtProof, square: &Square) {
+        let mut raw = RawProof {
+            start: proof.start.into(),
+            end: proof.end.into(),
+            nodes: mem::take(&mut proof.nodes),
+            leaf_hash: mem::take(&mut proof.leaf_hash),
+            is_max_namespace_ignored: true,
+        };
+        self.apply(&mut raw, square);
+        proof.start = raw.start as i32;
+        proof.end = raw.end as i32;
+        proof.nodes = raw.nodes;
+        proof.leaf_hash = raw.leaf_hash;
+    }
+}
+
+/// A mutation of a proof of a row root in the data root tree.
+#[derive(Arbitrary, Debug)]
+pub enum MerkleMutation {
+    Total(i64),
+    Index(i64),
+    LeafHash(Vec<u8>),
+    Aunts(ListMutation),
+    Aunt {
+        aunt: u8,
+        hash: Vec<u8>,
+    },
+    /// Replaces an aunt with one from the proof of another row.
+    AuntOf {
+        row: u16,
+        aunt: u8,
+    },
+}
+
+impl MerkleMutation {
+    pub fn apply(&self, proof: &mut RawMerkleProof, square: &Square) {
+        match self {
+            MerkleMutation::Total(total) => proof.total = *total,
+            MerkleMutation::Index(index) => proof.index = *index,
+            MerkleMutation::LeafHash(hash) => proof.leaf_hash = hash.clone(),
+            MerkleMutation::Aunts(mutation) => mutation.apply(&mut proof.aunts),
+            MerkleMutation::Aunt { aunt, hash } => {
+                if let Some(aunt) = pick(&mut proof.aunts, *aunt) {
+                    *aunt = hash.clone();
+                }
+            }
+            MerkleMutation::AuntOf { row, aunt } => {
+                let rows = square.eds.square_width();
+                let row = row % rows;
+                let mut other = RawRowProof::from(square.dah.row_proof(row..=row).unwrap());
+                let other = pick(&mut other.proofs[0].aunts, *aunt).cloned();
+                if let (Some(slot), Some(other)) = (pick(&mut proof.aunts, *aunt), other) {
+                    *slot = other;
+                }
+            }
         }
     }
 }
