@@ -978,3 +978,19 @@ mod uniffi_types {
         pub index: bool,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    #[test]
+    fn error_code_try_from_matches_repr() {
+        for code in 0..=ErrorCode::Panic as u32 {
+            let from_repr: Option<ErrorCode> = serde_json::from_value(code.into()).ok();
+            assert_eq!(ErrorCode::try_from(code).ok(), from_repr, "code {code}");
+        }
+    }
+}
