@@ -8,11 +8,14 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = { version = "1.5.0", features = ["derive"] }
 bytes = "1.12.0"
 celestia-proto = { path = "../../proto" }
 celestia-types = { path = ".." }
+ed25519-dalek = "3"
 libfuzzer-sys = "0.4"
 prost = "0.13.3"
+tendermint = "0.40.3"
 tendermint-proto = "0.40.3"
 
 [dev-dependencies]
@@ -59,6 +62,34 @@ bench = false
 [[bin]]
 name = "eds"
 path = "fuzz_targets/eds.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sample_structured"
+path = "fuzz_targets/sample_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "row_structured"
+path = "fuzz_targets/row_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "namespace_data_structured"
+path = "fuzz_targets/namespace_data_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header_verify"
+path = "fuzz_targets/header_verify.rs"
 test = false
 doc = false
 bench = false
