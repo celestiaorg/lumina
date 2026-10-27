@@ -2,3 +2,14 @@
 # try to release only after merging the release PR
 # https://release-plz.dev/docs/config#the-release_always-field
 release_always = false
+# PR titles must carry a review level tag, see CONTRIBUTING.md
+# https://release-plz.dev/docs/config#the-pr_name-field
+pr_name = "chore{% if package %}({{ package }}){% endif %}: [medium] release{% if version %} v{{ version }}{% endif %}"
+
+[changelog]
+commit_preprocessors = [
+  # drop the review level tag (e.g. `fix: [low] foo` -> `fix: foo`)
+  { pattern = '^(\w+(\([^)]*\))?!?: )\[(high|medium|low)\] ', replace = "${1}" },
+  # setting preprocessors replaces release-plz's default PR link preprocessor, so keep it
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/celestiaorg/lumina/pull/${1}))" },
+]

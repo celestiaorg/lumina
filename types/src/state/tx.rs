@@ -625,6 +625,20 @@ pub enum ErrorCode {
     BlobsTooLarge = 11139,
     /// invalid blob signer
     InvalidBlobSigner = 11140,
+    /// share version of blob and its respective MsgPayForBlobs differ
+    ShareVersionMismatch = 11141,
+    /// transaction size exceeds maximum allowed limit
+    TxExceedsMaxSize = 11142,
+    /// transaction exceeds maximum allowed SDK message count
+    TxExceedsMaxSDKMessages = 11143,
+    /// index wrapper txs must contain a MsgPayForBlobs
+    NonPFBIndexWrapper = 11144,
+    /// index wrapper txs must contain exactly one message
+    MultiMsgIndexWrapper = 11145,
+    /// invalid MsgPayForFibre transaction
+    InvalidPayForFibreTx = 11146,
+    /// blob tx is not canonically encoded
+    NonCanonicalBlobTx = 11147,
 }
 
 impl fmt::Display for ErrorCode {
@@ -711,6 +725,14 @@ impl TryFrom<u32> for ErrorCode {
             11138 => ErrorCode::TotalBlobSizeTooLarge,
             11139 => ErrorCode::BlobsTooLarge,
             11140 => ErrorCode::InvalidBlobSigner,
+            11141 => ErrorCode::ShareVersionMismatch,
+            // celestia-app
+            11142 => ErrorCode::TxExceedsMaxSize,
+            11143 => ErrorCode::TxExceedsMaxSDKMessages,
+            11144 => ErrorCode::NonPFBIndexWrapper,
+            11145 => ErrorCode::MultiMsgIndexWrapper,
+            11146 => ErrorCode::InvalidPayForFibreTx,
+            11147 => ErrorCode::NonCanonicalBlobTx,
             _ => bail_validation!("error code ({}) unknown", value),
         };
         Ok(error_code)
@@ -976,5 +998,21 @@ mod uniffi_types {
         pub key: String,
         pub value: String,
         pub index: bool,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    #[test]
+    fn error_code_try_from_matches_repr() {
+        for code in 0..=ErrorCode::Panic as u32 {
+            let from_repr: Option<ErrorCode> = serde_json::from_value(code.into()).ok();
+            assert_eq!(ErrorCode::try_from(code).ok(), from_repr, "code {code}");
+        }
     }
 }

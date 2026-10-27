@@ -1,0 +1,122 @@
+[package]
+name = "celestia-types-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.5.0", features = ["derive"] }
+base64 = "0.22.1"
+bytes = "1.12.0"
+celestia-proto = { path = "../../proto" }
+celestia-types = { path = ".." }
+ed25519-dalek = "3"
+libfuzzer-sys = "0.4"
+prost = "0.13.3"
+serde_json = "1.0.142"
+tendermint = "0.40.3"
+tendermint-proto = "0.40.3"
+
+# Keep the fuzz crate out of the main workspace.
+[workspace]
+
+[[bin]]
+name = "extended_header"
+path = "fuzz_targets/extended_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shwap_ids"
+path = "fuzz_targets/shwap_ids.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sample"
+path = "fuzz_targets/sample.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "row"
+path = "fuzz_targets/row.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "namespace_data"
+path = "fuzz_targets/namespace_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eds"
+path = "fuzz_targets/eds.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sample_structured"
+path = "fuzz_targets/sample_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "row_structured"
+path = "fuzz_targets/row_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "namespace_data_structured"
+path = "fuzz_targets/namespace_data_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header_verify"
+path = "fuzz_targets/header_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "share_proof"
+path = "fuzz_targets/share_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "share_proof_structured"
+path = "fuzz_targets/share_proof_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eds_raw_structured"
+path = "fuzz_targets/eds_raw_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "namespace"
+path = "fuzz_targets/namespace.rs"
+test = false
+doc = false
+bench = false

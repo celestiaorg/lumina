@@ -317,6 +317,7 @@ pub mod uniffi_types {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
 
     use tendermint_proto::v0_38::types::ValidatorSet as RawValidatorSet;
 
@@ -477,5 +478,119 @@ mod tests {
                 &commit,
             )
             .unwrap_err();
+    }
+
+    #[test]
+    fn verify_commit_light_not_enough_voting_power() {
+        let mut commit = sample_commit();
+        let val_set = sample_validator_set();
+        commit.signatures[0] = CommitSig::BlockIdFlagAbsent;
+
+        let err = val_set
+            .verify_commit_light(
+                &"private".to_string().try_into().unwrap(),
+                &1u32.into(),
+                &commit,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::Verification(VerificationError::NotEnoughVotingPower(0, 3333))
+        ));
+    }
+
+    #[test]
+    fn verify_commit_light_missing_signature() {
+        let mut commit = sample_commit();
+        let val_set = sample_validator_set();
+        let CommitSig::BlockIdFlagCommit { signature, .. } = &mut commit.signatures[0] else {
+            unreachable!()
+        };
+        *signature = None;
+
+        let err = val_set
+            .verify_commit_light(
+                &"private".to_string().try_into().unwrap(),
+                &1u32.into(),
+                &commit,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("No signature in CommitSig"));
+    }
+
+    #[test]
+    fn verify_commit_light_invalid_signature() {
+        let commit = sample_commit();
+        let val_set = sample_validator_set();
+
+        // The commit was signed for the "private" chain.
+        let err = val_set
+            .verify_commit_light(
+                &"other".to_string().try_into().unwrap(),
+                &1u32.into(),
+                &commit,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Tendermint(_)));
+    }
+
+    #[test]
+    fn verify_commit_light_trusting_missing_signature() {
+        let mut commit = sample_commit();
+        let val_set = sample_validator_set();
+        let CommitSig::BlockIdFlagCommit { signature, .. } = &mut commit.signatures[0] else {
+            unreachable!()
+        };
+        *signature = None;
+
+        let err = val_set
+            .verify_commit_light_trusting(
+                &"private".to_string().try_into().unwrap(),
+                &commit,
+                TrustLevelRatio::new(1, 3),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("No signature in CommitSig"));
+    }
+
+    #[test]
+    fn verify_commit_light_trusting_double_vote() {
+        let mut commit = sample_commit();
+        let val_set = sample_validator_set();
+        commit.signatures.push(commit.signatures[0].clone());
+
+        // Require all voting power, so the first vote alone doesn't finish verification.
+        let err = val_set
+            .verify_commit_light_trusting(
+                &"private".to_string().try_into().unwrap(),
+                &commit,
+                TrustLevelRatio::new(1, 1),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Double vote"));
+    }
+
+    #[test]
+    fn verify_commit_light_trusting_needs_more_than_trust_level() {
+        let commit = sample_commit();
+        let val_set = sample_validator_set();
+
+        let err = val_set
+            .verify_commit_light_trusting(
+                &"private".to_string().try_into().unwrap(),
+                &commit,
+                TrustLevelRatio::new(1, 1),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::Verification(VerificationError::NotEnoughVotingPower(5000, 5000))
+        ));
     }
 }

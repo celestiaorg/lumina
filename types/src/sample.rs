@@ -127,6 +127,11 @@ impl Sample {
     /// Verify the sample against the root of its row or column from the [`DataAvailabilityHeader`],
     /// checking that the proof is for the share at the sampled coordinates.
     pub fn verify(&self, id: SampleId, dah: &DataAvailabilityHeader) -> Result<()> {
+        let square_width = dah.square_width();
+        if id.row_index() >= square_width || id.column_index() >= square_width {
+            return Err(Error::EdsIndexOutOfRange(id.row_index(), id.column_index()));
+        }
+
         let (root, index) = match self.proof_type {
             AxisType::Row => (
                 dah.row_root(id.row_index())
@@ -491,6 +496,38 @@ mod tests {
         let sample = Sample::new(3, 1, AxisType::Col, &eds).unwrap();
         let id = SampleId::new(2, 1, 1).unwrap();
 
+        sample.verify(id, &dah).unwrap_err();
+    }
+
+    #[test]
+    fn verify_rejects_column_outside_of_square() {
+        let eds = generate_dummy_eds(8);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+
+        // genuine share and row proof of (1, 4), with the proof moved to column 8
+        let mut raw = RawSample::from(Sample::new(1, 4, AxisType::Row, &eds).unwrap());
+        let proof = raw.proof.as_mut().unwrap();
+        proof.start = 8;
+        proof.end = 9;
+        let id = SampleId::new(1, 8, 1).unwrap();
+
+        let sample = Sample::from_raw(id, raw).unwrap();
+        sample.verify(id, &dah).unwrap_err();
+    }
+
+    #[test]
+    fn verify_rejects_row_outside_of_square() {
+        let eds = generate_dummy_eds(8);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+
+        // genuine share and column proof of (4, 1), with the proof moved to row 8
+        let mut raw = RawSample::from(Sample::new(4, 1, AxisType::Col, &eds).unwrap());
+        let proof = raw.proof.as_mut().unwrap();
+        proof.start = 8;
+        proof.end = 9;
+        let id = SampleId::new(8, 1, 1).unwrap();
+
+        let sample = Sample::from_raw(id, raw).unwrap();
         sample.verify(id, &dah).unwrap_err();
     }
 

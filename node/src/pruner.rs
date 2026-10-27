@@ -1295,7 +1295,12 @@ mod test {
         let mut event_subscriber = events.subscribe();
         let (daser, mut daser_handle) = Daser::mocked();
 
-        let first_header_time = (Time::now() - Duration::from_millis(5000)).unwrap();
+        // Pruner checks right after it starts and then every `block_time`. Header
+        // times are relative to `pruner_start`, so checks happen ~100ms away from
+        // the moments a group reaches the pruning window edge, regardless of how
+        // long the setup below takes.
+        let pruner_start = (Time::now() + Duration::from_millis(300)).unwrap();
+        let first_header_time = (pruner_start - Duration::from_millis(5000)).unwrap();
         generator.set_time(first_header_time, header_time);
 
         // 5 headers that reach the pruning window edge ~100ms after Pruner starts
@@ -1315,6 +1320,11 @@ mod test {
             store.get_stored_header_ranges().await.unwrap(),
             new_block_ranges([1101..=1105, 1501..=1505, 5001..=5010]),
         );
+
+        let until_start = pruner_start
+            .duration_since(Time::now())
+            .expect("setup took longer than the time reserved for it");
+        sleep(until_start).await;
 
         let pruner = Pruner::start(PrunerArgs {
             daser: Arc::new(daser),
