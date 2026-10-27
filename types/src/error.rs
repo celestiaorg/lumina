@@ -202,10 +202,6 @@ pub enum Error {
     #[error("Invalid Public Key")]
     InvalidPublicKeyType(String),
 
-    /// Unsupported fraud proof type.
-    #[error("Unsupported fraud proof type: {0}")]
-    UnsupportedFraudProofType(String),
-
     /// Data square index out of range.
     #[error("Index ({0}) out of range ({1})")]
     IndexOutOfRange(usize, usize),
@@ -652,10 +648,6 @@ pub enum UniffiError {
     #[error("Invalid Public Key")]
     InvalidPublicKeyType(String),
 
-    /// Unsupported fraud proof type.
-    #[error("Unsupported fraud proof type: {0}")]
-    UnsupportedFraudProofType(String),
-
     /// Data square index out of range.
     #[error("Index ({0}) out of range ({1})")]
     IndexOutOfRange(u64, u64),
@@ -812,7 +804,6 @@ impl From<Error> for UniffiError {
             Error::InvalidCoinDenomination(d) => UniffiError::InvalidCoinDenomination(d),
             Error::InvalidBalance(b) => UniffiError::InvalidBalance(b),
             Error::InvalidPublicKeyType(t) => UniffiError::InvalidPublicKeyType(t),
-            Error::UnsupportedFraudProofType(t) => UniffiError::UnsupportedFraudProofType(t),
             Error::IndexOutOfRange(i, r) => UniffiError::IndexOutOfRange(
                 i.try_into().expect("index to fit"),
                 r.try_into().expect("range to fit"),
