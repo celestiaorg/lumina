@@ -27,10 +27,8 @@ impl MerkleTree {
 
         // Total nodes = 2 * num_leaves - 1
         let total_nodes = 2 * num_leaves - 1;
-        let mut nodes = vec![[0u8; 32]; total_nodes];
-
-        // Copy pre-hashed leaves.
-        nodes[0..num_leaves].copy_from_slice(&leaf_hashes);
+        let mut nodes = leaf_hashes;
+        nodes.resize(total_nodes, [0u8; 32]);
 
         // Build internal nodes
         let mut level_start = 0;
@@ -39,26 +37,18 @@ impl MerkleTree {
         while level_size > 1 {
             let next_level_start = level_start + level_size;
             let parent_count = level_size / 2;
+            let (children, parents) = nodes.split_at_mut(next_level_start);
+            let children = &children[level_start..];
+            let parents = &mut parents[..parent_count];
 
             // Parallelize internal node hashing for large levels
             if parent_count >= 64 {
-                // Compute hashes in parallel, then write back
-                let parent_hashes: Vec<[u8; 32]> = (0..parent_count)
-                    .into_par_iter()
-                    .map(|i| {
-                        let left = &nodes[level_start + i * 2];
-                        let right = &nodes[level_start + i * 2 + 1];
-                        hash_internal(left, right)
-                    })
-                    .collect();
-
-                nodes[next_level_start..next_level_start + parent_count]
-                    .copy_from_slice(&parent_hashes);
+                parents.par_iter_mut().enumerate().for_each(|(i, parent)| {
+                    *parent = hash_internal(&children[i * 2], &children[i * 2 + 1]);
+                });
             } else {
-                for i in 0..parent_count {
-                    let left = &nodes[level_start + i * 2];
-                    let right = &nodes[level_start + i * 2 + 1];
-                    nodes[next_level_start + i] = hash_internal(left, right);
+                for (i, parent) in parents.iter_mut().enumerate() {
+                    *parent = hash_internal(&children[i * 2], &children[i * 2 + 1]);
                 }
             }
 
@@ -189,7 +179,7 @@ mod tests {
 
     #[test]
     fn proof_generation_and_verification_for_all_leaves() {
-        for (count, depth) in [(1, 0), (2, 1), (4, 2), (16, 4), (128, 7)] {
+        for (count, depth) in [(1, 0), (2, 1), (4, 2), (16, 4), (64, 6), (128, 7), (256, 8)] {
             let leaves = make_leaves(count, 16);
             let tree = MerkleTree::new(&leaves);
             let root = tree.root();
