@@ -7,7 +7,6 @@ mod blob;
 mod blobstream;
 mod client;
 mod fibre;
-mod fraud;
 mod header;
 mod share;
 mod state;
@@ -20,7 +19,6 @@ pub mod api {
     pub use crate::blob::BlobApi;
     pub use crate::blobstream::BlobstreamApi;
     pub use crate::fibre::FibreApi;
-    pub use crate::fraud::FraudApi;
     pub use crate::header::HeaderApi;
     pub use crate::share::ShareApi;
     pub use crate::state::StateApi;
@@ -51,12 +49,6 @@ pub mod api {
         pub use celestia_rpc::share::{
             GetRangeResponse, GetRowResponse, RowSide, SampleCoordinates,
         };
-    }
-
-    /// Fraud API related types.
-    pub mod fraud {
-        #[doc(inline)]
-        pub use celestia_rpc::fraud::{Proof, ProofType};
     }
 
     /// State API related types.

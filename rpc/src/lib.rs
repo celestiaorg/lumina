@@ -15,7 +15,6 @@ mod error;
     all(target_arch = "wasm32", feature = "wasm-bindgen")
 ))]
 mod failover;
-pub mod fraud;
 mod header;
 #[cfg(feature = "p2p")]
 /// Types and client for the p2p JSON-RPC API.
@@ -62,10 +61,6 @@ pub use crate::failover::{
     DEFAULT_HEALTH_CHECK_INTERVAL, DEFAULT_MAX_HEAD_AGE, DEFAULT_PROBE_TIMEOUT, FailoverClient,
     RpcEndpoint,
 };
-pub use crate::fraud::FraudClient;
-pub use crate::fraud::FraudRpcServer;
-pub use crate::fraud::FraudServer;
-pub use crate::fraud::FraudSubscriptionRpcServer;
 pub use crate::header::HeaderClient;
 pub use crate::header::HeaderRpcServer;
 pub use crate::header::HeaderServer;
@@ -89,10 +84,6 @@ pub mod prelude {
     pub use crate::BlobstreamClient;
     pub use crate::BlobstreamRpcServer;
     pub use crate::DasClient;
-    pub use crate::FraudClient;
-    pub use crate::FraudRpcServer;
-    pub use crate::FraudServer;
-    pub use crate::FraudSubscriptionRpcServer;
     pub use crate::HeaderClient;
     pub use crate::HeaderRpcServer;
     pub use crate::HeaderServer;

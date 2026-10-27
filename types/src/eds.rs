@@ -329,16 +329,6 @@ impl ExtendedDataSquare {
             .ok_or(Error::EdsIndexOutOfRange(row, column))
     }
 
-    /// Returns the mutable share of the provided coordinates.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn share_mut(&mut self, row: u16, column: u16) -> Result<&mut Share> {
-        let index = flatten_index(row, column, self.square_width);
-
-        self.data_square
-            .get_mut(index)
-            .ok_or(Error::EdsIndexOutOfRange(row, column))
-    }
-
     /// Returns the shares of a row.
     pub fn row(&self, index: u16) -> Result<Vec<Share>> {
         self.axis(AxisType::Row, index)
