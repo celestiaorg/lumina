@@ -1,7 +1,7 @@
 use celestia_proto::cosmos::base::tendermint::v1beta1::{ProofOp, ProofOps};
 use ics23::commitment_proof::Proof;
 use ics23::{CommitmentProof, ExistenceProof};
-use prost::Message;
+use prost_013::Message;
 use tendermint::crypto::Sha256 as _;
 use tendermint::crypto::default::Sha256;
 
@@ -23,7 +23,7 @@ pub enum ProofError {
 
     /// Decoding from proto failed
     #[error("Decoding from proto failed: {0}")]
-    Decode(#[from] prost::DecodeError),
+    Decode(String),
 
     /// Existance proof missing in operation
     #[error("Existance proof missing in operation")]
@@ -64,7 +64,8 @@ impl TryFrom<ProofOp> for CommitmentOp {
         Ok(Self {
             key: value.key,
             spec,
-            proof: CommitmentProof::decode(value.data.as_slice())?,
+            proof: CommitmentProof::decode(value.data.as_slice())
+                .map_err(|e| ProofError::Decode(e.to_string()))?,
         })
     }
 }

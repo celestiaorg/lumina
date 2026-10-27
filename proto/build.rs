@@ -1,10 +1,7 @@
 //! A build script generating rust types from protobuf definitions.
 
-#[cfg(not(feature = "tonic"))]
 use prost_types::FileDescriptorSet;
 use std::collections::HashSet;
-#[cfg(feature = "tonic")]
-use tonic_build::FileDescriptorSet;
 
 const DEFAULT: &str = r#"#[serde(default)]"#;
 const HEXSTRING: &str = r#"#[serde(with = "crate::serializers::bytes::hexstring")]"#;
@@ -212,7 +209,28 @@ fn main() {
     #[cfg(not(feature = "tonic"))]
     prost_build(fds);
     #[cfg(feature = "tonic")]
-    tonic_build(fds)
+    tonic_build(fds);
+
+    strip_message_hash_derives();
+}
+
+/// prost-build 0.14 derives `Hash` on messages assuming extern types implement it,
+/// but `tendermint_proto::google::protobuf::Any` doesn't.
+fn strip_message_hash_derives() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+
+    for entry in std::fs::read_dir(out_dir).expect("failed to read OUT_DIR") {
+        let path = entry.expect("failed to read OUT_DIR entry").path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&path).expect("failed to read generated file");
+        let content = content
+            .replace(", Hash, ::prost::Message)]", ", ::prost::Message)]")
+            .replace(", Hash, ::prost::Oneof)]", ", ::prost::Oneof)]");
+        std::fs::write(&path, content).expect("failed to write generated file");
+    }
 }
 
 fn sanitise_commments(fds: &mut FileDescriptorSet) {
@@ -290,10 +308,10 @@ fn prost_build(fds: FileDescriptorSet) {
 
 #[cfg(feature = "tonic")]
 fn tonic_build(fds: FileDescriptorSet) {
-    let mut prost_config = tonic_build::Config::new();
+    let mut prost_config = prost_build::Config::new();
     prost_config.enable_type_names();
 
-    let mut tonic_config = tonic_build::configure()
+    let mut tonic_config = tonic_prost_build::configure()
         .include_file("mod.rs")
         .build_client(true)
         .build_server(cfg!(feature = "tonic-server"))
@@ -302,12 +320,10 @@ fn tonic_build(fds: FileDescriptorSet) {
         .compile_well_known_types(true)
         .codec_path("crate::tonic_codec::PreallocProstCodec")
         .skip_protoc_run()
-        .bytes([
-            ".tendermint_celestia_mods.abci",
-            ".celestia.fibre.v1.BlobRow.data",
-            ".celestia.fibre.v1.BlobRow.proof",
-            ".celestia.fibre.v1.BlobShard.rlcs",
-        ]);
+        .bytes(".tendermint_celestia_mods.abci")
+        .bytes(".celestia.fibre.v1.BlobRow.data")
+        .bytes(".celestia.fibre.v1.BlobRow.proof")
+        .bytes(".celestia.fibre.v1.BlobShard.rlcs");
 
     for (type_path, attr) in CUSTOM_TYPE_ATTRIBUTES {
         tonic_config = tonic_config.type_attribute(type_path, attr);
@@ -326,7 +342,7 @@ fn tonic_build(fds: FileDescriptorSet) {
     }
 
     tonic_config
-        .compile_fds_with_config(prost_config, fds)
+        .compile_fds_with_config(fds, prost_config)
         .expect("should be able to compile protobuf using tonic");
 
     fix_grpc_service_paths();

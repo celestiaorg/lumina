@@ -29,7 +29,7 @@ futures.workspace = true
 lumina-utils = { workspace = true, features = ["executor"] }
 
 # gRPC
-der = { version = "0.7.2", features = ["derive"] }
+der = { version = "0.7.2", features = ["derive", "std"] }
 hyper = { workspace = true, features = ["client", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 http.workspace = true

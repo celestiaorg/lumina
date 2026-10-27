@@ -103,23 +103,23 @@ impl BroadcastTxCodec {
 impl tonic::codec::Codec for BroadcastTxCodec {
     type Encode = BroadcastTxRequest;
     type Decode = BroadcastTxResponse;
-    type Encoder = <tonic::codec::ProstCodec<
+    type Encoder = <tonic_prost::ProstCodec<
         BroadcastTxRequest,
         BroadcastTxResponse,
     > as tonic::codec::Codec>::Encoder;
-    type Decoder = <tonic::codec::ProstCodec<
+    type Decoder = <tonic_prost::ProstCodec<
         BroadcastTxRequest,
         BroadcastTxResponse,
     > as tonic::codec::Codec>::Decoder;
 
     fn encoder(&mut self) -> Self::Encoder {
-        tonic::codec::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_encoder(
+        tonic_prost::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_encoder(
             self.buffer_settings,
         )
     }
 
     fn decoder(&mut self) -> Self::Decoder {
-        tonic::codec::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_decoder(
+        tonic_prost::ProstCodec::<BroadcastTxRequest, BroadcastTxResponse>::raw_decoder(
             tonic::codec::BufferSettings::default(),
         )
     }
@@ -452,7 +452,7 @@ impl GrpcClient {
     /// use celestia_types::state::{Address, Coin};
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
-    /// let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
+    /// let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
     /// let address = Address::from_account_verifying_key(*signing_key.verifying_key());
     /// let grpc_url = "public-celestia-mocha4-consensus.numia.xyz:9090";
     ///
@@ -498,7 +498,7 @@ impl GrpcClient {
     /// use celestia_types::state::{Address, Coin};
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
-    /// let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
+    /// let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
     /// let address = Address::from_account_verifying_key(*signing_key.verifying_key());
     /// let grpc_url = "public-celestia-mocha4-consensus.numia.xyz:9090";
     ///
@@ -552,7 +552,7 @@ impl GrpcClient {
     /// use celestia_types::nmt::Namespace;
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
-    /// let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
+    /// let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
     /// let address = Address::from_account_verifying_key(*signing_key.verifying_key());
     /// let grpc_url = "public-celestia-mocha4-consensus.numia.xyz:9090";
     ///
@@ -594,7 +594,7 @@ impl GrpcClient {
     /// use celestia_types::nmt::Namespace;
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
-    /// let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
+    /// let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
     /// let address = Address::from_account_verifying_key(*signing_key.verifying_key());
     /// let grpc_url = "public-celestia-mocha4-consensus.numia.xyz:9090";
     ///

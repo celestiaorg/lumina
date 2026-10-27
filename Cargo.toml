@@ -49,11 +49,13 @@ futures-util = "0.3"
 # to build for wasm32, thus we need to specify it and enable certain features
 # and set `rustflags` in `.cargo/config.toml`.
 # See <https://docs.rs/getrandom/0.3.3/getrandom/#webassembly-support>
-# rand 0.8 (backoff, lumina crates) and rand 0.9 (jsonrpsee-core) are both in the tree, which means we need both
+# rand 0.8 (backoff, lumina crates) and rand 0.9 (jsonrpsee-core) are both in the tree, which means we need both,
+# and k256 0.14 (via crypto-bigint) needs getrandom 0.4
 getrandom_02 = { package = "getrandom", version = "0.2.10", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3.4", features = [
   "wasm_js",
 ] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 gloo-net = { version = "0.6", default-features = false }
 gloo-timers = { version = "0.3", features = ["futures"] }
 hex = "0.4.3"
@@ -66,16 +68,16 @@ js-sys = "0.3.85"
 jsonrpsee = "0.26.1"
 jsonrpsee-core = "0.26.1"
 jsonrpsee-types = "0.26.1"
-k256 = "0.13"
+k256 = "0.14"
 libp2p = "0.57"
 libp2p-identity = "0.3.0"
 libp2p-websocket-websys = "0.6.0"
 nmt-rs = "0.2.2"
 pin-project = "1.1.5"
-prost = "0.13.3"
-prost-build = "0.13.3"
-prost-types = "0.13.3"
-protox = "0.8"
+prost = "0.14"
+prost-build = "0.14"
+prost-types = "0.14"
+protox = "0.9"
 rand = "0.8.5"
 redb = "2.6"
 rexie = "0.6"
@@ -87,15 +89,16 @@ serde_json = "1.0.142"
 serde_repr = "0.1.17"
 serde-wasm-bindgen = "0.6"
 sha2 = "0.10.8"
-tendermint = { version = "0.40.3", default-features = false }
-tendermint-proto = "0.40.3"
+tendermint = { version = "0.41", default-features = false }
+tendermint-proto = "0.41"
 time = { version = "0.3.35", default-features = false }
 tokio = "1.53.0"
 tokio-util = "0.7.14"
 tokio-stream = "0.1.18"
-tonic = { version = "0.13", default-features = false }
-tonic-build = { version = "0.13", default-features = false }
-tonic-web-wasm-client = "0.7"
+tonic = { version = "0.14", default-features = false }
+tonic-prost = "0.14"
+tonic-prost-build = { version = "0.14", default-features = false }
+tonic-web-wasm-client = "0.8"
 thiserror = "2.0.3"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.15"
