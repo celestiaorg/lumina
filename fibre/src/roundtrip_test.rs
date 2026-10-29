@@ -23,7 +23,7 @@ async fn upload_then_download_roundtrip() {
     // Upload.
     let signed = client
         .upload(
-            &k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng),
+            &k256::ecdsa::SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap(),
             celestia_types::nmt::Namespace::from_raw(&[0u8; 29]).unwrap(),
             blob,
         )
@@ -78,7 +78,7 @@ async fn roundtrip_with_partial_validator_failure() {
     // 3 good validators have 600 voting power > 533 → upload should succeed.
     let signed = client
         .upload(
-            &k256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng),
+            &k256::ecdsa::SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap(),
             celestia_types::nmt::Namespace::from_raw(&[0u8; 29]).unwrap(),
             blob,
         )

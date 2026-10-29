@@ -38,7 +38,7 @@ impl From<&PaymentPromise> for proto::PaymentPromise {
         let creation_timestamp = system_time_to_timestamp(pp.creation_timestamp);
 
         let signer_public_key = Some(ProtoPubKey {
-            key: pp.signer_pubkey.to_encoded_point(true).as_bytes().to_vec(),
+            key: pp.signer_pubkey.to_sec1_point(true).as_bytes().to_vec(),
         });
 
         proto::PaymentPromise {
@@ -182,11 +182,10 @@ mod tests {
     use super::*;
     use crate::test_utils::make_validator;
     use k256::ecdsa::SigningKey;
-    use rand::rngs::OsRng;
 
     #[test]
     fn payment_promise_to_proto_roundtrip_fields() {
-        let sk = SigningKey::random(&mut OsRng);
+        let sk = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
         let pp = PaymentPromise {
             chain_id: "test-chain".into(),
             height: std::num::NonZeroU64::new(42).unwrap(),

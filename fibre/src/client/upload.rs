@@ -353,7 +353,6 @@ mod tests {
 
     use celestia_types::nmt::Namespace;
     use k256::ecdsa::SigningKey;
-    use rand::rngs::OsRng;
 
     use crate::blob::BlobID;
     use crate::client::FibreClient;
@@ -370,7 +369,7 @@ mod tests {
     };
 
     fn test_signing_key() -> SigningKey {
-        SigningKey::random(&mut OsRng)
+        SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap()
     }
 
     #[tokio::test]
