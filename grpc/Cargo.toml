@@ -40,7 +40,7 @@ ics23 = { version = "0.12", default-features = false }
 k256.workspace = true
 prost.workspace = true
 # ics23 0.12 is still on prost 0.13
-prost_013 = { package = "prost", version = "0.13", default-features = false }
+prost_013 = { package = "prost", version = "0.13.3", default-features = false }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
 signature = "3"
