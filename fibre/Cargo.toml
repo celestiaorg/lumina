@@ -50,7 +50,7 @@ bytes.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["net", "rt"] }
 # Native-only so `tls-*` features never reach wasm32, where only `ring` builds.
-rustls = { version = "0.23.15", default-features = false, optional = true }
+rustls = { version = "0.23.27", default-features = false, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-net = { workspace = true, features = ["websocket"] }
