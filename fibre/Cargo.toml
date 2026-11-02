@@ -33,7 +33,7 @@ der = { version = "0.7.2", features = ["derive"] }
 hyper = { workspace = true, features = ["client", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 http.workspace = true
-tokio-rustls = { version = "0.26.1", default-features = false, features = ["logging", "ring"] }
+tokio-rustls = { version = "0.26.1", default-features = false, features = ["logging"] }
 tonic = { workspace = true, features = ["codegen"] }
 tower = { version = "0.5.2", features = ["util"] }
 x509-parser = "0.18"
@@ -49,10 +49,13 @@ bytes.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["net", "rt"] }
+# Native-only so `tls-*` features never reach wasm32, where only `ring` builds.
+rustls = { version = "0.23.15", default-features = false, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-net = { workspace = true, features = ["websocket"] }
 ring = { version = "0.17.14", features = ["wasm32_unknown_unknown_js"] }
+tokio-rustls = { version = "0.26.1", default-features = false, features = ["ring"] }
 rustls-pki-types = { workspace = true, features = ["web"] }
 send_wrapper.workspace = true
 
@@ -71,3 +74,10 @@ criterion.workspace = true
 [[bench]]
 name = "fibre_bench"
 harness = false
+
+[features]
+default = ["tls-ring"]
+# Use `ring` as the `rustls` crypto provider on native targets. wasm32 always uses `ring`.
+tls-ring = ["rustls/ring"]
+# Use `aws-lc-rs` as the `rustls` crypto provider on native targets. Wins over `tls-ring` if both are enabled.
+tls-aws-lc = ["rustls/aws_lc_rs"]

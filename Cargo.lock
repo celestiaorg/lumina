@@ -790,6 +790,7 @@ dependencies = [
  "rand 0.8.8",
  "ring",
  "rsema1d",
+ "rustls",
  "rustls-pki-types",
  "send_wrapper 0.6.0",
  "serde",
