@@ -4,7 +4,6 @@
 pub mod any;
 pub mod blob;
 pub mod block;
-mod byzantine;
 pub mod consts;
 mod data_availability_header;
 pub mod eds;
@@ -15,7 +14,6 @@ mod error;
 ))]
 pub mod evidence;
 mod extended_header;
-pub mod fraud_proof;
 pub mod hash;
 mod merkle_proof;
 pub mod namespace_data;
@@ -47,7 +45,6 @@ pub use crate::data_availability_header::*;
 pub use crate::eds::{AxisType, ExtendedDataSquare};
 pub use crate::error::*;
 pub use crate::extended_header::*;
-pub use crate::fraud_proof::FraudProof;
 pub use crate::merkle_proof::MerkleProof;
 pub use crate::share::*;
 pub use crate::sync::*;

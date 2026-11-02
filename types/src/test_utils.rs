@@ -10,7 +10,6 @@ use tendermint::public_key::PublicKey;
 use tendermint::{Signature, Time, chain};
 
 use crate::block::{CommitExt, GENESIS_HEIGHT};
-pub use crate::byzantine::test_utils::corrupt_eds;
 use crate::consts::appconsts::{
     CONTINUATION_SPARSE_SHARE_CONTENT_SIZE, FIRST_SPARSE_SHARE_CONTENT_SIZE, SHARE_INFO_BYTES,
     SHARE_SIZE,

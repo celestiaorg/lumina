@@ -185,7 +185,6 @@ const PROTO_FILES: &[&str] = &[
     "vendor/celestia/fibre/v1/tx.proto",
     "vendor/celestia/valaddr/v1/query.proto",
     "vendor/header/pb/extended_header.proto",
-    "vendor/share/eds/byzantine/pb/share.proto",
     "vendor/share/shwap/p2p/bitswap/pb/bitswap.proto",
     "vendor/share/shwap/p2p/shrex/pb/shrex.proto",
     "vendor/share/shwap/p2p/shrex/shrexsub/pb/notification.proto",

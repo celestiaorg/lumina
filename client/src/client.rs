@@ -14,7 +14,6 @@ use tonic::codegen::{Bytes, Service};
 
 use crate::blob::BlobApi;
 use crate::blobstream::BlobstreamApi;
-use crate::fraud::FraudApi;
 use crate::header::HeaderApi;
 use crate::share::ShareApi;
 use crate::state::StateApi;
@@ -78,7 +77,6 @@ pub struct Client {
     blob: BlobApi,
     header: HeaderApi,
     share: ShareApi,
-    fraud: FraudApi,
     blobstream: BlobstreamApi,
     fibre: Option<crate::fibre::FibreApi>,
 }
@@ -198,11 +196,6 @@ impl Client {
     /// Returns share API accessor.
     pub fn share(&self) -> &ShareApi {
         &self.share
-    }
-
-    /// Returns fraud API accessor.
-    pub fn fraud(&self) -> &FraudApi {
-        &self.fraud
     }
 
     /// Returns fibre API accessor.
@@ -508,7 +501,6 @@ impl ClientBuilder {
             blob: BlobApi::new(inner.clone()),
             header: HeaderApi::new(inner.clone()),
             share: ShareApi::new(inner.clone()),
-            fraud: FraudApi::new(inner.clone()),
             blobstream: BlobstreamApi::new(inner.clone()),
             state: StateApi::new(inner.clone()),
             fibre,
