@@ -125,7 +125,7 @@ impl TryFrom<RawTxStatusResponse> for TxStatusResponse {
         Ok(TxStatusResponse {
             height: value.height.try_into()?,
             index: value.index,
-            execution_code: value.execution_code.try_into()?,
+            execution_code: ErrorCode::from_abci(&value.codespace, value.execution_code),
             error: value.error,
             status: value.status.parse()?,
         })
