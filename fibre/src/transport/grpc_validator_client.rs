@@ -308,7 +308,7 @@ mod tests {
             tokio_rustls::TlsAcceptor::from(Arc::new(config))
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn grpc_tls_roundtrip_rejects_malformed_response_and_applies_request_timeout() {
             let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
             let blob = EncodedBlob::new(b"wire payload", cfg).unwrap();
