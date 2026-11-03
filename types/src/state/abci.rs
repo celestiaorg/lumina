@@ -74,7 +74,7 @@ impl TryFrom<RawAbciQueryResponse> for AbciQueryResponse {
     fn try_from(response: RawAbciQueryResponse) -> Result<AbciQueryResponse, Self::Error> {
         Ok(AbciQueryResponse {
             height: response.height.try_into()?,
-            code: response.code.try_into()?,
+            code: ErrorCode::from_abci(&response.codespace, response.code),
             codespace: response.codespace,
             index: response
                 .index
