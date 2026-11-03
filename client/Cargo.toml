@@ -92,11 +92,12 @@ tls-webpki-roots = ["celestia-grpc/tls-webpki-roots"]
 # Selecting this feature doesn't enable tls support in the client, it only guides
 # `tonic` which provider to use if tls is enabled.
 tls-ring = ["celestia-grpc/tls-ring"]
-# Select the `aws-lc` crypto provider for `rustls` in `tonic`
+# Select the `aws-lc` crypto provider for `rustls` in `tonic` and `celestia-fibre`
 #
 # Selecting this feature doesn't enable tls support in the client, it only guides
 # `tonic` which provider to use if tls is enabled.
-tls-aws-lc = ["celestia-grpc/tls-aws-lc"]
+# shortcut: `ring` stays linked (fibre's default, and jsonrpsee hard-codes it); disable fibre's default features once jsonrpsee lets us pick a provider.
+tls-aws-lc = ["celestia-grpc/tls-aws-lc", "celestia-fibre/tls-aws-lc"]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]

@@ -294,21 +294,21 @@ mod tests {
             let seed = hex::decode(&vector.tls_priv_seed).unwrap();
             let mut pkcs8 = hex::decode("302e020100300506032b657004220420").unwrap();
             pkcs8.extend_from_slice(&seed);
-            let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-            let mut config = ServerConfig::builder_with_provider(provider)
-                .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(
-                    vec![CertificateDer::from(cert_der)],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8)),
-                )
-                .unwrap();
+            let mut config =
+                ServerConfig::builder_with_provider(crate::transport::tls::crypto_provider())
+                    .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![CertificateDer::from(cert_der)],
+                        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8)),
+                    )
+                    .unwrap();
             config.alpn_protocols = vec![b"h2".to_vec()];
             tokio_rustls::TlsAcceptor::from(Arc::new(config))
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn grpc_tls_roundtrip_rejects_malformed_response_and_applies_request_timeout() {
             let cfg = BlobConfig::new_test(0, 4, 4, 4096, 4, 64);
             let blob = EncodedBlob::new(b"wire payload", cfg).unwrap();
