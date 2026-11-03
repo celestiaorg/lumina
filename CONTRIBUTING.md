@@ -33,7 +33,8 @@ Include the same tag in the PR description with a brief reason, e.g. `Review lev
 
 Choose the higher level when unsure. A small diff can still need deep review. CI checks the title format;
 reviewers should confirm the chosen level. Release PRs opened by release-plz use `[medium]`. The tag is
-stripped from changelog entries.
+stripped from changelog entries. The [required review policy](.github/review-policy.md) documents how
+the tier sets the number of independent approvals.
 
 ## Semantic versioning
 
