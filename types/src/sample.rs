@@ -132,6 +132,14 @@ impl Sample {
             return Err(Error::EdsIndexOutOfRange(id.row_index(), id.column_index()));
         }
 
+        if self.proof.total_leaves() != Some(usize::from(square_width)) {
+            bail_verification!(
+                "proof tree size ({:?}) doesn't match square width ({})",
+                self.proof.total_leaves(),
+                square_width
+            );
+        }
+
         let (root, index) = match self.proof_type {
             AxisType::Row => (
                 dah.row_root(id.row_index())
@@ -529,6 +537,58 @@ mod tests {
 
         let sample = Sample::from_raw(id, raw).unwrap();
         sample.verify(id, &dah).unwrap_err();
+    }
+
+    #[test]
+    fn verify_rejects_last_leaf_proof_moved_outside_of_square() {
+        let eds = generate_dummy_eds(8);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+
+        for proof_type in [AxisType::Row, AxisType::Col] {
+            // genuine share and proof of the last leaf of the axis, moved to index 14
+            let (row, col) = match proof_type {
+                AxisType::Row => (0, 7),
+                AxisType::Col => (7, 0),
+            };
+            let mut raw = RawSample::from(Sample::new(row, col, proof_type, &eds).unwrap());
+            let proof = raw.proof.as_mut().unwrap();
+            proof.start = 14;
+            proof.end = 15;
+            let id = match proof_type {
+                AxisType::Row => SampleId::new(0, 14, 1).unwrap(),
+                AxisType::Col => SampleId::new(14, 0, 1).unwrap(),
+            };
+
+            let sample = Sample::from_raw(id, raw).unwrap();
+            sample.verify(id, &dah).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn verify_rejects_proof_for_different_tree_size() {
+        let eds = generate_dummy_eds(8);
+        let dah = DataAvailabilityHeader::from_eds(&eds);
+        let id = SampleId::new(1, 3, 1).unwrap();
+
+        let mut raw = RawSample::from(Sample::new(1, 3, AxisType::Row, &eds).unwrap());
+        // drop the topmost sibling, so the proof describes a tree of 4 leaves
+        // instead of the 8 leaves of the row
+        raw.proof.as_mut().unwrap().nodes.pop();
+
+        let sample = Sample::from_raw(id, raw).unwrap();
+        sample.verify(id, &dah).unwrap_err();
+    }
+
+    #[test]
+    fn new_rejects_coordinates_outside_of_square() {
+        let eds = generate_dummy_eds(8);
+
+        for (row, col) in [(0, 8), (1, 8), (7, 8), (8, 0), (8, 1)] {
+            for proof_type in [AxisType::Row, AxisType::Col] {
+                let err = Sample::new(row, col, proof_type, &eds).unwrap_err();
+                assert!(matches!(err, Error::EdsIndexOutOfRange(r, c) if r == row && c == col));
+            }
+        }
     }
 
     #[test]
