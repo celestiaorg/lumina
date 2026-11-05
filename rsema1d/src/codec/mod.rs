@@ -16,13 +16,6 @@ use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 
 pub use commitment::ExtendedData;
-
-#[cfg(feature = "bench-internals")]
-#[doc(hidden)]
-pub fn bench_build_row_tree(rows: &RowMatrix, params: &Parameters) -> crate::crypto::MerkleTree {
-    commitment::build_row_tree(rows, params)
-}
-
 pub use original_commitment::commitment_from_original_rows;
 pub use padding::map_index_to_tree_position;
 pub use proof::{RowInclusionProof, RowProof, StandaloneProof};
@@ -43,6 +36,13 @@ pub fn bench_compute_rlcs(
     coefficients: Vec<crate::field::GF128>,
 ) -> Vec<crate::field::GF128> {
     symbols::compute_rlcs(data, row_size, coefficients)
+}
+
+/// Builds the extended-row Merkle tree for benchmarks.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub fn bench_build_row_tree(rows: &RowMatrix, params: &Parameters) -> crate::crypto::MerkleTree {
+    commitment::build_row_tree(rows, params)
 }
 pub use verification::{
     create_verification_context, verify_proof, verify_row_inclusion, verify_row_inclusion_proof,
