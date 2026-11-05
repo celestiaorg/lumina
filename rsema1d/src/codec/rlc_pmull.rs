@@ -116,37 +116,60 @@ fn reduce(mut x: u32) -> u16 {
 
 /// Reports whether the CPU supports every instruction the kernels use:
 /// 8-bit PMULL and TBL (base ASIMD) and EOR3 (SHA3).
-pub(super) fn available() -> bool {
+fn available() -> bool {
     std::arch::is_aarch64_feature_detected!("neon")
         && std::arch::is_aarch64_feature_detected!("sha3")
 }
 
-/// Computes the RLC of every row. Callers must check [`available`].
-pub(super) fn compute_rlcs(data: &[u8], row_size: usize, coefficients: &[GF128]) -> Vec<GF128> {
+/// Computes the RLC of every row, or `None` if the CPU lacks the instructions.
+pub(super) fn compute_rlcs(
+    data: &[u8],
+    row_size: usize,
+    coefficients: &[GF128],
+) -> Option<Vec<GF128>> {
+    if !available() {
+        return None;
+    }
     let k = data.len() / row_size;
-    let blocks = row_size / (2 * BLOCK_SYMBOLS);
+    // Like the scalar RLC, only complete 64-byte chunks count.
+    let chunks = row_size / 64;
+    let blocks = 2 * chunks;
     let mut tables = [
         vec![0u8; blocks * COEFF_BYTES],
         vec![0u8; blocks * COEFF_BYTES],
     ];
-    let [lo, hi] = &mut tables;
-    lo.par_chunks_exact_mut(COEFF_BYTES)
-        .zip(hi.par_chunks_exact_mut(COEFF_BYTES))
+    let [limbs_0_3, limbs_4_7] = &mut tables;
+    limbs_0_3
+        .par_chunks_exact_mut(COEFF_BYTES)
+        .zip(limbs_4_7.par_chunks_exact_mut(COEFF_BYTES))
         .zip(coefficients[..blocks * BLOCK_SYMBOLS].par_chunks_exact(BLOCK_SYMBOLS))
-        .for_each(|((lo, hi), coefficients)| fill_coefficients([lo, hi], coefficients));
+        .for_each(|((a, b), coefficients)| fill_coefficients([a, b], coefficients));
 
-    let mut out = vec![GF128::zero(); k];
-    out.par_iter_mut()
-        .zip(data[..k * row_size].par_chunks_exact(row_size))
-        // Per-worker scratch for the converted row.
-        .for_each_init(
-            || vec![0u8; blocks * OPERAND_BYTES],
-            |operands, (out, row)| {
-                // SAFETY: callers check `available()`, which detects neon and sha3.
-                *out = unsafe { row_rlc(row, operands, &tables) };
+    // Split rows into segments when there are fewer rows than threads.
+    let segments = rayon::current_num_threads()
+        .div_ceil(k.max(1))
+        .clamp(1, chunks.max(1));
+    let segment_chunks = chunks.div_ceil(segments);
+    let parts: Vec<GF128> = (0..k * segments)
+        .into_par_iter()
+        // Per-worker scratch for the converted segment.
+        .map_init(
+            || vec![0u8; 2 * segment_chunks * OPERAND_BYTES],
+            |operands, i| {
+                let (row, segment) = (i / segments, i % segments);
+                let start = (segment * segment_chunks).min(chunks);
+                let end = (start + segment_chunks).min(chunks);
+                let bytes = &data[row * row_size..][start * 64..end * 64];
+                // SAFETY: `available()` detected neon and sha3 above.
+                unsafe { row_rlc(bytes, operands, &tables, 2 * start) }
             },
-        );
-    out
+        )
+        .collect();
+    let rlcs = parts
+        .chunks(segments)
+        .map(|parts| parts.iter().fold(GF128::zero(), |sum, &part| sum + part))
+        .collect();
+    Some(rlcs)
 }
 
 /// Writes one table block: symbol `j` of the block sits in lane `j`, matching
@@ -164,12 +187,15 @@ fn fill_coefficients(tables: [&mut [u8]; 2], coefficients: &[GF128]) {
     }
 }
 
+/// RLC of `row`, a segment starting at block `first_block` of a full row.
 #[target_feature(enable = "neon,sha3")]
-fn row_rlc(row: &[u8], operands: &mut [u8], tables: &[Vec<u8>; 2]) -> GF128 {
+fn row_rlc(row: &[u8], operands: &mut [u8], tables: &[Vec<u8>; 2], first_block: usize) -> GF128 {
+    let operands = &mut operands[..row.len() / 32 * OPERAND_BYTES];
     convert_row(row, operands);
+    let offset = first_block * COEFF_BYTES;
     let acc = [
-        accumulate(operands, &tables[0]),
-        accumulate(operands, &tables[1]),
+        accumulate(operands, &tables[0][offset..]),
+        accumulate(operands, &tables[1][offset..]),
     ];
     GF128 {
         limbs: std::array::from_fn(|limb| {
@@ -317,14 +343,18 @@ mod tests {
         for (k, row_size) in [
             (1, 64),
             (3, 128),
+            // Uneven segments when split across threads.
+            (1, 2112),
             (17, 2112),
             (33, 4096),
             (100, 64),
+            // Trailing partial chunk, ignored as by the scalar RLC.
+            (5, 96),
             (2, 131072),
         ] {
             let mut data = vec![0u8; k * row_size + 1];
             rng.fill(&mut data[..]);
-            let coefficients: Vec<GF128> = (0..row_size / 2)
+            let coefficients: Vec<GF128> = (0..row_size / 64 * 32)
                 .map(|i| GF128 {
                     limbs: std::array::from_fn(|l| if (i + l) % 5 == 0 { 0 } else { rng.gen() }),
                 })
@@ -335,11 +365,17 @@ mod tests {
                 .chunks_exact(row_size)
                 .map(|row| compute_rlc(row, &coefficients))
                 .collect();
-            assert_eq!(
-                compute_rlcs(data, row_size, &coefficients),
-                expected,
-                "k={k}, row_size={row_size}"
-            );
+            for threads in [1, 7] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                assert_eq!(
+                    pool.install(|| compute_rlcs(data, row_size, &coefficients)),
+                    Some(expected.clone()),
+                    "k={k}, row_size={row_size}, threads={threads}"
+                );
+            }
         }
     }
 }
