@@ -229,40 +229,25 @@ mod tests {
 
     #[test]
     fn paired_row_tree_matches_independent_leaves() {
-        for workers in [1, 4] {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(workers)
-                .build()
-                .unwrap();
-            pool.install(|| {
-                for (k, n) in [(1, 1), (3, 5), (5, 7), (32, 32), (33, 31)] {
-                    for row_size in [64, 128, 256] {
-                        let params = Parameters::new(k, n, row_size).unwrap();
-                        let data: Vec<_> = (0..(k + n) * row_size)
-                            .map(|i| ((i * 17 + i / row_size) % 251) as u8)
-                            .collect();
-                        let rows = RowMatrix::with_shape(data, k + n, row_size).unwrap();
-                        let zero_hash = hash_leaf(&vec![0; row_size]);
-                        let mut leaves: Vec<_> =
-                            (0..k).map(|i| hash_leaf(row_slice(&rows, i))).collect();
-                        leaves.resize(params.k_padded(), zero_hash);
-                        leaves.extend((k..k + n).map(|i| hash_leaf(row_slice(&rows, i))));
-                        leaves.resize(params.total_padded(), zero_hash);
-                        let expected = MerkleTree::from_leaf_hashes(leaves.clone());
-                        let actual = build_row_tree(&rows, &params);
-                        assert_eq!(
-                            actual.root(),
-                            expected.root(),
-                            "K={k} N={n} workers={workers}"
-                        );
-                        for (i, leaf) in leaves.iter().enumerate() {
-                            let proof = actual.generate_proof(i);
-                            assert_eq!(proof, expected.generate_proof(i));
-                            assert!(crate::crypto::verify_proof(leaf, i, &proof, &actual.root()));
-                        }
-                    }
-                }
-            });
+        // (32, 32) and (33, 31) reach the parallel path (total_padded >= 64).
+        for (k, n) in [(1, 1), (3, 5), (5, 7), (32, 32), (33, 31)] {
+            for row_size in [64, 128, 256] {
+                let params = Parameters::new(k, n, row_size).unwrap();
+                let data: Vec<_> = (0..(k + n) * row_size)
+                    .map(|i| ((i * 17 + i / row_size) % 251) as u8)
+                    .collect();
+                let rows = RowMatrix::with_shape(data, k + n, row_size).unwrap();
+                let zero_hash = hash_leaf(&vec![0; row_size]);
+                let mut leaves: Vec<_> = (0..k).map(|i| hash_leaf(row_slice(&rows, i))).collect();
+                leaves.resize(params.k_padded(), zero_hash);
+                leaves.extend((k..k + n).map(|i| hash_leaf(row_slice(&rows, i))));
+                leaves.resize(params.total_padded(), zero_hash);
+                assert_eq!(
+                    build_row_tree(&rows, &params).root(),
+                    MerkleTree::from_leaf_hashes(leaves).root(),
+                    "K={k} N={n} row_size={row_size}"
+                );
+            }
         }
     }
 

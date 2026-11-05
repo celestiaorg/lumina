@@ -8,7 +8,7 @@ use rand_chacha::ChaCha8Rng;
 use rsema1d::{
     codec::bench_build_row_tree,
     crypto::{bench_hash_leaf_pair, hash_leaf},
-    encode_in_place, ExtendedData, Parameters, RowMatrix,
+    encode_in_place, Parameters, RowMatrix,
 };
 
 const DATA_SEED: u64 = 0x5eed_5eed_5eed_5eed;
@@ -57,17 +57,6 @@ fn bench_rows(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("row_tree", name), |b| {
             b.iter(|| bench_build_row_tree(black_box(&fixture.all_rows), black_box(&params)));
         });
-
-        let mut extended = Some(fixture.all_rows);
-        group.throughput(Throughput::Bytes((k * row_size) as u64));
-        group.bench_function(BenchmarkId::new("encode_in_place", name), |b| {
-            b.iter(|| {
-                let buffer = extended.take().expect("buffer must be available");
-                let encoded = encode_in_place(black_box(buffer), black_box(&params)).unwrap();
-                let ExtendedData { all_rows, .. } = encoded;
-                extended = Some(all_rows);
-            });
-        });
     }
     group.finish();
 }
@@ -76,8 +65,6 @@ criterion_group! {
     name = benches;
     config = {
         support::print_environment(rayon::current_num_threads());
-        #[cfg(target_arch = "aarch64")]
-        println!("SHA-2 available: {}", std::arch::is_aarch64_feature_detected!("sha2"));
         Criterion::default().noise_threshold(0.03)
     };
     targets = bench_leaves, bench_rows
