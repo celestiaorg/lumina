@@ -74,13 +74,17 @@ jobs:
       with:
         components: clippy
         cache-key: fuzz
-        cache-workspaces: types/fuzz
+        cache-workspaces: |
+          types/fuzz
+          rsema1d/fuzz
         # this disables default behavior of `setup-rust-toolchain` to put `-D warnings` which overwrites `.cargo/config.toml`
         rustflags: ""
 
-    # the fuzz crate is outside of the workspace, so it isn't covered by the `clippy` job
+    # the fuzz crates are outside of the workspace, so they aren't covered by the `clippy` job
     - name: Run clippy for fuzz targets
-      run: cargo clippy --all-targets --manifest-path types/fuzz/Cargo.toml -- -D warnings --no-deps
+      run: |
+        cargo clippy --all-targets --manifest-path types/fuzz/Cargo.toml -- -D warnings --no-deps
+        cargo clippy --all-targets --manifest-path rsema1d/fuzz/Cargo.toml -- -D warnings --no-deps
 
 
   test:
@@ -327,6 +331,33 @@ jobs:
       run: ./rsema1d/scripts/run_go_compat.sh
 
 
+  # rsema1d dispatches to aarch64-only kernels, which the x86_64 jobs never build.
+  test-rsema1d-aarch64:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+
+    - name: Setup Go toolchain
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: rsema1d/go/go.mod
+        cache-dependency-path: rsema1d/go/go.sum
+
+    # The PMULL kernels need SHA3 (EOR3); without it their tests skip instead of failing.
+    - name: Check CPU features
+      run: grep -m1 '^Features' /proc/cpuinfo | tee /dev/stderr | grep -qw sha3
+
+    - name: Run tests
+      run: cargo test --all-features -p rsema1d
+
+    - name: Run Go compatibility tests
+      run: ./rsema1d/scripts/run_go_compat.sh
+
+
   fmt:
     runs-on: ubuntu-latest
 
@@ -489,6 +520,7 @@ jobs:
     - test-wasm
     - test-js
     - test-rsema1d-go-compat
+    - test-rsema1d-aarch64
     - build-wasm
     - fmt
     - docs
