@@ -2,7 +2,10 @@
 
 use arbitrary::Arbitrary;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use rsema1d::{ExtendedData, Parameters, RowMatrix, default_work_budget, encode_with_work_budget};
+use rsema1d::{
+    ExtendedData, Parameters, RowMatrix, default_work_budget, encode_in_place_with_work_budget,
+    encode_with_work_budget,
+};
 use std::num::NonZeroUsize;
 use std::sync::OnceLock;
 
@@ -16,6 +19,8 @@ pub struct Square {
     chunks: u8,
     threads: u8,
     budget: Option<u32>,
+    /// Encode in place like fibre does, over parity rows holding stale bytes.
+    in_place: bool,
     seed: u64,
     prefix: Vec<u8>,
 }
@@ -53,21 +58,30 @@ impl Square {
 
     pub fn encode(&self) -> ExtendedData {
         let params = self.params();
-        let len = params.k * params.row_size;
         let mut x = self.seed | 1;
-        let mut data: Vec<u8> = (0..len)
-            .map(|_| {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                x as u8
-            })
+        let mut data: Vec<u8> = (0..params.total_rows() * params.row_size)
+            .map(|_| xorshift(&mut x) as u8)
             .collect();
-        let prefix = self.prefix.len().min(len);
+        let prefix = self.prefix.len().min(params.k * params.row_size);
         data[..prefix].copy_from_slice(&self.prefix[..prefix]);
-        let rows = RowMatrix::with_shape(data, params.k, params.row_size).unwrap();
         self.pool()
-            .install(|| encode_with_work_budget(&rows, &params, self.work_budget()))
+            .install(|| {
+                if self.in_place {
+                    let rows = RowMatrix::with_shape(data, params.total_rows(), params.row_size)?;
+                    encode_in_place_with_work_budget(rows, &params, self.work_budget())
+                } else {
+                    data.truncate(params.k * params.row_size);
+                    let rows = RowMatrix::with_shape(data, params.k, params.row_size)?;
+                    encode_with_work_budget(&rows, &params, self.work_budget())
+                }
+            })
             .unwrap()
     }
+}
+
+pub fn xorshift(x: &mut u64) -> u64 {
+    *x ^= *x << 13;
+    *x ^= *x >> 7;
+    *x ^= *x << 17;
+    *x
 }
