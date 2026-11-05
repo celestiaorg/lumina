@@ -5,7 +5,7 @@ mod original_commitment;
 mod padding;
 mod proof;
 mod reconstruct;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 #[allow(unsafe_code)]
 mod rlc_pmull;
 mod rows;
