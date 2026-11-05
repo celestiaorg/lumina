@@ -5,6 +5,9 @@ mod original_commitment;
 mod padding;
 mod proof;
 mod reconstruct;
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code)]
+mod rlc_pmull;
 mod rows;
 mod rs;
 mod symbols;
