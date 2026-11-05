@@ -4,6 +4,10 @@ use reed_solomon_simd::engine::tables::get_exp_log;
 use reed_solomon_simd::engine::{utils::xor, DefaultEngine, Engine};
 
 pub(crate) fn compute_rlcs(data: &[u8], row_size: usize, coefficients: Vec<GF128>) -> Vec<GF128> {
+    #[cfg(target_arch = "aarch64")]
+    if super::rlc_pmull::available() {
+        return super::rlc_pmull::compute_rlcs(data, row_size, &coefficients);
+    }
     compute_rlcs_with_engine(data, row_size, coefficients, &DefaultEngine::new())
 }
 
