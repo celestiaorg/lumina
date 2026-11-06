@@ -322,7 +322,11 @@ impl ExtendedDataSquare {
 
     /// Returns the share of the provided coordinates.
     pub fn share(&self, row: u16, column: u16) -> Result<&Share> {
-        let index = usize::from(row) * usize::from(self.square_width) + usize::from(column);
+        if row >= self.square_width || column >= self.square_width {
+            return Err(Error::EdsIndexOutOfRange(row, column));
+        }
+
+        let index = flatten_index(row, column, self.square_width);
 
         self.data_square
             .get(index)
@@ -518,6 +522,23 @@ mod tests {
         assert!(matches!(axis_type_err, Error::InvalidAxis(2)));
         let axis_type_err = AxisType::try_from(99).unwrap_err();
         assert!(matches!(axis_type_err, Error::InvalidAxis(99)));
+    }
+
+    #[test]
+    fn accessors_reject_coordinates_outside_of_square() {
+        let eds = crate::test_utils::generate_dummy_eds(8);
+        let width = eds.square_width();
+
+        eds.share(width - 1, width - 1).unwrap();
+        for (row, col) in [(0, width), (1, width), (width, 0), (width, width)] {
+            let err = eds.share(row, col).unwrap_err();
+            assert!(matches!(err, Error::EdsIndexOutOfRange(r, c) if r == row && c == col));
+        }
+
+        eds.row(width).unwrap_err();
+        eds.column(width).unwrap_err();
+        assert!(eds.row_nmt(width).is_err());
+        assert!(eds.column_nmt(width).is_err());
     }
 
     #[test]

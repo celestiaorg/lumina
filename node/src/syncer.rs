@@ -499,7 +499,7 @@ where
 
         // Pruner removes already sampled headers and creates gaps in the ranges.
         // Syncer must ignore those gaps.
-        let synced_ranges = pruned_ranges + &store_ranges;
+        let synced_ranges = pruned_ranges.clone() + &store_ranges;
 
         let next_batch = calculate_range_to_fetch(
             subjective_head_height,
@@ -532,13 +532,21 @@ where
         }
 
         // make sure we're inside the sampling window before we start
-        match self.store.get_by_height(next_batch.end() + 1).await {
+        let anchor_height = next_batch.end() + 1;
+        match self.store.get_by_height(anchor_height).await {
             Ok(known_header) => {
                 if !self.in_sampling_window(&known_header) {
                     return Ok(());
                 }
             }
-            Err(StoreError::NotFound) => {}
+            Err(StoreError::NotFound) => {
+                // The header the batch would be anchored on was synced and then pruned.
+                // The batch can't be inserted without it, so fetching it would only
+                // waste bandwidth.
+                if pruned_ranges.contains(anchor_height) {
+                    return Ok(());
+                }
+            }
             Err(e) => return Err(e.into()),
         }
 
@@ -1052,6 +1060,38 @@ mod tests {
 
         // Syncer is fully synced and awaiting for events
         p2p_mock.expect_no_cmd().await;
+    }
+
+    #[async_test]
+    async fn window_edge_pruned() {
+        let month_and_day_ago = Duration::from_secs(31 * 24 * 60 * 60);
+        let mut generator = ExtendedHeaderGenerator::new();
+        generator.set_time(
+            (Time::now() - month_and_day_ago).expect("to not underflow"),
+            Duration::from_secs(1),
+        );
+        let mut headers = generator.next_many(1200);
+        generator.reset_time();
+        headers.append(&mut generator.next_many(2049 - 1200));
+
+        let (syncer, store, mut p2p_mock) = initialized_syncer(headers[2048].clone()).await;
+        handle_session_batch(&mut p2p_mock, &headers, 1537..=2048, true).await;
+        handle_session_batch(&mut p2p_mock, &headers, 1025..=1536, true).await;
+        assert_syncing(&syncer, &store, &[1025..=2049], 2049).await;
+        p2p_mock.expect_no_cmd().await;
+
+        // Daser samples the headers within the sampling window and Pruner removes
+        // the lowest synced header, which is outside of the sampling window.
+        for height in 1201..=2049 {
+            store.mark_as_sampled(height).await.unwrap();
+        }
+        store.remove_height(1025).await.unwrap();
+        assert_syncing(&syncer, &store, &[1026..=2049], 2049).await;
+
+        // Syncer must not try to fetch headers below the pruned one
+        syncer.trigger_fetch_next_batch().await.unwrap();
+        p2p_mock.expect_no_cmd().await;
+        assert_syncing(&syncer, &store, &[1026..=2049], 2049).await;
     }
 
     #[async_test]
