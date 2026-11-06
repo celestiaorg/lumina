@@ -1,0 +1,38 @@
+[package]
+name = "rsema1d-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.5.0", features = ["derive"] }
+libfuzzer-sys = "0.4"
+rayon = "1.10"
+rsema1d = { path = ".." }
+
+# Keep the fuzz crate out of the main workspace.
+[workspace]
+
+[[bin]]
+name = "rlc"
+path = "fuzz_targets/rlc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify"
+path = "fuzz_targets/verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reconstruct"
+path = "fuzz_targets/reconstruct.rs"
+test = false
+doc = false
+bench = false
