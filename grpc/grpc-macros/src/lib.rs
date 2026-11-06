@@ -37,6 +37,9 @@ impl GrpcMethod {
 
         let grpc_client_struct = tonic_method.client;
         let grpc_method_name = tonic_method.method;
+        let latest_height = tonic_method.latest_height.then(|| {
+            quote! { merged_context.metadata.remove("x-cosmos-block-height"); }
+        });
 
         let signature = self.signature.clone();
         let params: Vec<_> = self
@@ -77,6 +80,7 @@ impl GrpcMethod {
                             // Merge transport context with per-call context.
                             let mut merged_context = transport_context.clone();
                             merged_context.extend(&call_context);
+                            #latest_height
                             let request_timeout = merged_context
                                 .timeout
                                 .unwrap_or_else(|| ::std::time::Duration::from_secs(30));
@@ -117,6 +121,7 @@ impl GrpcMethod {
 struct GrpcMethodAttribute {
     method: Ident,
     client: Punctuated<Ident, Token![::]>,
+    latest_height: bool,
 }
 
 impl Parse for GrpcMethodAttribute {
@@ -127,11 +132,28 @@ impl Parse for GrpcMethodAttribute {
         parsed.pop_punct();
         let client = parsed;
 
-        Ok(GrpcMethodAttribute { method, client })
+        let latest_height = if input.is_empty() {
+            false
+        } else {
+            input.parse::<Token![,]>()?;
+            let option: Ident = input.parse()?;
+            if option != "latest_height" {
+                return Err(syn::Error::new(option.span(), "expected `latest_height`"));
+            }
+            true
+        };
+
+        Ok(GrpcMethodAttribute {
+            method,
+            client,
+            latest_height,
+        })
     }
 }
 
 /// Annotate a function signature passing ServiceClient method to be called
+///
+/// Add `, latest_height` to ignore block-height metadata from both the endpoint and the call.
 #[proc_macro_attribute]
 pub fn grpc_method(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attributes = parse_macro_input!(attr as GrpcMethodAttribute);
