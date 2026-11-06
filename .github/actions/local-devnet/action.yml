@@ -23,8 +23,19 @@ runs:
     - name: Run the docker-compose stack
       shell: bash
       # --wait fails if any service exits or becomes unhealthy,
-      # instead of hanging until the job timeout
-      run: docker compose -f ci/docker-compose.yml up --no-build -d --wait --wait-timeout 180
+      # instead of hanging until the job timeout.
+      #
+      # `celestia-appd` in the `validator-eviction-testing` service occasionally
+      # exits while initialising its config (seen twice on 2026-09-03). Recreate
+      # the stack once before failing the job.
+      run: |
+        for attempt in 1 2; do
+          docker compose -f ci/docker-compose.yml up --no-build -d --wait --wait-timeout 180 && exit 0
+          echo "attempt $attempt failed, recreating the stack"
+          docker compose -f ci/docker-compose.yml logs --no-color --tail 50 || true
+          docker compose -f ci/docker-compose.yml down -v || true
+        done
+        exit 1
 
     - name: Generate auth tokens
       shell: bash
