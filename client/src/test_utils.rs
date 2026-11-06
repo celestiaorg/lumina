@@ -58,7 +58,7 @@ pub(crate) async fn new_read_only_client() -> Client {
 pub(crate) async fn new_client() -> Client {
     let (_lock, client) = node0_client().await;
 
-    let random_key = SigningKey::random(&mut rand::thread_rng());
+    let random_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
     let random_acc = random_key.verifying_key().into();
 
     // Fund the account with 20000 utai

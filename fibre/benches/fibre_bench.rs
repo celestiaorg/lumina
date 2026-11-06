@@ -43,7 +43,6 @@ use criterion::{
 };
 use prost::{Message, bytes::Bytes};
 use rand::Rng;
-use rand::rngs::OsRng;
 
 use celestia_fibre::transport::proto_conv;
 use celestia_fibre::{
@@ -194,7 +193,7 @@ fn bench_payment_promise(c: &mut Criterion) {
     group.measurement_time(CHEAP_MEASUREMENT);
     group.noise_threshold(0.03);
 
-    let signing_key = k256::ecdsa::SigningKey::random(&mut OsRng);
+    let signing_key = k256::ecdsa::SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
     let mut promise = PaymentPromise {
         chain_id: "private".into(),
         height: NonZeroU64::new(42).unwrap(),

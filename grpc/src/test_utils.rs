@@ -22,7 +22,7 @@ pub struct TestAccount {
 #[allow(dead_code)]
 impl TestAccount {
     pub fn random() -> Self {
-        let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
+        let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
         let verifying_key = *signing_key.verifying_key();
 
         Self {

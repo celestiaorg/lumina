@@ -524,7 +524,7 @@ mod tests {
     async fn transfer() {
         let client = new_client().await;
 
-        let random_key = SigningKey::random(&mut rand::rngs::OsRng);
+        let random_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
         let random_acc = random_key.verifying_key().into();
 
         client

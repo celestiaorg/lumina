@@ -2,7 +2,8 @@ use core::marker::PhantomData;
 
 use prost::Message;
 use tonic::Status;
-use tonic::codec::{Codec, EncodeBuf, Encoder, ProstCodec};
+use tonic::codec::{Codec, EncodeBuf, Encoder};
+use tonic_prost::ProstCodec;
 
 #[derive(Debug, Clone)]
 pub struct PreallocProstCodec<T, U> {
