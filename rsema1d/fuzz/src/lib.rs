@@ -37,15 +37,7 @@ impl Square {
 
     /// The pool to run the code under test in; thread count changes how work is split.
     pub fn pool(&self) -> &'static ThreadPool {
-        static POOLS: [OnceLock<ThreadPool>; MAX_THREADS] =
-            [const { OnceLock::new() }; MAX_THREADS];
-        let threads = usize::from(self.threads) % MAX_THREADS + 1;
-        POOLS[threads - 1].get_or_init(|| {
-            ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap()
-        })
+        pool(self.threads)
     }
 
     /// Work budget for encoding and reconstruction; small ones force narrow stripes.
@@ -77,6 +69,18 @@ impl Square {
             })
             .unwrap()
     }
+}
+
+/// A pool of 1 to 8 threads, picked by `threads`.
+pub fn pool(threads: u8) -> &'static ThreadPool {
+    static POOLS: [OnceLock<ThreadPool>; MAX_THREADS] = [const { OnceLock::new() }; MAX_THREADS];
+    let threads = usize::from(threads) % MAX_THREADS + 1;
+    POOLS[threads - 1].get_or_init(|| {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+    })
 }
 
 pub fn xorshift(x: &mut u64) -> u64 {
