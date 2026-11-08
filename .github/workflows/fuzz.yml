@@ -52,8 +52,11 @@ jobs:
         key: rsema1d-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
         restore-keys: rsema1d-fuzz-corpus-${{ matrix.target }}-
 
+    # cargo-fuzz defaults --target to the triple it was built for, and the installed x86_64 binary
+    # is a musl build, where ASan can't link; pass the runner's own host triple instead.
     - name: Fuzz
-      run: cargo fuzz run --fuzz-dir rsema1d/fuzz -O -s ${{ matrix.sanitizer }} ${{ matrix.target }} -- -max_total_time=${{ inputs.max_total_time || 300 }}
+      run: |
+        cargo fuzz run --fuzz-dir rsema1d/fuzz -O --target "$(rustc -vV | sed -n 's/^host: //p')" -s ${{ matrix.sanitizer }} ${{ matrix.target }} -- -max_total_time=${{ inputs.max_total_time || 300 }}
 
     - name: Save corpus
       if: always()
@@ -120,8 +123,10 @@ jobs:
     - name: Seed corpus
       run: cargo run --manifest-path types/fuzz/Cargo.toml --example seed_corpus
 
+    # See the rsema1d job's Fuzz step.
     - name: Fuzz
-      run: cargo fuzz run --fuzz-dir types/fuzz -O -s address ${{ matrix.target }} -- -max_total_time=${{ inputs.max_total_time || 300 }} ${{ matrix.args }}
+      run: |
+        cargo fuzz run --fuzz-dir types/fuzz -O --target "$(rustc -vV | sed -n 's/^host: //p')" -s address ${{ matrix.target }} -- -max_total_time=${{ inputs.max_total_time || 300 }} ${{ matrix.args }}
 
     - name: Save corpus
       if: always()
