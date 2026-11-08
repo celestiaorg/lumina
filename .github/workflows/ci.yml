@@ -16,7 +16,9 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  WASM_BINDGEN_TEST_TIMEOUT: 120
+  # A budget for each wasm test binary's whole headless run, not per test. The lumina-node suite
+  # takes 80-120s on hosted runners, so 120 left no headroom.
+  WASM_BINDGEN_TEST_TIMEOUT: 300
 
 jobs:
   clippy:
