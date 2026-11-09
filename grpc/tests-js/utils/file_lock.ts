@@ -1,4 +1,4 @@
-import { server } from "@vitest/browser/context"
+import { server } from "vitest/browser"
 
 // we only have those 3 "syscalls" available, so it ain't much, but it's honest work
 // didn't dive into custom commands tho https://vitest.dev/guide/browser/commands
