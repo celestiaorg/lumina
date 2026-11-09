@@ -37,5 +37,8 @@
     "scripts": {
         "tsc": "tsc",
         "update-readme": "typedoc --plugin typedoc-plugin-markdown --out ./docs --readme ../README.md ../pkg/lumina_node_wasm.d.ts && concat-md  --decrease-title-levels --dir-name-as-title docs > README.md"
+    },
+    "overrides": {
+        "minimatch": "^11.0.5"
     }
 }

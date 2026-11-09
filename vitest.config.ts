@@ -2,6 +2,7 @@
 
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
+import { playwright } from "@vitest/browser-playwright";
 
 const exclude = ["**/{.git,.direnv,node_modules,target,dist}/**"];
 
@@ -20,7 +21,7 @@ export default defineConfig({
             headless: true,
             screenshotFailures: false,
             ui: false,
-            provider: "playwright",
+            provider: playwright(),
             instances: [
               { browser: "chromium" },
               { browser: "firefox" },
