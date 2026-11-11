@@ -1,5 +1,5 @@
 import { assert, afterEach, beforeEach, test } from "vitest";
-import { server } from "@vitest/browser/context"
+import { server } from "vitest/browser"
 import { secp256k1 } from "@noble/curves/secp256k1";
 
 import { Blob, GrpcClient, Namespace, SignDoc, protoEncodeSignDoc } from "../pkg/celestia_grpc";

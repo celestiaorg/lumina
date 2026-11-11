@@ -239,8 +239,8 @@ fn grpc_client_with_time(
         .ok_or_else(|| FibreError::EndpointMissingHost(uri.clone()))?
         .to_string();
     let port = uri.port_u16().unwrap_or(443);
-    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-    let mut tls_config = fibre_tls_config(validator_key, chain_id, provider, time_provider);
+    let mut tls_config =
+        fibre_tls_config(validator_key, chain_id, crypto_provider(), time_provider);
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
     let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
     let transport = FibreH2Transport {
@@ -291,6 +291,23 @@ impl tokio_rustls::rustls::time_provider::TimeProvider for FixedTime {
     }
 }
 
+#[cfg(not(any(target_arch = "wasm32", feature = "tls-ring", feature = "tls-aws-lc")))]
+compile_error!("celestia-fibre needs a rustls crypto provider: enable `tls-ring` or `tls-aws-lc`");
+
+pub(crate) fn crypto_provider() -> Arc<CryptoProvider> {
+    #[cfg(target_arch = "wasm32")]
+    let provider = tokio_rustls::rustls::crypto::ring::default_provider();
+    #[cfg(all(not(target_arch = "wasm32"), feature = "tls-aws-lc"))]
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        feature = "tls-ring",
+        not(feature = "tls-aws-lc")
+    ))]
+    let provider = rustls::crypto::ring::default_provider();
+    Arc::new(provider)
+}
+
 fn fibre_tls_config(
     validator_key: VerifyingKey,
     chain_id: String,
@@ -308,7 +325,7 @@ fn fibre_tls_config(
     };
     let mut tls_config = builder
         .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
-        .expect("ring crypto provider supports TLS 1.3")
+        .expect("ring and aws-lc-rs crypto providers support TLS 1.3")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
@@ -870,7 +887,7 @@ mod tests {
             hex::decode("302e020100300506032b657004220420").expect("PKCS#8 prefix should be hex");
         pkcs8.extend_from_slice(&seed);
 
-        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        let provider = crypto_provider();
         let mut server_config = ServerConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
             .expect("TLS 1.3 should be supported")

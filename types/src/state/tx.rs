@@ -12,7 +12,6 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-bindgen"))]
 use crate::any::JsAny;
-use crate::bail_validation;
 use crate::hash::Hash;
 #[cfg(all(target_arch = "wasm32", feature = "wasm-bindgen"))]
 use crate::signature::JsSignature;
@@ -481,6 +480,8 @@ pub enum ErrorCode {
     // source https://github.com/celestiaorg/cosmos-sdk/blob/v1.25.1-sdk-v0.46.16/types/errors/errors.go#L38
     /// No error
     Success = 0,
+    /// Unregistered (internal) error returned by a module, codespace `undefined`
+    Internal = 1,
     /// Cannot parse a transaction
     TxDecode = 2,
     /// Sequence number (nonce) is incorrect for the signature
@@ -639,6 +640,10 @@ pub enum ErrorCode {
     InvalidPayForFibreTx = 11146,
     /// blob tx is not canonically encoded
     NonCanonicalBlobTx = 11147,
+
+    /// Code not known to lumina, or a known code from a different codespace
+    /// (e.g. code 5 from `bank` is not `InsufficientFunds`)
+    Unknown = 999_999,
 }
 
 impl fmt::Display for ErrorCode {
@@ -647,13 +652,35 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-impl TryFrom<u32> for ErrorCode {
-    type Error = Error;
+impl ErrorCode {
+    /// Decode an ABCI `(codespace, code)` pair.
+    ///
+    /// Codes are only unique within a codespace, so a known code coming from
+    /// an unexpected codespace decodes to [`ErrorCode::Unknown`].
+    pub fn from_abci(codespace: &str, code: u32) -> ErrorCode {
+        let Some(error_code) = ErrorCode::from_code(code) else {
+            return ErrorCode::Unknown;
+        };
+        let expected = match code {
+            0 => return ErrorCode::Success,
+            1 | 111222 => "undefined",
+            2..=41 => "sdk",
+            11110..=11141 => "blob",
+            _ => "app",
+        };
+        // REJECTED tx status carries no codespace, so fall back to the bare code
+        if codespace == expected || codespace.is_empty() {
+            error_code
+        } else {
+            ErrorCode::Unknown
+        }
+    }
 
-    fn try_from(value: u32) -> Result<ErrorCode, Self::Error> {
+    fn from_code(value: u32) -> Option<ErrorCode> {
         let error_code = match value {
             // cosmos-sdk
             0 => ErrorCode::Success,
+            1 => ErrorCode::Internal,
             2 => ErrorCode::TxDecode,
             3 => ErrorCode::InvalidSequence,
             4 => ErrorCode::Unauthorized,
@@ -733,9 +760,9 @@ impl TryFrom<u32> for ErrorCode {
             11145 => ErrorCode::MultiMsgIndexWrapper,
             11146 => ErrorCode::InvalidPayForFibreTx,
             11147 => ErrorCode::NonCanonicalBlobTx,
-            _ => bail_validation!("error code ({}) unknown", value),
+            _ => return None,
         };
-        Ok(error_code)
+        Some(error_code)
     }
 }
 
@@ -800,8 +827,8 @@ impl TryFrom<RawTxResponse> for TxResponse {
         Ok(TxResponse {
             height: response.height.try_into()?,
             txhash: response.txhash.parse()?,
+            code: ErrorCode::from_abci(&response.codespace, response.code),
             codespace: response.codespace,
-            code: response.code.try_into()?,
             data: response.data,
             raw_log: response.raw_log,
             logs: response.logs,
@@ -1009,10 +1036,35 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test as test;
 
     #[test]
-    fn error_code_try_from_matches_repr() {
+    fn error_code_from_code_matches_repr() {
         for code in 0..=ErrorCode::Panic as u32 {
             let from_repr: Option<ErrorCode> = serde_json::from_value(code.into()).ok();
-            assert_eq!(ErrorCode::try_from(code).ok(), from_repr, "code {code}");
+            assert_eq!(ErrorCode::from_code(code), from_repr, "code {code}");
+        }
+    }
+
+    #[test]
+    fn error_code_from_abci_checks_codespace() {
+        let cases = [
+            ("sdk", 5, ErrorCode::InsufficientFunds),
+            ("bank", 5, ErrorCode::Unknown),
+            ("", 32, ErrorCode::WrongSequence),
+            ("undefined", 1, ErrorCode::Internal),
+            ("fibre", 1, ErrorCode::Unknown),
+            ("undefined", 111222, ErrorCode::Panic),
+            ("staking", 42, ErrorCode::Unknown),
+            ("anything", 0, ErrorCode::Success),
+            ("blob", 11110, ErrorCode::ReservedNamespace),
+            ("sdk", 11110, ErrorCode::Unknown),
+            ("app", 11146, ErrorCode::InvalidPayForFibreTx),
+            ("blob", 11146, ErrorCode::Unknown),
+        ];
+        for (codespace, code, expected) in cases {
+            assert_eq!(
+                ErrorCode::from_abci(codespace, code),
+                expected,
+                "{codespace}/{code}"
+            );
         }
     }
 }
