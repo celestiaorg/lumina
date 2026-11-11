@@ -182,10 +182,11 @@ mod tests {
     use super::*;
     use crate::test_utils::make_validator;
     use k256::ecdsa::SigningKey;
+    use k256::elliptic_curve::Generate;
 
     #[test]
     fn payment_promise_to_proto_roundtrip_fields() {
-        let sk = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+        let sk = SigningKey::generate();
         let pp = PaymentPromise {
             chain_id: "test-chain".into(),
             height: std::num::NonZeroU64::new(42).unwrap(),

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::Client;
+use k256::elliptic_curve::Generate;
+
 use crate::tx::{SigningKey, TxConfig};
 use crate::types::state::{AccAddress, ValAddress};
 
@@ -58,7 +60,7 @@ pub(crate) async fn new_read_only_client() -> Client {
 pub(crate) async fn new_client() -> Client {
     let (_lock, client) = node0_client().await;
 
-    let random_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+    let random_key = SigningKey::generate();
     let random_acc = random_key.verifying_key().into();
 
     // Fund the account with 20000 utai

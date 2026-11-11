@@ -41,6 +41,7 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group,
     criterion_main,
 };
+use k256::elliptic_curve::Generate;
 use prost::{Message, bytes::Bytes};
 use rand::Rng;
 
@@ -193,7 +194,7 @@ fn bench_payment_promise(c: &mut Criterion) {
     group.measurement_time(CHEAP_MEASUREMENT);
     group.noise_threshold(0.03);
 
-    let signing_key = k256::ecdsa::SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+    let signing_key = k256::ecdsa::SigningKey::generate();
     let mut promise = PaymentPromise {
         chain_id: "private".into(),
         height: NonZeroU64::new(42).unwrap(),

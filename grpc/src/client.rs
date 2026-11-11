@@ -450,9 +450,10 @@ impl GrpcClient {
     /// use celestia_grpc::{GrpcClient, TxConfig};
     /// use celestia_proto::cosmos::bank::v1beta1::MsgSend;
     /// use celestia_types::state::{Address, Coin};
+    /// use k256::elliptic_curve::Generate;
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
-    /// let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+    /// let signing_key = SigningKey::generate();
     /// let address = Address::from_account_verifying_key(*signing_key.verifying_key());
     /// let grpc_url = "public-celestia-mocha4-consensus.numia.xyz:9090";
     ///
@@ -496,9 +497,10 @@ impl GrpcClient {
     /// use celestia_grpc::{GrpcClient, TxConfig};
     /// use celestia_proto::cosmos::bank::v1beta1::MsgSend;
     /// use celestia_types::state::{Address, Coin};
+    /// use k256::elliptic_curve::Generate;
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
-    /// let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+    /// let signing_key = SigningKey::generate();
     /// let address = Address::from_account_verifying_key(*signing_key.verifying_key());
     /// let grpc_url = "public-celestia-mocha4-consensus.numia.xyz:9090";
     ///
@@ -550,9 +552,10 @@ impl GrpcClient {
     /// use celestia_types::state::{Address, Coin};
     /// use celestia_types::Blob;
     /// use celestia_types::nmt::Namespace;
+    /// use k256::elliptic_curve::Generate;
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
-    /// let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+    /// let signing_key = SigningKey::generate();
     /// let address = Address::from_account_verifying_key(*signing_key.verifying_key());
     /// let grpc_url = "public-celestia-mocha4-consensus.numia.xyz:9090";
     ///
@@ -592,9 +595,10 @@ impl GrpcClient {
     /// use celestia_types::state::{Address, Coin};
     /// use celestia_types::Blob;
     /// use celestia_types::nmt::Namespace;
+    /// use k256::elliptic_curve::Generate;
     /// use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
     ///
-    /// let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+    /// let signing_key = SigningKey::generate();
     /// let address = Address::from_account_verifying_key(*signing_key.verifying_key());
     /// let grpc_url = "public-celestia-mocha4-consensus.numia.xyz:9090";
     ///

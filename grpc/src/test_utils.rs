@@ -1,4 +1,5 @@
 use celestia_types::state::{AccAddress, Address};
+use k256::elliptic_curve::Generate;
 use tendermint::crypto::default::ecdsa_secp256k1::SigningKey;
 use tendermint::public_key::Secp256k1 as VerifyingKey;
 
@@ -22,7 +23,7 @@ pub struct TestAccount {
 #[allow(dead_code)]
 impl TestAccount {
     pub fn random() -> Self {
-        let signing_key = SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+        let signing_key = SigningKey::generate();
         let verifying_key = *signing_key.verifying_key();
 
         Self {

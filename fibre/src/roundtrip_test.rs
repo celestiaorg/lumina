@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use k256::elliptic_curve::Generate;
+
 use crate::test_utils::{
     MockValidatorConnection, build_test_client, make_connector, test_blob, validator_set,
 };
@@ -23,7 +25,7 @@ async fn upload_then_download_roundtrip() {
     // Upload.
     let signed = client
         .upload(
-            &k256::ecdsa::SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap(),
+            &k256::ecdsa::SigningKey::generate(),
             celestia_types::nmt::Namespace::from_raw(&[0u8; 29]).unwrap(),
             blob,
         )
@@ -78,7 +80,7 @@ async fn roundtrip_with_partial_validator_failure() {
     // 3 good validators have 600 voting power > 533 → upload should succeed.
     let signed = client
         .upload(
-            &k256::ecdsa::SigningKey::from_slice(&rand::random::<[u8; 32]>()).unwrap(),
+            &k256::ecdsa::SigningKey::generate(),
             celestia_types::nmt::Namespace::from_raw(&[0u8; 29]).unwrap(),
             blob,
         )
