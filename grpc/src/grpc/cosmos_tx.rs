@@ -164,6 +164,7 @@ mod wbg {
         /// DEPRECATED: use `BroadcastMode` `Sync` instead,
         /// `BroadcastMode` `Block` is not supported by the SDK from v0.47.x onwards.
         #[wasm_bindgen(js_name = Block, getter)]
+        #[allow(deprecated)]
         pub fn block() -> JsBroadcastMode {
             BroadcastMode::Block.into()
         }

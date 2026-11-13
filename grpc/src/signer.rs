@@ -167,7 +167,7 @@ pub async fn sign_tx(
     };
 
     let public_key = secp256k1::PubKey {
-        key: verifying_key.to_encoded_point(true).as_bytes().to_vec(),
+        key: verifying_key.to_sec1_point(true).as_bytes().to_vec(),
     };
 
     let public_key_as_any = Any {

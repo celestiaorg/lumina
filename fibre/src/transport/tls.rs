@@ -61,8 +61,8 @@ impl From<BoxError> for FibreTransportError {
 
 #[derive(Sequence)]
 struct SignedIdentity<'a> {
-    payload: OctetStringRef<'a>,
-    signature: OctetStringRef<'a>,
+    payload: &'a OctetStringRef,
+    signature: &'a OctetStringRef,
 }
 
 #[derive(Sequence)]
@@ -70,7 +70,7 @@ struct BindingPayload<'a> {
     version: i64,
     not_before: i64,
     not_after: i64,
-    tls_pub_key: OctetStringRef<'a>,
+    tls_pub_key: &'a OctetStringRef,
 }
 
 #[derive(Debug, thiserror::Error)]
