@@ -37,6 +37,13 @@ pub fn bench_compute_rlcs(
 ) -> Vec<crate::field::GF128> {
     symbols::compute_rlcs(data, row_size, coefficients)
 }
+
+/// Builds the extended-row Merkle tree for benchmarks.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub fn bench_build_row_tree(rows: &RowMatrix, params: &Parameters) -> crate::crypto::MerkleTree {
+    commitment::build_row_tree(rows, params)
+}
 pub use verification::{
     create_verification_context, verify_proof, verify_row_inclusion, verify_row_inclusion_proof,
     verify_row_with_context, verify_standalone, verify_standalone_proof, verify_with_context,

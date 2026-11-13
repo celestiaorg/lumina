@@ -1,5 +1,5 @@
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
+use sha2::{digest::generic_array::GenericArray, Digest, Sha256};
 
 /// Binary Merkle tree (RFC 6962 compatible)
 #[derive(Debug, Clone)]
@@ -113,6 +113,57 @@ pub fn hash_leaf(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+const IV: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
+/// Hashes two leaves, alternating compression blocks so the CPU can overlap both chains.
+pub(crate) fn hash_leaf_pair(a: &[u8], b: &[u8]) -> [[u8; 32]; 2] {
+    // Interleaving is only benchmarked on aarch64 (Graviton4).
+    if !cfg!(target_arch = "aarch64") || a.len() != b.len() || a.len() < 63 {
+        return [hash_leaf(a), hash_leaf(b)];
+    }
+    let mut first = [[0u8; 64]; 2];
+    first[0][1..].copy_from_slice(&a[..63]);
+    first[1][1..].copy_from_slice(&b[..63]);
+
+    let full = (a.len() - 63) / 64 * 64;
+    let tail_len = a.len() - 63 - full;
+    let padded_len = if tail_len < 56 { 64 } else { 128 };
+    let bits = ((a.len() as u64 + 1) * 8).to_be_bytes();
+    let mut last = [[0u8; 128]; 2];
+    for (block, data) in last.iter_mut().zip([a, b]) {
+        block[..tail_len].copy_from_slice(&data[63 + full..]);
+        block[tail_len] = 0x80;
+        block[padded_len - 8..padded_len].copy_from_slice(&bits);
+    }
+
+    let mut states = [IV; 2];
+    for (a, b) in [
+        (&first[0][..], &first[1][..]),
+        (&a[63..63 + full], &b[63..63 + full]),
+        (&last[0][..padded_len], &last[1][..padded_len]),
+    ] {
+        for (a, b) in a.as_chunks::<64>().0.iter().zip(b.as_chunks::<64>().0) {
+            sha2::compress256(
+                &mut states[0],
+                core::slice::from_ref(GenericArray::from_slice(a)),
+            );
+            sha2::compress256(
+                &mut states[1],
+                core::slice::from_ref(GenericArray::from_slice(b)),
+            );
+        }
+    }
+    states.map(|state| {
+        let mut digest = [0; 32];
+        for (bytes, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+            bytes.copy_from_slice(&word.to_be_bytes());
+        }
+        digest
+    })
+}
+
 /// Hash internal node (RFC 6962 format)
 pub fn hash_internal(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -142,6 +193,35 @@ pub fn verify_proof(leaf: &[u8; 32], index: usize, proof: &[[u8; 32]], root: &[u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn paired_leaves_match_independent_hashes() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x5eed);
+        let lengths = (0..=300).chain(
+            [16384, 32768, 131072]
+                .into_iter()
+                .flat_map(|len| [len - 1, len, len + 1]),
+        );
+        for len in lengths {
+            let mut a = vec![0; len + 1];
+            let mut b = vec![0; len + 1];
+            rng.fill_bytes(&mut a);
+            rng.fill_bytes(&mut b);
+            // Misalign one input relative to the other.
+            let (a, b) = (&a[..len], &b[1..]);
+            let expected = [hash_leaf(a), hash_leaf(b)];
+            assert_eq!(hash_leaf_pair(a, b), expected, "len={len}");
+            if len > 0 {
+                assert_eq!(
+                    hash_leaf_pair(a, &b[1..]),
+                    [expected[0], hash_leaf(&b[1..])],
+                    "unequal lengths must fall back, len={len}"
+                );
+            }
+        }
+    }
 
     fn make_leaves(count: usize, leaf_size: usize) -> Vec<Vec<u8>> {
         (0..count)

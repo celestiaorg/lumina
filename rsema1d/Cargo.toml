@@ -16,7 +16,7 @@ bench-internals = []
 [dependencies]
 reed-solomon-simd = "3.1.0"
 bytes.workspace = true
-sha2 = { workspace = true, features = ["asm"] }
+sha2 = { workspace = true, features = ["asm", "compress"] }
 thiserror.workspace = true
 rayon = "1.10"
 serde = { workspace = true, features = ["derive"] }
@@ -44,6 +44,11 @@ harness = false
 
 [[bench]]
 name = "rlc_bench"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "merkle_bench"
 harness = false
 required-features = ["bench-internals"]
 
