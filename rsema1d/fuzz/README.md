@@ -20,4 +20,4 @@ cargo +nightly fuzz run --fuzz-dir rsema1d/fuzz -O rlc
 
 Crashing inputs land in `rsema1d/fuzz/artifacts/<target>/`; reproduce one with `cargo +nightly fuzz run --fuzz-dir rsema1d/fuzz -O <target> <path>`, or print it with `cargo +nightly fuzz fmt --fuzz-dir rsema1d/fuzz <target> <path>`.
 
-The `Fuzz` workflow (`.github/workflows/fuzz.yml`) runs every target for 20 minutes nightly on x86_64, where reed-solomon-simd uses its AVX2 engine, and keeps each corpus in the Actions cache. Crashes are uploaded as workflow artifacts.
+The `Fuzz` workflow (`.github/workflows/fuzz.yml`) runs every target nightly on x86_64, where reed-solomon-simd uses its AVX2 engine, and on aarch64 with SHA3, where RLCs use the PMULL kernels. Both architectures share each target's corpus in the Actions cache. Crashes are uploaded as workflow artifacts.

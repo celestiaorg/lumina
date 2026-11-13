@@ -12,15 +12,15 @@ permissions:
   contents: read
 
 jobs:
-  # x86_64, so reed-solomon-simd takes its AVX2 engine; aarch64 code is covered by the CI arm job.
+  # Both architectures: reed-solomon-simd, sha2 and the RLC kernels each dispatch to arch-specific code.
   rsema1d:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
 
     strategy:
       fail-fast: false
       matrix:
-        target: [rlc, verify, reconstruct]
-        sanitizer: [address]
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        target: [rlc, verify, reconstruct, rlc_large]
         include:
           # See the target's header for why it runs without a sanitizer.
           - target: rlc_large
@@ -33,7 +33,7 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: nightly
-        cache-key: fuzz-${{ matrix.target }}
+        cache-key: fuzz-${{ matrix.target }}-${{ runner.arch }}
         cache-workspaces: rsema1d/fuzz
         rustflags: ""
 
@@ -42,34 +42,42 @@ jobs:
       with:
         tool: cargo-fuzz
 
-    - name: Check CPU features
+    # reed-solomon-simd must take its AVX2 engine, as in production.
+    - name: Check CPU features (x86_64)
+      if: runner.arch == 'X64'
       run: grep -m1 '^flags' /proc/cpuinfo | tee /dev/stderr | grep -qw avx2
 
+    # Without SHA3 (EOR3), RLCs skip the PMULL kernels and take the generic path.
+    - name: Check CPU features (aarch64)
+      if: runner.arch == 'ARM64'
+      run: grep -m1 '^Features' /proc/cpuinfo | tee /dev/stderr | grep -qw sha3
+
+    # The corpus is shared across architectures; only the save key is per-arch so they don't collide.
     - name: Restore corpus
       uses: actions/cache/restore@v4
       with:
         path: rsema1d/fuzz/corpus/${{ matrix.target }}
-        key: rsema1d-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+        key: rsema1d-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ runner.arch }}
         restore-keys: rsema1d-fuzz-corpus-${{ matrix.target }}-
 
     # cargo-fuzz defaults --target to the triple it was built for, and the installed x86_64 binary
     # is a musl build, where ASan can't link; pass the runner's own host triple instead.
     - name: Fuzz
       run: |
-        cargo fuzz run --fuzz-dir rsema1d/fuzz -O --target "$(rustc -vV | sed -n 's/^host: //p')" -s ${{ matrix.sanitizer }} ${{ matrix.target }} -- -max_total_time=${{ inputs.max_total_time || 300 }}
+        cargo fuzz run --fuzz-dir rsema1d/fuzz -O --target "$(rustc -vV | sed -n 's/^host: //p')" -s ${{ matrix.sanitizer || 'address' }} ${{ matrix.target }} -- -max_total_time=${{ inputs.max_total_time || 300 }}
 
     - name: Save corpus
       if: always()
       uses: actions/cache/save@v4
       with:
         path: rsema1d/fuzz/corpus/${{ matrix.target }}
-        key: rsema1d-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+        key: rsema1d-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ runner.arch }}
 
     - name: Upload crashes
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: rsema1d-fuzz-${{ matrix.target }}-artifacts
+        name: rsema1d-fuzz-${{ matrix.target }}-${{ runner.arch }}-artifacts
         path: rsema1d/fuzz/artifacts/${{ matrix.target }}
 
   types:
