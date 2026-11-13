@@ -1,5 +1,6 @@
 use celestia_proto::cosmos::base::node::v1beta1::{
-    ConfigRequest, ConfigResponse as RawConfigResponse,
+    ConfigRequest, ConfigResponse as RawConfigResponse, StatusRequest,
+    StatusResponse as RawStatusResponse,
 };
 use celestia_types::state::BOND_DENOM;
 use serde::{Deserialize, Serialize};
@@ -56,4 +57,11 @@ impl FromGrpcResponse<ConfigResponse> for RawConfigResponse {
     }
 }
 
+impl FromGrpcResponse<u64> for RawStatusResponse {
+    fn try_from_response(self) -> Result<u64> {
+        Ok(self.height)
+    }
+}
+
 make_empty_params!(ConfigRequest);
+make_empty_params!(StatusRequest);
