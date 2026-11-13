@@ -9,7 +9,7 @@ cargo build
 rm -rf ../target/kotlin-uniffi-bindings
 mkdir -p ../target/kotlin-uniffi-bindings
 
-cargo run --bin uniffi-bindgen \
+cargo run --features bindgen --bin uniffi-bindgen \
   generate \
   --library ../target/debug/liblumina_node_uniffi.so \
   --language kotlin \
