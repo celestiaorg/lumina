@@ -20,7 +20,7 @@ cargo ndk \
   -t x86_64 \
   build --release
 
-cargo run --bin uniffi-bindgen \
+cargo run --features bindgen --bin uniffi-bindgen \
   generate \
   --library ../target/debug/liblumina_node_uniffi.$so_ext \
   --language kotlin \

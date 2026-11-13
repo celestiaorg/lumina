@@ -16,6 +16,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [[bin]]
 name = "uniffi-bindgen"
 path = "./src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
 
 [dependencies]
 blockstore.workspace = true
@@ -35,7 +36,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 tonic.workspace = true
-uniffi = { workspace = true, features = ["tokio", "cli"] }
+uniffi = { workspace = true, features = ["tokio"] }
 
 [features]
 # webpki is needed for TLS on android and iOS
@@ -43,3 +44,5 @@ uniffi = { workspace = true, features = ["tokio", "cli"] }
 default = ['tls-webpki-roots']
 tls-native-roots = ["celestia-grpc/tls-native-roots"]
 tls-webpki-roots = ["celestia-grpc/tls-webpki-roots"]
+# Needed only by the `uniffi-bindgen` binary.
+bindgen = ["uniffi/cli"]
