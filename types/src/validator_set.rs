@@ -85,7 +85,7 @@ impl ValidatorSetExt for Set {
                 _ => continue,
             };
             let vote_sign = commit.vote_sign_bytes(chain_id, idx)?;
-            validator.verify_signature::<Verifier>(&vote_sign, signature)?;
+            validator.verify_signature(&Verifier, &vote_sign, signature)?;
 
             tallied_voting_power += validator.power();
             if tallied_voting_power > voting_power_needed {
@@ -135,7 +135,7 @@ impl ValidatorSetExt for Set {
             seen_vals.insert(val_idx, idx);
 
             let vote_sign = commit.vote_sign_bytes(chain_id, idx)?;
-            validator.verify_signature::<Verifier>(&vote_sign, signature)?;
+            validator.verify_signature(&Verifier, &vote_sign, signature)?;
 
             tallied_voting_power += validator.power();
 

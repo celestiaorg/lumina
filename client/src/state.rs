@@ -513,6 +513,7 @@ mod tests {
 
     use celestia_grpc::TxConfig;
     use k256::ecdsa::SigningKey;
+    use k256::elliptic_curve::Generate;
 
     use crate::Error;
     use crate::test_utils::{
@@ -524,7 +525,7 @@ mod tests {
     async fn transfer() {
         let client = new_client().await;
 
-        let random_key = SigningKey::random(&mut rand::rngs::OsRng);
+        let random_key = SigningKey::generate();
         let random_acc = random_key.verifying_key().into();
 
         client
