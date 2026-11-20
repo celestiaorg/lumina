@@ -68,6 +68,7 @@ pub use crate::header::HeaderSubscriptionRpcServer;
 #[cfg(feature = "p2p")]
 #[cfg_attr(docsrs, doc(cfg(feature = "p2p")))]
 pub use crate::p2p::P2PClient;
+pub use crate::share::RawGetRowResponse;
 pub use crate::share::ShareClient;
 pub use crate::share::ShareRpcServer;
 pub use crate::share::ShareServer;
@@ -90,6 +91,7 @@ pub mod prelude {
     pub use crate::HeaderSubscriptionRpcServer;
     #[cfg(feature = "p2p")]
     pub use crate::P2PClient;
+    pub use crate::RawGetRowResponse;
     pub use crate::ShareClient;
     pub use crate::ShareRpcServer;
     pub use crate::ShareServer;
